@@ -1,0 +1,28 @@
+{
+  "name": "worker-kwadwos-gpt",
+  "version": "1.0.0",
+  "description": "Moda Interact background workers",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "bullmq": "^6.2.0",
+    "ioredis": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "msgpackr-extract@3.0.4": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
+}
