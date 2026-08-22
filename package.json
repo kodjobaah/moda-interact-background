@@ -2,6 +2,7 @@
   "name": "worker-kwadwos-gpt",
   "version": "1.0.0",
   "description": "Moda Interact background workers",
+  "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
