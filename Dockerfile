@@ -7,6 +7,8 @@ COPY package*.json ./
 RUN npm ci
 
 COPY tsconfig.json ./
+COPY prisma.config.ts ./
+COPY database ./database
 COPY src ./src
 
 RUN npm run build
