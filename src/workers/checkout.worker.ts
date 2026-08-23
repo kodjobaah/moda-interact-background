@@ -56,4 +56,4 @@ const checkoutWorker =
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   
-  console.log("Order worker started");
+  console.log("Checkout worker started");
