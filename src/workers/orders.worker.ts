@@ -1,26 +1,6 @@
 import { Worker } from "bullmq";
-import { Redis } from "ioredis";
+import { connectionRedis } from "../lib/redis.js";
 
-interface OrderCompletedData {
-  shop: string;
-  orderId: string;
-  checkoutToken: string | null;
-  customerId: string | null;
-  totalPrice: string | null;
-  currency: string | null;
-}
-
-const redisUrl = process.env.REDIS_URL;
-
-if (!redisUrl) {
-  throw new Error(
-    "REDIS_URL environment variable is required",
-  );
-}
-
-const connection = new Redis(redisUrl, {
-  maxRetriesPerRequest: null,
-});
 
 interface OrderCompletedData {
   shop: string;
@@ -50,7 +30,7 @@ const worker = new Worker<OrderCompletedData>(
   },
 
   {
-    connection,
+    connection: connectionRedis,
     concurrency: 5,
   },
 );
@@ -75,12 +55,6 @@ async function handleOrderCompleted(data: OrderCompletedData) {
     currency,
   });
 
-  // Later:
-  //
-  // 1. Find the corresponding abandoned checkout
-  // 2. Mark it RECOVERED
-  // 3. Cancel outstanding WhatsApp jobs
-  // 4. Record recovered revenue
 }
 
 worker.on("completed", (job) => {
@@ -99,7 +73,7 @@ async function shutdown(signal: NodeJS.Signals) {
   console.log(`${signal} received, shutting down worker`);
 
   await worker.close();
-  await connection.quit();
+  await connectionRedis.quit();
 
   process.exit(0);
 }

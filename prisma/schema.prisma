@@ -1,0 +1,193 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+generator plantuml {
+  provider = "prisma-generator-plantuml-erd"
+  output   = "../docs/generated/prisma-erd.puml"
+}
+
+datasource db {
+  provider = "postgresql"
+  schemas  = ["public", "whatsapp", "commerce", "shopify"]
+}
+
+model Customer {
+  id String @id @default(cuid())
+
+  shop  String
+  phone String?
+  email String?
+
+  firstName String?
+  lastName  String?
+
+  recoveries CheckoutRecovery[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, phone])
+  @@index([shop])
+  @@schema("commerce")
+}
+
+enum CheckoutRecoveryStatus {
+  DETECTED
+  MESSAGE_SENT
+  ENGAGED
+  COMPLETED
+  EXPIRED
+  CANCELLED
+  PENDING
+  RECOVERED
+
+  @@schema("commerce")
+}
+
+model CheckoutRecovery {
+  id String @id @default(cuid())
+
+  shop String
+
+  checkoutToken String
+  cartToken     String?
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  status CheckoutRecoveryStatus @default(DETECTED)
+
+  currency    String?
+  totalPrice  Decimal?
+  checkoutUrl String?
+
+  detectedAt    DateTime  @default(now())
+  messageSentAt DateTime?
+  engagedAt     DateTime?
+  completedAt   DateTime?
+  expiredAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversations Conversation[]
+
+  @@unique([shop, checkoutToken])
+  @@index([customerId])
+  @@index([shop, status])
+  @@schema("commerce")
+}
+
+enum ConversationType {
+  RECOVERY
+  PRODUCT_DISCOVERY
+  PRODUCT_SUPPORT
+  POST_PURCHASE
+
+  @@schema("whatsapp")
+}
+
+model Conversation {
+  id String @id @default(cuid())
+
+  checkoutRecoveryId String
+  checkoutRecovery   CheckoutRecovery @relation(fields: [checkoutRecoveryId], references: [id], onDelete: Cascade)
+
+  type ConversationType
+
+  inboundVersion       Int @default(0)
+  lastProcessedVersion Int @default(0)
+
+  summary String?
+
+  lastInboundAt DateTime?
+  lastMessageAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ConversationMessage[]
+
+  @@unique([checkoutRecoveryId, type])
+  @@index([checkoutRecoveryId])
+  @@index([lastMessageAt])
+  @@schema("whatsapp")
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+
+  @@schema("whatsapp")
+}
+
+enum MessageSenderType {
+  CUSTOMER
+  AGENT
+  AUTOMATION
+  HUMAN
+
+  @@schema("whatsapp")
+}
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+
+  @@schema("whatsapp")
+}
+model ConversationMessage {
+  id String @id @default(cuid())
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Meta's WhatsApp message ID
+  providerMessageId String? @unique
+
+  // Meta context.id when this message is a reply
+  inReplyToProviderId String?
+
+  direction  MessageDirection
+  senderType MessageSenderType
+
+  content String
+
+  status MessageStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([inReplyToProviderId])
+  @@schema("whatsapp")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+
+  @@schema("shopify")
+}

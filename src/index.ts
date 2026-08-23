@@ -2,6 +2,8 @@ import http from "node:http";
 
 // Importing this starts your BullMQ worker
 import "./workers/orders.worker.js";
+import "./workers/whatsapp.worker.js";
+import "./workers/checkout.worker.js";
 
 const port = Number(process.env.PORT ?? 3000);
 

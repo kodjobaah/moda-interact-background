@@ -1,0 +1,247 @@
+@startuml
+hide circle
+skinparam linetype ortho
+skinparam packageStyle rectangle
+
+' =========================================================
+' SHOPIFY SCHEMA
+' Owned by the Shopify application
+' =========================================================
+
+package "shopify" {
+
+  entity Session {
+    * id : String <<PK>>
+    --
+    shop : String
+    state : String
+    isOnline : Boolean
+    scope : String?
+    expires : DateTime?
+    accessToken : String
+    userId : BigInt?
+    firstName : String?
+    lastName : String?
+    email : String?
+    accountOwner : Boolean
+    locale : String?
+    collaborator : Boolean?
+    emailVerified : Boolean?
+    refreshToken : String?
+    refreshTokenExpires : DateTime?
+  }
+
+  entity ShopSettings {
+    * id : String <<PK>>
+    --
+    * shop : String <<UK>>
+    onboardingCompleted : Boolean
+    plan : String?
+    createdAt : DateTime
+    updatedAt : DateTime
+  }
+}
+
+
+' =========================================================
+' COMMERCE SCHEMA
+' Owned by the background / commerce service
+' =========================================================
+
+package "commerce" {
+
+  entity Customer {
+    * id : String <<PK>>
+    --
+    * shop : String
+    * phone : String
+    firstName : String?
+    lastName : String?
+    email : String?
+    shopifyCustomerId : String?
+    createdAt : DateTime
+    updatedAt : DateTime
+    --
+    <<UK: shop + phone>>
+  }
+
+  entity CheckoutRecovery {
+    * id : String <<PK>>
+    --
+    * shop : String
+    * checkoutToken : String
+    cartToken : String?
+    * customerId : String <<FK>>
+    status : CheckoutRecoveryStatus
+    currency : String?
+    totalPrice : Decimal?
+    checkoutUrl : String?
+    completedAt : DateTime?
+    createdAt : DateTime
+    updatedAt : DateTime
+    --
+    <<UK: shop + checkoutToken>>
+  }
+
+  enum CheckoutRecoveryStatus {
+    PENDING
+    MESSAGE_SENT
+    ENGAGED
+    RECOVERED
+    EXPIRED
+    CANCELLED
+  }
+}
+
+
+' =========================================================
+' WHATSAPP SCHEMA
+' Conversation / messaging domain
+' =========================================================
+
+package "whatsapp" {
+
+  entity WhatsAppAccount {
+    * id : String <<PK>>
+    --
+    * shop : String
+    * phoneNumberId : String <<UK>>
+    businessId : String?
+    accessToken : String?
+    createdAt : DateTime
+    updatedAt : DateTime
+  }
+
+
+  entity Conversation {
+    * id : String <<PK>>
+    --
+    * shop : String
+    * channel : String
+    * customerAddress : String
+
+    whatsappAccountId : String? <<FK>>
+
+    inboundVersion : Int
+    lastProcessedVersion : Int
+
+    lastInboundAt : DateTime?
+    lastMessageAt : DateTime?
+
+    summary : String?
+
+    createdAt : DateTime
+    updatedAt : DateTime
+
+    --
+    <<UK: whatsappAccountId + customerAddress>>
+  }
+
+
+  entity ConversationMessage {
+    * id : String <<PK>>
+    --
+    * conversationId : String <<FK>>
+    recoveryId : String? <<FK>>
+
+    providerMessageId : String? <<UK>>
+    inReplyToProviderId : String?
+
+    direction : MessageDirection
+    role : String
+    content : String
+
+    createdAt : DateTime
+  }
+
+
+  enum MessageDirection {
+    INBOUND
+    OUTBOUND
+  }
+}
+
+
+' =========================================================
+' RELATIONSHIPS
+' =========================================================
+
+Customer ||--o{ CheckoutRecovery : has
+
+WhatsAppAccount ||--o{ Conversation : receives
+
+Conversation ||--o{ ConversationMessage : contains
+
+CheckoutRecovery |o--o{ ConversationMessage : contextualises
+
+
+' =========================================================
+' LOGICAL / CROSS-DOMAIN ASSOCIATIONS
+' Not necessarily database foreign keys
+' =========================================================
+
+ShopSettings .. Customer : shop
+ShopSettings .. CheckoutRecovery : shop
+ShopSettings .. WhatsAppAccount : shop
+ShopSettings .. Conversation : shop
+
+Session .. ShopSettings : shop
+
+CheckoutRecoveryStatus .. CheckoutRecovery
+MessageDirection .. ConversationMessage
+
+
+note right of Conversation
+Long-lived agent memory.
+
+Agent context can use:
+- rolling summary
+- latest N messages
+- inboundVersion
+- active recovery context
+end note
+
+
+note right of CheckoutRecovery
+Represents one abandoned
+checkout / recovery lifecycle.
+
+A customer may have many
+recoveries over time.
+end note
+
+
+note bottom of ConversationMessage
+conversationId:
+Which conversation does this
+message belong to?
+
+recoveryId:
+Which commercial recovery event
+was this message related to?
+
+recoveryId is optional because not
+all customer conversations originate
+from an abandoned checkout.
+end note
+
+
+note bottom of Customer
+Identity is tenant-scoped.
+
+(shop, phone) is unique.
+
+The same phone number may be a
+customer of multiple Shopify stores.
+end note
+
+
+note bottom of Session
+Owned by Shopify application.
+
+Background worker should treat
+this table as read-only.
+end note
+
+
+@enduml

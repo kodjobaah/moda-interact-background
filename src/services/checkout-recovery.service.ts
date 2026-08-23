@@ -1,0 +1,312 @@
+// src/services/checkout-recovery.service.ts
+
+import prisma from "../lib/db.js";
+import type { CheckoutCreatedEvent } from "../events/checkout-events.js";
+import { customerService } from "./customer.service.js";
+import { conversationService } from "./conversation.service.js";
+import { conversationMessageService } from "./conversation.message.service.js";
+import { whatsAppService } from "./whatsapp.service.js";
+import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
+export class CheckoutRecoveryService {
+  async upsertRecovery(event: CheckoutCreatedEvent) {
+    return prisma.checkoutRecovery.upsert({
+      where: {
+        shop_checkoutToken: {
+          shop: event.shop,
+          checkoutToken: event.checkoutToken,
+        },
+      },
+
+      create: {
+        shop: event.shop,
+
+        checkoutToken: event.checkoutToken,
+        cartToken: event.cartToken,
+
+        status: "DETECTED",
+
+        currency: event.currency,
+
+        totalPrice: event.totalPrice !== null ? event.totalPrice : null,
+
+        checkoutUrl: event.checkoutUrl,
+
+        lineItems: event.lineItems,
+
+        detectedAt: new Date(event.detectedAt),
+
+        completedAt:
+          event.completedAt !== null ? new Date(event.completedAt) : null,
+      },
+
+      update: {
+        cartToken: event.cartToken,
+        currency: event.currency,
+
+        totalPrice: event.totalPrice !== null ? event.totalPrice : null,
+
+        checkoutUrl: event.checkoutUrl,
+
+        lineItems: event.lineItems,
+
+        completedAt:
+          event.completedAt !== null ? new Date(event.completedAt) : null,
+      },
+    });
+  }
+
+  async attachCustomer(recoveryId: string, customerId: string) {
+    return prisma.checkoutRecovery.update({
+      where: {
+        id: recoveryId,
+      },
+
+      data: {
+        customerId,
+      },
+    });
+  }
+
+  resolveRecipient(event: CheckoutCreatedEvent): string {
+    if (event.customer.phone) {
+      return event.customer.phone;
+    }
+
+    const testRecipient = process.env.TEST_WHATSAPP_RECIPIENT;
+
+    if (!testRecipient) {
+      throw new Error(
+        "No customer phone and TEST_WHATSAPP_RECIPIENT is not configured",
+      );
+    }
+
+    return testRecipient;
+  }
+
+  async markRecoveryMessageSent(recoveryId: string) {
+    return prisma.checkoutRecovery.update({
+      where: {
+        id: recoveryId,
+      },
+
+      data: {
+        status: "MESSAGE_SENT",
+        messageSentAt: new Date(),
+      },
+    });
+  }
+
+  async handleCheckoutCreated(event: CheckoutCreatedEvent) {
+    // 1
+    let recovery = await this.upsertRecovery(event);
+
+    // 2
+    const customer = await customerService.resolveCustomer(event);
+
+    if (customer && recovery.customerId !== customer.id) {
+      recovery = await prisma.checkoutRecovery.update({
+        where: {
+          id: recovery.id,
+        },
+
+        data: {
+          customerId: customer.id,
+        },
+      });
+    }
+
+    // Don't send again if this recovery
+    // already progressed beyond DETECTED.
+    if (recovery.status !== "DETECTED") {
+      return recovery;
+    }
+
+    // 3
+    const recipient = this.resolveRecipient(event);
+
+    // 4
+    const conversation =
+      await conversationService.getOrCreateRecoveryConversation(recovery.id);
+
+    const content = conversationMessageService.buildRecoveryMessage(event);
+
+    // 5a - persist intent to send
+    const message =
+      await conversationMessageService.createPendingRecoveryMessage(
+        conversation.id,
+        content,
+      );
+
+    try {
+      // 5b
+      const result = await whatsAppService.sendWhatsAppText({
+        to: recipient,
+        text: content,
+      });
+
+      // 6
+      await conversationMessageService.markMessageSent(
+        message.id,
+        result.providerMessageId,
+      );
+
+      await this.markRecoveryMessageSent(recovery.id);
+
+      return recovery;
+    } catch (error) {
+      await prisma.conversationMessage.update({
+        where: {
+          id: message.id,
+        },
+
+        data: {
+          status: "FAILED",
+        },
+      });
+
+      throw error;
+    }
+  }
+
+    async getAgentContext({
+    checkoutRecoveryId,
+    conversationId,
+  }: {
+    checkoutRecoveryId: string;
+    conversationId: string;
+  }): Promise<RecoveryAgentContext> {
+    const recovery =
+      await prisma.checkoutRecovery.findUnique({
+        where: {
+          id: checkoutRecoveryId,
+        },
+
+        select: {
+          id: true,
+          shop: true,
+          status: true,
+          checkoutToken: true,
+          completedAt: true,
+          totalPrice: true,
+
+          customer: {
+            select: {
+              id: true,
+              phone: true,
+              firstName: true,
+            },
+          },
+
+          conversations: {
+            where: {
+              id: conversationId,
+            },
+
+            take: 1,
+
+            select: {
+              id: true,
+              type: true,
+              summary: true,
+              inboundVersion: true,
+
+              messages: {
+                orderBy: {
+                  createdAt: "desc",
+                },
+
+                take: 20,
+
+                select: {
+                  direction: true,
+                  content: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+    if (!recovery) {
+      throw new Error(
+        `Checkout recovery not found: ${checkoutRecoveryId}`,
+      );
+    }
+
+    const conversation =
+      recovery.conversations[0];
+
+    if (!conversation) {
+      throw new Error(
+        `Conversation ${conversationId} does not belong to recovery ${checkoutRecoveryId}`,
+      );
+    }
+
+    /*
+     * We queried newest-first for efficiency.
+     * Reverse them before passing them to the LLM.
+     */
+    const messages: AgentMessage[] =
+      conversation.messages
+        .reverse()
+        .map((message) => ({
+          role:
+            message.direction === "INBOUND"
+              ? "user"
+              : "assistant",
+
+          content: message.content,
+        }));
+
+    return {
+      shop: recovery.shop,
+
+      recovery: {
+        id: recovery.id,
+
+        status: recovery.status,
+
+        checkoutToken:
+          recovery.checkoutToken,
+
+        completedAt:
+          recovery.completedAt,
+
+        totalPrice:
+          recovery.totalPrice?.toString() ??
+          null,
+      },
+
+      customer: recovery.customer
+        ? {
+            id: recovery.customer.id,
+
+            phone:
+              recovery.customer.phone,
+
+            firstName:
+              recovery.customer.firstName,
+          }
+        : null,
+
+      conversation: {
+        conversationId: conversation.id,
+
+        shop: recovery.shop,
+
+        type: conversation.type,
+
+        summary:
+          conversation.summary,
+
+        version:
+          conversation.inboundVersion,
+
+        messages,
+      },
+    };
+  }
+}
+
+export const checkoutRecoveryService =
+  new CheckoutRecoveryService();

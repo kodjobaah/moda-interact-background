@@ -11,19 +11,27 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "dependencies": {
+    "@ai-sdk/openai": "^4.0.46",
+    "@prisma/client": "^7.9.1",
+    "ai": "^7.0.77",
     "bullmq": "^6.2.0",
-    "ioredis": "^6.0.0"
+    "ioredis": "^6.0.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "dotenv": "^17.4.2",
+    "prisma": "^7.9.1",
+    "prisma-generator-plantuml-erd": "^1.7.1",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },
   "allowScripts": {
     "msgpackr-extract@3.0.4": true,
     "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "prisma@7.9.1": true,
+    "@prisma/engines@7.9.1": true
   }
 }

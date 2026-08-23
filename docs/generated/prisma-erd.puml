@@ -1,0 +1,118 @@
+@startuml erd
+skinparam linetype ortho
+enum "CheckoutRecoveryStatus" as CheckoutRecoveryStatus {
+  DETECTED
+  MESSAGE_SENT
+  ENGAGED
+  COMPLETED
+  EXPIRED
+  CANCELLED
+  PENDING
+  RECOVERED
+}
+enum "ConversationType" as ConversationType {
+  RECOVERY
+  PRODUCT_DISCOVERY
+  PRODUCT_SUPPORT
+  POST_PURCHASE
+}
+enum "MessageDirection" as MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+enum "MessageSenderType" as MessageSenderType {
+  CUSTOMER
+  AGENT
+  AUTOMATION
+  HUMAN
+}
+entity "Customer" as Customer {
++ id [PK] : String 
+--
+  * shop : String
+  phone : String
+  email : String
+  firstName : String
+  lastName : String
+  * createdAt : DateTime
+  * updatedAt : DateTime
+}
+
+entity "CheckoutRecovery" as CheckoutRecovery {
++ id [PK] : String 
+--
+  * shop : String
+  * checkoutToken : String
+  cartToken : String
+  # customerId : [FK] Customer
+  * status : CheckoutRecoveryStatus
+  currency : String
+  totalPrice : Decimal
+  checkoutUrl : String
+  * detectedAt : DateTime
+  messageSentAt : DateTime
+  engagedAt : DateTime
+  completedAt : DateTime
+  expiredAt : DateTime
+  * createdAt : DateTime
+  * updatedAt : DateTime
+}
+
+entity "Conversation" as Conversation {
++ id [PK] : String 
+--
+  # checkoutRecoveryId : [FK] CheckoutRecovery
+  * type : ConversationType
+  * inboundVersion : Int
+  * lastProcessedVersion : Int
+  summary : String
+  lastInboundAt : DateTime
+  lastMessageAt : DateTime
+  * createdAt : DateTime
+  * updatedAt : DateTime
+}
+
+entity "ConversationMessage" as ConversationMessage {
++ id [PK] : String 
+--
+  # conversationId : [FK] Conversation
+  providerMessageId : String
+  inReplyToProviderId : String
+  * direction : MessageDirection
+  * senderType : MessageSenderType
+  * content : String
+  * createdAt : DateTime
+}
+
+entity "Session" as Session {
++ id [PK] : String 
+--
+  * shop : String
+  * state : String
+  * isOnline : Boolean
+  scope : String
+  expires : DateTime
+  * accessToken : String
+  userId : BigInt
+  firstName : String
+  lastName : String
+  email : String
+  * accountOwner : Boolean
+  locale : String
+  collaborator : Boolean
+  emailVerified : Boolean
+  refreshToken : String
+  refreshTokenExpires : DateTime
+}
+
+' Relations
+CheckoutRecovery }o--o| Customer
+Conversation }o--|| CheckoutRecovery
+ConversationMessage }o--|| Conversation
+' ManyToMany Relations
+' enum relations
+CheckoutRecovery |o--|| CheckoutRecoveryStatus
+Conversation |o--|| ConversationType
+ConversationMessage |o--|| MessageDirection
+ConversationMessage |o--|| MessageSenderType
+@enduml
