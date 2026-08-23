@@ -4,6 +4,9 @@
   "description": "Moda Interact background workers",
   "type": "module",
   "scripts": {
+    "test": "vitest run",
+    "test:shopify": "vitest run tests/integration/shopify.service.integration.test.ts",
+    "test:integration": "vitest run tests/integration",
     "dev": "tsx watch src/index.ts",
     "build": "npm run prisma:generate && tsc",
     "start": "node dist/index.js",
@@ -14,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@ai-sdk/groq": "^4.0.30",
     "@ai-sdk/openai": "^4.0.46",
     "@prisma/client": "^6.19.3",
     "ai": "^7.0.77",
@@ -27,7 +31,8 @@
     "prisma": "^6.19.3",
     "prisma-generator-plantuml-erd": "^1.7.1",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   },
   "allowScripts": {
     "msgpackr-extract@3.0.4": true,

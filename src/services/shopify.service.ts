@@ -64,13 +64,13 @@ export async function searchProducts({
 
   if (!response.ok) {
     const body = await response.text();
-
     throw new Error(
       `Shopify GraphQL request failed: ${response.status} ${body}`,
     );
   }
 
   const result = await response.json();
+  console.log("Shopify GraphQL result:", JSON.stringify(result));
 
   if (result.errors) {
     throw new Error(
