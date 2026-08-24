@@ -154,7 +154,11 @@ export class ConversationService {
 
           checkoutRecovery: {
             select: {
-              shop: true,
+              shop: {
+                select: {
+                  domain: true,
+                },
+              },
             },
           },
         },
@@ -189,7 +193,7 @@ export class ConversationService {
       conversationId: conversation.id,
 
       shop:
-        conversation.checkoutRecovery.shop,
+        conversation.checkoutRecovery.shop.domain,
 
       type: conversation.type,
 

@@ -181,3 +181,43 @@ export interface RecoveryAgentContext {
   shop: string;
 }
 
+export interface UpsertShopifyCustomerInput {
+  shopId: string;
+  shopifyCustomerId: string;
+
+  phone?: string | null;
+  email?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+}
+
+export interface SetCurrentPhoneInput {
+  customerId: string;
+  phone: string;
+}
+
+export interface FindCustomerByPhoneInput {
+  shopId: string;
+  phone: string;
+}
+
+export type EntitlementFeature =
+  | "checkout_recovery"
+  | "order_support"
+  | "product_search"
+  | "ai_conversations";
+
+export type UsageMetric =
+  | "monthly_conversations"
+  | "monthly_recoveries"
+  | "monthly_messages";
+
+
+export interface RecordUsageInput {
+  shopId: string;
+  metric: UsageMetric;
+  quantity: number;
+  idempotencyKey: string;
+  sourceType?: string;
+  sourceId?: string;
+}  

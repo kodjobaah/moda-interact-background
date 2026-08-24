@@ -9,16 +9,25 @@ import { whatsAppService } from "./whatsapp.service.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
 export class CheckoutRecoveryService {
   async upsertRecovery(event: CheckoutCreatedEvent) {
+    const shop = await prisma.shop.findUniqueOrThrow({
+      where: {
+        domain: event.shop,
+      },
+      select: {
+        id: true,
+      },
+    });
+
     return prisma.checkoutRecovery.upsert({
       where: {
-        shop_checkoutToken: {
-          shop: event.shop,
+        shopId_checkoutToken: {
+          shopId: shop.id,
           checkoutToken: event.checkoutToken,
         },
       },
 
       create: {
-        shop: event.shop,
+        shopId: shop.id,
 
         checkoutToken: event.checkoutToken,
         cartToken: event.cartToken,
@@ -168,7 +177,7 @@ export class CheckoutRecoveryService {
     }
   }
 
-    async getAgentContext({
+  async getAgentContext({
     checkoutRecoveryId,
     conversationId,
   }: {
@@ -183,7 +192,11 @@ export class CheckoutRecoveryService {
 
         select: {
           id: true,
-          shop: true,
+          shop: {
+            select: {
+              domain: true,
+            },
+          },
           status: true,
           checkoutToken: true,
           completedAt: true,
@@ -259,7 +272,7 @@ export class CheckoutRecoveryService {
         }));
 
     return {
-      shop: recovery.shop,
+      shop: recovery.shop.domain,
 
       recovery: {
         id: recovery.id,
@@ -292,7 +305,7 @@ export class CheckoutRecoveryService {
       conversation: {
         conversationId: conversation.id,
 
-        shop: recovery.shop,
+        shop: recovery.shop.domain,
 
         type: conversation.type,
 
