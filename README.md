@@ -219,6 +219,47 @@ providerMessageId
 
 BullMQ retries are used for processing failures rather than generating new job identifiers.
 
+### Billable action keys
+
+Each billable action should use a deterministic `idempotencyKey`. The key
+identifies the action being recorded, so retries produce one usage event rather
+than charging the same action multiple times.
+
+Use a different key namespace for each billable action:
+
+```text
+checkout-recovery:${recovery.id}
+conversation:${conversation.id}
+agent-message:${message.id}
+whatsapp-message:${message.id}
+```
+
+The `UsageService.record` method accepts the following input:
+
+```typescript
+interface RecordUsageInput {
+      shopId: string;
+      metric: UsageMetric;
+      quantity: number;
+      idempotencyKey: string;
+      sourceType?: string;
+      sourceId?: string;
+}
+```
+
+For example:
+
+```typescript
+await usageService.record({
+      shopId,
+      metric: "monthly_recoveries",
+      quantity: 1,
+      idempotencyKey: `checkout-recovery:${recovery.id}`,
+      sourceType: "CheckoutRecovery",
+      sourceId: recovery.id,
+});
+```
+
 ## Queues
 
 The service currently consumes BullMQ queues including:
