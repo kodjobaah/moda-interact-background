@@ -3,6 +3,7 @@
 import {
   generateText,
   stepCountIs,
+  type LanguageModel,
 } from "ai";
 
 import { groq } from "../providers/groq.provider.js";
@@ -12,27 +13,33 @@ import type {
   RecoveryAgentContext,
 } from "./types.js";
 
+export type CommerceAgentDependencies = {
+  model?: LanguageModel;
+  createSearchProductsTool?: typeof createSearchProductsTool;
+};
 
 export async function runCommerceAgent(
   context: RecoveryAgentContext,
+  dependencies: CommerceAgentDependencies = {},
 ) {
-  const {
-    shop,
-    recovery,
-    customer,
-    conversation,
-  } = context;
+  const model =
+    dependencies.model ??
+    groq("openai/gpt-oss-20b");
+
+  const productToolFactory =
+    dependencies.createSearchProductsTool ??
+    createSearchProductsTool;
 
   const result = await generateText({
-    model: groq("openai/gpt-oss-20b"),
+    model,
 
     system: buildSystemPrompt(context),
 
-    messages: conversation.messages,
+    messages: context.conversation.messages,
 
     tools: {
       searchProducts:
-        createSearchProductsTool(shop),
+        productToolFactory(context.shop),
     },
 
     stopWhen: stepCountIs(5),
