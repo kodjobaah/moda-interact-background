@@ -27,7 +27,7 @@ export function createCommerceAgentPipeline(
   dependencies: CommerceAgentDependencies = {},
 ) {
   return new StateGraph(CommerceAgentState)
-    .addNode("commerceAgent", async (state) => ({
+    .addNode("commerceAgent", async (state: CommerceAgentState) => ({
       result: await runCommerceAgent(
         state.context,
         dependencies,

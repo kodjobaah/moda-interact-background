@@ -7,17 +7,18 @@ import {
 
 import {
   generateText,
+  type LanguageModel,
 } from "ai";
 
 import {
   createCommerceAgentPipeline,
-} from "../../src/agents/commerce.agent.pipeline.js";
+} from "../../../src/agents/commerce.agent.pipeline.js";
 
 import type {
   RecoveryAgentContext,
-} from "../../src/agents/types.js";
+} from "../../../src/agents/types.js";
 
-vi.mock("../../src/providers/groq.provider.js", () => ({
+vi.mock("../../../src/providers/groq.provider.js", () => ({
   groq: vi.fn(),
 }));
 
@@ -61,7 +62,7 @@ describe("commerce agent LangGraph pipeline", () => {
       },
     };
 
-    const model = {} as Parameters<typeof createCommerceAgentPipeline>[0]["model"];
+    const model = {} as LanguageModel;
     const searchProducts = vi.fn(async ({ query }: { query: string }) => ({
       products: [
         {

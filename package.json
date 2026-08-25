@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
     "test:shopify": "vitest run tests/integration/shopify.service.integration.test.ts",
     "test:integration": "vitest run tests/integration",
     "dev": "tsx watch src/index.ts",
@@ -19,6 +20,7 @@
   "dependencies": {
     "@ai-sdk/groq": "^4.0.30",
     "@ai-sdk/openai": "^4.0.46",
+    "@langchain/langgraph": "^1.4.12",
     "@prisma/client": "^6.19.3",
     "ai": "^7.0.77",
     "bullmq": "^6.2.0",
