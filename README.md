@@ -152,9 +152,6 @@ The resolution flow therefore uses deterministic WhatsApp context where availabl
 ## Flow
 
 ```text
-## Flow
-
-```text
 WhatsApp Webhook
       │
       ▼
@@ -230,7 +227,7 @@ Commerce Agent
 
 The LLM is therefore treated as a reasoning layer rather than the source of truth for the workflow.
 
-The agent can call tools such as product search to retrieve current Shopify data instead of inventing product, pricing or availability information.
+The agent can call tools such as product search to retrieve current Shopify data instead of inventing product, pricing or availability information. When multiple active recoveries are available, it can use the customer's message and recovery details to identify the relevant abandoned checkout; if no reliable match can be made, it asks the customer for clarification.
 
 ## Conversation Processing
 
