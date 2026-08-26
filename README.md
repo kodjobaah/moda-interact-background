@@ -529,9 +529,9 @@ Handles Shopify application integration and webhook ingestion.
 
 Owns the shared Prisma schema, migration history and generated database ERD.
 
-### WhatsApp integration
+### Messaging integration
 
-[kwadwos-gpt](https://github.com/kodjobaah/kwadwos-gpt)
+[moda-interact-message](https://github.com/kodjobaah/moda-interact-messaging)
 
 Handles WhatsApp webhook ingestion and messaging integration.
 
