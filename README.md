@@ -191,7 +191,8 @@ deterministically          the most likely recovery
                           ▼          ▼
                     Return recovery  Ask customer
                     identifier       for clarification
-                    
+```
+
 ## Commerce Agent
 
 The commerce agent uses Groq through the Vercel AI SDK.
