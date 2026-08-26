@@ -141,6 +141,57 @@ The recovery lifecycle is stored independently from the LLM conversation.
 
 This means the application does not rely on the language model to determine the current commercial state of a checkout.
 
+# WhatsApp Inbound Message Flow
+
+The WhatsApp webhook is responsible for processing inbound customer messages and determining which `CheckoutRecovery`, if any, the customer is responding to.
+
+A customer may have multiple active abandoned checkouts, so an inbound WhatsApp message cannot always be associated with a recovery using the customer's phone number alone.
+
+The resolution flow therefore uses deterministic WhatsApp context where available and falls back to the `CommerceAgent` when the message is ambiguous.
+
+## Flow
+
+```text
+WhatsApp Webhook
+      │
+      ▼
+Receive inbound message
+      │
+      ▼
+Identify customer / conversation
+      │
+      ▼
+Create inbound Message
+      │
+      ▼
+Does the WhatsApp message contain context.id?
+      │
+   ┌──┴───┐
+   │      │
+  YES     NO
+   │      │
+   ▼      ▼
+Lookup original             Load all active
+outbound Message            CheckoutRecoveries
+using context.id            for the customer
+   │                           │
+   ▼                           ▼
+Find associated            Provide the customer's
+CheckoutRecovery           message and recovery
+   │                       line items to CommerceAgent
+   │                           │
+   ▼                           ▼
+Recovery resolved          CommerceAgent determines
+deterministically          the most likely recovery
+                               │
+                          ┌────┴─────┐
+                          │          │
+                       MATCH      AMBIGUOUS
+                          │          │
+                          ▼          ▼
+                    Return recovery  Ask customer
+                    identifier       for clarification
+                    
 ## Commerce Agent
 
 The commerce agent uses Groq through the Vercel AI SDK.
