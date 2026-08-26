@@ -152,6 +152,9 @@ The resolution flow therefore uses deterministic WhatsApp context where availabl
 ## Flow
 
 ```text
+## Flow
+
+```text
 WhatsApp Webhook
       │
       ▼
@@ -166,31 +169,35 @@ Create inbound Message
       ▼
 Does the WhatsApp message contain context.id?
       │
-   ┌──┴───┐
-   │      │
-  YES     NO
-   │      │
-   ▼      ▼
-Lookup original             Load all active
-outbound Message            CheckoutRecoveries
-using context.id            for the customer
-   │                           │
-   ▼                           ▼
-Find associated            Provide the customer's
-CheckoutRecovery           message and recovery
-   │                       line items to CommerceAgent
-   │                           │
-   ▼                           ▼
-Recovery resolved          CommerceAgent determines
-deterministically          the most likely recovery
-                               │
-                          ┌────┴─────┐
-                          │          │
-                       MATCH      AMBIGUOUS
-                          │          │
-                          ▼          ▼
-                    Return recovery  Ask customer
-                    identifier       for clarification
+   ┌──┴───────────────┐
+   │                  │
+  YES                 NO
+   │                  │
+   ▼                  ▼
+Lookup original     Load all active
+outbound Message    CheckoutRecoveries
+using context.id    for the customer
+   │                  │
+   ▼                  ▼
+Find associated     Load line items for
+CheckoutRecovery    each CheckoutRecovery
+   │                  │
+   ▼                  ▼
+Recovery resolved   Send customer message +
+deterministically   recovery data to CommerceAgent
+                      │
+                      ▼
+                 Can the agent identify
+                 the CheckoutRecovery?
+                      │
+                 ┌────┴────┐
+                 │         │
+                YES        NO
+                 │         │
+                 ▼         ▼
+             Return      Ask customer
+             recovery    for clarification
+             identifier
 ```
 
 ## Commerce Agent
