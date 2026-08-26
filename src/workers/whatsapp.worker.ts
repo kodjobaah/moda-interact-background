@@ -1,17 +1,14 @@
 import { Worker } from "bullmq";
 
-
-
 import { connectionRedis } from "../lib/redis.js";
 
+import { runCommerceAgent } from "../agents/commerce.agent.js";
+import type { RecoveryAgentContext } from "../agents/types.js";
+import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
+import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
-import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
-
 import { whatsAppService } from "../services/whatsapp.service.js";
-import { runCommerceAgent } from "../agents/commerce.agent.js";
-import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
-
 
 export const whatsappWorker =
   new Worker<WhatsAppInboundEvent>(
@@ -36,7 +33,6 @@ export const whatsappWorker =
     },
   );
 
-
 async function processInboundMessage(
   event: WhatsAppInboundEvent,
 ) {
@@ -45,30 +41,45 @@ async function processInboundMessage(
     event.providerMessageId,
   );
 
-  /*
-   * 1. Work out which CheckoutRecovery /
-   * Conversation this WhatsApp message belongs to.
-   *
-   * Exact reply:
-   *
-   * contextMessageId
-   *   -> outbound ConversationMessage
-   *   -> Conversation
-   *   -> CheckoutRecovery
-   *
-   * No contextMessageId:
-   *   -> fallback resolution using customerPhone
-   */
   const route =
     await recoveryRoutingService.resolveInboundMessage(
       event,
     );
 
-  /*
-   * 2. Persist the inbound message.
-   *
-   * This also increments inboundVersion.
-   */
+  if (route.kind === "product-only") {
+    const context = buildProductOnlyContext(
+      route,
+      event,
+    );
+
+    const result =
+      await runCommerceAgent(context);
+
+    await whatsAppService.sendWhatsAppText({
+      to: event.customerPhone,
+      text: result.text,
+    });
+
+    return;
+  }
+
+  if (route.kind === "clarify") {
+    const options = route.recoveries
+      .map((recovery) =>
+        `- ${recovery.checkoutToken}${recovery.totalPrice ? ` (${recovery.totalPrice})` : ""}`,
+      )
+      .join("\n");
+
+    await whatsAppService.sendWhatsAppText({
+      to: event.customerPhone,
+      text:
+        "I found more than one active abandoned basket for your account. Please tell me which one you mean by replying with the basket reference below:\n\n" +
+        options,
+    });
+
+    return;
+  }
+
   const received =
     await conversationService.receiveMessage({
       conversationId:
@@ -84,9 +95,6 @@ async function processInboundMessage(
         event.text ?? "",
     });
 
-  /*
-   * Meta/BullMQ may deliver the same event twice.
-   */
   if (received.duplicate) {
     console.log(
       "Ignoring duplicate WhatsApp message",
@@ -96,14 +104,6 @@ async function processInboundMessage(
     return;
   }
 
-  /*
-   * 3. Rebuild CURRENT recovery context from Postgres.
-   *
-   * Do not trust state copied into the queue message.
-   *
-   * The checkout may have become COMPLETED since the
-   * original WhatsApp recovery message was sent.
-   */
   const context =
     await checkoutRecoveryService.getAgentContext({
       checkoutRecoveryId:
@@ -113,21 +113,9 @@ async function processInboundMessage(
         route.conversationId,
     });
 
-  /*
-   * 4. Run the commerce agent.
-   */
   const result =
     await runCommerceAgent(context);
 
-  /*
-   * 5. Did another customer message arrive while
-   * Groq was processing?
-   *
-   * If yes, don't send this potentially stale answer.
-   *
-   * The newer inbound message has its own BullMQ job,
-   * which will process the latest conversation state.
-   */
   const changed =
     await conversationService.hasChanged(
       route.conversationId,
@@ -149,44 +137,69 @@ async function processInboundMessage(
     return;
   }
 
-  /*
-   * 6. Persist our intent to send BEFORE calling Meta.
-   */
   const outboundMessage =
     await conversationService.createPendingAgentMessage(
       route.conversationId,
       result.text,
     );
 
-  /*
-   * 7. Send through Moda's WhatsApp account.
-   *
-   * customerPhone is the destination.
-   */
   const sent =
     await whatsAppService.sendWhatsAppText({
       to: event.customerPhone,
       text: result.text,
     });
 
-  /*
-   * 8. Link Meta's wamid back to our internal message.
-   */
   await conversationService.markMessageSent(
     outboundMessage.id,
     sent.providerMessageId,
   );
 
-  /*
-   * 9. Record that this inbound conversation version
-   * has now been successfully processed.
-   */
   await conversationService.markProcessed(
     route.conversationId,
     received.version,
   );
 }
 
+function buildProductOnlyContext(
+  route: {
+    kind: "product-only";
+    customerPhone: string;
+    shop?: string;
+    customerId?: string;
+  },
+  event: WhatsAppInboundEvent,
+): RecoveryAgentContext {
+  return {
+    shop: route.shop ?? "unknown-shop",
+    recovery: {
+      id: "product-only",
+      status: "ENGAGED",
+      checkoutToken: "product-only",
+      completedAt: null,
+      totalPrice: null,
+    },
+    customer: route.customerId
+      ? {
+          id: route.customerId,
+          phone: route.customerPhone,
+          firstName: null,
+        }
+      : null,
+    conversation: {
+      conversationId: `product-only-${event.providerMessageId}`,
+      shop: route.shop ?? "unknown-shop",
+      type: "PRODUCT_DISCOVERY",
+      summary: null,
+      version: 0,
+      messages: [
+        {
+          role: "user",
+          content: event.text ?? "",
+        },
+      ],
+    },
+  };
+}
 
 whatsappWorker.on(
   "completed",
