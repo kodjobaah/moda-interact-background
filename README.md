@@ -212,7 +212,7 @@ Customer message
       ▼
 Conversation
       │
-      ├── current CheckoutRecovery
+      ├── All Active CheckoutRecovery's
       ├── Customer
       ├── conversation summary
       └── recent messages
