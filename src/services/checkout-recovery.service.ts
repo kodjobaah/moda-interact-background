@@ -7,6 +7,16 @@ import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
+
+export interface OrderCompletedEvent {
+  shop: string;
+  orderId: string;
+  checkoutToken: string | null;
+  customerId: string | null;
+  totalPrice: string | null;
+  currency: string | null;
+}
+
 export class CheckoutRecoveryService {
   async upsertRecovery(event: CheckoutCreatedEvent) {
     const shop = await prisma.shop.findUniqueOrThrow({
@@ -102,6 +112,79 @@ export class CheckoutRecoveryService {
         status: "MESSAGE_SENT",
         messageSentAt: new Date(),
       },
+    });
+  }
+
+  async handleOrderCompleted(event: OrderCompletedEvent) {
+    if (!event.checkoutToken) {
+      return { kind: "ignored", reason: "missing-checkout-token" } as const;
+    }
+
+    const checkoutToken = event.checkoutToken;
+
+    const shop = await prisma.shop.findUnique({
+      where: { domain: event.shop },
+      select: { id: true },
+    });
+
+    if (!shop) {
+      return { kind: "ignored", reason: "shop-not-found" } as const;
+    }
+
+    return prisma.$transaction(async (transaction) => {
+      const recovery = await transaction.checkoutRecovery.findUnique({
+        where: {
+          shopId_checkoutToken: {
+            shopId: shop.id,
+              checkoutToken,
+          },
+        },
+        select: { id: true, status: true, completedAt: true },
+      });
+
+      if (!recovery) {
+        return { kind: "ignored", reason: "recovery-not-found" } as const;
+      }
+
+      if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
+        return { kind: "ignored", reason: `terminal-${recovery.status.toLowerCase()}` } as const;
+      }
+
+      const completedAt = new Date();
+      const updated = await transaction.checkoutRecovery.updateMany({
+        where: {
+          id: recovery.id,
+          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        },
+        data: {
+          status: "COMPLETED",
+          completedAt,
+        },
+      });
+
+      if (updated.count === 0) {
+        return { kind: "ignored", reason: "already-transitioned" } as const;
+      }
+
+      await transaction.checkoutRecoveryStatusHistory.create({
+        data: {
+          checkoutRecoveryId: recovery.id,
+          fromStatus: recovery.status,
+          toStatus: "COMPLETED",
+          reason: "Order completed",
+          source: "shopify.orders.create",
+          metadata: event.customerId
+            ? { orderId: event.orderId, customerId: event.customerId }
+            : { orderId: event.orderId },
+          occurredAt: completedAt,
+        },
+      });
+
+      return {
+        kind: "completed",
+        recoveryId: recovery.id,
+        fromStatus: recovery.status,
+      } as const;
     });
   }
 

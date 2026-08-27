@@ -1,16 +1,9 @@
 import { Worker } from "bullmq";
 import { connectionRedis } from "../lib/redis.js";
+import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
+import type { OrderCompletedEvent } from "../services/checkout-recovery.service.js";
 
-
-interface OrderCompletedData {
-  shop: string;
-  orderId: string;
-  checkoutToken: string | null;
-  customerId: string | null;
-  totalPrice: string | null;
-  currency: string | null;
-}
-const worker = new Worker<OrderCompletedData>(
+const worker = new Worker<OrderCompletedEvent>(
   "order-events",
 
   async (job) => {
@@ -21,7 +14,7 @@ const worker = new Worker<OrderCompletedData>(
 
     switch (job.name) {
       case "order-completed":
-        await handleOrderCompleted(job.data);
+        await checkoutRecoveryService.handleOrderCompleted(job.data);
         break;
 
       default:
@@ -35,27 +28,6 @@ const worker = new Worker<OrderCompletedData>(
   },
 );
 
-
-async function handleOrderCompleted(data: OrderCompletedData) {
-  const {
-    shop,
-    orderId,
-    checkoutToken,
-    customerId,
-    totalPrice,
-    currency,
-  } = data;
-
-  console.log("Processing completed order", {
-    shop,
-    orderId,
-    checkoutToken,
-    customerId,
-    totalPrice,
-    currency,
-  });
-
-}
 
 worker.on("completed", (job) => {
   console.log(`Job ${job.id} completed successfully`);

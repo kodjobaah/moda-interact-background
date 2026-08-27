@@ -30,4 +30,3 @@ export interface CheckoutCreatedEvent {
     price: string | null;
   }>;
 }
-
