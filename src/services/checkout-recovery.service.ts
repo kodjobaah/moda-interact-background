@@ -210,7 +210,7 @@ export class CheckoutRecoveryService {
             },
           },
 
-          conversations: {
+          conversation: {
             where: {
               id: conversationId,
             },
@@ -246,8 +246,7 @@ export class CheckoutRecoveryService {
       );
     }
 
-    const conversation =
-      recovery.conversations[0];
+    const conversation = recovery.conversation;
 
     if (!conversation) {
       throw new Error(

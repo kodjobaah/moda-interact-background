@@ -50,6 +50,10 @@ export class RecoveryRoutingService {
         });
 
       if (originalMessage) {
+        if (!originalMessage.conversation.checkoutRecoveryId) {
+          throw new Error("Original message is not linked to a recovery");
+        }
+
         return {
           kind: "resolved",
           conversationId:
@@ -127,6 +131,14 @@ export class RecoveryRoutingService {
         );
       }
 
+      if (!conversation.checkoutRecoveryId) {
+        throw new Error("Recovery conversation is missing its recovery ID");
+      }
+
+      if (!conversation.checkoutRecovery) {
+        throw new Error("Recovery conversation is missing its checkout recovery");
+      }
+
       return {
         kind: "resolved",
         conversationId: conversation.id,
@@ -139,14 +151,18 @@ export class RecoveryRoutingService {
       kind: "clarify",
       customerPhone,
       recoveries: conversations.map(
-        (conversation) => ({
-          id: conversation.checkoutRecovery.id,
-          checkoutToken:
-            conversation.checkoutRecovery.checkoutToken,
-          status: conversation.checkoutRecovery.status,
-          totalPrice:
-            conversation.checkoutRecovery.totalPrice?.toString() ?? null,
-        }),
+        (conversation) => {
+          if (!conversation.checkoutRecovery) {
+            throw new Error("Recovery conversation is missing its checkout recovery");
+          }
+
+          return {
+            id: conversation.checkoutRecovery.id,
+            checkoutToken: conversation.checkoutRecovery.checkoutToken,
+            status: conversation.checkoutRecovery.status,
+            totalPrice: conversation.checkoutRecovery.totalPrice?.toString() ?? null,
+          };
+        },
       ),
     };
   }
@@ -178,8 +194,8 @@ export class RecoveryRoutingService {
         take: 10,
       });
 
-    const matchingCustomer =
-      activeCustomerPhones[0]?.customer;
+    const matchingCustomerPhone = activeCustomerPhones[0];
+    const matchingCustomer = matchingCustomerPhone?.customer;
 
     if (!matchingCustomer) {
       return {
@@ -192,7 +208,7 @@ export class RecoveryRoutingService {
       kind: "product-only",
       customerPhone,
       shop: matchingCustomer.shop.domain,
-      customerId: activeCustomerPhones[0].customerId,
+      customerId: matchingCustomerPhone.customerId,
     };
   }
 }

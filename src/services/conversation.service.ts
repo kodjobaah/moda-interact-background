@@ -164,6 +164,12 @@ export class ConversationService {
         },
       });
 
+    if (!conversation.checkoutRecovery) {
+      throw new Error(
+        `Conversation ${conversation.id} is not linked to a checkout recovery`,
+      );
+    }
+
     const messages =
       await prisma.conversationMessage.findMany({
         where: {
@@ -249,12 +255,7 @@ export class ConversationService {
   ) {
 
     return prisma.conversation.upsert({
-      where: {
-        checkoutRecoveryId_type: {
-          checkoutRecoveryId,
-          type: "RECOVERY",
-        },
-      },
+      where: { checkoutRecoveryId },
 
       create: {
         checkoutRecoveryId,

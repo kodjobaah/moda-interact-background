@@ -11,8 +11,6 @@ export type CheckoutRecoveryStatus =
   | "ENGAGED"
   | "COMPLETED"
   | "EXPIRED"
-  | "PENDING"
-  | "RECOVERED"
   | "CANCELLED";
 
 
