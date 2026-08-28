@@ -7,13 +7,24 @@ import {
 } from "../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../lib/redis.js";
 import { pendingRecoveryCandidateService } from "../services/pending-recovery-candidate.service.js";
+import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 
 const pendingRecoveryCandidateWorker = new Worker<PendingRecoveryCandidate>(
   PENDING_RECOVERY_CANDIDATE_QUEUE,
   async (job) => {
     switch (job.name) {
       case EVALUATE_PENDING_RECOVERY_JOB:
-        await pendingRecoveryCandidateService.handleCandidateMatured(job.data);
+        try {
+          // Materialize the matured candidate into durable recovery state using
+          // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
+          // payload embedded in the job.
+          await checkoutRecoveryService.materializeMaturedCandidate(job.data);
+        } finally {
+          // The candidate is no longer pending once it has matured: drop the
+          // O(1) candidate lookup indexes regardless of the materialization
+          // outcome (created, discarded, or provider error).
+          await pendingRecoveryCandidateService.handleCandidateMatured(job.data);
+        }
         return;
       default:
         throw new Error(`Unknown pending candidate job: ${job.name}`);

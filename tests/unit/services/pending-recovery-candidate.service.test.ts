@@ -240,4 +240,72 @@ describe("pending recovery candidate service", () => {
     const ttlMs = domainModule.pendingCandidateIndexTtlMs(45);
     expect(ttlMs).toBeGreaterThan(45 * 60 * 1000);
   });
+
+  it("resolves a candidate by cart-token fallback without scanning the queue", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_1",
+      cartToken: "cart_9",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      legacyV1Transition: null,
+    });
+
+    // No checkout token supplied: fall back to the indexed cart correlation.
+    const matched = await serviceModule.pendingRecoveryCandidateService.resolveCandidate({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "cart_9",
+    });
+
+    expect(matched).not.toBeNull();
+    expect(matched?.jobId).toBe(result.jobId);
+    expect(matched?.candidate.checkoutToken).toBe("checkout_1");
+  });
+
+  it("cancels a candidate and removes all its aliases (checkout and cart indexes)", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_1",
+      cartToken: "cart_9",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      legacyV1Transition: null,
+    });
+
+    const matched = await serviceModule.pendingRecoveryCandidateService.resolveCandidate({
+      shopId: "shop_1",
+      checkoutToken: "checkout_1",
+      cartToken: null,
+    });
+
+    expect(matched).not.toBeNull();
+
+    await serviceModule.pendingRecoveryCandidateService.cancelCandidate(matched!);
+
+    expect(
+      await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCheckout({
+        shopId: "shop_1",
+        checkoutToken: "checkout_1",
+      }),
+    ).toBeNull();
+    expect(
+      await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCart({
+        shopId: "shop_1",
+        cartToken: "cart_9",
+      }),
+    ).toBeNull();
+  });
+
+  it("records and reads an order-completed tombstone scoped to the checkout", async () => {
+    await serviceModule.pendingRecoveryCandidateService.markOrderProcessed("shop_1", "checkout_1");
+
+    expect(
+      await serviceModule.pendingRecoveryCandidateService.hasOrderProcessed("shop_1", "checkout_1"),
+    ).toBe(true);
+    expect(
+      await serviceModule.pendingRecoveryCandidateService.hasOrderProcessed("shop_1", "checkout_2"),
+    ).toBe(false);
+  });
 });
+

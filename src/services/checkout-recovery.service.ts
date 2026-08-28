@@ -12,16 +12,36 @@ import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
+import {
+  abandonedCheckoutLookupService,
+} from "./abandoned-checkout-lookup.service.js";
+import {
+  toLookupInput,
+  type NormalizedAbandonedCheckout,
+} from "../domain/abandoned-checkout.js";
+import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
 
 interface RecoveryOrderCompletionInput {
   shop: string;
   orderId: string;
   checkoutToken: string | null;
+  cartToken: string | null;
   customerId: string | null;
   totalPrice: string | null;
   currency: string | null;
+  completedAt: string | null;
 }
+
+export type MaturedCandidateMaterializationResult =
+  | { outcome: "recovery-created"; checkoutToken: string }
+  | { outcome: "no-op-existing"; checkoutToken: string; status: string }
+  | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
+  | { outcome: "discarded-not-found"; checkoutToken: string }
+  | { outcome: "discarded-not-recoverable"; checkoutToken: string }
+  | { outcome: "discarded-ambiguous"; checkoutToken: string }
+  | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
+  | { outcome: "discarded-order-completed"; checkoutToken: string };
 
 export class CheckoutRecoveryService {
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -36,6 +56,157 @@ export class CheckoutRecoveryService {
       checkoutToken: event.checkoutToken,
       source: event.legacyV1Transition ? "legacy-v1" : "v2",
     } as const;
+  }
+
+  /**
+   * Transition a matured pending candidate into durable `CheckoutRecovery`.
+   *
+   * ARCH-001-BACKGROUND-004. The webhook's embedded basket/customer payload is
+   * never used here. Current Shopify data (from ARCH-001-BACKGROUND-003) is the
+   * only source used to populate recovery state. Non-recoverable outcomes
+   * (not-found, ambiguous, bound-exceeded, already-completed) produce no
+   * recovery record and no message.
+   */
+  async materializeMaturedCandidate(
+    candidate: PendingRecoveryCandidate,
+  ): Promise<MaturedCandidateMaterializationResult> {
+    const shopDomain =
+      await abandonedCheckoutLookupService.resolveShopDomain(candidate.shopId);
+
+    // Checkout-scoped serialization with the order path (ARCH-001-BACKGROUND-005).
+    return pendingRecoveryCandidateService.withCheckoutLock(
+      candidate.shopId,
+      candidate.checkoutToken,
+      async () => {
+        // If an order already processed this checkout, the checkout completed
+        // before recovery action was committed: do not create a recovery or
+        // send a recovery message for it.
+        if (
+          await pendingRecoveryCandidateService.hasOrderProcessed(
+            candidate.shopId,
+            candidate.checkoutToken,
+          )
+        ) {
+          return {
+            outcome: "discarded-order-completed",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
+        }
+
+        const outcome =
+          await abandonedCheckoutLookupService.lookup(
+            toLookupInput(candidate, shopDomain),
+          );
+
+        // Transient Shopify/API failures remain retryable and are never
+        // translated into a "not recoverable" decision.
+        if (outcome.kind === "provider-error") {
+      throw new Error(
+        `Abandoned checkout provider error while materializing candidate: ${outcome.message}`,
+      );
+    }
+
+        if (outcome.kind === "not-found") {
+          return { outcome: "discarded-not-found", checkoutToken: candidate.checkoutToken } as const;
+        }
+
+        if (outcome.kind === "ambiguous") {
+          return { outcome: "discarded-ambiguous", checkoutToken: candidate.checkoutToken } as const;
+        }
+
+        if (outcome.kind === "bounded-limit-exceeded") {
+          return { outcome: "discarded-bound-exceeded", checkoutToken: candidate.checkoutToken } as const;
+        }
+
+    const checkout = outcome.checkout;
+
+        // Shopify reports the checkout already completed: not recoverable.
+        if (checkout.completedAt != null) {
+          return { outcome: "discarded-not-recoverable", checkoutToken: candidate.checkoutToken } as const;
+        }
+
+        // Idempotency guard: never reopen an existing recovery or re-run the
+        // recovery-message workflow for a checkout that has already materialized.
+        const existing = await this.findExistingRecovery(shopDomain, candidate.checkoutToken);
+        if (existing) {
+          if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(existing.status)) {
+            return { outcome: "discarded-terminal", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
+          }
+          return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
+        }
+
+        const seed = this.toRecoverySeed(candidate, shopDomain, checkout);
+        await this.handleCheckoutCreated(seed);
+
+    return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
+      },
+    );
+  }
+
+  private async findExistingRecovery(shopDomain: string, checkoutToken: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { domain: shopDomain },
+      select: { id: true },
+    });
+    if (!shop) {
+      return null;
+    }
+    return prisma.checkoutRecovery.findUnique({
+      where: {
+        shopId_checkoutToken: {
+          shopId: shop.id,
+          checkoutToken,
+        },
+      },
+      select: { status: true },
+    });
+  }
+
+  /**
+   * Map current Shopify data plus candidate correlation identifiers into the
+   * existing recovery seed shape. Only the lookup result supplies customer,
+   * line item, pricing, currency and recovery URL; the candidate provides only
+   * the shopId, checkout token and cart token.
+   */
+  private toRecoverySeed(
+    candidate: PendingRecoveryCandidate,
+    shopDomain: string,
+    checkout: NormalizedAbandonedCheckout,
+  ): RecoveryCheckoutSeed {
+    return {
+      shop: shopDomain,
+      checkoutToken: candidate.checkoutToken,
+      cartToken: candidate.cartToken,
+      detectedAt: checkout.createdAt || candidate.checkoutCreatedAt || new Date().toISOString(),
+      currency: checkout.currencyCode,
+      totalPrice: checkout.totalPrice,
+      checkoutUrl: checkout.abandonedCheckoutUrl,
+      completedAt: checkout.completedAt,
+      customer: checkout.customer
+        ? {
+            shopifyCustomerId: checkout.customer.shopifyCustomerId,
+            phone: checkout.customer.phone,
+            email: checkout.customer.email,
+            firstName: checkout.customer.firstName,
+            lastName: checkout.customer.lastName,
+          }
+        : {
+            shopifyCustomerId: null,
+            phone: null,
+            email: null,
+            firstName: null,
+            lastName: null,
+          },
+      lineItems: checkout.lineItems.map((li) => ({
+        productId: li.productId,
+        variantId: li.variantId,
+        title: li.title,
+        variantTitle: li.variantTitle,
+        sku: li.sku,
+        quantity: li.quantity,
+        price: li.price,
+      })),
+    };
   }
 
   async handleCheckoutUpdatedContract(event: CheckoutUpdatedContractInput) {
@@ -53,9 +224,11 @@ export class CheckoutRecoveryService {
       shop: event.shopDomain,
       orderId: event.orderId,
       checkoutToken: event.checkoutToken,
+      cartToken: event.cartToken,
       customerId: null,
       totalPrice: null,
       currency: null,
+      completedAt: event.completedAt,
     });
   }
 
@@ -156,12 +329,26 @@ export class CheckoutRecoveryService {
     });
   }
 
+  /*
+   * ARCH-001-BACKGROUND-005.
+   *
+   * Orders are only ever processed for recovery purposes:
+   *   1. a matching pending candidate is cancelled (and its aliases cleaned up);
+   *   2. else a matching existing CheckoutRecovery is completed/attributed;
+   *   3. else the order is discarded.
+   *
+   * The order path serialises against candidate materialization on a single
+   * checkout via a transient Redis mutex plus an order-completion tombstone, so
+   * an order that completes a checkout before a recovery message is committed
+   * never triggers an inappropriate recovery message. No durable order record
+   * or retained business event is created for an unrelated order.
+   */
   async handleOrderCompleted(event: RecoveryOrderCompletionInput) {
-    if (!event.checkoutToken) {
-      return { kind: "ignored", reason: "missing-checkout-token" } as const;
+    // Customer identity alone must not associate an order with recovery; we
+    // require a checkout/cart correlation identifier.
+    if (!event.checkoutToken && !event.cartToken) {
+      return { kind: "ignored", reason: "missing-correlation" } as const;
     }
-
-    const checkoutToken = event.checkoutToken;
 
     const shop = await prisma.shop.findUnique({
       where: { domain: event.shop },
@@ -172,61 +359,126 @@ export class CheckoutRecoveryService {
       return { kind: "ignored", reason: "shop-not-found" } as const;
     }
 
-    return prisma.$transaction(async (transaction) => {
-      const recovery = await transaction.checkoutRecovery.findUnique({
-        where: {
-          shopId_checkoutToken: {
-            shopId: shop.id,
-              checkoutToken,
-          },
-        },
-        select: { id: true, status: true, completedAt: true },
+    // Cart-only orders must be correlated through the indexed transient
+    // candidate correlation before we can determine the checkout scope.
+    let checkoutTokenForScope = event.checkoutToken;
+    if (!checkoutTokenForScope) {
+      const cartOnly = await pendingRecoveryCandidateService.resolveCandidate({
+        shopId: shop.id,
+        checkoutToken: null,
+        cartToken: event.cartToken,
       });
 
-      if (!recovery) {
-        return { kind: "ignored", reason: "recovery-not-found" } as const;
+      if (!cartOnly) {
+        return { kind: "discarded", reason: "no-checkout-token" } as const;
       }
 
-      if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
-        return { kind: "ignored", reason: `terminal-${recovery.status.toLowerCase()}` } as const;
-      }
+      checkoutTokenForScope = cartOnly.candidate.checkoutToken;
+    }
+    return pendingRecoveryCandidateService.withCheckoutLock(
+      shop.id,
+      checkoutTokenForScope,
+      async () => {
+        // 1. Resolve a pending candidate (checkout then cart fallback, O(1)).
+        const matched = await pendingRecoveryCandidateService.resolveCandidate({
+          shopId: shop.id,
+          checkoutToken: checkoutTokenForScope,
+          cartToken: event.cartToken,
+        });
 
-      const completedAt = new Date();
-      const updated = await transaction.checkoutRecovery.updateMany({
-        where: {
-          id: recovery.id,
-          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-        },
-        data: {
-          status: "COMPLETED",
-          completedAt,
-        },
-      });
+        if (matched) {
+          // The checkout completed before recovery began: cancel the candidate
+          // and all its aliases, then discard the order.
+          await pendingRecoveryCandidateService.cancelCandidate(matched);
+          await pendingRecoveryCandidateService.markOrderProcessed(
+            shop.id,
+            matched.candidate.checkoutToken,
+          );
+          return {
+            kind: "cancelled-candidate",
+            checkoutToken: matched.candidate.checkoutToken,
+          } as const;
+        }
 
-      if (updated.count === 0) {
-        return { kind: "ignored", reason: "already-transitioned" } as const;
-      }
+        const checkoutToken = event.checkoutToken as string | null;
+        if (!checkoutToken) {
+          // No candidate matched, so there is no checkout identity with which
+          // to find an existing recovery.
+          return { kind: "discarded", reason: "no-checkout-token" } as const;
+        }
+        // 2. No candidate. Record that an order was processed for this checkout
+        //    so an in-flight materialization cannot send a recovery message.
+        await pendingRecoveryCandidateService.markOrderProcessed(
+          shop.id,
+          checkoutToken,
+        );
 
-      await transaction.checkoutRecoveryStatusHistory.create({
-        data: {
-          checkoutRecoveryId: recovery.id,
-          fromStatus: recovery.status,
-          toStatus: "COMPLETED",
-          reason: "Order completed",
-          source: "shopify.orders.create",
-          metadata: event.customerId
-            ? { orderId: event.orderId, customerId: event.customerId }
-            : { orderId: event.orderId },
-          occurredAt: completedAt,
-        },
-      });
+        // 3. Look up and complete the existing recovery if eligible.
+        return prisma.$transaction(async (transaction) => {
+          const recovery = await transaction.checkoutRecovery.findUnique({
+            where: {
+              shopId_checkoutToken: {
+                shopId: shop.id,
+                checkoutToken,
+              },
+            },
+            select: { id: true, status: true },
+          });
 
-      return {
-        kind: "completed",
-        recoveryId: recovery.id,
-        fromStatus: recovery.status,
-      } as const;
-    });
+          if (!recovery) {
+            return { kind: "discarded", reason: "recovery-not-found" } as const;
+          }
+
+          if (
+            ["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)
+          ) {
+            return {
+              kind: "ignored",
+              reason: `terminal-${recovery.status.toLowerCase()}`,
+            } as const;
+          }
+
+          const completedAt = new Date(
+            event.completedAt ?? new Date().toISOString(),
+          );
+
+          const updated = await transaction.checkoutRecovery.updateMany({
+            where: {
+              id: recovery.id,
+              status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+            },
+            data: {
+              status: "COMPLETED",
+              completedAt,
+            },
+          });
+
+          if (updated.count === 0) {
+            return { kind: "ignored", reason: "already-transitioned" } as const;
+          }
+
+          await transaction.checkoutRecoveryStatusHistory.create({
+            data: {
+              checkoutRecoveryId: recovery.id,
+              fromStatus: recovery.status,
+              toStatus: "COMPLETED",
+              reason: "Order completed",
+              source: "shopify.orders.create",
+              metadata: event.customerId
+                ? { orderId: event.orderId, customerId: event.customerId }
+                : { orderId: event.orderId },
+              occurredAt: completedAt,
+            },
+          });
+
+          return {
+            kind: "completed",
+            recoveryId: recovery.id,
+            fromStatus: recovery.status,
+          } as const;
+        });
+      },
+    );
   }
 
   async handleCheckoutCreated(event: RecoveryCheckoutSeed) {
@@ -446,3 +698,6 @@ export class CheckoutRecoveryService {
 
 export const checkoutRecoveryService =
   new CheckoutRecoveryService();
+
+
+
