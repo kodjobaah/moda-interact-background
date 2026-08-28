@@ -17,6 +17,7 @@ import {
 } from "./abandoned-checkout-lookup.service.js";
 import {
   toLookupInput,
+  type AbandonedCheckoutLookupInput,
   type NormalizedAbandonedCheckout,
 } from "../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
@@ -42,6 +43,11 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
   | { outcome: "discarded-order-completed"; checkoutToken: string };
+
+export type CheckoutRefreshResult =
+  | { kind: "refreshed"; recoveryId: string; status: string }
+  | { kind: "discarded"; reason: string }
+  | { kind: "ignored"; reason: string };
 
 export class CheckoutRecoveryService {
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -197,25 +203,143 @@ export class CheckoutRecoveryService {
             firstName: null,
             lastName: null,
           },
-      lineItems: checkout.lineItems.map((li) => ({
-        productId: li.productId,
-        variantId: li.variantId,
-        title: li.title,
-        variantTitle: li.variantTitle,
-        sku: li.sku,
-        quantity: li.quantity,
-        price: li.price,
-      })),
+      lineItems: this.serializeLineItems(checkout.lineItems),
     };
   }
 
-  async handleCheckoutUpdatedContract(event: CheckoutUpdatedContractInput) {
-    // ARCH-001-BACKGROUND-001 boundary-only routing.
-    return {
-      kind: "accepted",
+  /**
+   * Serialize current Shopify abandoned-checkout line items into the durable
+   * recovery snapshot shape. This is the only place that maps normalized line
+   * items into the stored `CheckoutRecovery.lineItems` JSON, so creation
+   * (BACKGROUND-004) and refresh (BACKGROUND-006) store an identical shape.
+   */
+  private serializeLineItems(
+    lineItems: NormalizedAbandonedCheckout["lineItems"],
+  ): RecoveryCheckoutSeed["lineItems"] {
+    return lineItems.map((li) => ({
+      productId: li.productId,
+      variantId: li.variantId,
+      title: li.title,
+      variantTitle: li.variantTitle,
+      sku: li.sku,
+      quantity: li.quantity,
+      price: li.price,
+    }));
+  }
+
+  /**
+   * Process a checkout-update event by refreshing an existing
+   * `CheckoutRecovery` from current Shopify data.
+   *
+   * ARCH-001-BACKGROUND-006. No `CheckoutRecovery` means the update is
+   * discarded immediately: no Shopify lookup and no write beyond the recovery
+   * lookup. When a recovery exists, the current Shopify abandoned checkout is
+   * re-fetched (BACKGROUND-003) and only basket/content fields are refreshed.
+   * The webhook payload is never used as recovery state. Lifecycle status and
+   * timing (detectedAt/messageSentAt/engagedAt/completedAt) are preserved: a
+   * terminal recovery is never reopened and this task never restarts recovery
+   * timing or creates a new recovery.
+   */
+  async handleCheckoutUpdatedContract(
+    event: CheckoutUpdatedContractInput,
+  ): Promise<CheckoutRefreshResult> {
+    const shop = await prisma.shop.findUnique({
+      where: { domain: event.shopDomain },
+      select: { id: true },
+    });
+    if (!shop) {
+      return { kind: "discarded", reason: "shop-not-found" } as const;
+    }
+
+    const recovery = await prisma.checkoutRecovery.findUnique({
+      where: {
+        shopId_checkoutToken: {
+          shopId: shop.id,
+          checkoutToken: event.checkoutToken,
+        },
+      },
+      select: {
+        id: true,
+        status: true,
+        cartToken: true,
+        checkoutUrl: true,
+        detectedAt: true,
+      },
+    });
+
+    // No recovery: the update is irrelevant before recovery exists.
+    if (!recovery) {
+      return { kind: "discarded", reason: "recovery-not-found" } as const;
+    }
+
+    // A terminal recovery is never reopened by a checkout update.
+    if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
+      return {
+        kind: "ignored",
+        reason: `terminal-${recovery.status.toLowerCase()}`,
+      } as const;
+    }
+
+    // Fetch the current Shopify abandoned checkout. The lookup input is derived
+    // exclusively from durable recovery state (shop/checkout/cart correlation,
+    // stored recovery URL, and the Shopify creation timestamp retained in
+    // detectedAt), never from the webhook payload.
+    const lookupInput: AbandonedCheckoutLookupInput = {
+      shopId: shop.id,
       shopDomain: event.shopDomain,
       checkoutToken: event.checkoutToken,
-      source: "v2-or-v1-transition",
+      cartToken: recovery.cartToken,
+      abandonedCheckoutUrl: recovery.checkoutUrl,
+      checkoutCreatedAt: recovery.detectedAt
+        ? recovery.detectedAt.toISOString()
+        : null,
+    };
+
+    const outcome = await abandonedCheckoutLookupService.lookup(lookupInput);
+
+    // Transient provider failures remain retryable and are never converted into
+    // a "nothing to refresh" discard.
+    if (outcome.kind === "provider-error") {
+      throw new Error(
+        `Abandoned checkout provider error while refreshing recovery ${recovery.id}: ${outcome.message}`,
+      );
+    }
+
+    if (outcome.kind !== "found") {
+      // not-found / ambiguous / bounded-limit-exceeded: the current checkout
+      // cannot be identified deterministically, so there is nothing to refresh.
+      return {
+        kind: "discarded",
+        reason: `lookup-${outcome.kind}`,
+      } as const;
+    }
+
+    const checkout = outcome.checkout;
+
+    // Refresh basket/content fields only. The status-guarded updateMany preserves
+    // lifecycle status and prevents refreshing a recovery that concurrently
+    // transitioned to a terminal state.
+    const refreshed = await prisma.checkoutRecovery.updateMany({
+      where: {
+        id: recovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+      },
+      data: {
+        currency: checkout.currencyCode,
+        totalPrice: checkout.totalPrice,
+        checkoutUrl: checkout.abandonedCheckoutUrl,
+        lineItems: this.serializeLineItems(checkout.lineItems),
+      },
+    });
+
+    if (refreshed.count === 0) {
+      return { kind: "ignored", reason: "already-transitioned" } as const;
+    }
+
+    return {
+      kind: "refreshed",
+      recoveryId: recovery.id,
+      status: recovery.status,
     } as const;
   }
 
@@ -698,6 +822,4 @@ export class CheckoutRecoveryService {
 
 export const checkoutRecoveryService =
   new CheckoutRecoveryService();
-
-
 
