@@ -11,6 +11,7 @@ import { customerService } from "./customer.service.js";
 import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
+import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
 
 interface RecoveryOrderCompletionInput {
@@ -24,10 +25,13 @@ interface RecoveryOrderCompletionInput {
 
 export class CheckoutRecoveryService {
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
-    // ARCH-001-BACKGROUND-001 only establishes shared contract boundaries.
-    // Candidate lifecycle and recovery materialization are handled by later tasks.
+    const scheduled =
+      await pendingRecoveryCandidateService.scheduleFromCheckoutCreated(event);
+
     return {
-      kind: "accepted",
+      kind: "scheduled",
+      outcome: scheduled.outcome,
+      delayMinutes: scheduled.delayMinutes,
       shopDomain: event.shopDomain,
       checkoutToken: event.checkoutToken,
       source: event.legacyV1Transition ? "legacy-v1" : "v2",

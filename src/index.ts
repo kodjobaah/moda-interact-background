@@ -4,6 +4,7 @@ import http from "node:http";
 import "./workers/orders.worker.js";
 import "./workers/whatsapp.worker.js";
 import "./workers/checkout.worker.js";
+import "./workers/pending-recovery-candidate.worker.js";
 
 const port = Number(process.env.PORT ?? 3000);
 
