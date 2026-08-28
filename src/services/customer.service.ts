@@ -1,12 +1,12 @@
 import type { UpsertShopifyCustomerInput } from "../domain/types.js";
-import type { CheckoutCreatedEvent } from "../events/checkout-events.js";
+import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
 import prisma from "../lib/db.js";
 import type { Customer } from "@prisma/client";
 import { customerPhoneService } from "./customer.phone.service.js";
 export class CustomerService {
 
 async resolveCustomer(
-  event: CheckoutCreatedEvent,
+  event: RecoveryCheckoutSeed,
 ): Promise<Customer | null> {
   const incoming = event.customer;
 

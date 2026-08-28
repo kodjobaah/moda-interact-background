@@ -1,4 +1,6 @@
-export interface CheckoutCreatedEvent {
+// Internal seed shape retained for legacy recovery-message helpers only.
+// Cross-service queue contracts are parsed from @modainteract/moda-interact-shared.
+export interface RecoveryCheckoutSeed {
   shop: string;
 
   checkoutToken: string;

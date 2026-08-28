@@ -1,14 +1,19 @@
 // src/services/checkout-recovery.service.ts
 
 import prisma from "../lib/db.js";
-import type { CheckoutCreatedEvent } from "../events/checkout-events.js";
+import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
+import type {
+  CheckoutCreatedContractInput,
+  CheckoutUpdatedContractInput,
+  OrderCompletedContractInput,
+} from "../events/shopify-contract-adapter.js";
 import { customerService } from "./customer.service.js";
 import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
 
-export interface OrderCompletedEvent {
+interface RecoveryOrderCompletionInput {
   shop: string;
   orderId: string;
   checkoutToken: string | null;
@@ -18,7 +23,39 @@ export interface OrderCompletedEvent {
 }
 
 export class CheckoutRecoveryService {
-  async upsertRecovery(event: CheckoutCreatedEvent) {
+  async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
+    // ARCH-001-BACKGROUND-001 only establishes shared contract boundaries.
+    // Candidate lifecycle and recovery materialization are handled by later tasks.
+    return {
+      kind: "accepted",
+      shopDomain: event.shopDomain,
+      checkoutToken: event.checkoutToken,
+      source: event.legacyV1Transition ? "legacy-v1" : "v2",
+    } as const;
+  }
+
+  async handleCheckoutUpdatedContract(event: CheckoutUpdatedContractInput) {
+    // ARCH-001-BACKGROUND-001 boundary-only routing.
+    return {
+      kind: "accepted",
+      shopDomain: event.shopDomain,
+      checkoutToken: event.checkoutToken,
+      source: "v2-or-v1-transition",
+    } as const;
+  }
+
+  async handleOrderCompletedContract(event: OrderCompletedContractInput) {
+    return this.handleOrderCompleted({
+      shop: event.shopDomain,
+      orderId: event.orderId,
+      checkoutToken: event.checkoutToken,
+      customerId: null,
+      totalPrice: null,
+      currency: null,
+    });
+  }
+
+  async upsertRecovery(event: RecoveryCheckoutSeed) {
     const shop = await prisma.shop.findUniqueOrThrow({
       where: {
         domain: event.shop,
@@ -86,7 +123,7 @@ export class CheckoutRecoveryService {
     });
   }
 
-  resolveRecipient(event: CheckoutCreatedEvent): string {
+  resolveRecipient(event: RecoveryCheckoutSeed): string {
     if (event.customer.phone) {
       return event.customer.phone;
     }
@@ -115,7 +152,7 @@ export class CheckoutRecoveryService {
     });
   }
 
-  async handleOrderCompleted(event: OrderCompletedEvent) {
+  async handleOrderCompleted(event: RecoveryOrderCompletionInput) {
     if (!event.checkoutToken) {
       return { kind: "ignored", reason: "missing-checkout-token" } as const;
     }
@@ -188,7 +225,7 @@ export class CheckoutRecoveryService {
     });
   }
 
-  async handleCheckoutCreated(event: CheckoutCreatedEvent) {
+  async handleCheckoutCreated(event: RecoveryCheckoutSeed) {
     // 1
     let recovery = await this.upsertRecovery(event);
 

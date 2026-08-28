@@ -1,9 +1,12 @@
 import { Worker } from "bullmq";
 import { connectionRedis } from "../lib/redis.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
-import type { OrderCompletedEvent } from "../services/checkout-recovery.service.js";
+import {
+  mapOrderCompletedContractInput,
+  parseRuntimeShopifyEvent,
+} from "../events/shopify-contract-adapter.js";
 
-const worker = new Worker<OrderCompletedEvent>(
+const worker = new Worker<unknown>(
   "order-events",
 
   async (job) => {
@@ -14,7 +17,9 @@ const worker = new Worker<OrderCompletedEvent>(
 
     switch (job.name) {
       case "order-completed":
-        await checkoutRecoveryService.handleOrderCompleted(job.data);
+        await checkoutRecoveryService.handleOrderCompletedContract(
+          mapOrderCompletedContractInput(parseRuntimeShopifyEvent(job.data)),
+        );
         break;
 
       default:

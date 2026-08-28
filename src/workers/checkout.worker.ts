@@ -4,18 +4,30 @@ import {
 } from "bullmq";
 
 import { connectionRedis } from "../lib/redis.js";
-import type { CheckoutCreatedEvent } from "../events/checkout-events.js";
+import {
+  mapCheckoutCreatedContractInput,
+  mapCheckoutUpdatedContractInput,
+  parseRuntimeShopifyEvent,
+} from "../events/shopify-contract-adapter.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 
 const checkoutWorker =
-  new Worker<CheckoutCreatedEvent>(
+  new Worker<unknown>(
     "checkout-events",
 
     async (job) => {
+      const parsedEvent = parseRuntimeShopifyEvent(job.data);
+
       switch (job.name) {
         case "checkout-created":
-          await checkoutRecoveryService.handleCheckoutCreated(
-            job.data,
+          await checkoutRecoveryService.handleCheckoutCreatedContract(
+            mapCheckoutCreatedContractInput(parsedEvent),
+          );
+          return;
+
+        case "checkout-updated":
+          await checkoutRecoveryService.handleCheckoutUpdatedContract(
+            mapCheckoutUpdatedContractInput(parsedEvent),
           );
           return;
 

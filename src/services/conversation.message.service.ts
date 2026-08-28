@@ -1,4 +1,4 @@
-import type { CheckoutCreatedEvent } from "../events/checkout-events.js";
+import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
 import prisma from "../lib/db.js";
 
 export class ConversationMessageService {
@@ -16,7 +16,7 @@ export class ConversationMessageService {
     });
   }
 
-  buildRecoveryMessage(event: CheckoutCreatedEvent): string {
+  buildRecoveryMessage(event: RecoveryCheckoutSeed): string {
     const firstItem = event.lineItems[0];
 
     if (firstItem?.title) {
