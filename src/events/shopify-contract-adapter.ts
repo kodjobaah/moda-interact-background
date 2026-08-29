@@ -1,21 +1,7 @@
 import {
   parseShopifyRecoveryEventV2,
-  safeParseShopifyRecoveryEventV2,
-  parseShopifyCommerceEvent,
   type ShopifyRecoveryEventV2,
-  type ShopifyCommerceEvent,
 } from "@modainteract/moda-interact-shared/shopify";
-
-type LegacyCheckoutCreatedTransitionEvent = {
-  checkoutToken: string;
-  cartToken: string | null;
-  checkoutCreatedAt: string | null;
-  abandonedCheckoutUrl: string | null;
-};
-
-type RuntimeShopifyEvent =
-  | { kind: "v2"; event: ShopifyRecoveryEventV2 }
-  | { kind: "v1"; event: ShopifyCommerceEvent };
 
 export type CheckoutCreatedContractInput = {
   shopDomain: string;
@@ -23,7 +9,6 @@ export type CheckoutCreatedContractInput = {
   cartToken: string | null;
   checkoutCreatedAt: string | null;
   abandonedCheckoutUrl: string | null;
-  legacyV1Transition: LegacyCheckoutCreatedTransitionEvent | null;
 };
 
 export type CheckoutUpdatedContractInput = {
@@ -39,115 +24,66 @@ export type OrderCompletedContractInput = {
   completedAt: string;
 };
 
-export function parseRuntimeShopifyEvent(jobData: unknown): RuntimeShopifyEvent {
-  const v2Result = safeParseShopifyRecoveryEventV2(jobData);
-  if (v2Result.success) {
-    return { kind: "v2", event: v2Result.data };
-  }
-
-  return { kind: "v1", event: parseShopifyCommerceEvent(jobData) };
+/**
+ * Runtime-validate worker job data against the canonical ARCH-001 v2 recovery
+ * contract. Invalid cross-service payloads throw before any business handling
+ * so malformed events fail visibly rather than being treated as valid.
+ */
+export function parseRuntimeShopifyEvent(
+  jobData: unknown,
+): ShopifyRecoveryEventV2 {
+  return parseShopifyRecoveryEventV2(jobData);
 }
 
 export function mapCheckoutCreatedContractInput(
-  event: RuntimeShopifyEvent,
+  event: ShopifyRecoveryEventV2,
 ): CheckoutCreatedContractInput {
-  if (event.kind === "v2") {
-    if (event.event.eventType !== "checkout.created") {
+  if (event.eventType !== "checkout.created") {
       throw new Error(
-        `Invalid checkout event type for checkout-created handler: ${event.event.eventType}`,
+      `Invalid checkout event type for checkout-created handler: ${event.eventType}`,
       );
     }
 
     return {
-      shopDomain: event.event.tenant.shopDomain,
-      checkoutToken: event.event.payload.checkoutToken,
-      cartToken: event.event.payload.cartToken,
-      checkoutCreatedAt: event.event.payload.checkoutCreatedAt,
-      abandonedCheckoutUrl: event.event.payload.abandonedCheckoutUrl,
-      legacyV1Transition: null,
+    shopDomain: event.tenant.shopDomain,
+    checkoutToken: event.payload.checkoutToken,
+    cartToken: event.payload.cartToken,
+    checkoutCreatedAt: event.payload.checkoutCreatedAt,
+    abandonedCheckoutUrl: event.payload.abandonedCheckoutUrl,
     };
   }
-
-  if (event.event.eventType !== "checkout.observed") {
-    throw new Error(
-      `Invalid legacy event type for checkout-created handler: ${event.event.eventType}`,
-    );
-  }
-
-  return {
-    shopDomain: event.event.tenant.shopDomain,
-    checkoutToken: event.event.payload.checkoutToken,
-    cartToken: event.event.payload.cartToken,
-    checkoutCreatedAt: event.event.payload.checkoutCreatedAt,
-    abandonedCheckoutUrl: null,
-    // Transitional mapping keeps only correlation identifiers from legacy events.
-    legacyV1Transition: {
-      checkoutToken: event.event.payload.checkoutToken,
-      cartToken: event.event.payload.cartToken,
-      checkoutCreatedAt: event.event.payload.checkoutCreatedAt,
-      abandonedCheckoutUrl: null,
-    },
-  };
-}
 
 export function mapCheckoutUpdatedContractInput(
-  event: RuntimeShopifyEvent,
+  event: ShopifyRecoveryEventV2,
 ): CheckoutUpdatedContractInput {
-  if (event.kind === "v2") {
-    if (event.event.eventType !== "checkout.updated") {
+  if (event.eventType !== "checkout.updated") {
       throw new Error(
-        `Invalid checkout event type for checkout-updated handler: ${event.event.eventType}`,
+      `Invalid checkout event type for checkout-updated handler: ${event.eventType}`,
       );
     }
 
     return {
-      shopDomain: event.event.tenant.shopDomain,
-      checkoutToken: event.event.payload.checkoutToken,
+    shopDomain: event.tenant.shopDomain,
+    checkoutToken: event.payload.checkoutToken,
     };
   }
-
-  if (event.event.eventType !== "checkout.observed") {
-    throw new Error(
-      `Invalid legacy event type for checkout-updated handler: ${event.event.eventType}`,
-    );
-  }
-
-  return {
-    shopDomain: event.event.tenant.shopDomain,
-    checkoutToken: event.event.payload.checkoutToken,
-  };
-}
 
 export function mapOrderCompletedContractInput(
-  event: RuntimeShopifyEvent,
+  event: ShopifyRecoveryEventV2,
 ): OrderCompletedContractInput {
-  if (event.kind === "v2") {
-    if (event.event.eventType !== "order.completed") {
+  if (event.eventType !== "order.completed") {
       throw new Error(
-        `Invalid event type for order-completed handler: ${event.event.eventType}`,
+      `Invalid event type for order-completed handler: ${event.eventType}`,
       );
     }
 
     return {
-      shopDomain: event.event.tenant.shopDomain,
-      orderId: event.event.payload.orderId,
-      checkoutToken: event.event.payload.checkoutToken,
-      cartToken: event.event.payload.cartToken,
-      completedAt: event.event.payload.completedAt,
+    shopDomain: event.tenant.shopDomain,
+    orderId: event.payload.orderId,
+    checkoutToken: event.payload.checkoutToken,
+    cartToken: event.payload.cartToken,
+    completedAt: event.payload.completedAt,
     };
   }
 
-  if (event.event.eventType !== "order.completed") {
-    throw new Error(
-      `Invalid legacy event type for order-completed handler: ${event.event.eventType}`,
-    );
-  }
 
-  return {
-    shopDomain: event.event.tenant.shopDomain,
-    orderId: event.event.payload.orderId,
-    checkoutToken: event.event.payload.checkoutToken,
-    cartToken: null,
-    completedAt: event.event.payload.completedAt,
-  };
-}

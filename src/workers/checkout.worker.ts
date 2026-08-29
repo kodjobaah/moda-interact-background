@@ -10,22 +10,22 @@ import {
   parseRuntimeShopifyEvent,
 } from "../events/shopify-contract-adapter.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
+import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
 
 const checkoutWorker =
   new Worker<unknown>(
-    "checkout-events",
-
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
     async (job) => {
       const parsedEvent = parseRuntimeShopifyEvent(job.data);
 
       switch (job.name) {
-        case "checkout-created":
+        case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName:
           await checkoutRecoveryService.handleCheckoutCreatedContract(
             mapCheckoutCreatedContractInput(parsedEvent),
           );
           return;
 
-        case "checkout-updated":
+        case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName:
           await checkoutRecoveryService.handleCheckoutUpdatedContract(
             mapCheckoutUpdatedContractInput(parsedEvent),
           );

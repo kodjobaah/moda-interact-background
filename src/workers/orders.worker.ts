@@ -5,10 +5,10 @@ import {
   mapOrderCompletedContractInput,
   parseRuntimeShopifyEvent,
 } from "../events/shopify-contract-adapter.js";
+import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
 
 const worker = new Worker<unknown>(
-  "order-events",
-
+  SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName,
   async (job) => {
     console.log("Received job", {
       id: job.id,
@@ -16,7 +16,7 @@ const worker = new Worker<unknown>(
     });
 
     switch (job.name) {
-      case "order-completed":
+      case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.jobName:
         await checkoutRecoveryService.handleOrderCompletedContract(
           mapOrderCompletedContractInput(parseRuntimeShopifyEvent(job.data)),
         );
@@ -32,7 +32,6 @@ const worker = new Worker<unknown>(
     concurrency: 5,
   },
 );
-
 
 worker.on("completed", (job) => {
   console.log(`Job ${job.id} completed successfully`);

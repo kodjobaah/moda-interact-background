@@ -37,60 +37,43 @@ describe("shopify-contract-adapter", () => {
       cartToken: "cart_1",
       abandonedCheckoutUrl: "https://shop.example/recover",
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
     });
   });
 
-  it("falls back to v1 parsing and marks transition payload without basket authority", () => {
-    const parsed = parseRuntimeShopifyEvent({
-      schemaVersion: 1,
-      receiptId: "r1",
-      deliveryId: "d1",
-      eventId: "e1",
-      source: "shopify",
-      providerTopic: "CHECKOUTS_CREATE",
-      tenant: { shopId: "shop_1", shopDomain: "shop.myshopify.com" },
-      occurredAt: "2026-08-28T00:00:00.000Z",
-      receivedAt: "2026-08-28T00:00:01.000Z",
-      traceId: "t1",
-      orderingKey: "shop_1:checkout_1",
-      eventType: "checkout.observed",
-      payload: {
-        checkoutToken: "checkout_1",
-        cartToken: "cart_1",
-        checkoutUrl: "https://shop.example/checkout",
-        customer: {
-          shopifyCustomerId: "gid://shopify/Customer/1",
-          phone: "+15550001111",
-          email: "customer@example.com",
-          firstName: "Ada",
-          lastName: "Lovelace",
-        },
-        total: { amount: "10.00", currencyCode: "USD" },
-        lineItems: [
-          {
-            lineItemId: "li_1",
-            productId: "p_1",
-            variantId: "v_1",
-            title: "Ignored Item",
-            variantTitle: null,
-            sku: null,
-            quantity: 1,
-            unitPrice: "10.00",
+  it("rejects legacy v1 events (no compatibility path)", () => {
+    expect(() =>
+      parseRuntimeShopifyEvent({
+        schemaVersion: 1,
+        receiptId: "r1",
+        deliveryId: "d1",
+        eventId: "e1",
+        source: "shopify",
+        providerTopic: "CHECKOUTS_CREATE",
+        tenant: { shopId: "shop_1", shopDomain: "shop.myshopify.com" },
+        occurredAt: "2026-08-28T00:00:00.000Z",
+        receivedAt: "2026-08-28T00:00:01.000Z",
+        traceId: "t1",
+        orderingKey: "shop_1:checkout_1",
+        eventType: "checkout.observed",
+        payload: {
+          checkoutToken: "checkout_1",
+          cartToken: "cart_1",
+          checkoutUrl: "https://shop.example/checkout",
+          customer: {
+            shopifyCustomerId: "gid://shopify/Customer/1",
+            phone: "+15550001111",
+            email: "customer@example.com",
+            firstName: "Ada",
+            lastName: "Lovelace",
           },
-        ],
-        checkoutCreatedAt: "2026-08-28T00:00:00Z",
-        checkoutUpdatedAt: null,
-        completedAt: null,
-      },
-    });
-
-    const mapped = mapCheckoutCreatedContractInput(parsed);
-
-    expect(mapped.checkoutToken).toBe("checkout_1");
-    expect(mapped.cartToken).toBe("cart_1");
-    expect(mapped.abandonedCheckoutUrl).toBeNull();
-    expect(mapped.legacyV1Transition).not.toBeNull();
+          total: { amount: "10.00", currencyCode: "USD" },
+          lineItems: [],
+          checkoutCreatedAt: "2026-08-28T00:00:00Z",
+          checkoutUpdatedAt: null,
+          completedAt: null,
+        },
+      }),
+    ).toThrow();
   });
 
   it("throws on invalid cross-service payload", () => {
@@ -159,3 +142,4 @@ describe("shopify-contract-adapter", () => {
     });
   });
 });
+

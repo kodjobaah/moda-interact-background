@@ -60,7 +60,7 @@ export class CheckoutRecoveryService {
       delayMinutes: scheduled.delayMinutes,
       shopDomain: event.shopDomain,
       checkoutToken: event.checkoutToken,
-      source: event.legacyV1Transition ? "legacy-v1" : "v2",
+      source: "v2",
     } as const;
   }
 
@@ -822,4 +822,5 @@ export class CheckoutRecoveryService {
 
 export const checkoutRecoveryService =
   new CheckoutRecoveryService();
+
 
