@@ -5,6 +5,7 @@ import {
   stepCountIs,
   type LanguageModel,
 } from "ai";
+import { observeAgentInvocation } from "@modainteract/moda-interact-shared/observability/genai";
 
 import { groq } from "../providers/groq.provider.js";
 import { createSearchProductsTool } from "../tools/search-product.js";
@@ -22,32 +23,43 @@ export async function runCommerceAgent(
   context: RecoveryAgentContext,
   dependencies: CommerceAgentDependencies = {},
 ) {
-  const model =
-    dependencies.model ??
-    groq("openai/gpt-oss-20b");
+  return observeAgentInvocation(
+    { agentName: "commerce-agent" },
+    async () => {
+      const model =
+        dependencies.model ??
+        groq("openai/gpt-oss-20b");
 
-  const productToolFactory =
-    dependencies.createSearchProductsTool ??
-    createSearchProductsTool;
+      const productToolFactory =
+        dependencies.createSearchProductsTool ??
+        createSearchProductsTool;
 
-  const result = await generateText({
-    model,
+      const result = await generateText({
+        model,
 
-    system: buildSystemPrompt(context),
+        system: buildSystemPrompt(context),
 
-    messages: context.conversation.messages,
+        messages: context.conversation.messages,
 
-    tools: {
-      searchProducts:
-        productToolFactory(context.shop),
+        tools: {
+          searchProducts:
+            productToolFactory(context.shop),
+        },
+
+        stopWhen: stepCountIs(5),
+      });
+
+      return {
+        text: result.text,
+      };
     },
-
-    stopWhen: stepCountIs(5),
-  });
-
-  return {
-    text: result.text,
-  };
+    {
+      mapException: () => ({
+        name: "CommerceAgentError",
+        message: "Commerce agent invocation failed",
+      }),
+    },
+  );
 }
 
 

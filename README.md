@@ -330,6 +330,44 @@ The queue layer allows webhook ingestion and long-running work to scale independ
 
 For example, additional worker instances can be added without increasing the number of Shopify webhook servers.
 
+## Worker Entrypoints
+
+Production uses three independently deployable processes. The commands are the
+same in test and production; deployment configuration supplies each
+environment's credentials and state connections.
+
+| Logical service | Command | Owned queues/workers |
+| --- | --- | --- |
+| `moda-shopify-event-worker` | `npm run start:shopify-event-worker` | `checkout-events` and `order-events` |
+| `moda-recovery-worker` | `npm run start:recovery-worker` | `pending-recovery-candidates` |
+| `moda-messaging-worker` | `npm run start:messaging-worker` | `whatsapp-events`, including the current CommerceAgent workflow |
+
+Before importing its BullMQ consumers, each production entrypoint performs the
+same bounded, non-mutating dependency preflight available through these
+diagnostic commands:
+
+| Logical service | Readiness command | Required dependencies |
+| --- | --- | --- |
+| `moda-shopify-event-worker` | `npm run readiness:shopify-event-worker` | Redis and PostgreSQL |
+| `moda-recovery-worker` | `npm run readiness:recovery-worker` | Redis and PostgreSQL |
+| `moda-messaging-worker` | `npm run readiness:messaging-worker` | Redis and PostgreSQL |
+
+The Redis probe issues `PING`; the PostgreSQL probe issues `SELECT 1`. Both use
+environment-provided connection configuration and a five-second operation
+timeout. The command exits `0` with `<service> ready` when every required
+dependency is available, `1` with a sanitized dependency name when readiness
+fails, and `2` for an invalid service name. It never starts a normal consumer,
+calls an external provider, mutates durable state, or prints connection details.
+Test and production use the same command and startup preflight semantics.
+
+Each production process installs graceful `SIGTERM` and `SIGINT` handling. It
+stops only its owned BullMQ workers, waits for active jobs through BullMQ's
+`Worker.close()` behavior, then closes its Redis and Prisma resources. These
+entrypoints do not start an HTTP listener.
+
+For local development, `npm run dev` and `npm start` retain the combined worker
+process and its liveness server.
+
 ## Database
 
 The Prisma schema and migration history are maintained in the separate:
@@ -409,7 +447,7 @@ Build the project:
 npm run build
 ```
 
-Start the worker service:
+Start the combined local worker service:
 
 ```bash
 npm start

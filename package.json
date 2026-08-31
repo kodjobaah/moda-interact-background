@@ -11,6 +11,12 @@
     "dev": "tsx watch src/index.ts",
     "build": "npm run prisma:generate && tsc",
     "start": "node dist/index.js",
+    "start:shopify-event-worker": "node --import ./observability/shopify-event.mjs dist/entrypoints/shopify-event.js",
+    "start:recovery-worker": "node --import ./observability/recovery.mjs dist/entrypoints/recovery.js",
+    "start:messaging-worker": "node --import ./observability/messaging.mjs dist/entrypoints/messaging.js",
+    "readiness:shopify-event-worker": "node dist/readiness.js moda-shopify-event-worker",
+    "readiness:recovery-worker": "node dist/readiness.js moda-recovery-worker",
+    "readiness:messaging-worker": "node dist/readiness.js moda-messaging-worker",
     "prisma:validate": "prisma validate --schema database/prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema database/prisma/schema.prisma"
   },
@@ -21,7 +27,8 @@
     "@ai-sdk/groq": "^4.0.30",
     "@ai-sdk/openai": "^4.0.46",
     "@langchain/langgraph": "^1.4.12",
-    "@modainteract/moda-interact-shared": "file:../moda-interact-shared",
+    "@modainteract/moda-interact-shared": "0.5.0",
+    "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",
     "ai": "^7.0.77",
     "bullmq": "^6.2.0",
@@ -29,6 +36,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/sdk-metrics": "^2.11.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@types/node": "^26.2.0",
     "dotenv": "^17.4.2",
     "prisma": "^6.19.3",

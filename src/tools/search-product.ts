@@ -2,6 +2,7 @@
 
 import { tool } from "ai";
 import { z } from "zod";
+import { observeAgentTool } from "@modainteract/moda-interact-shared/observability/genai";
 
 import { searchProducts } from "../services/shopify.service.js";
 
@@ -24,14 +25,23 @@ export function createSearchProductsTool(
       query,
       maxPrice,
     }) => {
-      return searchProducts({
-        shop,
-        query,
+      return observeAgentTool(
+        "search-products",
+        () => searchProducts({
+          shop,
+          query,
 
-        ...(maxPrice !== undefined
-          ? { maxPrice }
-          : {}),
-      });
+          ...(maxPrice !== undefined
+            ? { maxPrice }
+            : {}),
+        }),
+        {
+          mapException: () => ({
+            name: "ShopifyToolError",
+            message: "Shopify product search failed",
+          }),
+        },
+      );
     },
   });
 }

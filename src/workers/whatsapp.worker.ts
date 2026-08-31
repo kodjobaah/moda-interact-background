@@ -1,6 +1,9 @@
 import { Worker } from "bullmq";
+import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
+import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
 
 import { connectionRedis } from "../lib/redis.js";
+import { observeWorkerJob } from "../observability/worker-metrics.js";
 
 import { runCommerceAgent } from "../agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../agents/types.js";
@@ -10,26 +13,48 @@ import { conversationService } from "../services/conversation.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
 import { whatsAppService } from "../services/whatsapp.service.js";
 
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-messaging-worker",
+  enableMetrics: false,
+});
+const workerMetricDefinition = {
+  workerName: "whatsapp",
+  queueName: "whatsapp-events",
+  jobNames: ["message-received"],
+} as const;
+const conversationTurnObservation = {
+  mapException: () => ({
+    name: "InboundTurnError",
+    message: "Inbound conversation turn failed",
+  }),
+} as const;
+
 export const whatsappWorker =
   new Worker<WhatsAppInboundEvent>(
     "whatsapp-events",
 
-    async (job) => {
-      switch (job.name) {
-        case "message-received":
-          await processInboundMessage(job.data);
-          return;
+    async (job) =>
+      observeWorkerJob(workerMetricDefinition, job, async () => {
+        switch (job.name) {
+          case "message-received":
+            await observeConversationTurn(
+              "whatsapp",
+              () => processInboundMessage(job.data),
+              conversationTurnObservation,
+            );
+            return;
 
-        default:
-          throw new Error(
-            `Unknown WhatsApp job: ${job.name}`,
-          );
-      }
-    },
+          default:
+            throw new Error(
+              `Unknown WhatsApp job: ${job.name}`,
+            );
+        }
+      }),
 
     {
       connection: connectionRedis,
       concurrency: 20,
+      telemetry: bullMQTelemetry,
     },
   );
 

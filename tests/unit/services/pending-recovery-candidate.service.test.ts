@@ -63,6 +63,7 @@ class FakeQueue {
 }
 
 const queueInstance = new FakeQueue();
+let queueOptions: Record<string, unknown> | null = null;
 
 const redisStore = new Map<string, string>();
 const redisMock = {
@@ -93,7 +94,8 @@ const prismaMock = {
 
 vi.mock("bullmq", () => ({
   Queue: class {
-    constructor() {
+    constructor(_name: string, options: Record<string, unknown>) {
+      queueOptions = options;
       return queueInstance;
     }
   },
@@ -141,6 +143,19 @@ describe("pending recovery candidate service", () => {
     expect(result.delayMinutes).toBe(45);
     expect(queueInstance.addCalls).toHaveLength(1);
     expect(queueInstance.addCalls[0].opts.delay).toBe(45 * 60 * 1000);
+    expect(queueInstance.addCalls[0].data).toBe(result.candidate);
+    expect(queueOptions).toMatchObject({
+      telemetry: expect.any(Object),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 1_000,
+        },
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    });
     expect(result.candidate).toEqual({
       shopId: "shop_1",
       checkoutToken: "checkout_1",

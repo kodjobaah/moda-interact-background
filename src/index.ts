@@ -1,10 +1,11 @@
 import http from "node:http";
 
-// Importing this starts your BullMQ worker
-import "./workers/orders.worker.js";
-import "./workers/whatsapp.worker.js";
-import "./workers/checkout.worker.js";
-import "./workers/pending-recovery-candidate.worker.js";
+import { closeWorkerResources } from "./entrypoints/resources.js";
+import { startWorkerProcess } from "./runtime/worker-process.js";
+import { checkoutWorker } from "./workers/checkout.worker.js";
+import { orderWorker } from "./workers/orders.worker.js";
+import { pendingRecoveryCandidateWorker } from "./workers/pending-recovery-candidate.worker.js";
+import { whatsappWorker } from "./workers/whatsapp.worker.js";
 
 const port = Number(process.env.PORT ?? 3000);
 
@@ -33,5 +34,28 @@ const server = http.createServer((request, response) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Health server listening on port ${port}`);
-  console.log("Moda Interact workers started");
+});
+
+startWorkerProcess({
+  serviceName: "moda-interact-worker-development",
+  workers: [
+    checkoutWorker,
+    orderWorker,
+    pendingRecoveryCandidateWorker,
+    whatsappWorker,
+  ],
+  closeResources: [
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        });
+      }),
+    ...closeWorkerResources,
+  ],
 });

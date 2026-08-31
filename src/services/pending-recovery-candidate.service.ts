@@ -20,11 +20,16 @@ function sleep(ms: number) {
 }
 
 import { Queue } from "bullmq";
+import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
+
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-shopify-event-worker",
+});
 
 type CandidateEnqueueOutcome = "enqueued" | "refreshed";
 
@@ -35,6 +40,7 @@ function getPendingCandidateQueue() {
   if (!pendingCandidateQueue) {
     pendingCandidateQueue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, {
       connection: connectionRedis,
+      telemetry: bullMQTelemetry,
       defaultJobOptions: {
         attempts: 3,
         backoff: {

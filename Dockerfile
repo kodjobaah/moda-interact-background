@@ -9,6 +9,7 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY prisma.config.ts ./
 COPY database ./database
+COPY observability ./observability
 COPY src ./src
 
 RUN npm run build
