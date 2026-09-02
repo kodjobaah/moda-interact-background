@@ -470,6 +470,8 @@ SHOPIFY_API_SECRET=
 
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_ACCESS_TOKEN=
+# Optional; defaults to https://graph.facebook.com/v25.0
+WHATSAPP_API_BASE_URL=
 ```
 
 Do not commit real credentials or connection strings to the repository.

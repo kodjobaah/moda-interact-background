@@ -3,7 +3,14 @@ import type {
   SendTextInput,
 } from "../integration/whatsapp/types.js";
 
+export const DEFAULT_WHATSAPP_API_BASE_URL =
+  "https://graph.facebook.com/v25.0";
+
+type FetchImplementation = typeof fetch;
+
 export class WhatsAppService {
+  constructor(private readonly fetchImplementation: FetchImplementation = fetch) {}
+
   async sendWhatsAppText({
     to,
     text,
@@ -16,8 +23,13 @@ export class WhatsAppService {
       throw new Error("WhatsApp configuration is missing");
     }
 
-    const response = await fetch(
-      `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`,
+    const apiBaseUrl = (
+      process.env.WHATSAPP_API_BASE_URL?.trim() ||
+      DEFAULT_WHATSAPP_API_BASE_URL
+    ).replace(/\/+$/, "");
+
+    const response = await this.fetchImplementation(
+      `${apiBaseUrl}/${phoneNumberId}/messages`,
       {
         method: "POST",
 
