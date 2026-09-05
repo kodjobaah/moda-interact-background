@@ -6,6 +6,8 @@ import {
 } from "@opentelemetry/api";
 import type { Job } from "bullmq";
 
+import { recordQueueWait } from "./queue-performance.js";
+
 type WorkerName =
   | "checkout"
   | "order"
@@ -26,7 +28,12 @@ type WorkerMetricDefinition = {
 
 type WorkerJobMetadata = Pick<
   Job,
-  "name" | "timestamp" | "processedOn" | "attemptsStarted" | "attemptsMade"
+  | "name"
+  | "timestamp"
+  | "id"
+  | "processedOn"
+  | "attemptsStarted"
+  | "attemptsMade"
 >;
 
 type WorkerMetricInstruments = {
@@ -116,6 +123,7 @@ function recordWorkerMetrics(
     safelyRecord(() =>
       instruments.processingAge.record(processingAgeMs, attributes),
     );
+    recordQueueWait(definition.queueName, job);
   } catch {
     // Telemetry must not replace a job result or business error.
   }

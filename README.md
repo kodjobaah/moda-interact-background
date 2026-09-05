@@ -412,6 +412,15 @@ moda-interact-background/
 └── README.md
 ```
 
+## Observability
+
+Background workers expose OpenTelemetry metrics for BullMQ queue health,
+throughput, backlog age, processing latency, retries, failures, and stalls.
+
+See:
+
+- [Queue performance monitoring](docs/observability/queue-performance.md)
+
 ## Local Development
 
 Clone the repository including its database submodule:

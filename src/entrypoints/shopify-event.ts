@@ -1,5 +1,7 @@
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
+import { connectionRedis } from "../lib/redis.js";
+import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-shopify-event-worker",
@@ -11,9 +13,14 @@ void startReadyWorkerProcess({
         import("../workers/orders.worker.js"),
       ]);
 
+    const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
+      connection: connectionRedis,
+      queueNames: ["checkout-events", "order-events"],
+    });
+
     return {
       workers: [checkoutWorker, orderWorker],
-      closeResources: [...closeWorkerResources, closeWorkerObservability],
+      closeResources: [...closeWorkerResources, closeWorkerObservability, closeQueuePerformanceTelemetry],
     };
   },
 }).catch(reportReadinessFailure);

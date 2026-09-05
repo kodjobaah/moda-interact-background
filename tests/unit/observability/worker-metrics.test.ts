@@ -58,7 +58,7 @@ describe("background worker operational metrics", () => {
   });
 
   it("creates the bounded instruments once at module scope", () => {
-    expect(metricMocks.getMeter).toHaveBeenCalledOnce();
+    expect(metricMocks.getMeter).toHaveBeenCalledTimes(2);
     expect(metricMocks.getMeter).toHaveBeenCalledWith(
       "moda-interact-background.worker",
     );
