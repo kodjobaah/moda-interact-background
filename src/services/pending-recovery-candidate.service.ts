@@ -68,9 +68,10 @@ export class PendingRecoveryCandidateService {
     delayMinutes: number;
     candidate: PendingRecoveryCandidate;
   }> {
+    const shopDomain = input.shopDomain.trim().toLowerCase();
     const shop = await prisma.shop.findUnique({
       where: {
-        domain: input.shopDomain,
+        domain: shopDomain,
       },
       select: {
         id: true,
@@ -83,7 +84,7 @@ export class PendingRecoveryCandidateService {
     });
 
     if (!shop) {
-      throw new Error(`Shop not found for domain: ${input.shopDomain}`);
+      throw new Error(`Shop not found for domain: ${shopDomain}`);
     }
 
     const delayMinutes =
@@ -91,6 +92,7 @@ export class PendingRecoveryCandidateService {
 
     const candidate: PendingRecoveryCandidate = {
       shopId: shop.id,
+      shopDomain,
       checkoutToken: input.checkoutToken,
       cartToken: input.cartToken,
       abandonedCheckoutUrl: input.abandonedCheckoutUrl,
@@ -98,24 +100,33 @@ export class PendingRecoveryCandidateService {
     };
 
     const queue = getPendingCandidateQueue();
-    const jobId = createPendingRecoveryCandidateJobId(
+    const legacyJobId = createPendingRecoveryCandidateJobId(
       candidate.shopId,
       candidate.checkoutToken,
     );
+    const jobId = `${candidate.shopId}--${legacyJobId}`;
 
-    const existingJob = await queue.getJob(jobId);
+    const [newJob, legacyJob] = await Promise.all([
+      queue.getJob(jobId),
+      queue.getJob(legacyJobId),
+    ]);
+    const existingJob = newJob ?? legacyJob;
+    const activeJobId = newJob ? jobId : legacyJob ? legacyJobId : jobId;
     if (existingJob) {
+      if (newJob && legacyJob) {
+        await legacyJob.remove();
+      }
       await existingJob.updateData(candidate);
       const state = await existingJob.getState();
       if (state === "delayed") {
         await existingJob.changeDelay(delayMinutes * 60_000);
       }
 
-      await this.upsertIndexes(candidate, jobId, delayMinutes);
+      await this.upsertIndexes(candidate, activeJobId, delayMinutes);
 
       return {
         outcome: "refreshed",
-        jobId,
+        jobId: activeJobId,
         delayMinutes,
         candidate,
       };
@@ -177,8 +188,6 @@ export class PendingRecoveryCandidateService {
       shopId: input.shopId,
       checkoutToken: input.checkoutToken,
       cartToken: null,
-      abandonedCheckoutUrl: null,
-      checkoutCreatedAt: null,
     });
 
     return { removed: true } as const;
@@ -350,7 +359,12 @@ export class PendingRecoveryCandidateService {
     }
   }
 
-  private async removeIndexes(candidate: PendingRecoveryCandidate) {
+  private async removeIndexes(
+    candidate: Pick<
+      PendingRecoveryCandidate,
+      "shopId" | "checkoutToken" | "cartToken"
+    >,
+  ) {
     const keys = [
       pendingCandidateCheckoutIndexKey({
         shopId: candidate.shopId,

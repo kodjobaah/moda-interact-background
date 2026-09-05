@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Candidate = {
   shopId: string;
+  shopDomain: string;
   checkoutToken: string;
   cartToken: string | null;
   abandonedCheckoutUrl: string | null;
@@ -158,6 +159,7 @@ describe("pending recovery candidate service", () => {
     });
     expect(result.candidate).toEqual({
       shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
       checkoutToken: "checkout_1",
       cartToken: "cart_1",
       abandonedCheckoutUrl: "https://shop.example/recover",
@@ -186,10 +188,41 @@ describe("pending recovery candidate service", () => {
 
     expect(result.outcome).toBe("refreshed");
     expect(queueInstance.addCalls).toHaveLength(1);
+    expect(queueInstance.addCalls[0].opts.jobId).toMatch(/^shop_1--pending-recovery-/);
 
     const job = queueInstance.jobs.get(result.jobId);
     expect(job?.updatedData?.cartToken).toBe("cart_2");
     expect(job?.delayChanges).toEqual([45 * 60 * 1000]);
+  });
+
+  it("reuses a legacy candidate ID during the rollout without duplicating work", async () => {
+    const { createPendingRecoveryCandidateJobId } = await import(
+      "@modainteract/moda-interact-shared/shopify/node"
+    );
+    const legacyJobId = createPendingRecoveryCandidateJobId("shop_1", "checkout_legacy");
+    const legacyJob = new FakeJob({
+      shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_legacy",
+      cartToken: null,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+    });
+    queueInstance.jobs.set(legacyJobId, legacyJob);
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "SHOP.MYSHOPIFY.COM",
+      checkoutToken: "checkout_legacy",
+      cartToken: null,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      legacyV1Transition: null,
+    });
+
+    expect(result.outcome).toBe("refreshed");
+    expect(result.jobId).toBe(legacyJobId);
+    expect(queueInstance.addCalls).toHaveLength(0);
+    expect(legacyJob.updatedData?.shopDomain).toBe("shop.myshopify.com");
   });
 
   it("provides O(1) checkout/cart lookup and cleans indexes on maturation", async () => {

@@ -89,6 +89,7 @@ const service = new CheckoutRecoveryService();
 
 const candidate = {
   shopId: "shop_1",
+  shopDomain: "shop.myshopify.com",
   checkoutToken: "checkout_1",
   cartToken: "cart_1",
   abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",

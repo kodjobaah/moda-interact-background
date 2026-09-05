@@ -6,6 +6,7 @@ const RECOVERY_CANDIDATE_TTL_BUFFER_MS = 60 * 60 * 1000;
 
 export type PendingRecoveryCandidate = {
   shopId: string;
+  shopDomain: string;
   checkoutToken: string;
   cartToken: string | null;
   abandonedCheckoutUrl: string | null;
