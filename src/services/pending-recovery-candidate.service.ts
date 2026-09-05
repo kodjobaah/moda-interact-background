@@ -7,6 +7,7 @@ import {
   pendingCandidateCartIndexKey,
   pendingCandidateCheckoutIndexKey,
   pendingCandidateIndexTtlMs,
+  pendingCandidateShopIndexKey,
   type PendingRecoveryCandidate,
 } from "../domain/pending-recovery-candidate.js";
 
@@ -115,6 +116,7 @@ export class PendingRecoveryCandidateService {
     if (existingJob) {
       if (newJob && legacyJob) {
         await legacyJob.remove();
+        await this.removeShopIndexMember(candidate.shopId, legacyJobId);
       }
       await existingJob.updateData(candidate);
       const state = await existingJob.getState();
@@ -122,7 +124,13 @@ export class PendingRecoveryCandidateService {
         await existingJob.changeDelay(delayMinutes * 60_000);
       }
 
-      await this.upsertIndexes(candidate, activeJobId, delayMinutes);
+      await this.upsertIndexes(
+        candidate,
+        activeJobId,
+        delayMinutes,
+        state === "delayed" ? Date.now() + delayMinutes * 60_000 : Date.now(),
+        state === "delayed" || state === "waiting" || state === "active",
+      );
 
       return {
         outcome: "refreshed",
@@ -137,7 +145,13 @@ export class PendingRecoveryCandidateService {
       delay: delayMinutes * 60_000,
     });
 
-    await this.upsertIndexes(candidate, jobId, delayMinutes);
+    await this.upsertIndexes(
+      candidate,
+      jobId,
+      delayMinutes,
+      Date.now() + delayMinutes * 60_000,
+      true,
+    );
 
     return {
       outcome: "enqueued",
@@ -180,15 +194,16 @@ export class PendingRecoveryCandidateService {
     }
 
     const job = await queue.getJob(jobId);
-    if (job) {
-      await job.remove();
-    }
+    if (job) await job.remove();
 
-    await this.removeIndexes({
-      shopId: input.shopId,
-      checkoutToken: input.checkoutToken,
-      cartToken: null,
-    });
+    await this.removeIndexes(
+      job?.data ?? {
+        shopId: input.shopId,
+        checkoutToken: input.checkoutToken,
+        cartToken: null,
+      },
+      jobId,
+    );
 
     return { removed: true } as const;
   }
@@ -251,7 +266,7 @@ export class PendingRecoveryCandidateService {
       await job.remove();
     }
 
-    await this.removeIndexes(input.candidate);
+    await this.removeIndexes(input.candidate, input.jobId);
 
     return { removed: true } as const;
   }
@@ -324,8 +339,11 @@ export class PendingRecoveryCandidateService {
     return value != null;
   }
 
-  async handleCandidateMatured(candidate: PendingRecoveryCandidate) {
-    await this.removeIndexes(candidate);
+  async handleCandidateMatured(
+    candidate: PendingRecoveryCandidate,
+    jobId?: string,
+  ) {
+    await this.removeIndexes(candidate, jobId);
     return candidate;
   }
 
@@ -333,6 +351,8 @@ export class PendingRecoveryCandidateService {
     candidate: PendingRecoveryCandidate,
     jobId: string,
     delayMinutes: number,
+    dueAtMs: number,
+    shouldIndexShop: boolean,
   ) {
     const ttlMs = pendingCandidateIndexTtlMs(delayMinutes);
 
@@ -357,6 +377,16 @@ export class PendingRecoveryCandidateService {
         ttlMs,
       );
     }
+
+    if (shouldIndexShop) {
+      await connectionRedis.zadd(
+        pendingCandidateShopIndexKey(candidate.shopId),
+        dueAtMs,
+        jobId,
+      );
+    } else {
+      await this.removeShopIndexMember(candidate.shopId, jobId);
+    }
   }
 
   private async removeIndexes(
@@ -364,6 +394,7 @@ export class PendingRecoveryCandidateService {
       PendingRecoveryCandidate,
       "shopId" | "checkoutToken" | "cartToken"
     >,
+    jobId?: string,
   ) {
     const keys = [
       pendingCandidateCheckoutIndexKey({
@@ -382,6 +413,15 @@ export class PendingRecoveryCandidateService {
     }
 
     await connectionRedis.del(...keys);
+
+    if (jobId) {
+      await this.removeShopIndexMember(candidate.shopId, jobId);
+    }
+  }
+
+  private async removeShopIndexMember(shopId: string, jobId: string) {
+    const shopIndexKey = pendingCandidateShopIndexKey(shopId);
+    await connectionRedis.zrem(shopIndexKey, jobId);
   }
 }
 

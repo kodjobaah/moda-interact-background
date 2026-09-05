@@ -36,7 +36,10 @@ export const pendingRecoveryCandidateWorker = new Worker<PendingRecoveryCandidat
             // The candidate is no longer pending once it has matured: drop the
             // O(1) candidate lookup indexes regardless of the materialization
             // outcome (created, discarded, or provider error).
-            await pendingRecoveryCandidateService.handleCandidateMatured(job.data);
+            await pendingRecoveryCandidateService.handleCandidateMatured(
+              job.data,
+              job.id,
+            );
           }
           return;
         default:

@@ -27,6 +27,10 @@ export function pendingCandidateCartIndexKey(input: {
   return `pending-recovery:index:cart:${input.shopId}:${input.cartToken}`;
 }
 
+export function pendingCandidateShopIndexKey(shopId: string) {
+  return `pending-recovery:index:shop:${shopId}`;
+}
+
 // Checkout-scoped order/materialization coordination keys (ARCH-001-BACKGROUND-005).
 // These are transient Redis keys used only to prevent an order that completes a
 // checkout from racing a recovery message for the same checkout.
