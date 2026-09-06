@@ -4,7 +4,11 @@ process.env.REDIS_URL ??= "redis://localhost:6379/translation-submit-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
 process.env.TRANSLATION_MODEL ??= "test-model";
 
-const { TranslationBatchSubmissionError, TranslationBatchSubmitService } =
+const {
+  TranslationBatchSubmissionError,
+  TranslationBatchSubmitService,
+  translationBatchSubmitTestInternals,
+} =
   await import("../../../src/services/translation-batch-submit.service.js");
 
 function createDatabase(options: {
@@ -238,5 +242,73 @@ describe("TranslationBatchSubmitService", () => {
     expect(provider.prepareBatchInput).not.toHaveBeenCalled();
     expect(provider.createBatch).toHaveBeenCalledWith("batch-1", "file-existing");
     expect(database.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the persisted provider and model snapshot for the default factory", async () => {
+    process.env.TRANSLATION_PROVIDER = "openai";
+    process.env.TRANSLATION_MODEL = "current-deployment-model";
+    const database = createDatabase({
+      claim: [{ ...claimedBatch, provider: "openai", model: "persisted-model" }],
+      requests: [request],
+    });
+    const provider = createProvider();
+    const providerFactory = vi.fn(() => provider);
+    const service = new TranslationBatchSubmitService({
+      database: database.database,
+      providerFactory,
+      queue: { add: vi.fn(async () => undefined) },
+    });
+
+    await service.submit({ translationBatchId: "batch-1" });
+
+    expect(providerFactory).toHaveBeenCalledWith({
+      provider: "openai",
+      model: "persisted-model",
+    });
+  });
+
+  it("does not create after input-file persistence affects zero rows", async () => {
+    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    database.execute.mockResolvedValueOnce(0).mockResolvedValue(1);
+    const provider = createProvider();
+    const service = new TranslationBatchSubmitService({
+      database: database.database,
+      provider,
+      queue: { add: vi.fn(async () => undefined) },
+    });
+
+    await service.submit({ translationBatchId: "batch-1" });
+
+    expect(provider.createBatch).not.toHaveBeenCalled();
+    expect(database.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry create when accepted provider persistence affects zero rows", async () => {
+    const database = createDatabase({ claim: [claimedBatch], requests: [request] });
+    database.execute
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0)
+      .mockResolvedValue(1);
+    const provider = createProvider();
+    const service = new TranslationBatchSubmitService({
+      database: database.database,
+      provider,
+      queue: { add: vi.fn(async () => undefined) },
+    });
+
+    await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow(
+      "unexpected number of rows",
+    );
+    expect(provider.createBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds retry, attempt and initial-poll configuration", () => {
+    process.env.TRANSLATION_BATCH_SUBMIT_RETRY_MINUTES = "999999";
+    process.env.TRANSLATION_BATCH_SUBMIT_MAX_ATTEMPTS = "999999";
+    process.env.TRANSLATION_BATCH_INITIAL_POLL_MINUTES = "999999";
+
+    expect(translationBatchSubmitTestInternals.retryMinutes()).toBe(24 * 60);
+    expect(translationBatchSubmitTestInternals.maxAttempts()).toBe(10);
+    expect(translationBatchSubmitTestInternals.initialPollMinutes()).toBe(24 * 60);
   });
 });

@@ -62,7 +62,7 @@ export type TranslationProviderBatch = {
 };
 
 export type TranslationProviderResult = {
-  translationId: string;
+  providerCustomId: string;
   status: "completed" | "failed";
   translatedText: string | null;
   failureCode: string | null;
@@ -93,6 +93,7 @@ export type TranslationProvider = {
 type OpenAITranslationProviderOptions = {
   client?: OpenAI;
   model?: string;
+  provider?: string;
   maxCorrelationPages?: number;
 };
 
@@ -146,7 +147,7 @@ export function createOpenAITranslationProvider(
 ): TranslationProvider {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const model = options.model?.trim() || process.env.TRANSLATION_MODEL?.trim();
-  const provider = process.env.TRANSLATION_PROVIDER?.trim() || "openai";
+  const provider = options.provider?.trim() || process.env.TRANSLATION_PROVIDER?.trim() || "openai";
 
   if (provider !== "openai") {
     throw new TranslationProviderConfigurationError(
@@ -196,15 +197,20 @@ export function createOpenAITranslationProvider(
           "Cannot create a translation Batch without an input file",
         );
       }
-      const batch = await client.batches.create({
-        input_file_id: inputFileId,
-        endpoint: BATCH_ENDPOINT,
-        completion_window: COMPLETION_WINDOW,
-        metadata: {
-          [CORRELATION_METADATA_KEY]: logicalBatchId,
-          [SCHEMA_METADATA_KEY]: String(MERCHANT_COMMUNICATIONS_SCHEMA_VERSION),
-        },
-      });
+      let batch: OpenAIBatch;
+      try {
+        batch = await client.batches.create({
+          input_file_id: inputFileId,
+          endpoint: BATCH_ENDPOINT,
+          completion_window: COMPLETION_WINDOW,
+          metadata: {
+            [CORRELATION_METADATA_KEY]: logicalBatchId,
+            [SCHEMA_METADATA_KEY]: String(MERCHANT_COMMUNICATIONS_SCHEMA_VERSION),
+          },
+        });
+      } catch (error) {
+        throw classifyCreateFailure(error);
+      }
 
       return normalizeBatch(batch, logicalBatchId);
     },
@@ -305,26 +311,22 @@ function encodeTranslationId(translationId: string): string {
   return `translation-${encoded}`;
 }
 
-function decodeTranslationId(customId: string): string {
-  if (!customId.startsWith("translation-")) {
-    throw new TranslationProviderResponseError("Invalid translation custom_id");
-  }
-  const encoded = customId.slice("translation-".length);
-  if (encoded.includes("-")) {
-    return customId;
-  }
-  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
-    throw new TranslationProviderResponseError("Invalid translation custom_id");
-  }
-  try {
-    const translationId = Buffer.from(encoded, "base64url").toString("utf8");
-    if (!translationId) {
-      throw new Error("empty translation ID");
-    }
-    return translationId;
-  } catch {
-    throw new TranslationProviderResponseError("Invalid translation custom_id");
-  }
+function classifyCreateFailure(error: unknown): Error {
+  if (!error || typeof error !== "object") return error as Error;
+
+  const status = "status" in error && typeof error.status === "number"
+    ? error.status
+    : undefined;
+  const classification = status === 429
+    ? "DEFINITE_RETRYABLE_NOT_CREATED"
+    : status !== undefined && [400, 401, 403, 404, 409, 413, 422].includes(status)
+      ? "DEFINITE_TERMINAL_NOT_CREATED"
+      : "AMBIGUOUS_CREATE";
+  const classified = new TranslationProviderResponseError(
+    error instanceof Error ? error.message : "OpenAI Batch create failed",
+  );
+  Object.assign(classified, { classification });
+  return classified;
 }
 
 function normalizeBatch(
@@ -376,7 +378,7 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
     throw new TranslationProviderResponseError("Batch output has too many lines");
   }
 
-  const seenTranslationIds = new Set<string>();
+  const seenProviderCustomIds = new Set<string>();
   return lines.map((line) => {
     let parsed: ParsedOutputLine;
     try {
@@ -392,16 +394,16 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
     ) {
       throw new TranslationProviderResponseError("Batch output is missing custom_id");
     }
-    const translationId = decodeTranslationId(parsed.custom_id);
-    if (seenTranslationIds.has(translationId)) {
+    const providerCustomId = parsed.custom_id;
+    if (seenProviderCustomIds.has(providerCustomId)) {
       throw new TranslationProviderResponseError(
         "Batch output contains duplicate custom_id",
       );
     }
-    seenTranslationIds.add(translationId);
+    seenProviderCustomIds.add(providerCustomId);
     if (parsed.error) {
       return {
-        translationId,
+        providerCustomId,
         status: "failed",
         translatedText: null,
         failureCode:
@@ -412,7 +414,7 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
     const statusCode = parsed.response?.status_code;
     if (typeof statusCode !== "number" || statusCode < 200 || statusCode >= 300) {
       return {
-        translationId,
+        providerCustomId,
         status: "failed",
         translatedText: null,
         failureCode:
@@ -430,7 +432,7 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
 
     if (!translatedText) {
       return {
-        translationId,
+        providerCustomId,
         status: "failed",
         translatedText: null,
         failureCode: "malformed-provider-output",
@@ -438,7 +440,7 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
     }
 
     return {
-      translationId,
+      providerCustomId,
       status: "completed",
       translatedText,
       failureCode: null,
@@ -449,7 +451,7 @@ function parseOutputFile(body: string): TranslationProviderResult[] {
 export const translationProviderTestInternals = {
   buildBatchRequestLine,
   createOpenAIClient,
-  decodeTranslationId,
+  classifyCreateFailure,
   normalizeStatus,
   parseOutputFile,
 };

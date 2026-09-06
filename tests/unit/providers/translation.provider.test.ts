@@ -99,7 +99,7 @@ describe("OpenAI translation provider", () => {
     );
     expect(results).toEqual([
       {
-        translationId: "abc",
+        providerCustomId: customId,
         status: "failed",
         translatedText: null,
         failureCode: "bad_request",
@@ -115,7 +115,7 @@ describe("OpenAI translation provider", () => {
       )),
     ).resolves.toEqual([
       {
-        translationId: "abc",
+        providerCustomId: customId,
         status: "failed",
         translatedText: null,
         failureCode: "malformed-provider-output",
@@ -205,6 +205,44 @@ describe("OpenAI translation provider", () => {
     expect(() =>
       translationProviderTestInternals.parseOutputFile(`${line}\n${line}`),
     ).toThrow("duplicate custom_id");
+  });
+
+  it("preserves a per-Batch provider custom ID without decoding it as a translation ID", () => {
+    const providerCustomId = "translation-cmtranslation123-batch-1";
+    const results = translationProviderTestInternals.parseOutputFile(
+      JSON.stringify({
+        custom_id: providerCustomId,
+        response: {
+          status_code: 200,
+          body: { output: [{ content: [{ type: "output_text", text: "Bonjour" }] }] },
+        },
+      }),
+    );
+
+    expect(results).toEqual([
+      {
+        providerCustomId,
+        status: "completed",
+        translatedText: "Bonjour",
+        failureCode: null,
+      },
+    ]);
+  });
+
+  it.each([
+    [429, "DEFINITE_RETRYABLE_NOT_CREATED"],
+    [400, "DEFINITE_TERMINAL_NOT_CREATED"],
+    [503, "AMBIGUOUS_CREATE"],
+  ] as const)("classifies OpenAI create status %s as %s", async (status, classification) => {
+    const client = createFakeClient();
+    client.batches.create.mockRejectedValue(
+      Object.assign(new Error(`status ${status}`), { status }),
+    );
+    const provider = createOpenAITranslationProvider({ client: client as never });
+
+    await expect(provider.createBatch("logical-1", "file-input")).rejects.toMatchObject({
+      classification,
+    });
   });
 
   it("uses maxRetries zero for the production OpenAI client", () => {
