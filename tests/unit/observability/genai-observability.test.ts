@@ -242,7 +242,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     expect(sources[2]).toContain("observeAgentTool(");
     for (const source of sources) {
       expect(source).not.toContain("recordMetrics: false");
-      expect(source).toContain("mapException: () => ({");
+      expect(source).toContain("mapException:");
       expect(source).not.toMatch(/createHistogram|createCounter|getMeter|moda\.agent\..*duration/);
     }
   });

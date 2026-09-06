@@ -29,6 +29,13 @@ export type CommerceAgentDependencies = {
   createSearchProductsTool?: typeof createSearchProductsTool;
 };
 
+export class CommerceAgentConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CommerceAgentConfigurationError";
+  }
+}
+
 export async function runCommerceAgent(
   context: RecoveryAgentContext,
   dependencies: CommerceAgentDependencies = {},
@@ -38,7 +45,7 @@ export async function runCommerceAgent(
     async () => {
       const model =
         dependencies.model ??
-        groq("openai/gpt-oss-20b");
+        groq(resolveCommerceModelId());
 
       const productToolFactory =
         dependencies.createSearchProductsTool ??
@@ -48,9 +55,8 @@ export async function runCommerceAgent(
 
       await generateText({
         model,
-
+        maxOutputTokens: 800,  
         system: buildSystemPrompt(context),
-
         messages: context.conversation.messages,
 
         tools: {
@@ -94,12 +100,32 @@ export async function runCommerceAgent(
       return finalResponse;
     },
     {
-      mapException: () => ({
-        name: "CommerceAgentError",
-        message: "Commerce agent invocation failed",
-      }),
+      mapException: (error) =>
+        error instanceof CommerceAgentConfigurationError
+          ? {
+              name: error.name,
+              message: error.message,
+            }
+          : {
+              name: "CommerceAgentError",
+              message: "Commerce agent invocation failed",
+            },
     },
   );
+}
+
+
+function resolveCommerceModelId(): string {
+  const modelId =
+    process.env.GROQ_COMMERCE_MODEL?.trim();
+
+  if (!modelId) {
+    throw new CommerceAgentConfigurationError(
+      "GROQ_COMMERCE_MODEL environment variable is not set",
+    );
+  }
+
+  return modelId;
 }
 
 

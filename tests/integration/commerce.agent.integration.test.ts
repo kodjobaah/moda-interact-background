@@ -25,8 +25,11 @@ import type {
 const hasGroqKey =
   Boolean(process.env.GROQ_API_KEY);
 
+const commerceModel =
+  process.env.GROQ_COMMERCE_MODEL?.trim();
+
 const describeWithGroq =
-  hasGroqKey
+  hasGroqKey && commerceModel
     ? describe
     : describe.skip;
 
