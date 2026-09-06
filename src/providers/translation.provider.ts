@@ -34,6 +34,7 @@ type OpenAIBatchStatus =
 
 export type TranslationRequest = {
   translationId: string;
+  providerCustomId?: string;
   direction: MerchantTranslationDirection;
   sourceLanguageTag: string;
   targetLanguageTag: string;
@@ -266,7 +267,7 @@ export function createOpenAITranslationProvider(
 
 function buildBatchRequestLine(request: TranslationRequest, model: string): string {
   MerchantTranslationDirectionSchema.parse(request.direction);
-  const customId = encodeTranslationId(request.translationId);
+  const customId = request.providerCustomId ?? encodeTranslationId(request.translationId);
 
   return JSON.stringify({
     custom_id: customId,
@@ -309,6 +310,9 @@ function decodeTranslationId(customId: string): string {
     throw new TranslationProviderResponseError("Invalid translation custom_id");
   }
   const encoded = customId.slice("translation-".length);
+  if (encoded.includes("-")) {
+    return customId;
+  }
   if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
     throw new TranslationProviderResponseError("Invalid translation custom_id");
   }
