@@ -11,13 +11,14 @@ import {
 } from "./commerce.agent.js";
 
 import type {
+  CommerceAgentResult,
   RecoveryAgentContext,
 } from "./types.js";
 
 export const CommerceAgentState =
   Annotation.Root({
     context: Annotation<RecoveryAgentContext>(),
-    result: Annotation<{ text: string }>(),
+    result: Annotation<CommerceAgentResult>(),
   });
 
 export type CommerceAgentState =

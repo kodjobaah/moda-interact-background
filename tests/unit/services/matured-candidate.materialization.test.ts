@@ -39,11 +39,28 @@ const hoisted = vi.hoisted(() => {
     },
     conversationMessageServiceMock: {
       buildRecoveryMessage: vi.fn(() => "Hello!"),
+      buildRecoveryTemplateDescriptor: vi.fn(
+        ({ purpose, templateName, canonicalLanguageTag, providerLanguageCode }) =>
+          `[WhatsApp template sent; purpose=${purpose}; template=${templateName}; canonicalLanguage=${canonicalLanguageTag}; providerLanguage=${providerLanguageCode}]`,
+      ),
       createPendingRecoveryMessage: vi.fn(async () => ({ id: "message-1" })),
       markMessageSent: vi.fn(async () => ({})),
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      sendWhatsAppTemplate: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      getProviderAccountId: vi.fn(() => "provider-account-1"),
+    },
+    whatsappTemplateSelectorMock: {
+      select: vi.fn(async () => ({
+        outcome: "selected",
+        canonicalLanguageTag: "en-GB",
+        providerLanguageCode: "en_GB",
+        providerTemplateName: "checkout_recovery",
+        providerTemplateId: null,
+        selectionSource: "exact",
+        marketCapability: "supported",
+      })),
     },
   };
 });
@@ -55,6 +72,7 @@ const { customerServiceMock } = hoisted;
 const { conversationServiceMock } = hoisted;
 const { conversationMessageServiceMock } = hoisted;
 const { whatsAppServiceMock } = hoisted;
+const { whatsappTemplateSelectorMock } = hoisted;
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: hoisted.prismaMock,
@@ -82,6 +100,9 @@ vi.mock("../../../src/services/conversation.message.service.js", () => ({
 vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
+vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
+  whatsappTemplateSelectorService: hoisted.whatsappTemplateSelectorMock,
+}));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
 
@@ -94,6 +115,13 @@ const candidate = {
   cartToken: "cart_1",
   abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
   checkoutCreatedAt: "2026-08-28T12:00:00Z",
+  internationalContext: {
+    languageTag: "fr-CA",
+    languageSource: "shopify" as const,
+    countryCode: "CA",
+    currencyCode: "USD",
+    timeZone: "America/Toronto",
+  },
 };
 
 const recoverableCheckout = {
@@ -103,6 +131,13 @@ const recoverableCheckout = {
   completedAt: null,
   currencyCode: "USD",
   totalPrice: "49.99",
+  internationalContext: {
+    languageTag: "en-GB",
+    languageSource: null,
+    countryCode: "GB",
+    currencyCode: "GBP",
+    timeZone: "Europe/London",
+  },
   customer: {
     shopifyCustomerId: "gid://shopify/Customer/1",
     email: "buyer@example.com",
@@ -126,11 +161,30 @@ const recoverableCheckout = {
 describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    whatsappTemplateSelectorMock.select.mockResolvedValue({
+      outcome: "selected",
+      canonicalLanguageTag: "en-GB",
+      providerLanguageCode: "en_GB",
+      providerTemplateName: "checkout_recovery",
+      providerTemplateId: null,
+      selectionSource: "exact",
+      marketCapability: "supported",
+    });
+    whatsAppServiceMock.sendWhatsAppTemplate.mockResolvedValue({
+      providerMessageId: "wamid-1",
+    });
     redisMock.set.mockResolvedValue("OK");
     redisMock.get.mockResolvedValue(null);
     redisMock.del.mockResolvedValue(1);
     // Default: shop exists, no existing recovery, recoverable lookup result.
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      settings: {
+        defaultLanguageTag: "pt-BR",
+        defaultCountryCode: "BR",
+        defaultTimeZone: "America/Sao_Paulo",
+      },
+    });
     prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
     lookupServiceMock.lookup.mockResolvedValue({
@@ -162,8 +216,101 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(call.create.lineItems[0].title).toBe("Teal Dress");
     expect(call.create.lineItems[0].quantity).toBe(2);
 
+    expect(
+      conversationServiceMock.getOrCreateRecoveryConversation,
+    ).toHaveBeenCalledWith("recovery-1", {
+      languageTag: "fr-CA",
+      languageSource: "shopify",
+      countryCode: "GB",
+      currencyCode: "GBP",
+      timeZone: "Europe/London",
+    });
+
     // The recovery-message workflow should run for a newly materialized recovery.
-    expect(whatsAppServiceMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows provider-check-required templates to reach the provider", async () => {
+    whatsappTemplateSelectorMock.select.mockResolvedValue({
+      outcome: "provider-check-required",
+      canonicalLanguageTag: "fr-CA",
+      providerLanguageCode: "fr_CA_CUSTOM",
+      providerTemplateName: "checkout_recovery_fr_ca",
+      providerTemplateId: null,
+      selectionSource: "exact",
+      marketCapability: "provider-check-required",
+    });
+
+    await service.materializeMaturedCandidate(candidate);
+
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateName: "checkout_recovery_fr_ca",
+        languageCode: "fr_CA_CUSTOM",
+      }),
+    );
+  });
+
+  it("persists a truthful descriptor for a selected non-English template", async () => {
+    whatsappTemplateSelectorMock.select.mockResolvedValue({
+      outcome: "selected",
+      canonicalLanguageTag: "fr-CA",
+      providerLanguageCode: "fr_CA_CUSTOM",
+      providerTemplateName: "checkout_recovery_fr_ca",
+      providerTemplateId: null,
+      selectionSource: "exact",
+      marketCapability: "supported",
+    });
+
+    await service.materializeMaturedCandidate(candidate);
+
+    expect(conversationMessageServiceMock.buildRecoveryMessage).not.toHaveBeenCalled();
+    expect(
+      conversationMessageServiceMock.buildRecoveryTemplateDescriptor,
+    ).toHaveBeenCalledWith({
+      purpose: "checkout-recovery",
+      templateName: "checkout_recovery_fr_ca",
+      canonicalLanguageTag: "fr-CA",
+      providerLanguageCode: "fr_CA_CUSTOM",
+    });
+    expect(
+      conversationMessageServiceMock.createPendingRecoveryMessage,
+    ).toHaveBeenCalledWith(
+      "conversation-recovery-1",
+      expect.stringContaining(
+        "[WhatsApp template sent; purpose=checkout-recovery; template=checkout_recovery_fr_ca; canonicalLanguage=fr-CA; providerLanguage=fr_CA_CUSTOM]",
+      ),
+    );
+    expect(
+      conversationMessageServiceMock.createPendingRecoveryMessage.mock.calls[0]?.[1],
+    ).not.toContain("Hello!");
+  });
+
+  it.each([
+    { outcome: "template-unavailable", reason: "no-approved-variant" },
+    { outcome: "market-unavailable", reason: "unsupported-market" },
+  ] as const)("does not send when selection is bounded as $outcome", async (selection) => {
+    whatsappTemplateSelectorMock.select.mockResolvedValue(selection);
+
+    await service.materializeMaturedCandidate(candidate);
+
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(conversationMessageServiceMock.createPendingRecoveryMessage).not.toHaveBeenCalled();
+  });
+
+  it("marks the pending message failed when the provider rejects a template", async () => {
+    whatsAppServiceMock.sendWhatsAppTemplate.mockRejectedValue(
+      new Error("bounded provider rejection"),
+    );
+
+    await expect(service.materializeMaturedCandidate(candidate)).rejects.toThrow(
+      "bounded provider rejection",
+    );
+    expect(prismaMock.conversationMessage.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { status: "FAILED" },
+      }),
+    );
   });
 
   it("discards and does not create a recovery when the checkout is not found", async () => {
@@ -276,6 +423,45 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     const call = prismaMock.checkoutRecovery.upsert.mock.calls[0][0];
     expect(call.create.lineItems[0].title).toBe("Teal Dress");
     expect(call.create.customerId).toBeUndefined();
+  });
+
+  it("uses merchant defaults only when current and event context are absent", async () => {
+    lookupServiceMock.lookup.mockResolvedValue({
+      kind: "found",
+      checkout: {
+        ...recoverableCheckout,
+        currencyCode: null,
+        internationalContext: {
+          languageTag: null,
+          languageSource: null,
+          countryCode: null,
+          currencyCode: null,
+          timeZone: null,
+        },
+      },
+    });
+
+    const result = await service.materializeMaturedCandidate({
+      ...candidate,
+      internationalContext: {
+        languageTag: null,
+        languageSource: null,
+        countryCode: null,
+        currencyCode: null,
+        timeZone: null,
+      },
+    });
+
+    expect(result.outcome).toBe("recovery-created");
+    expect(
+      conversationServiceMock.getOrCreateRecoveryConversation,
+    ).toHaveBeenCalledWith("recovery-1", {
+      languageTag: "pt-BR",
+      languageSource: "merchant-default",
+      countryCode: "BR",
+      currencyCode: null,
+      timeZone: "America/Sao_Paulo",
+    });
   });
 
   it("discards without creating a recovery or sending a message when an order already processed the checkout (BACKGROUND-005 race guard)", async () => {

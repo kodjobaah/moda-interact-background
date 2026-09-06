@@ -53,6 +53,8 @@ describe("commerce agent LangGraph pipeline", () => {
         type: "PRODUCT_DISCOVERY",
         summary: null,
         version: 1,
+        languageTag: "fr-FR",
+        languageSource: "detected",
         messages: [
           {
             role: "user",
@@ -84,9 +86,13 @@ describe("commerce agent LangGraph pipeline", () => {
         query: "ski wax",
       });
 
-      return {
-        text: `${products.products[0].title} costs ${products.products[0].price}.`,
-      } as any;
+      await options.tools.finalResponse.execute({
+          replyText: `${products.products[0].title} costs ${products.products[0].price}.`,
+          detectedLanguageTag: null,
+          detectedLanguageConfidence: null,
+      });
+
+      return {} as any;
     });
 
     const pipeline = createCommerceAgentPipeline({
@@ -96,8 +102,8 @@ describe("commerce agent LangGraph pipeline", () => {
 
     const result = await pipeline.invoke({ context });
 
-    expect(result.result.text).toContain("Ski Wax");
-    expect(result.result.text).toContain("24.95");
+    expect(result.result.replyText).toContain("Ski Wax");
+    expect(result.result.replyText).toContain("24.95");
     expect(createSearchProductsTool).toHaveBeenCalledWith(
       "test-shop.myshopify.com",
     );
@@ -105,5 +111,8 @@ describe("commerce agent LangGraph pipeline", () => {
       query: "ski wax",
     });
     expect(generateText).toHaveBeenCalledOnce();
+    expect(vi.mocked(generateText).mock.calls[0]?.[0].system).toContain(
+      "Resolved customer language: fr-FR",
+    );
   });
 });

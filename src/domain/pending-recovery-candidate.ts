@@ -4,6 +4,8 @@ export const EVALUATE_PENDING_RECOVERY_JOB = "evaluate-pending-recovery";
 export const DEFAULT_RECOVERY_DELAY_MINUTES = 30;
 const RECOVERY_CANDIDATE_TTL_BUFFER_MS = 60 * 60 * 1000;
 
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
+
 export type PendingRecoveryCandidate = {
   shopId: string;
   shopDomain: string;
@@ -11,6 +13,9 @@ export type PendingRecoveryCandidate = {
   cartToken: string | null;
   abandonedCheckoutUrl: string | null;
   checkoutCreatedAt: string | null;
+  internationalContext?: InternationalContext;
+  /** Optional for legacy jobs created before ARCH-004. */
+  lastActivityAt?: string;
 };
 
 export function pendingCandidateCheckoutIndexKey(input: {

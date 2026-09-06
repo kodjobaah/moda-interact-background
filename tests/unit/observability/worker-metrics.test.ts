@@ -35,7 +35,7 @@ const { observeWorkerJob } = await import(
 const definition = {
   workerName: "checkout",
   queueName: "checkout-events",
-  jobNames: ["checkout-created", "checkout-updated"],
+  jobNames: ["checkout-created", "checkout-updated", "cart-activity"],
 } as const;
 
 function job(overrides: Record<string, unknown> = {}) {

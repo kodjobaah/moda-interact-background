@@ -72,4 +72,44 @@ describe("WhatsAppService API base URL", () => {
       `http://127.0.0.1:45678/${phoneNumberId}/messages`,
     );
   });
+
+  it.each([
+    {
+      canonicalLanguageTag: "en-GB",
+      providerLanguageCode: "en_GB",
+      templateName: "checkout_recovery_en_gb",
+    },
+    {
+      canonicalLanguageTag: "fr-CA",
+      providerLanguageCode: "fr_CA_CUSTOM",
+      templateName: "checkout_recovery_fr_ca",
+    },
+  ])("sends the selected provider template fields unchanged", async ({
+    canonicalLanguageTag,
+    providerLanguageCode,
+    templateName,
+  }) => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ messages: [{ id: "wamid-template" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await new WhatsAppService(fetchMock).sendWhatsAppTemplate({
+      to: input.to,
+      templateName,
+      languageCode: providerLanguageCode,
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body).toMatchObject({
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: providerLanguageCode },
+      },
+    });
+    expect(body.template.language.code).not.toBe(canonicalLanguageTag);
+  });
 });

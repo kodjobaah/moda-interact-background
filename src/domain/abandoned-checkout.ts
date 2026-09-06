@@ -7,6 +7,7 @@
 // diagnostics only and must not be durably persisted as part of ARCH-001 scope.
 
 import type { PendingRecoveryCandidate } from "./pending-recovery-candidate.js";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 export const ABANDONED_CHECKOUT_API_VERSION = "2026-07";
 
@@ -82,6 +83,7 @@ export interface NormalizedAbandonedCheckout {
 
   currencyCode: string | null;
   totalPrice: string | null;
+  internationalContext: InternationalContext;
 
   customer: NormalizedAbandonedCheckoutCustomer | null;
   lineItems: NormalizedAbandonedCheckoutLineItem[];

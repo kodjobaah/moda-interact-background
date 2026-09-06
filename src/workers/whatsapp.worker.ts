@@ -82,7 +82,7 @@ async function processInboundMessage(
 
     await whatsAppService.sendWhatsAppText({
       to: event.customerPhone,
-      text: result.text,
+      text: result.replyText,
     });
 
     return;
@@ -141,6 +141,14 @@ async function processInboundMessage(
   const result =
     await runCommerceAgent(context);
 
+  await conversationService.applyDetectedLanguage({
+    conversationId: route.conversationId,
+    version: received.version,
+    message: event.text ?? "",
+    detectedLanguageTag: result.detectedLanguageTag,
+    detectedLanguageConfidence: result.detectedLanguageConfidence,
+  });
+
   const changed =
     await conversationService.hasChanged(
       route.conversationId,
@@ -165,13 +173,13 @@ async function processInboundMessage(
   const outboundMessage =
     await conversationService.createPendingAgentMessage(
       route.conversationId,
-      result.text,
+      result.replyText,
     );
 
   const sent =
     await whatsAppService.sendWhatsAppText({
       to: event.customerPhone,
-      text: result.text,
+      text: result.replyText,
     });
 
   await conversationService.markMessageSent(
@@ -216,6 +224,8 @@ function buildProductOnlyContext(
       type: "PRODUCT_DISCOVERY",
       summary: null,
       version: 0,
+      languageTag: null,
+      languageSource: null,
       messages: [
         {
           role: "user",

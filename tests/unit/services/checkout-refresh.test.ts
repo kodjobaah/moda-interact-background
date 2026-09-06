@@ -40,6 +40,22 @@ const hoisted = vi.hoisted(() => {
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      sendWhatsAppTemplate: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      getProviderAccountId: vi.fn(() => "provider-account-1"),
+    },
+    whatsappTemplateSelectorMock: {
+      select: vi.fn(async () => ({
+        outcome: "selected",
+        canonicalLanguageTag: "en-GB",
+        providerLanguageCode: "en_GB",
+        providerTemplateName: "checkout_recovery",
+        providerTemplateId: null,
+        selectionSource: "exact",
+        marketCapability: "supported",
+      })),
+    },
+    pendingCandidateServiceMock: {
+      refreshCandidateActivity: vi.fn(),
     },
   };
 });
@@ -71,6 +87,12 @@ vi.mock("../../../src/services/conversation.message.service.js", () => ({
 }));
 vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
+}));
+vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
+  whatsappTemplateSelectorService: hoisted.whatsappTemplateSelectorMock,
+}));
+vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
+  pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
 }));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
@@ -128,6 +150,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       kind: "found",
       checkout: currentCheckout,
     });
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
+      outcome: "not-found",
+    });
   });
 
   it("discards the update and does not call Shopify when no recovery exists", async () => {
@@ -181,6 +206,62 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
         ],
       },
     });
+  });
+
+  it("reschedules a matching pending candidate before checking durable recovery", async () => {
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
+      outcome: "rescheduled",
+      jobId: "candidate-1",
+    });
+
+    const result = await service.handleCheckoutUpdatedContract({
+      ...event,
+      activityAt: "2026-08-28T00:02:00.000Z",
+    });
+
+    expect(result).toEqual({
+      kind: "pending",
+      outcome: "rescheduled",
+      jobId: "candidate-1",
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).toHaveBeenCalledWith({
+      shopId: "shop_1",
+      checkoutToken: "checkout_1",
+      cartToken: null,
+      activityAt: "2026-08-28T00:02:00.000Z",
+      isEmpty: null,
+    });
+  });
+
+  it("handles cart activity without a Shopify lookup or candidate creation", async () => {
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
+      outcome: "cancelled",
+      jobId: "candidate-1",
+    });
+
+    const result = await service.handleCartActivityContract({
+      shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
+      cartToken: "cart_1",
+      isEmpty: true,
+      activityAt: "2026-08-28T00:04:00.000Z",
+    });
+
+    expect(result).toEqual({
+      kind: "pending",
+      outcome: "cancelled",
+      jobId: "candidate-1",
+    });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).toHaveBeenCalledWith({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "cart_1",
+      activityAt: "2026-08-28T00:04:00.000Z",
+      isEmpty: true,
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
   });
 
   it("does not use webhook basket data (only the Shopify lookup result)", async () => {

@@ -16,7 +16,7 @@ import {
 
 import {
   runCommerceAgent,
-} from "../../src/agents/commerce.agent.fake.js";
+} from "../../src/agents/commerce.agent.js";
 
 import type {
   RecoveryAgentContext,
@@ -128,14 +128,14 @@ describeWithGroq(
           receivedQuery?.toLowerCase(),
         ).toContain("ski");
 
-        expect(result.text).toBeTruthy();
+        expect(result.replyText).toBeTruthy();
 
         expect(
-          result.text.toLowerCase(),
+          result.replyText.toLowerCase(),
         ).toContain("ski");
 
         expect(
-          result.text,
+          result.replyText,
         ).toContain("24.95");
       },
       30_000,

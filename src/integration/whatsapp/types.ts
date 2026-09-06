@@ -55,3 +55,10 @@ export interface SendTextInput {
   to: string;
   text: string;
 }
+
+export interface SendTemplateInput {
+  to: string;
+  templateName: string;
+  languageCode: string;
+  bodyParameters?: string[];
+}

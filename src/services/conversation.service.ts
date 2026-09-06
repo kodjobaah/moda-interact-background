@@ -8,6 +8,11 @@ import type {
 import type {
   MessageDirection,
 } from "../domain/types.js";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
+import {
+  ConversationLanguageService,
+  conversationLanguageService,
+} from "./conversation-language.service.js";
 
 export interface ResolvedIncomingMessage {
   conversationId: string;
@@ -21,9 +26,14 @@ export interface ResolvedIncomingMessage {
   inReplyToProviderId: string | null;
 
   content: string;
+
+  explicitLanguageTag?: string | null;
 }
 
 export class ConversationService {
+  constructor(
+    private readonly languageService: ConversationLanguageService = conversationLanguageService,
+  ) {}
 
   /**
    * Persist an inbound customer message.
@@ -54,6 +64,8 @@ export class ConversationService {
           conversation: {
             select: {
               inboundVersion: true,
+              languageTag: true,
+              languageSource: true,
             },
           },
         },
@@ -70,6 +82,27 @@ export class ConversationService {
         duplicate: true,
       };
     }
+
+    const currentConversation = await prisma.conversation.findUniqueOrThrow({
+      where: { id: message.conversationId },
+      select: {
+        languageTag: true,
+        languageSource: true,
+      },
+    });
+
+    const language = await this.languageService.resolveInitial({
+      currentLanguageTag: currentConversation.languageTag,
+      currentLanguageSource: fromPrismaLanguageSource(
+        currentConversation.languageSource,
+      ),
+      ...(message.explicitLanguageTag !== undefined
+        ? { explicitLanguageTag: message.explicitLanguageTag }
+        : {}),
+      shopifyLanguageTag: null,
+      merchantLanguageTag: null,
+      platformLanguageTag: null,
+    });
 
     /*
      * Persist the message and increment the
@@ -112,6 +145,8 @@ export class ConversationService {
 
               lastInboundAt: new Date(),
               lastMessageAt: new Date(),
+              languageTag: language.languageTag,
+              languageSource: toPrismaLanguageSource(language.languageSource),
             },
 
             select: {
@@ -151,6 +186,8 @@ export class ConversationService {
           type: true,
           summary: true,
           inboundVersion: true,
+          languageTag: true,
+          languageSource: true,
 
           checkoutRecovery: {
             select: {
@@ -206,6 +243,10 @@ export class ConversationService {
       version:
         conversation.inboundVersion,
 
+      languageTag: conversation.languageTag,
+
+      languageSource: fromPrismaLanguageSource(conversation.languageSource),
+
       summary:
         conversation.summary,
 
@@ -241,6 +282,51 @@ export class ConversationService {
     );
   }
 
+  async applyDetectedLanguage({
+    conversationId,
+    version,
+    message,
+    detectedLanguageTag,
+    detectedLanguageConfidence,
+  }: {
+    conversationId: string;
+    version: number;
+    message: string;
+    detectedLanguageTag: string | null;
+    detectedLanguageConfidence: number | null;
+  }): Promise<boolean> {
+    const conversation = await prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: { inboundVersion: true, languageTag: true, languageSource: true },
+    });
+
+    if (conversation.inboundVersion !== version) {
+      return false;
+    }
+
+    const language = this.languageService.acceptDetectedLanguage({
+      message,
+      currentLanguageTag: conversation.languageTag,
+      currentLanguageSource: fromPrismaLanguageSource(conversation.languageSource),
+      detectedLanguageTag,
+      detectedLanguageConfidence,
+    });
+
+    if (!language.changed) {
+      return false;
+    }
+
+    const updated = await prisma.conversation.updateMany({
+      where: { id: conversationId, inboundVersion: version },
+      data: {
+        languageTag: language.languageTag,
+        languageSource: toPrismaLanguageSource(language.languageSource),
+      },
+    });
+
+    return updated.count === 1;
+  }
+
 
   /**
    * Every CheckoutRecovery can have one RECOVERY
@@ -252,6 +338,7 @@ export class ConversationService {
    */
   async getOrCreateRecoveryConversation(
     checkoutRecoveryId: string,
+    internationalContext?: InternationalContext,
   ) {
 
     return prisma.conversation.upsert({
@@ -260,6 +347,15 @@ export class ConversationService {
       create: {
         checkoutRecoveryId,
         type: "RECOVERY",
+        ...(internationalContext
+          ? {
+              languageTag: internationalContext.languageTag,
+              languageSource: toPrismaLanguageSource(internationalContext.languageSource),
+              countryCode: internationalContext.countryCode,
+              currencyCode: internationalContext.currencyCode,
+              timeZone: internationalContext.timeZone,
+            }
+          : {}),
       },
 
       update: {},
@@ -359,6 +455,19 @@ export class ConversationService {
       content: message.content,
     };
   }
+}
+
+function toPrismaLanguageSource(source: InternationalContext["languageSource"]):
+  "CUSTOMER_EXPLICIT" | "DETECTED" | "SHOPIFY" | "MERCHANT_DEFAULT" | "PLATFORM_DEFAULT" | null {
+  if (!source) return null;
+  return source.replaceAll("-", "_").toUpperCase() as ReturnType<typeof toPrismaLanguageSource>;
+}
+
+function fromPrismaLanguageSource(
+  source: "CUSTOMER_EXPLICIT" | "DETECTED" | "SHOPIFY" | "MERCHANT_DEFAULT" | "PLATFORM_DEFAULT" | null | undefined,
+): InternationalContext["languageSource"] {
+  if (!source) return null;
+  return source.toLowerCase().replaceAll("_", "-") as NonNullable<InternationalContext["languageSource"]>;
 }
 
 export const conversationService =

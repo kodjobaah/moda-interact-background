@@ -9,6 +9,7 @@ import { observeWorkerJob } from "../observability/worker-metrics.js";
 import {
   mapCheckoutCreatedContractInput,
   mapCheckoutUpdatedContractInput,
+  mapCartActivityContractInput,
   parseRuntimeShopifyEvent,
 } from "../events/shopify-contract-adapter.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
@@ -24,6 +25,7 @@ const workerMetricDefinition = {
   jobNames: [
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName,
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName,
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName,
   ],
 } as const;
 
@@ -44,6 +46,12 @@ export const checkoutWorker =
           case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName:
             await checkoutRecoveryService.handleCheckoutUpdatedContract(
               mapCheckoutUpdatedContractInput(parsedEvent),
+            );
+            return;
+
+          case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName:
+            await checkoutRecoveryService.handleCartActivityContract(
+              mapCartActivityContractInput(parsedEvent),
             );
             return;
 

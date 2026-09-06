@@ -43,8 +43,9 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
     abandonedCheckoutUrl: url,
     createdAt: "2026-08-28T12:00:00Z",
     completedAt: null,
-    currencyCode: "USD",
-    totalPrice: { amount: "49.99", currencyCode: "USD" },
+    totalPriceSet: {
+      presentmentMoney: { amount: "49.99", currencyCode: "USD" },
+    },
     customer: {
       id: "gid://shopify/Customer/999",
       email: "buyer@example.com",
@@ -52,16 +53,23 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
       firstName: "Ada",
       lastName: "Lovelace",
     },
+    billingAddress: {
+      countryCodeV2: "US",
+      timeZone: "America/New_York",
+    },
     lineItems: {
       nodes: [
         {
           id: "gid://shopify/AbandonedCheckoutLineItem/1",
           product: { id: "gid://shopify/Product/1" },
-          variant: { id: "gid://shopify/ProductVariant/1", sku: "SKU-1" },
+          variant: { id: "gid://shopify/ProductVariant/1" },
+          sku: "SKU-1",
           title: "Teal Dress",
           variantTitle: "M",
           quantity: 2,
-          originalUnitPrice: { amount: "20.00", currencyCode: "USD" },
+          originalUnitPriceSet: {
+            presentmentMoney: { amount: "20.00", currencyCode: "USD" },
+          },
         },
       ],
     },
@@ -163,15 +171,20 @@ describe("abandoned checkout lookup service", () => {
     prismaMock.shop.findUnique.mockResolvedValue({
       domain: candidate.shopDomain,
     });
-    mockCountResponse(50);
+    mockCountResponse(21);
 
     const result = await service.lookup(candidate);
 
     expect(result.kind).toBe("bounded-limit-exceeded");
 
     if (result.kind === "bounded-limit-exceeded") {
-      expect(result.candidateCount).toBe(50);
+      expect(result.candidateCount).toBe(21);
     }
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.query).toContain("abandonedCheckoutsCount(query: $query, limit: $limit)");
+    expect(body.query).not.toContain("maximum");
+    expect(body.variables).toMatchObject({ limit: 21 });
 
     // The bounded list query must never run once the count pre-check fails,
     // proving the implementation cannot enumerate an unbounded history.
@@ -225,6 +238,74 @@ describe("abandoned checkout lookup service", () => {
     expect(query).toMatch(/AND/);
     // Only one Shopify call: the bounded count pre-check (no list query).
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses billing purchaser context instead of shipping destination context", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      domain: candidate.shopDomain,
+    });
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, {
+        totalPriceSet: {
+          presentmentMoney: { amount: "49.99", currencyCode: "GBP" },
+        },
+        customer: {
+          ...makeNode(candidateUrl).customer,
+          locale: "en-GB",
+        },
+        shippingAddress: {
+          countryCodeV2: "FR",
+          timeZone: "Europe/Paris",
+        },
+        billingAddress: {
+          countryCodeV2: "GB",
+          timeZone: "Europe/London",
+        },
+      }),
+    ]);
+
+    const result = await service.lookup(candidate);
+
+    expect(result.kind).toBe("found");
+    if (result.kind === "found") {
+      expect(result.checkout.internationalContext).toEqual({
+        languageTag: "en-GB",
+        languageSource: null,
+        countryCode: "GB",
+        currencyCode: "GBP",
+        timeZone: "Europe/London",
+      });
+      expect(result.checkout.currencyCode).toBe("GBP");
+    }
+  });
+
+  it("sends a complete 2026-07 list query without shipping or legacy fields", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      domain: candidate.shopDomain,
+    });
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl)]);
+
+    await service.lookup(candidate);
+
+    const listCall = fetchMock.mock.calls[1];
+    const body = JSON.parse(listCall[1].body as string);
+    const query = body.query as string;
+
+    expect(query).toContain("totalPriceSet");
+    expect(query).toContain("presentmentMoney");
+    expect(query).toContain("billingAddress");
+    expect(query).toContain("locale");
+    expect(query).toContain("sku");
+    expect(query).toContain("originalUnitPriceSet");
+    expect(query).not.toContain("shippingAddress");
+    expect(query).not.toMatch(/\n {14}currencyCode\s*\n/);
+    expect(query).not.toContain("totalPrice {");
+    expect(query).not.toContain("originalUnitPrice {");
+    expect((query.match(/{/g) ?? []).length).toBe(
+      (query.match(/}/g) ?? []).length,
+    );
   });
 });
 

@@ -27,12 +27,20 @@ import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
 });
 
 type CandidateEnqueueOutcome = "enqueued" | "refreshed";
+
+export type CandidateActivityResult =
+  | { outcome: "rescheduled"; jobId: string; candidate: PendingRecoveryCandidate }
+  | { outcome: "stale"; jobId: string; candidate: PendingRecoveryCandidate }
+  | { outcome: "not-found" }
+  | { outcome: "not-reschedulable"; state: string; jobId: string }
+  | { outcome: "cancelled"; jobId: string };
 
 let pendingCandidateQueue: Queue<PendingRecoveryCandidate, void, string> | null =
   null;
@@ -90,6 +98,7 @@ export class PendingRecoveryCandidateService {
 
     const delayMinutes =
       shop.settings?.recoveryDelayMinutes ?? DEFAULT_RECOVERY_DELAY_MINUTES;
+    const schedulingNow = Date.now();
 
     const candidate: PendingRecoveryCandidate = {
       shopId: shop.id,
@@ -98,6 +107,10 @@ export class PendingRecoveryCandidateService {
       cartToken: input.cartToken,
       abandonedCheckoutUrl: input.abandonedCheckoutUrl,
       checkoutCreatedAt: input.checkoutCreatedAt,
+      ...(input.internationalContext
+        ? { internationalContext: input.internationalContext }
+        : {}),
+      lastActivityAt: canonicalActivityAt(input.activityAt, schedulingNow),
     };
 
     const queue = getPendingCandidateQueue();
@@ -114,21 +127,45 @@ export class PendingRecoveryCandidateService {
     const existingJob = newJob ?? legacyJob;
     const activeJobId = newJob ? jobId : legacyJob ? legacyJobId : jobId;
     if (existingJob) {
+      const previousCartToken = existingJob.data.cartToken;
+      const effectiveLastActivityAt = maxActivityAt(
+        existingJob.data.lastActivityAt ?? existingJob.data.checkoutCreatedAt,
+        candidate.lastActivityAt,
+      );
+      const effectiveCandidate = {
+        ...candidate,
+        ...optionalCandidateContext(
+          mergeCandidateContext(
+            existingJob.data.internationalContext,
+            candidate.internationalContext,
+          ),
+        ),
+        lastActivityAt: effectiveLastActivityAt,
+      };
       if (newJob && legacyJob) {
         await legacyJob.remove();
         await this.removeShopIndexMember(candidate.shopId, legacyJobId);
       }
-      await existingJob.updateData(candidate);
+      if (
+        previousCartToken &&
+        previousCartToken !== effectiveCandidate.cartToken
+      ) {
+        await this.removeCartIndex(candidate.shopId, previousCartToken);
+      }
+      await existingJob.updateData(effectiveCandidate);
       const state = await existingJob.getState();
       if (state === "delayed") {
-        await existingJob.changeDelay(delayMinutes * 60_000);
+        const dueAtMs = activityDueAtMs(effectiveLastActivityAt, delayMinutes);
+        await existingJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
       }
 
       await this.upsertIndexes(
-        candidate,
+        effectiveCandidate,
         activeJobId,
         delayMinutes,
-        state === "delayed" ? Date.now() + delayMinutes * 60_000 : Date.now(),
+        state === "delayed"
+          ? activityDueAtMs(effectiveLastActivityAt, delayMinutes)
+          : Date.now(),
         state === "delayed" || state === "waiting" || state === "active",
       );
 
@@ -136,20 +173,21 @@ export class PendingRecoveryCandidateService {
         outcome: "refreshed",
         jobId: activeJobId,
         delayMinutes,
-        candidate,
+        candidate: effectiveCandidate,
       };
     }
 
+    const dueAtMs = activityDueAtMs(candidate.lastActivityAt, delayMinutes);
     await queue.add(EVALUATE_PENDING_RECOVERY_JOB, candidate, {
       jobId,
-      delay: delayMinutes * 60_000,
+      delay: Math.max(0, dueAtMs - schedulingNow),
     });
 
     await this.upsertIndexes(
       candidate,
       jobId,
       delayMinutes,
-      Date.now() + delayMinutes * 60_000,
+      dueAtMs,
       true,
     );
 
@@ -179,6 +217,87 @@ export class PendingRecoveryCandidateService {
         shopId: input.shopId,
         cartToken: input.cartToken,
       }),
+    );
+  }
+
+  async refreshCandidateActivity(input: {
+    shopId: string;
+    checkoutToken: string | null;
+    cartToken: string | null;
+    activityAt: string;
+    isEmpty: boolean | null;
+    internationalContext?: InternationalContext;
+  }): Promise<CandidateActivityResult> {
+    const initialMatch = await this.resolveCandidate(input);
+    if (!initialMatch || initialMatch.candidate.shopId !== input.shopId) {
+      return { outcome: "not-found" };
+    }
+
+    return this.withCheckoutLock(
+      input.shopId,
+      initialMatch.candidate.checkoutToken,
+      async () => {
+        const matched = await this.resolveCandidate(input);
+        if (!matched || matched.candidate.shopId !== input.shopId) {
+          return { outcome: "not-found" };
+        }
+        return this.refreshResolvedCandidateActivity(input, matched);
+      },
+    );
+  }
+
+  async cancelCandidateByCart(input: {
+    shopId: string;
+    cartToken: string;
+  }): Promise<
+    | { outcome: "cancelled"; jobId: string }
+    | { outcome: "not-found" }
+    | { outcome: "not-reschedulable"; state: string; jobId: string }
+  > {
+    const initialMatch = await this.resolveCandidate({
+      shopId: input.shopId,
+      checkoutToken: null,
+      cartToken: input.cartToken,
+    });
+    if (
+      !initialMatch ||
+      initialMatch.candidate.shopId !== input.shopId ||
+      initialMatch.candidate.cartToken !== input.cartToken
+    ) {
+      return { outcome: "not-found" };
+    }
+
+    return this.withCheckoutLock(
+      input.shopId,
+      initialMatch.candidate.checkoutToken,
+      async () => {
+        const matched = await this.resolveCandidate({
+          shopId: input.shopId,
+          checkoutToken: null,
+          cartToken: input.cartToken,
+        });
+        if (
+          !matched ||
+          matched.candidate.shopId !== input.shopId ||
+          matched.candidate.cartToken !== input.cartToken
+        ) {
+          return { outcome: "not-found" };
+        }
+
+        const queue = getPendingCandidateQueue();
+        const job = await queue.getJob(matched.jobId);
+        if (!job) {
+          return { outcome: "not-found" };
+        }
+
+        const state = await job.getState();
+        if (state !== "delayed" && state !== "waiting") {
+          return { outcome: "not-reschedulable", state, jobId: matched.jobId };
+        }
+
+        await this.cancelCandidate(matched);
+        return { outcome: "cancelled", jobId: matched.jobId };
+      },
     );
   }
 
@@ -389,6 +508,87 @@ export class PendingRecoveryCandidateService {
     }
   }
 
+  private async refreshResolvedCandidateActivity(
+    input: {
+      shopId: string;
+      checkoutToken: string | null;
+      cartToken: string | null;
+      activityAt: string;
+      isEmpty: boolean | null;
+      internationalContext?: InternationalContext;
+    },
+    matched: { jobId: string; candidate: PendingRecoveryCandidate },
+  ): Promise<CandidateActivityResult> {
+    if (input.cartToken && matched.candidate.cartToken !== input.cartToken) {
+      return { outcome: "not-found" };
+    }
+
+    const incomingActivityAt = canonicalActivityAt(input.activityAt);
+    const existingActivityAt = matched.candidate.lastActivityAt
+      ?? matched.candidate.checkoutCreatedAt;
+    if (
+      existingActivityAt &&
+      Date.parse(incomingActivityAt) <= Date.parse(existingActivityAt)
+    ) {
+      return {
+        outcome: "stale",
+        jobId: matched.jobId,
+        candidate: matched.candidate,
+      };
+    }
+
+    const queue = getPendingCandidateQueue();
+    const job = await queue.getJob(matched.jobId);
+    if (!job) {
+      return { outcome: "not-found" };
+    }
+
+    const state = await job.getState();
+    if (input.isEmpty === true && input.cartToken) {
+      if (state !== "delayed" && state !== "waiting") {
+        return { outcome: "not-reschedulable", state, jobId: matched.jobId };
+      }
+      await this.cancelCandidate(matched);
+      return { outcome: "cancelled", jobId: matched.jobId };
+    }
+
+    if (state !== "delayed") {
+      return { outcome: "not-reschedulable", state, jobId: matched.jobId };
+    }
+
+    const delayMinutes = await this.getRecoveryDelayMinutes(input.shopId);
+    const candidate: PendingRecoveryCandidate = {
+      ...matched.candidate,
+      ...optionalCandidateContext(
+        mergeCandidateContext(
+          matched.candidate.internationalContext,
+          input.internationalContext,
+        ),
+      ),
+      lastActivityAt: incomingActivityAt,
+    };
+    const dueAtMs = activityDueAtMs(incomingActivityAt, delayMinutes);
+    await job.updateData(candidate);
+    await job.changeDelay(Math.max(0, dueAtMs - Date.now()));
+    await this.upsertIndexes(
+      candidate,
+      matched.jobId,
+      delayMinutes,
+      dueAtMs,
+      true,
+    );
+
+    return { outcome: "rescheduled", jobId: matched.jobId, candidate };
+  }
+
+  private async getRecoveryDelayMinutes(shopId: string) {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: { settings: { select: { recoveryDelayMinutes: true } } },
+    });
+    return shop?.settings?.recoveryDelayMinutes ?? DEFAULT_RECOVERY_DELAY_MINUTES;
+  }
+
   private async removeIndexes(
     candidate: Pick<
       PendingRecoveryCandidate,
@@ -423,8 +623,61 @@ export class PendingRecoveryCandidateService {
     const shopIndexKey = pendingCandidateShopIndexKey(shopId);
     await connectionRedis.zrem(shopIndexKey, jobId);
   }
+
+  private async removeCartIndex(shopId: string, cartToken: string) {
+    await connectionRedis.del(
+      pendingCandidateCartIndexKey({ shopId, cartToken }),
+    );
+  }
 }
 
 export const pendingRecoveryCandidateService =
   new PendingRecoveryCandidateService();
+
+function canonicalActivityAt(value: string | null | undefined, fallbackNow = Date.now()): string {
+  if (value) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  return new Date(fallbackNow).toISOString();
+}
+
+function activityDueAtMs(lastActivityAt: string | undefined, delayMinutes: number): number {
+  const activityMs = lastActivityAt ? Date.parse(lastActivityAt) : Date.now();
+  return activityMs + delayMinutes * 60_000;
+}
+
+function maxActivityAt(existing: string | null | undefined, incoming: string | undefined): string {
+  const incomingValue = incoming ?? new Date().toISOString();
+  const existingMs = existing ? Date.parse(existing) : NaN;
+  const incomingMs = Date.parse(incomingValue);
+  if (Number.isFinite(existingMs) && existingMs >= incomingMs) {
+    return new Date(existingMs).toISOString();
+  }
+  return incomingValue;
+}
+
+function mergeCandidateContext(
+  existing: InternationalContext | undefined,
+  incoming: InternationalContext | undefined,
+): InternationalContext | undefined {
+  if (!existing && !incoming) return undefined;
+
+  return {
+    languageTag: incoming?.languageTag ?? existing?.languageTag ?? null,
+    languageSource: incoming?.languageSource ?? existing?.languageSource ?? null,
+    countryCode: incoming?.countryCode ?? existing?.countryCode ?? null,
+    currencyCode: incoming?.currencyCode ?? existing?.currencyCode ?? null,
+    timeZone: incoming?.timeZone ?? existing?.timeZone ?? null,
+  };
+}
+
+function optionalCandidateContext(
+  context: InternationalContext | undefined,
+): { internationalContext: InternationalContext } | Record<string, never> {
+  return context ? { internationalContext: context } : {};
+}
 

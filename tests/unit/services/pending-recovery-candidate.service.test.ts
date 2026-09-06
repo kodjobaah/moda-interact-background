@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 type Candidate = {
   shopId: string;
@@ -7,6 +8,8 @@ type Candidate = {
   cartToken: string | null;
   abandonedCheckoutUrl: string | null;
   checkoutCreatedAt: string | null;
+  internationalContext?: InternationalContext;
+  lastActivityAt?: string;
 };
 
 class FakeJob {
@@ -185,13 +188,94 @@ describe("pending recovery candidate service", () => {
         removeOnFail: false,
       },
     });
-    expect(result.candidate).toEqual({
+    expect(result.candidate).toEqual(expect.objectContaining({
       shopId: "shop_1",
       shopDomain: "shop.myshopify.com",
       checkoutToken: "checkout_1",
       cartToken: "cart_1",
       abandonedCheckoutUrl: "https://shop.example/recover",
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      lastActivityAt: expect.any(String),
+    }));
+  });
+
+  it("preserves known context when a checkout update supplies only nulls", async () => {
+    const initialContext: InternationalContext = {
+      languageTag: "en-GB",
+      languageSource: "shopify",
+      countryCode: "GB",
+      currencyCode: "GBP",
+      timeZone: "Europe/London",
+    };
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_context_nulls",
+      cartToken: "cart_context_nulls",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      internationalContext: initialContext,
+      legacyV1Transition: null,
+    });
+
+    const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_context_nulls",
+      cartToken: "cart_context_nulls",
+      activityAt: "2026-09-06T00:01:00Z",
+      isEmpty: false,
+      internationalContext: {
+        languageTag: null,
+        languageSource: null,
+        countryCode: null,
+        currencyCode: null,
+        timeZone: null,
+      },
+    });
+
+    expect(refreshed).toMatchObject({ outcome: "rescheduled", jobId: result.jobId });
+    expect(queueInstance.jobs.get(result.jobId)?.updatedData?.internationalContext).toEqual(
+      initialContext,
+    );
+  });
+
+  it("merges newer non-null context dimensions without erasing others", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_context_merge",
+      cartToken: "cart_context_merge",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-09-06T00:00:00Z",
+      internationalContext: {
+        languageTag: "en-GB",
+        languageSource: "shopify",
+        countryCode: "GB",
+        currencyCode: "GBP",
+        timeZone: "Europe/London",
+      },
+      legacyV1Transition: null,
+    });
+
+    await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_context_merge",
+      cartToken: "cart_context_merge",
+      activityAt: "2026-09-06T00:01:00Z",
+      isEmpty: false,
+      internationalContext: {
+        languageTag: "fr-FR",
+        languageSource: "shopify",
+        countryCode: null,
+        currencyCode: "EUR",
+        timeZone: null,
+      },
+    });
+
+    expect(queueInstance.jobs.get(result.jobId)?.updatedData?.internationalContext).toEqual({
+      languageTag: "fr-FR",
+      languageSource: "shopify",
+      countryCode: "GB",
+      currencyCode: "EUR",
+      timeZone: "Europe/London",
     });
   });
 
@@ -232,6 +316,65 @@ describe("pending recovery candidate service", () => {
       refreshedAt + 45 * 60 * 1000,
     );
     expect(redisZsets.get(shopIndexKey)?.get(result.jobId)).toBeGreaterThan(firstScore!);
+  });
+
+  it("removes the old cart alias when checkout scheduling changes cart token", async () => {
+    const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_cart_change",
+      cartToken: "cart_old",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T00:00:00.000Z",
+      legacyV1Transition: null,
+    });
+
+    const second = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_cart_change",
+      cartToken: "cart_new",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T01:00:00.000Z",
+      legacyV1Transition: null,
+    });
+
+    expect(second.jobId).toBe(first.jobId);
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCart({
+      shopId: "shop_1",
+      cartToken: "cart_old",
+    })).toBeNull();
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCart({
+      shopId: "shop_1",
+      cartToken: "cart_new",
+    })).toBe(first.jobId);
+    expect(queueInstance.jobs.get(first.jobId)?.data.cartToken).toBe("cart_new");
+  });
+
+  it("does not move an existing candidate backwards on an older checkout event", async () => {
+    const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_monotonic",
+      cartToken: null,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T02:00:00.000Z",
+      legacyV1Transition: null,
+    });
+    const job = queueInstance.jobs.get(first.jobId)!;
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_monotonic",
+      cartToken: null,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T01:00:00.000Z",
+      legacyV1Transition: null,
+    });
+
+    expect(result.candidate.lastActivityAt).toBe("2026-08-28T02:00:00.000Z");
+    expect(job.updatedData?.lastActivityAt).toBe("2026-08-28T02:00:00.000Z");
   });
 
   it("reuses a legacy candidate ID during the rollout without duplicating work", async () => {
@@ -561,6 +704,222 @@ describe("pending recovery candidate service", () => {
     expect(
       await serviceModule.pendingRecoveryCandidateService.hasOrderProcessed("shop_1", "checkout_2"),
     ).toBe(false);
+  });
+
+  it("reschedules from newer activity and leaves older activity stale", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_activity",
+      cartToken: "cart_activity",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      activityAt: "2026-08-28T00:00:00.000Z",
+      legacyV1Transition: null,
+    });
+    const job = queueInstance.jobs.get(result.jobId)!;
+    const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "cart_activity",
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+    });
+
+    expect(refreshed.outcome).toBe("rescheduled");
+    expect(job.updatedData?.lastActivityAt).toBe("2026-08-28T01:00:00.000Z");
+    expect(job.delayChanges.at(-1)).toBe(0);
+    expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.get(result.jobId)).toBe(
+      Date.parse("2026-08-28T01:45:00.000Z"),
+    );
+
+    const stale = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_activity",
+      cartToken: null,
+      activityAt: "2026-08-28T00:30:00.000Z",
+      isEmpty: null,
+    });
+    expect(stale).toMatchObject({ outcome: "stale", jobId: result.jobId });
+    expect(job.delayChanges).toHaveLength(1);
+  });
+
+  it("does not let a stale empty-cart event cancel newer activity", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_stale_empty",
+      cartToken: "cart_stale_empty",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T02:00:00.000Z",
+      legacyV1Transition: null,
+    });
+
+    const stale = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "cart_stale_empty",
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: true,
+    });
+
+    expect(stale).toMatchObject({ outcome: "stale", jobId: result.jobId });
+    expect(queueInstance.jobs.get(result.jobId)?.removed).toBe(false);
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCart({
+      shopId: "shop_1",
+      cartToken: "cart_stale_empty",
+    })).toBe(result.jobId);
+    expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.has(result.jobId)).toBe(true);
+  });
+
+  it("locks activity mutation and re-resolves after lock acquisition", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_lock",
+      cartToken: "cart_lock",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T00:00:00.000Z",
+      legacyV1Transition: null,
+    });
+    const lockSpy = vi
+      .spyOn(serviceModule.pendingRecoveryCandidateService, "withCheckoutLock")
+      .mockImplementation(async (_shopId, _checkoutToken, callback) => {
+        queueInstance.jobs.delete(result.jobId);
+        return callback();
+      });
+
+    const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_lock",
+      cartToken: null,
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+    });
+
+    expect(lockSpy).toHaveBeenCalledWith("shop_1", "checkout_lock", expect.any(Function));
+    expect(refreshed).toEqual({ outcome: "not-found" });
+    lockSpy.mockRestore();
+  });
+
+  it.each(["delayed", "waiting", "active", "failed", "completed", "missing"] as const)(
+    "returns the bounded refresh result for a %s candidate",
+    async (state) => {
+      const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+        shopDomain: "shop.myshopify.com",
+        checkoutToken: `checkout-state-${state}`,
+        cartToken: null,
+        abandonedCheckoutUrl: null,
+        checkoutCreatedAt: null,
+        activityAt: "2026-08-28T00:00:00.000Z",
+        legacyV1Transition: null,
+      });
+      const job = queueInstance.jobs.get(result.jobId)!;
+      if (state === "missing") {
+        queueInstance.jobs.delete(result.jobId);
+      } else {
+        job.state = state;
+      }
+
+      const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+        shopId: "shop_1",
+        checkoutToken: `checkout-state-${state}`,
+        cartToken: null,
+        activityAt: "2026-08-28T01:00:00.000Z",
+        isEmpty: false,
+      });
+
+      if (state === "delayed") {
+        expect(refreshed.outcome).toBe("rescheduled");
+      } else if (state === "missing") {
+        expect(refreshed).toEqual({ outcome: "not-found" });
+      } else {
+        expect(refreshed).toEqual({ outcome: "not-reschedulable", state, jobId: result.jobId });
+      }
+    },
+  );
+
+  it("cancels a matched cart candidate and removes every alias", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_empty",
+      cartToken: "cart_empty",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T00:00:00.000Z",
+      legacyV1Transition: null,
+    });
+
+    const cancelled = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "cart_empty",
+      activityAt: "2026-08-28T00:01:00.000Z",
+      isEmpty: true,
+    });
+
+    expect(cancelled).toEqual({ outcome: "cancelled", jobId: result.jobId });
+    expect(queueInstance.jobs.get(result.jobId)?.removed).toBe(true);
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCheckout({
+      shopId: "shop_1",
+      checkoutToken: "checkout_empty",
+    })).toBeNull();
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCart({
+      shopId: "shop_1",
+      cartToken: "cart_empty",
+    })).toBeNull();
+  });
+
+  it.each(["delayed", "waiting"] as const)(
+    "cancels a cart candidate in the supported %s state",
+    async (state) => {
+      const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+        shopDomain: "shop.myshopify.com",
+        checkoutToken: `checkout-cancel-${state}`,
+        cartToken: `cart-cancel-${state}`,
+        abandonedCheckoutUrl: null,
+        checkoutCreatedAt: null,
+        activityAt: "2026-08-28T00:00:00.000Z",
+        legacyV1Transition: null,
+      });
+      queueInstance.jobs.get(result.jobId)!.state = state;
+
+      await expect(serviceModule.pendingRecoveryCandidateService.cancelCandidateByCart({
+        shopId: "shop_1",
+        cartToken: `cart-cancel-${state}`,
+      })).resolves.toEqual({ outcome: "cancelled", jobId: result.jobId });
+      expect(queueInstance.jobs.get(result.jobId)?.removed).toBe(true);
+    },
+  );
+
+  it("does not mutate an unmatched cart or non-delayed candidate", async () => {
+    expect(await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: null,
+      cartToken: "missing-cart",
+      activityAt: "2026-08-28T00:01:00.000Z",
+      isEmpty: false,
+    })).toEqual({ outcome: "not-found" });
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_waiting",
+      cartToken: "cart_waiting",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T00:00:00.000Z",
+      legacyV1Transition: null,
+    });
+    const job = queueInstance.jobs.get(result.jobId)!;
+    job.state = "active";
+
+    expect(await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_waiting",
+      cartToken: null,
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+    })).toEqual({ outcome: "not-reschedulable", state: "active", jobId: result.jobId });
+    expect(job.updatedData).toBeNull();
   });
 });
 

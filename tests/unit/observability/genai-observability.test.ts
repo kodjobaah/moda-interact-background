@@ -140,11 +140,19 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     vi.mocked(searchProducts).mockResolvedValue([]);
     vi.mocked(generateText).mockImplementation(async (options: any) => {
       await options.tools.searchProducts.execute({ query: "boots" });
-      return { text: "No matching products found." } as any;
+      await options.tools.finalResponse.execute({
+          replyText: "No matching products found.",
+          detectedLanguageTag: null,
+          detectedLanguageConfidence: null,
+      });
+
+      return {} as any;
     });
 
     await expect(runObservedTurn()).resolves.toEqual({
-      text: "No matching products found.",
+      replyText: "No matching products found.",
+      detectedLanguageTag: null,
+      detectedLanguageConfidence: null,
     });
 
     const spans = exporter.getFinishedSpans();
@@ -230,7 +238,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     ].map((path) => readFileSync(path, "utf8"));
 
     expect(sources[0]).toContain("observeConversationTurn(");
-    expect(sources[1]).toContain("observeAgentInvocation(");
+    expect(sources[1]).toContain("observeAgentInvocation<CommerceAgentResult>(");
     expect(sources[2]).toContain("observeAgentTool(");
     for (const source of sources) {
       expect(source).not.toContain("recordMetrics: false");

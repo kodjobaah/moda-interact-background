@@ -24,6 +24,13 @@ import {
   type NormalizedAbandonedCheckout,
 } from "../domain/abandoned-checkout.js";
 import { getShopifyAccessToken } from "./shopify-session.service.js";
+import {
+  canonicaliseLanguageTag,
+  normalizeCountryCode,
+  normalizeCurrencyCode,
+  normalizeTimeZone,
+  type InternationalContext,
+} from "@modainteract/moda-interact-shared/internationalization";
 
 const GRAPHQL_ENDPOINT = (shopDomain: string, version: string) =>
   `https://${shopDomain}/admin/api/${version}/graphql.json`;
@@ -148,15 +155,15 @@ export class AbandonedCheckoutLookupService {
 
     const body = {
       query: `
-        query AbandonedCheckoutsCount($query: String!, $maximum: Int!) {
-          abandonedCheckoutsCount(query: $query, maximum: $maximum) {
+        query AbandonedCheckoutsCount($query: String!, $limit: Int!) {
+          abandonedCheckoutsCount(query: $query, limit: $limit) {
             count
           }
         }
       `,
       variables: {
         query,
-        maximum: ABANDONED_CHECKOUT_MAX_CANDIDATES,
+        limit: ABANDONED_CHECKOUT_MAX_CANDIDATES + 1,
       },
     };
 
@@ -188,10 +195,11 @@ export class AbandonedCheckoutLookupService {
               abandonedCheckoutUrl
               createdAt
               completedAt
-              currencyCode
-              totalPrice {
-                amount
-                currencyCode
+              totalPriceSet {
+                presentmentMoney {
+                  amount
+                  currencyCode
+                }
               }
               customer {
                 id
@@ -199,6 +207,11 @@ export class AbandonedCheckoutLookupService {
                 phone
                 firstName
                 lastName
+                locale
+              }
+              billingAddress {
+                countryCodeV2
+                timeZone
               }
               lineItems {
                 nodes {
@@ -208,14 +221,16 @@ export class AbandonedCheckoutLookupService {
                   }
                   variant {
                     id
-                    sku
                   }
+                  sku
                   title
                   variantTitle
                   quantity
-                  originalUnitPrice {
-                    amount
-                    currencyCode
+                  originalUnitPriceSet {
+                    presentmentMoney {
+                      amount
+                      currencyCode
+                    }
                   }
                 }
               }
@@ -243,13 +258,15 @@ export class AbandonedCheckoutLookupService {
   }
 
   private normalize(node: any): NormalizedAbandonedCheckout {
+    const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
     return {
       shopifyAbandonedCheckoutId: node?.id ?? null,
       abandonedCheckoutUrl: node?.abandonedCheckoutUrl ?? "",
       createdAt: node?.createdAt ?? "",
       completedAt: node?.completedAt ?? null,
-      currencyCode: node?.currencyCode ?? node?.totalPrice?.currencyCode ?? null,
-      totalPrice: node?.totalPrice?.amount ?? null,
+      currencyCode: presentmentMoney?.currencyCode ?? null,
+      totalPrice: presentmentMoney?.amount ?? null,
+      internationalContext: normalizeInternationalContext(node),
       customer: node?.customer
         ? {
             shopifyCustomerId: node.customer.id ?? null,
@@ -265,9 +282,9 @@ export class AbandonedCheckoutLookupService {
             variantId: li?.variant?.id ?? null,
             title: li?.title ?? null,
             variantTitle: li?.variantTitle ?? null,
-            sku: li?.variant?.sku ?? null,
+            sku: li?.sku ?? null,
             quantity: li?.quantity ?? 0,
-            price: li?.originalUnitPrice?.amount ?? null,
+            price: li?.originalUnitPriceSet?.presentmentMoney?.amount ?? null,
           }))
         : [],
     };
@@ -327,4 +344,31 @@ export class AbandonedCheckoutLookupService {
 }
 
 export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService();
+function normalizeInternationalContext(node: any): InternationalContext {
+  const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
+  const billingAddress = node?.billingAddress;
 
+  return {
+    languageTag: safelyNormalize(node?.customer?.locale, canonicaliseLanguageTag),
+    languageSource: null,
+    countryCode: safelyNormalize(billingAddress?.countryCodeV2, normalizeCountryCode),
+    currencyCode: safelyNormalize(
+      presentmentMoney?.currencyCode,
+      normalizeCurrencyCode,
+    ),
+    timeZone: safelyNormalize(billingAddress?.timeZone, normalizeTimeZone),
+  };
+}
+
+function safelyNormalize(
+  value: unknown,
+  normalizer: (value: string) => string,
+): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  try {
+    return normalizer(value);
+  } catch {
+    return null;
+  }
+}

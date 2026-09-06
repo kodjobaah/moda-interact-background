@@ -1,5 +1,7 @@
 // Internal seed shape retained for legacy recovery-message helpers only.
 // Cross-service queue contracts are parsed from @modainteract/moda-interact-shared.
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
+
 export interface RecoveryCheckoutSeed {
   shop: string;
 
@@ -13,6 +15,8 @@ export interface RecoveryCheckoutSeed {
   checkoutUrl: string | null;
 
   completedAt: string | null;
+
+  internationalContext?: InternationalContext;
 
   customer: {
     shopifyCustomerId: string | null;

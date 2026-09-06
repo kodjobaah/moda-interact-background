@@ -2,6 +2,7 @@ import {
   parseShopifyRecoveryEventV2,
   type ShopifyRecoveryEventV2,
 } from "@modainteract/moda-interact-shared/shopify";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 export type CheckoutCreatedContractInput = {
   shopDomain: string;
@@ -9,11 +10,23 @@ export type CheckoutCreatedContractInput = {
   cartToken: string | null;
   checkoutCreatedAt: string | null;
   abandonedCheckoutUrl: string | null;
+  internationalContext?: InternationalContext;
+  activityAt?: string;
 };
 
 export type CheckoutUpdatedContractInput = {
   shopDomain: string;
   checkoutToken: string;
+  internationalContext?: InternationalContext;
+  activityAt: string;
+};
+
+export type CartActivityContractInput = {
+  shopId: string;
+  shopDomain: string;
+  cartToken: string;
+  isEmpty: boolean | null;
+  activityAt: string;
 };
 
 export type OrderCompletedContractInput = {
@@ -50,6 +63,10 @@ export function mapCheckoutCreatedContractInput(
     cartToken: event.payload.cartToken,
     checkoutCreatedAt: event.payload.checkoutCreatedAt,
     abandonedCheckoutUrl: event.payload.abandonedCheckoutUrl,
+    ...(event.internationalContext
+      ? { internationalContext: event.internationalContext }
+      : {}),
+    activityAt: event.occurredAt ?? event.receivedAt,
     };
   }
 
@@ -65,6 +82,28 @@ export function mapCheckoutUpdatedContractInput(
     return {
     shopDomain: event.tenant.shopDomain,
     checkoutToken: event.payload.checkoutToken,
+    ...(event.internationalContext
+      ? { internationalContext: event.internationalContext }
+      : {}),
+    activityAt: event.occurredAt ?? event.receivedAt,
+    };
+  }
+
+export function mapCartActivityContractInput(
+  event: ShopifyRecoveryEventV2,
+): CartActivityContractInput {
+  if (event.eventType !== "cart.activity") {
+      throw new Error(
+      `Invalid event type for cart-activity handler: ${event.eventType}`,
+      );
+    }
+
+    return {
+    shopId: event.tenant.shopId,
+    shopDomain: event.tenant.shopDomain,
+    cartToken: event.payload.cartToken,
+    isEmpty: event.payload.isEmpty,
+    activityAt: event.occurredAt ?? event.receivedAt,
     };
   }
 

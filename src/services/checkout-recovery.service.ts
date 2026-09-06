@@ -4,6 +4,7 @@ import prisma from "../lib/db.js";
 import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
 import type {
   CheckoutCreatedContractInput,
+  CartActivityContractInput,
   CheckoutUpdatedContractInput,
   OrderCompletedContractInput,
 } from "../events/shopify-contract-adapter.js";
@@ -11,6 +12,7 @@ import { customerService } from "./customer.service.js";
 import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
+import { whatsappTemplateSelectorService } from "./whatsapp-template-selector.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
 import {
   abandonedCheckoutLookupService,
@@ -22,6 +24,12 @@ import {
 } from "../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
+import {
+  canonicaliseLanguageTag,
+  normalizeCountryCode,
+  normalizeTimeZone,
+  type InternationalContext,
+} from "@modainteract/moda-interact-shared/internationalization";
 
 interface RecoveryOrderCompletionInput {
   shop: string;
@@ -45,6 +53,7 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-order-completed"; checkoutToken: string };
 
 export type CheckoutRefreshResult =
+  | { kind: "pending"; outcome: string; jobId?: string }
   | { kind: "refreshed"; recoveryId: string; status: string }
   | { kind: "discarded"; reason: string }
   | { kind: "ignored"; reason: string };
@@ -141,7 +150,16 @@ export class CheckoutRecoveryService {
           return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
         }
 
-        const seed = this.toRecoverySeed(candidate, shopDomain, checkout);
+        const internationalContext = await this.resolveInternationalContext(
+          candidate,
+          checkout,
+        );
+        const seed = this.toRecoverySeed(
+          candidate,
+          shopDomain,
+          checkout,
+          internationalContext,
+        );
         await this.handleCheckoutCreated(seed);
 
     return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
@@ -178,6 +196,7 @@ export class CheckoutRecoveryService {
     candidate: PendingRecoveryCandidate,
     shopDomain: string,
     checkout: NormalizedAbandonedCheckout,
+    internationalContext: InternationalContext,
   ): RecoveryCheckoutSeed {
     return {
       shop: shopDomain,
@@ -188,6 +207,7 @@ export class CheckoutRecoveryService {
       totalPrice: checkout.totalPrice,
       checkoutUrl: checkout.abandonedCheckoutUrl,
       completedAt: checkout.completedAt,
+      internationalContext,
       customer: checkout.customer
         ? {
             shopifyCustomerId: checkout.customer.shopifyCustomerId,
@@ -204,6 +224,58 @@ export class CheckoutRecoveryService {
             lastName: null,
           },
       lineItems: this.serializeLineItems(checkout.lineItems),
+    };
+  }
+
+  private async resolveInternationalContext(
+    candidate: PendingRecoveryCandidate,
+    checkout: NormalizedAbandonedCheckout,
+  ): Promise<InternationalContext> {
+    const shop = await prisma.shop.findUnique({
+      where: { id: candidate.shopId },
+      select: {
+        settings: {
+          select: {
+            defaultLanguageTag: true,
+            defaultCountryCode: true,
+            defaultTimeZone: true,
+          },
+        },
+      },
+    });
+
+    const eventContext = candidate.internationalContext;
+    const currentContext = checkout.internationalContext ?? {
+      languageTag: null,
+      languageSource: null,
+      countryCode: null,
+      currencyCode: null,
+      timeZone: null,
+    };
+    const merchantContext = shop?.settings;
+    const languageTag =
+      eventContext?.languageTag ??
+      currentContext.languageTag ??
+      safelyNormalize(merchantContext?.defaultLanguageTag, canonicaliseLanguageTag);
+    const countryCode =
+      currentContext.countryCode ??
+      eventContext?.countryCode ??
+      safelyNormalize(merchantContext?.defaultCountryCode, normalizeCountryCode);
+    const timeZone =
+      currentContext.timeZone ??
+      eventContext?.timeZone ??
+      safelyNormalize(merchantContext?.defaultTimeZone, normalizeTimeZone);
+
+    return {
+      languageTag,
+      languageSource: languageTag
+        ? eventContext?.languageTag || currentContext.languageTag
+          ? "shopify"
+          : "merchant-default"
+        : null,
+      countryCode,
+      currencyCode: currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
+      timeZone,
     };
   }
 
@@ -249,6 +321,24 @@ export class CheckoutRecoveryService {
     });
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
+    }
+
+    const pending = await pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: shop.id,
+      checkoutToken: event.checkoutToken,
+      cartToken: null,
+      activityAt: event.activityAt,
+      isEmpty: null,
+      ...(event.internationalContext
+        ? { internationalContext: event.internationalContext }
+        : {}),
+    });
+    if (pending.outcome !== "not-found") {
+      return {
+        kind: "pending",
+        outcome: pending.outcome,
+        ...( "jobId" in pending ? { jobId: pending.jobId } : {}),
+      };
     }
 
     const recovery = await prisma.checkoutRecovery.findUnique({
@@ -340,6 +430,22 @@ export class CheckoutRecoveryService {
       kind: "refreshed",
       recoveryId: recovery.id,
       status: recovery.status,
+    } as const;
+  }
+
+  async handleCartActivityContract(event: CartActivityContractInput) {
+    const result = await pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: event.shopId,
+      checkoutToken: null,
+      cartToken: event.cartToken,
+      activityAt: event.activityAt,
+      isEmpty: event.isEmpty,
+    });
+
+    return {
+      kind: "pending",
+      outcome: result.outcome,
+      ...( "jobId" in result ? { jobId: result.jobId } : {}),
     } as const;
   }
 
@@ -635,9 +741,33 @@ export class CheckoutRecoveryService {
 
     // 4
     const conversation =
-      await conversationService.getOrCreateRecoveryConversation(recovery.id);
+      await conversationService.getOrCreateRecoveryConversation(
+        recovery.id,
+        event.internationalContext,
+      );
 
-    const content = conversationMessageService.buildRecoveryMessage(event);
+    const selection = await whatsappTemplateSelectorService.select({
+      shopId: recovery.shopId,
+      providerAccountId: whatsAppService.getProviderAccountId(),
+      purpose: "checkout-recovery",
+      languageTag: event.internationalContext?.languageTag ?? null,
+      countryCode: event.internationalContext?.countryCode ?? null,
+      resolveMarketCapability: async () => "unknown" as const,
+    });
+
+    if (
+      selection.outcome !== "selected" &&
+      selection.outcome !== "provider-check-required"
+    ) {
+      return recovery;
+    }
+
+    const content = conversationMessageService.buildRecoveryTemplateDescriptor({
+      purpose: "checkout-recovery",
+      templateName: selection.providerTemplateName,
+      canonicalLanguageTag: selection.canonicalLanguageTag,
+      providerLanguageCode: selection.providerLanguageCode,
+    });
 
     // 5a - persist intent to send
     const message =
@@ -648,9 +778,10 @@ export class CheckoutRecoveryService {
 
     try {
       // 5b
-      const result = await whatsAppService.sendWhatsAppText({
+      const result = await whatsAppService.sendWhatsAppTemplate({
         to: recipient,
-        text: content,
+        templateName: selection.providerTemplateName,
+        languageCode: selection.providerLanguageCode,
       });
 
       // 6
@@ -722,6 +853,8 @@ export class CheckoutRecoveryService {
               type: true,
               summary: true,
               inboundVersion: true,
+              languageTag: true,
+              languageSource: true,
 
               messages: {
                 orderBy: {
@@ -814,6 +947,12 @@ export class CheckoutRecoveryService {
         version:
           conversation.inboundVersion,
 
+        languageTag: conversation.languageTag,
+
+        languageSource: conversation.languageSource
+          ? conversation.languageSource.toLowerCase().replaceAll("_", "-") as NonNullable<RecoveryAgentContext["conversation"]["languageSource"]>
+          : null,
+
         messages,
       },
     };
@@ -822,5 +961,18 @@ export class CheckoutRecoveryService {
 
 export const checkoutRecoveryService =
   new CheckoutRecoveryService();
+
+function safelyNormalize(
+  value: string | null | undefined,
+  normalizer: (value: string) => string,
+): string | null {
+  if (!value?.trim()) return null;
+
+  try {
+    return normalizer(value);
+  } catch {
+    return null;
+  }
+}
 
 

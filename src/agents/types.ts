@@ -2,6 +2,7 @@ import type {
   CheckoutRecoveryStatus,
   ConversationType,
 } from "../domain/types.js";
+import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 export interface AgentMessage {
   role: "user" | "assistant";
@@ -14,6 +15,8 @@ export interface AgentConversationContext {
   type: ConversationType;
   summary: string | null;
   version: number;
+  languageTag: string | null;
+  languageSource: InternationalContext["languageSource"];
   messages: AgentMessage[];
 }
 
@@ -35,4 +38,10 @@ export interface RecoveryAgentContext {
   } | null;
 
   conversation: AgentConversationContext;
+}
+
+export interface CommerceAgentResult {
+  replyText: string;
+  detectedLanguageTag: string | null;
+  detectedLanguageConfidence: number | null;
 }

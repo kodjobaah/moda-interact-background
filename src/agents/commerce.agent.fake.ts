@@ -8,6 +8,7 @@ import { groq } from "../providers/groq.provider.js";
 import { createSearchProductsTool } from "../tools/search-product.js";
 
 import type {
+  CommerceAgentResult,
   RecoveryAgentContext,
 } from "./types.js";
 
@@ -45,9 +46,10 @@ export async function runCommerceAgent(
 
   console.log("Commerce agent result:", result);
   return {
-    text: result.text,
-    steps: result.steps,
-  };
+    replyText: result.text,
+    detectedLanguageTag: null,
+    detectedLanguageConfidence: null,
+  } satisfies CommerceAgentResult;
 }
 
 function buildSystemPrompt(
@@ -68,6 +70,7 @@ Checkout total: ${recovery.totalPrice ?? "unknown"}
 Completed at: ${recovery.completedAt ?? "not completed"}
 
 Conversation type: ${conversation.type}
+Resolved customer language: ${conversation.languageTag ?? "unknown"}
 Conversation summary: ${conversation.summary ?? "none"}
 
 Customer first name: ${customer?.firstName ?? "unknown"}
@@ -78,5 +81,6 @@ Rules:
 - Use Shopify tools for product, price and availability information.
 - Never invent product information.
 - Keep responses concise and suitable for WhatsApp.
+- Respond in the resolved customer language when one is present.
 `.trim();
 }
