@@ -8,6 +8,7 @@ export const WORKER_DEPENDENCIES = {
   "moda-shopify-event-worker": ["redis", "postgresql"],
   "moda-recovery-worker": ["redis", "postgresql"],
   "moda-messaging-worker": ["redis", "postgresql"],
+  "moda-merchant-communications-worker": ["redis", "postgresql"],
 } as const;
 
 export type WorkerServiceName = keyof typeof WORKER_DEPENDENCIES;

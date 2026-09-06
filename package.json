@@ -14,9 +14,11 @@
     "start:shopify-event-worker": "node --import ./observability/shopify-event.mjs dist/entrypoints/shopify-event.js",
     "start:recovery-worker": "node --import ./observability/recovery.mjs dist/entrypoints/recovery.js",
     "start:messaging-worker": "node --import ./observability/messaging.mjs dist/entrypoints/messaging.js",
+    "start:merchant-communications-worker": "node --import ./observability/merchant-communications.mjs dist/entrypoints/merchant-communications.js",
     "readiness:shopify-event-worker": "node dist/readiness.js moda-shopify-event-worker",
     "readiness:recovery-worker": "node dist/readiness.js moda-recovery-worker",
     "readiness:messaging-worker": "node dist/readiness.js moda-messaging-worker",
+    "readiness:merchant-communications-worker": "node dist/readiness.js moda-merchant-communications-worker",
     "prisma:validate": "prisma validate --schema database/prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema database/prisma/schema.prisma"
   },

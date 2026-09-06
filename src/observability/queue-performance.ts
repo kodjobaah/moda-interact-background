@@ -12,7 +12,8 @@ export type QueueName =
   | "checkout-events"
   | "order-events"
   | "pending-recovery-candidates"
-  | "whatsapp-events";
+  | "whatsapp-events"
+  | "merchant-communications";
 
 type QueueSnapshot = {
   active: number;
