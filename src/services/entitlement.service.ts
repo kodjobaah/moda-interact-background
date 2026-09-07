@@ -1,9 +1,18 @@
 import type { EntitlementFeature, UsageMetric } from "../domain/types.js";
-import prisma from "../lib/db.js";
+import {
+  EffectiveBillingPolicyError,
+  effectiveBillingPolicyResolver,
+} from "./effective-billing-policy.service.js";
 
-type EntitlementMap = Partial<Record<EntitlementFeature, boolean>>;
-
-type LimitMap = Partial<Record<UsageMetric, number | null>>;
+const featureMap: Record<
+  EntitlementFeature,
+  "CHECKOUT_RECOVERY" | "ORDER_SUPPORT" | "PRODUCT_SEARCH" | "AI_CONVERSATIONS"
+> = {
+  checkout_recovery: "CHECKOUT_RECOVERY",
+  order_support: "ORDER_SUPPORT",
+  product_search: "PRODUCT_SEARCH",
+  ai_conversations: "AI_CONVERSATIONS",
+};
 
 export class EntitlementError extends Error {
   constructor(
@@ -19,37 +28,31 @@ export class EntitlementError extends Error {
 }
 
 class EntitlementService {
-  async hasFeature(
-    shopId: string,
-    feature: EntitlementFeature,
-  ): Promise<boolean> {
-    const subscription = await this.getActiveSubscription(shopId);
-
-    if (!subscription?.plan) {
-      return false;
+  async hasFeature(shopId: string, feature: EntitlementFeature): Promise<boolean> {
+    try {
+      const policy = await effectiveBillingPolicyResolver.resolve(shopId);
+      return policy.features[featureMap[feature]] === true;
+    } catch (error) {
+      if (error instanceof EffectiveBillingPolicyError) return false;
+      throw error;
     }
-
-    const entitlements = subscription.plan.entitlements as EntitlementMap;
-
-    return entitlements[feature] === true;
   }
 
-  async assertFeature(
-    shopId: string,
-    feature: EntitlementFeature,
-  ): Promise<void> {
-    const subscription = await this.getActiveSubscription(shopId);
-
-    if (!subscription?.plan) {
-      throw new EntitlementError(
-        "NO_ACTIVE_SUBSCRIPTION",
-        `Shop ${shopId} does not have an active subscription`,
-      );
+  async assertFeature(shopId: string, feature: EntitlementFeature): Promise<void> {
+    let policy;
+    try {
+      policy = await effectiveBillingPolicyResolver.resolve(shopId);
+    } catch (error) {
+      if (error instanceof EffectiveBillingPolicyError) {
+        throw new EntitlementError(
+          "NO_ACTIVE_SUBSCRIPTION",
+          `Shop ${shopId} does not have an active subscription`,
+        );
+      }
+      throw error;
     }
 
-    const entitlements = subscription.plan.entitlements as EntitlementMap;
-
-    if (entitlements[feature] !== true) {
+    if (!policy.features[featureMap[feature]]) {
       throw new EntitlementError(
         "FEATURE_NOT_AVAILABLE",
         `Feature '${feature}' is not available for shop ${shopId}`,
@@ -58,18 +61,10 @@ class EntitlementService {
   }
 
   async getLimit(shopId: string, metric: UsageMetric): Promise<number | null> {
-    const subscription = await this.getActiveSubscription(shopId);
-
-    if (!subscription?.plan) {
-      throw new EntitlementError(
-        "NO_ACTIVE_SUBSCRIPTION",
-        `Shop ${shopId} does not have an active subscription`,
-      );
-    }
-
-    const limits = subscription.plan.limits as LimitMap;
-
-    return limits[metric] ?? null;
+    const policy = await effectiveBillingPolicyResolver.resolve(shopId);
+    return metric === "monthly_conversations" && policy.freeAllowance
+      ? policy.freeAllowance.effective
+      : null;
   }
 
   async assertUsageAvailable(
@@ -77,84 +72,16 @@ class EntitlementService {
     metric: UsageMetric,
     quantity = 1,
   ): Promise<void> {
-    const subscription = await this.getActiveSubscription(shopId);
+    const policy = await effectiveBillingPolicyResolver.resolve(shopId);
+    if (metric !== "monthly_conversations" || !policy.freeAllowance) return;
 
-    if (!subscription?.plan) {
-      throw new EntitlementError(
-        "NO_ACTIVE_SUBSCRIPTION",
-        `Shop ${shopId} does not have an active subscription`,
-      );
-    }
-
-    const limits = subscription.plan.limits as LimitMap;
-
-    const limit = limits[metric];
-
-    // null = unlimited
-    if (limit == null) {
-      return;
-    }
-
-    const periodStart =
-      subscription.currentPeriodStart ?? startOfCurrentMonth();
-
-    const periodEnd = subscription.currentPeriodEnd ?? startOfNextMonth();
-
-    const usage = await prisma.usageEvent.aggregate({
-      where: {
-        shopId,
-        metric,
-        occurredAt: {
-          gte: periodStart,
-          lt: periodEnd,
-        },
-      },
-      _sum: {
-        quantity: true,
-      },
-    });
-
-    const consumed = Number(usage._sum.quantity ?? 0);
-
-    if (consumed + quantity > limit) {
+    if (policy.freeAllowance.remaining < quantity) {
       throw new EntitlementError(
         "USAGE_LIMIT_EXCEEDED",
         `Usage limit '${metric}' has been exceeded for shop ${shopId}`,
       );
     }
   }
-
-  private async getActiveSubscription(shopId: string) {
-    return prisma.subscription.findFirst({
-      where: {
-        shopId,
-        status: {
-          in: ["ACTIVE", "TRIALING"],
-        },
-        plan: {
-          active: true,
-        },
-      },
-      include: {
-        plan: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-  }
-}
-
-function startOfCurrentMonth(): Date {
-  const now = new Date();
-
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-}
-
-function startOfNextMonth(): Date {
-  const now = new Date();
-
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
 }
 
 export const entitlementService = new EntitlementService();

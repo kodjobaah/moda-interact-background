@@ -29,7 +29,7 @@
     "@ai-sdk/groq": "^4.0.30",
     "@ai-sdk/openai": "^4.0.46",
     "@langchain/langgraph": "^1.4.12",
-    "@modainteract/moda-interact-shared": "0.7.2",
+    "@modainteract/moda-interact-shared": "0.7.3",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",
     "ai": "^7.0.77",
