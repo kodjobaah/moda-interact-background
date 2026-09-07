@@ -246,7 +246,7 @@ export class TranslationReconciliationService {
           "inputFileId" = COALESCE("inputFileId", ${correlation.batch.inputFileId}),
           "outputFileId" = ${correlation.batch.outputFileId},
           "errorFileId" = ${correlation.batch.errorFileId},
-          "status" = ${completed ? "PROVIDER_COMPLETED" : "SUBMITTED"},
+          "status" = CAST(${completed ? "PROVIDER_COMPLETED" : "SUBMITTED"} AS "support"."MerchantTranslationBatchStatus"),
           "nextPollAt" = CASE WHEN ${completed} THEN "nextPollAt" ELSE NOW() END,
           "updatedAt" = NOW()
       WHERE "id" = ${batch.id} AND "status" = 'SUBMISSION_UNKNOWN'

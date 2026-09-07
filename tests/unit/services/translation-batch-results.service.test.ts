@@ -17,6 +17,10 @@ const batch = {
   providerBatchId: "provider-batch-1",
 };
 
+function sqlText(query: { strings: readonly string[] }): string {
+  return query.strings.join("");
+}
+
 function createDatabase(options: {
   kind?: "ADMINISTRATIVE" | "SYSTEM" | "MERCHANT";
   translationStatus?: "PENDING" | "AVAILABLE" | "FAILED";
@@ -157,6 +161,9 @@ describe("TranslationBatchResultsService", () => {
       applied: 1,
     });
     expect(database.execute).toHaveBeenCalledTimes(2);
+    const update = database.execute.mock.calls[0]?.[0];
+    expect(sqlText(update)).toContain('AS "support"."MerchantMessageTranslationStatus"');
+    expect(update.values).toContain("PENDING");
   });
 
   it("marks exhausted non-retryable admin translation failures terminally", async () => {

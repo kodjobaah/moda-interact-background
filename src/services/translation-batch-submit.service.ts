@@ -309,7 +309,7 @@ export class TranslationBatchSubmitService {
       await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
-          "status" = ${nextStatus},
+          "status" = CAST(${nextStatus} AS "support"."MerchantTranslationBatchStatus"),
           "nextSubmitAt" = ${nextSubmitAt},
           "failureCode" = ${failureCode(error)},
           "updatedAt" = NOW()

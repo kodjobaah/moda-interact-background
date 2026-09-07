@@ -67,6 +67,10 @@ const request = {
   sourceText: "Authoritative source",
 };
 
+function sqlText(query: { strings: readonly string[] }): string {
+  return query.strings.join("");
+}
+
 describe("TranslationBatchSubmitService", () => {
   it("lets only one concurrent delivery cross provider create", async () => {
     let claimed = true;
@@ -163,6 +167,10 @@ describe("TranslationBatchSubmitService", () => {
     });
     expect(provider.createBatch).not.toHaveBeenCalled();
     expect(database.execute).toHaveBeenCalledTimes(1);
+    const update = database.execute.mock.calls[0]?.[0];
+    expect(sqlText(update)).toContain('CAST(');
+    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(update.values).toContain("READY");
   });
 
   it("preserves an explicit terminal preparation failure", async () => {
@@ -186,6 +194,9 @@ describe("TranslationBatchSubmitService", () => {
       batchId: "batch-1",
     });
     expect(database.execute).toHaveBeenCalledTimes(1);
+    const update = database.execute.mock.calls[0]?.[0];
+    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(update.values).toContain("FAILED");
   });
 
   it("records ambiguous create as SUBMISSION_UNKNOWN and never retries create", async () => {
@@ -204,6 +215,9 @@ describe("TranslationBatchSubmitService", () => {
     await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
     expect(provider.createBatch).toHaveBeenCalledTimes(1);
     expect(database.execute).toHaveBeenCalledTimes(2);
+    const update = database.execute.mock.calls[1]?.[0];
+    expect(sqlText(update)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(update.values).toContain("SUBMISSION_UNKNOWN");
   });
 
   it("keeps an ambiguous create unknown even after the attempt limit", async () => {

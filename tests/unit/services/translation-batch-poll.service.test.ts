@@ -53,6 +53,10 @@ const batch: Batch = {
   pollSequence: 4,
 };
 
+function sqlText(query: { strings: readonly string[] }): string {
+  return query.strings.join("");
+}
+
 describe("TranslationBatchPollService", () => {
   it("ignores stale or terminal poll jobs without provider work", async () => {
     const database = createDatabase({ ...batch, pollSequence: 5 });
@@ -150,6 +154,12 @@ describe("TranslationBatchPollService", () => {
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
       .resolves.toEqual({ status: "terminal", batchId: "batch-1", providerStatus: "failed" });
     expect(execute).toHaveBeenCalledTimes(2);
+    const batchUpdate = execute.mock.calls[0]?.[0];
+    const translationUpdate = execute.mock.calls[1]?.[0];
+    expect(sqlText(batchUpdate)).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(batchUpdate.values).toContain("FAILED");
+    expect(sqlText(translationUpdate)).toContain('AS "support"."MerchantMessageTranslationStatus"');
+    expect(translationUpdate.values).toContain("FAILED");
   });
 
   it("does not mutate translations when a duplicate terminal poll loses the CAS", async () => {

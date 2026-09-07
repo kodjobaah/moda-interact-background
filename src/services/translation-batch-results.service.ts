@@ -213,7 +213,7 @@ export class TranslationBatchResultsService {
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantMessageTranslation"
         SET
-          "status" = ${retry ? "PENDING" : "FAILED"},
+          "status" = CAST(${retry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
           "currentBatchId" = NULL,
           "retryCount" = "retryCount" + ${retry ? 1 : 0},
           "nextAttemptAt" = ${retry ? new Date(Date.now() + retryMinutes() * 60_000) : null},

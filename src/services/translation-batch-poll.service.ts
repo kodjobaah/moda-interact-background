@@ -215,7 +215,7 @@ export class TranslationBatchPollService {
       const claimed = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
-          "status" = ${providerStatus.toUpperCase()},
+          "status" = CAST(${providerStatus.toUpperCase()} AS "support"."MerchantTranslationBatchStatus"),
           "lastPolledAt" = NOW(),
           "nextPollAt" = NULL,
           "failureCode" = ${failureCode ?? providerStatus},
@@ -239,7 +239,7 @@ export class TranslationBatchPollService {
         const affected = await transaction.$executeRaw(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
           SET
-            "status" = ${shouldRetry ? "PENDING" : "FAILED"},
+            "status" = CAST(${shouldRetry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
             "currentBatchId" = NULL,
             "retryCount" = "retryCount" + ${shouldRetry ? 1 : 0},
             "nextAttemptAt" = ${shouldRetry ? new Date(Date.now() + configuredPollMinutes() * 60_000) : null},

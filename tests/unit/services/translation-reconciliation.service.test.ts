@@ -120,6 +120,9 @@ describe("TranslationReconciliationService", () => {
       inputFileId: "input-1",
     }));
     expect(database.$executeRaw).toHaveBeenCalledOnce();
+    const update = database.$executeRaw.mock.calls[0]?.[0];
+    expect(update.sql).toContain('AS "support"."MerchantTranslationBatchStatus"');
+    expect(update.values).toContain("PROVIDER_COMPLETED");
     expect(queue.add).toHaveBeenCalledWith(
       "translation-batch-results",
       expect.objectContaining({ translationBatchId: "batch-1" }),
