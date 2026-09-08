@@ -40,6 +40,16 @@ const entrypoints = [
       "pending-recovery-candidate.worker.js",
     ],
   },
+  {
+    file: "src/entrypoints/billing.ts",
+    script: "start:billing-worker",
+    command: "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
+    readinessScript: "readiness:billing-worker",
+    readinessCommand: "node dist/readiness.js moda-billing-worker",
+    serviceName: "moda-billing-worker",
+    ownedWorkers: [],
+    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "pending-recovery-candidate.worker.js", "whatsapp.worker.js"],
+  },
 ] as const;
 
 describe("production worker entrypoints", () => {

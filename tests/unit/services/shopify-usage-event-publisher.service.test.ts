@@ -16,7 +16,7 @@ function usageRow(overrides: Record<string, unknown> = {}) {
     reportAttemptCount: 0,
     nextReportAt: null,
     lastReportAttemptAt: null,
-    shop: { shopifyShopId: "gid://shopify/Shop/1" },
+    shop: { shopifyShopId: "gid://shopify/Shop/1", status: "ACTIVE", uninstalledAt: null },
     ...overrides,
   };
 }
@@ -102,6 +102,24 @@ describe("ShopifyUsageEventPublisherService", () => {
 
   it("fails closed before the provider when reportable mapping is incomplete", async () => {
     const test = harness([usageRow({ shop: { shopifyShopId: null } })]);
+
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      claimed: 1,
+      needsAttention: 1,
+    });
+    expect(test.provider.createBillingEvent).not.toHaveBeenCalled();
+    expect(test.states.get("usage-1")).toBe("NEEDS_ATTENTION");
+  });
+
+  it("does not publish usage created after the uninstall cutoff", async () => {
+    const test = harness([usageRow({
+      occurredAt: new Date("2026-09-08T10:00:00.000Z"),
+      shop: {
+        shopifyShopId: "gid://shopify/Shop/1",
+        status: "UNINSTALLED",
+        uninstalledAt: new Date("2026-09-08T09:00:00.000Z"),
+      },
+    })]);
 
     await expect(test.service.publishDue()).resolves.toMatchObject({
       claimed: 1,

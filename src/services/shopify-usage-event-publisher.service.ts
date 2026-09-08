@@ -37,7 +37,7 @@ type UsageEventRecord = {
   reportAttemptCount: number;
   nextReportAt: Date | null;
   lastReportAttemptAt: Date | null;
-  shop: { shopifyShopId: string | null };
+  shop: { shopifyShopId: string | null; status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED"; uninstalledAt: Date | null };
 };
 
 type PublisherDatabase = Pick<PrismaClient, "$transaction" | "usageEvent">;
@@ -97,7 +97,7 @@ export class ShopifyUsageEventPublisherService {
         reportAttemptCount: true,
         nextReportAt: true,
         lastReportAttemptAt: true,
-        shop: { select: { shopifyShopId: true } },
+        shop: { select: { shopifyShopId: true, status: true, uninstalledAt: true } },
       },
     });
 
@@ -267,6 +267,9 @@ function boundedPageSize(value: number): number {
 }
 
 function validateReportableUsage(row: UsageEventRecord): string | null {
+  if (row.shop.status !== "ACTIVE" && (!row.shop.uninstalledAt || row.occurredAt > row.shop.uninstalledAt)) {
+    return "Usage event is after the shop uninstall cutoff";
+  }
   if (!row.shop.shopifyShopId?.trim()) return "Shop has no Shopify shop GID";
   if (!row.shopifyEventHandle?.trim()) return "Usage event handle is missing";
   if (!row.shopifyIdempotencyKey?.trim()) return "Shopify idempotency key is missing";
