@@ -11,6 +11,7 @@ import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
 import prisma from "../lib/db.js";
 
 type Database = typeof prisma;
+const MAX_TRANSACTION_RETRIES = 3;
 
 const STATUS_RANK: Record<MessageStatus, number> = {
   PENDING: 0,
@@ -32,6 +33,7 @@ export class WhatsAppProviderStatusService {
   constructor(
     private readonly database: Database = prisma,
     private readonly serviceLogger: StructuredLogger = logger,
+    private readonly maxRetries = MAX_TRANSACTION_RETRIES,
   ) {}
 
   async process(input: unknown): Promise<ProviderStatusOutcome> {
@@ -51,11 +53,12 @@ export class WhatsAppProviderStatusService {
   ): Promise<ProviderStatusOutcome> {
     const occurredAt = new Date(event.occurredAt);
 
-    return this.database.$transaction(async (transaction) => {
+    return this.withRetry(() => this.database.$transaction(async (transaction) => {
       const message = await transaction.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
         select: {
           id: true,
+          direction: true,
           status: true,
           sentAt: true,
           deliveredAt: true,
@@ -76,6 +79,14 @@ export class WhatsAppProviderStatusService {
         return "unknown-message";
       }
 
+      if (message.direction !== "OUTBOUND") {
+        this.serviceLogger.warn("whatsapp.provider_status.non_outbound_message", {
+          providerMessageId: event.providerMessageId,
+          messageId: message.id,
+        });
+        return "ignored";
+      }
+
       const shopId =
         message.conversation.shopId ??
         message.conversation.checkoutRecovery?.shopId;
@@ -94,11 +105,22 @@ export class WhatsAppProviderStatusService {
         shouldRecordDelivered &&
         STATUS_RANK[message.status] < STATUS_RANK.DELIVERED;
 
-      if (nextStatus !== message.status || event.status === "READ") {
-        await transaction.conversationMessage.update({
-          where: { id: message.id },
-          data: lifecycleUpdate(message, nextStatus, occurredAt, event.status),
+      const lifecycleData = lifecycleUpdate(
+        message,
+        nextStatus,
+        occurredAt,
+        event.status,
+      );
+      if (Object.keys(lifecycleData).length > 0) {
+        const updated = await transaction.conversationMessage.updateMany({
+          where: {
+            id: message.id,
+            direction: "OUTBOUND",
+            status: message.status,
+          },
+          data: lifecycleData,
         });
+        if (updated.count !== 1) throw new ProviderStatusConcurrencyConflict();
       }
 
       if (becameDelivered) {
@@ -130,9 +152,24 @@ export class WhatsAppProviderStatusService {
       return nextStatus === message.status && !becameDelivered
         ? "ignored"
         : "applied";
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+  }
+
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!isRetryableConflict(error) || attempt === this.maxRetries - 1) {
+          throw error;
+        }
+      }
+    }
+    throw new Error("Provider status retry limit exceeded");
   }
 }
+
+class ProviderStatusConcurrencyConflict extends Error {}
 
 function statusForEvent(
   eventStatus: NormalizedWhatsAppStatus["status"],
@@ -191,6 +228,11 @@ function providerSummary(event: NormalizedWhatsAppStatus): string {
     status: event.status,
     ...(event.pricing ? { pricing: event.pricing } : {}),
   }).slice(0, 2000);
+}
+
+function isRetryableConflict(error: unknown): boolean {
+  return error instanceof ProviderStatusConcurrencyConflict ||
+    (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034");
 }
 
 export const whatsappProviderStatusService =

@@ -14,6 +14,7 @@ const baseEvent = {
 function harness(status = "SENT") {
   const message = {
     id: "message-1",
+    direction: "OUTBOUND",
     status,
     sentAt: new Date("2026-09-08T14:59:00.000Z"),
     deliveredAt: null as Date | null,
@@ -27,12 +28,22 @@ function harness(status = "SENT") {
   const transaction = {
     conversationMessage: {
       findUnique: vi.fn().mockResolvedValue(message),
-      update: vi
+      updateMany: vi
         .fn()
         .mockImplementation(
-          async ({ data }: { data: Record<string, unknown> }) => {
+          async ({ where, data }: {
+            where: { id: string; direction: string; status: string };
+            data: Record<string, unknown>;
+          }) => {
+            if (
+              where.id !== message.id ||
+              where.direction !== message.direction ||
+              where.status !== message.status
+            ) {
+              return { count: 0 };
+            }
             Object.assign(message, data);
-            return message;
+            return { count: 1 };
           },
         ),
     },
@@ -144,7 +155,7 @@ describe("WhatsAppProviderStatusService", () => {
       "unknown-message",
     );
 
-    expect(test.transaction.conversationMessage.update).not.toHaveBeenCalled();
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
     expect(test.transaction.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
@@ -165,4 +176,87 @@ describe("WhatsAppProviderStatusService", () => {
       }),
     );
   });
+
+  it("ignores an inbound message with a matching provider id", async () => {
+    const test = harness();
+    test.message.direction = "INBOUND";
+
+    await expect(test.service.process(baseEvent)).resolves.toBe("ignored");
+
+    expect(test.message.status).toBe("SENT");
+    expect(test.usageEvents).toHaveLength(0);
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("derives accounting from the durable message shop, not provider identities", async () => {
+    const test = harness();
+    test.message.conversation = {
+      shopId: "durable-shop",
+      checkoutRecovery: null,
+    };
+
+    await test.service.process({
+      ...baseEvent,
+      providerAccountId: "other-shop-account",
+      providerPhoneNumberId: "other-shop-phone",
+    });
+
+    expect(test.usageEvents[0]).toMatchObject({ shopId: "durable-shop" });
+  });
+
+  it("retries a CAS loser so concurrent READ and DELIVERED remain monotonic", async () => {
+    const test = harness();
+    let updateAttempts = 0;
+    const originalUpdateMany = test.transaction.conversationMessage.updateMany;
+    test.transaction.conversationMessage.updateMany = vi.fn().mockImplementation(
+      async (args) => {
+        updateAttempts += 1;
+        if (updateAttempts === 1) {
+          Object.assign(test.message, lifecycleDataFor("DELIVERED"));
+          test.usageEvents.push({ idempotencyKey: "whatsapp-delivered:message-1" });
+        }
+        return originalUpdateMany(args);
+      },
+    );
+
+    await Promise.all([
+      test.service.process({ ...baseEvent, status: "READ" }),
+      test.service.process(baseEvent),
+    ]);
+
+    expect(test.message.status).toBe("READ");
+    expect(test.usageEvents).toHaveLength(1);
+    expect(updateAttempts).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not let a concurrent FAILED status regress delivery", async () => {
+    const test = harness();
+    let updateAttempts = 0;
+    const originalUpdateMany = test.transaction.conversationMessage.updateMany;
+    test.transaction.conversationMessage.updateMany = vi.fn().mockImplementation(
+      async (args) => {
+        updateAttempts += 1;
+        if (updateAttempts === 1) {
+          Object.assign(test.message, lifecycleDataFor("DELIVERED"));
+          test.usageEvents.push({ idempotencyKey: "whatsapp-delivered:message-1" });
+        }
+        return originalUpdateMany(args);
+      },
+    );
+
+    await Promise.all([
+      test.service.process(baseEvent),
+      test.service.process({ ...baseEvent, status: "FAILED" }),
+    ]);
+
+    expect(test.message.status).toBe("DELIVERED");
+    expect(test.usageEvents).toHaveLength(1);
+  });
 });
+
+function lifecycleDataFor(status: "DELIVERED"): Record<string, unknown> {
+  return {
+    status,
+    deliveredAt: new Date(baseEvent.occurredAt),
+  };
+}
