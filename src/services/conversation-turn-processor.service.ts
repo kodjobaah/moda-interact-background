@@ -7,6 +7,10 @@ import {
   runCommerceAgentAfterAdmission,
   type OutboundAdmissionResult,
 } from "./outbound-whatsapp-admission.service.js";
+import type {
+  InboundAbuseAdmission,
+  InboundAbuseConversationType,
+} from "./inbound-whatsapp-abuse-admission.service.js";
 
 export const QUIET_WINDOW_MS = 3_000;
 export const MAX_SETTLE_WINDOW_MS = 10_000;
@@ -40,6 +44,10 @@ type Admitted = Extract<OutboundAdmissionResult, { kind: "admitted" }>;
 export type LoadedConversationTurn<TContext> = {
   shopId: string;
   to: string;
+  customerPhone: string;
+  conversationType: InboundAbuseConversationType;
+  checkoutRecoveryId: string | null;
+  hasReplyContext: boolean;
   context: TContext | null;
   languageMessage: string;
   clarificationText?: string;
@@ -69,6 +77,17 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       input: Admitted & { to: string; text: string },
     ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
+  };
+  abuseAdmission: {
+    admitSettledTurn: (input: {
+      conversationId: string;
+      observedVersion: number;
+      shopId: string;
+      customerPhone: string;
+      conversationType: InboundAbuseConversationType;
+      hasReplyContext: boolean;
+      checkoutRecoveryId: string | null;
+    }) => Promise<InboundAbuseAdmission>;
   };
   loadTurn: (
     conversationId: string,
@@ -153,6 +172,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         state.pendingTurnStartedAt as Date,
       );
+
+      const abuse = await this.dependencies.abuseAdmission.admitSettledTurn({
+        conversationId,
+        observedVersion,
+        shopId: loaded.shopId,
+        customerPhone: loaded.customerPhone,
+        conversationType: loaded.conversationType,
+        hasReplyContext: loaded.hasReplyContext,
+        checkoutRecoveryId: loaded.checkoutRecoveryId,
+      });
+      if (abuse.kind !== "allowed") {
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
 
       if (loaded.handledWithoutAgent) {
         await this.dependencies.conversation.completeTurn(
@@ -292,6 +325,32 @@ export class ConversationTurnProcessor<TContext, TResult> {
         removeOnComplete: true,
       },
     );
+  }
+
+  private async finishSuppressedTurn(
+    conversationId: string,
+    observedVersion: number,
+  ): Promise<void> {
+    const completed = await this.dependencies.conversation.completeTurn(
+      conversationId,
+      observedVersion,
+    );
+    if (completed) return;
+
+    await this.dependencies.conversation.releaseTurn(
+      conversationId,
+      observedVersion,
+    );
+    const latest = await this.dependencies.conversation.getTurnState(
+      conversationId,
+    );
+    if (
+      latest.inboundVersion > observedVersion &&
+      latest.lastProcessedVersion < latest.inboundVersion &&
+      latest.pendingTurnStartedAt !== null
+    ) {
+      await this.enqueue(conversationId, latest.inboundVersion);
+    }
   }
 }
 
