@@ -10,8 +10,11 @@ import type { RecoveryAgentContext } from "../agents/types.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
+import {
+  outboundWhatsAppAdmissionService,
+  runCommerceAgentAfterAdmission,
+} from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
-import { whatsAppService } from "../services/whatsapp.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-messaging-worker",
@@ -71,16 +74,46 @@ async function processInboundMessage(
       event,
     );
 
-  if (route.kind === "product-only") {
+  if (route.kind === "product-only" || route.kind === "standalone") {
+    if (!route.shopId || !route.conversationId) return;
+
+    const received = await conversationService.receiveMessage({
+      conversationId: route.conversationId,
+      providerMessageId: event.providerMessageId,
+      inReplyToProviderId: event.contextMessageId,
+      content: event.text ?? "",
+    });
+
+    if (received.duplicate) return;
+
+    const admission = await outboundWhatsAppAdmissionService.reserve({
+      shopId: route.shopId,
+      conversationId: route.conversationId,
+      idempotencyKey: `agent:${event.providerMessageId}`,
+      senderType: "AGENT",
+    });
+    if (admission.kind !== "admitted") return;
+
     const context = buildProductOnlyContext(
       route,
       event,
+      route.conversationId,
     );
 
-    const result =
-      await runCommerceAgent(context);
+    const result = await runCommerceAgentAfterAdmission({
+      admission,
+      to: event.customerPhone,
+      context,
+      runAgent: runCommerceAgent,
+      sendPreparedText: (input) =>
+        outboundWhatsAppAdmissionService.sendPreparedText(input),
+      failPrepared: (messageId) =>
+        outboundWhatsAppAdmissionService.failPrepared(messageId),
+    });
+    if (result === null) return;
 
-    await whatsAppService.sendWhatsAppText({
+    await outboundWhatsAppAdmissionService.sendPreparedText({
+      ...admission,
       to: event.customerPhone,
       text: result.replyText,
     });
@@ -89,13 +122,26 @@ async function processInboundMessage(
   }
 
   if (route.kind === "clarify") {
+    const received = await conversationService.receiveMessage({
+      conversationId: route.conversationId,
+      providerMessageId: event.providerMessageId,
+      inReplyToProviderId: event.contextMessageId,
+      content: event.text ?? "",
+    });
+
+    if (received.duplicate) return;
+
     const options = route.recoveries
       .map((recovery) =>
         `- ${recovery.checkoutToken}${recovery.totalPrice ? ` (${recovery.totalPrice})` : ""}`,
       )
       .join("\n");
 
-    await whatsAppService.sendWhatsAppText({
+    await outboundWhatsAppAdmissionService.sendText({
+      shopId: route.shopId,
+      conversationId: route.conversationId,
+      idempotencyKey: `clarify:${event.providerMessageId}`,
+      senderType: "AUTOMATION",
       to: event.customerPhone,
       text:
         "I found more than one active abandoned basket for your account. Please tell me which one you mean by replying with the basket reference below:\n\n" +
@@ -104,6 +150,8 @@ async function processInboundMessage(
 
     return;
   }
+
+  if (route.kind === "unresolved") return;
 
   const received =
     await conversationService.receiveMessage({
@@ -138,8 +186,37 @@ async function processInboundMessage(
         route.conversationId,
     });
 
-  const result =
-    await runCommerceAgent(context);
+  const admission = await outboundWhatsAppAdmissionService.reserve({
+    shopId: route.shopId,
+    conversationId: route.conversationId,
+    idempotencyKey: `agent:${route.conversationId}:${received.version}`,
+    senderType: "AGENT",
+  });
+  if (admission.kind !== "admitted") {
+    await conversationService.markProcessed(
+      route.conversationId,
+      received.version,
+    );
+    return;
+  }
+
+  const result = await runCommerceAgentAfterAdmission({
+    admission,
+    to: event.customerPhone,
+    context,
+    runAgent: runCommerceAgent,
+    sendPreparedText: (input) =>
+      outboundWhatsAppAdmissionService.sendPreparedText(input),
+    failPrepared: (messageId) =>
+      outboundWhatsAppAdmissionService.failPrepared(messageId),
+  });
+  if (result === null) {
+    await conversationService.markProcessed(
+      route.conversationId,
+      received.version,
+    );
+    return;
+  }
 
   await conversationService.applyDetectedLanguage({
     conversationId: route.conversationId,
@@ -167,25 +244,15 @@ async function processInboundMessage(
       },
     );
 
+    await outboundWhatsAppAdmissionService.failPrepared(admission.messageId);
     return;
   }
 
-  const outboundMessage =
-    await conversationService.createPendingAgentMessage(
-      route.conversationId,
-      result.replyText,
-    );
-
-  const sent =
-    await whatsAppService.sendWhatsAppText({
+  await outboundWhatsAppAdmissionService.sendPreparedText({
+    ...admission,
       to: event.customerPhone,
       text: result.replyText,
-    });
-
-  await conversationService.markMessageSent(
-    outboundMessage.id,
-    sent.providerMessageId,
-  );
+  });
 
   await conversationService.markProcessed(
     route.conversationId,
@@ -195,12 +262,14 @@ async function processInboundMessage(
 
 function buildProductOnlyContext(
   route: {
-    kind: "product-only";
+    kind: "product-only" | "standalone";
     customerPhone: string;
     shop?: string;
     customerId?: string;
+    type: "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
   },
   event: WhatsAppInboundEvent,
+  conversationId: string,
 ): RecoveryAgentContext {
   return {
     shop: route.shop ?? "unknown-shop",
@@ -219,9 +288,9 @@ function buildProductOnlyContext(
         }
       : null,
     conversation: {
-      conversationId: `product-only-${event.providerMessageId}`,
+      conversationId,
       shop: route.shop ?? "unknown-shop",
-      type: "PRODUCT_DISCOVERY",
+      type: route.type,
       summary: null,
       version: 0,
       languageTag: null,

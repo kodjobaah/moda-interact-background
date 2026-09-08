@@ -1,0 +1,1049 @@
+===== TASK RECORD =====
+---
+id: ARCH-007-BACKGROUND-002
+architecture_id: ARCH-007
+title: Implement concurrency-safe Free recovery reservation, commit and release
+task_kind: implementation
+domain: background
+repository: moda-interact-background
+assigned_agent: moda_background
+coordinator: moda_architect
+status: review
+priority: 70
+executor: copilot
+claimed_at: 2026-09-07T22:34:15+01:00
+attempt: 1
+depends_on: 
+  - ARCH-007-BACKGROUND-001
+enables: 
+  - ARCH-007-BACKGROUND-003
+created: 2026-09-07
+updated: 2026-09-07T22:40:09+00:00
+---
+
+# ARCH-007-BACKGROUND-002: Implement concurrency-safe Free recovery reservation, commit and release
+
+## Architecture
+
+Canonical: `docs/architecture/ARCH-007-shopify-billing-usage-cost-control.md`
+
+## Objective
+
+Implement the Prisma-only admission mutation that prevents concurrent workers from overspending the final Free lifetime recovery credit and commits/releases one deterministic reservation safely.
+
+## Context
+
+ARCH-007 explicitly forbids aggregate-then-send races. Prisma has no need for raw SQL here: use ShopEntitlementCounter.version with conditional `updateMany` CAS inside bounded interactive transactions/retries.
+
+## Scope
+
+New Background reservation service and focused unit + disposable PostgreSQL concurrency tests. No recovery worker integration yet.
+
+## Out of Scope
+
+- Sending WhatsApp messages.
+- Creating merchant notifications.
+- Shopify App Events.
+- Paid overage logic beyond returning non-Free admission semantics.
+
+## Requirements
+
+- Input includes shopId and deterministic recovery reservation sourceKey. Same sourceKey replay must return the existing terminal/current reservation outcome.
+- Inside transaction resolve/verify Free policy and effective allowance, load/create counter safely, read version/committed/reserved, and only reserve if `committed + reserved + quantity <= allowance`.
+- Perform conditional counter update using Prisma `updateMany` matching key/version and atomic increment reserved/version. Count=0 is a concurrency conflict; retry the whole bounded operation with a small fixed maximum. Do not spin indefinitely.
+- Persist UsageReservation in same correctness boundary. Handle unique-source race by re-reading existing reservation rather than creating another capacity unit.
+- Commit transition RESERVED->COMMITTED must atomically decrement reserved, increment committed, update version, create/link exactly one NOT_REPORTABLE Free RECOVERY_CONVERSATION UsageEvent and set reservation COMMITTED.
+- Release transition RESERVED->RELEASED must atomically decrement reserved/update version and never decrement committed. Releasing COMMITTED is not allowed through this API.
+- Ambiguous provider outcome can transition reservation to AMBIGUOUS without releasing capacity; reconciliation is BACKGROUND-003/008 as applicable.
+- Signed allowance adjustment reduction must not corrupt counters even if effective allowance falls below already committed usage; it simply prevents further reservation.
+- Use serializable isolation if supported by current Prisma/runtime in addition to CAS where useful, but correctness must be explicit and tested. No raw SQL/DB advisory lock.
+
+## Work Items
+
+- [x] Implement reserve/commit/release/markAmbiguous APIs.
+- [x] Add deterministic idempotency usage identity generation using Shared helper.
+- [x] Add unit tests for terminal replay and invalid transitions.
+- [x] Add disposable PostgreSQL test launching at least two concurrent final-credit reservations and prove at most one succeeds.
+- [x] Test CAS conflict retry bound.
+
+## Interfaces / Contracts
+
+State machine:
+
+```text
+RESERVED -> COMMITTED
+RESERVED -> RELEASED
+RESERVED -> AMBIGUOUS
+COMMITTED/RELEASED are terminal for automatic replay
+```
+
+## Dependencies
+
+Explicit task dependencies are authoritative in YAML frontmatter. Do not begin unless every listed dependency is architect-accepted `complete` and any accepted Shared/database artifact required by this repository is available to consume.
+
+## Enables
+
+- ARCH-007-BACKGROUND-003
+
+## Acceptance Criteria
+
+- [x] Two simultaneous attempts for one remaining credit produce exactly one reserved capacity unit.
+- [x] Same sourceKey replay never double-reserves/commits.
+- [x] Commit atomically creates one usage event and counter transition.
+- [x] Release restores reserved capacity exactly once.
+- [x] No raw SQL is introduced.
+- [x] Disposable PostgreSQL concurrency proof and repository validation pass.
+
+## Validation
+
+Inspect the repository `package.json` first. Run the focused tests required by this task plus the repository-declared typecheck/lint/build/Prisma validation that actually exists, and `git diff --check`. Do not invent missing npm scripts.
+
+## Implementation Notes
+
+Exact Shared dependency for this task: `@modainteract/moda-interact-shared@0.7.3`. Provider-status v2/Shared `0.7.4` is not required by this reservation task.
+
+
+Luna deterministic-execution guardrails:
+
+- Treat this task file as the complete implementation contract. Do not infer additional product policy from old billing code.
+- Inspect the named current implementation before editing, but if old code conflicts with ARCH-007, implement ARCH-007.
+- Do not start an enabled/dependent task. Return only this task to `review` and STOP.
+- Do not modify another repository except an explicitly permitted database submodule/package dependency pointer in this task.
+- Do not add new billing raw SQL (`$queryRaw`, `$executeRaw`, `Prisma.sql`, raw driver SQL) to compensate for an unavailable Prisma delegate. Adopt/regenerate the accepted Prisma schema instead.
+- Do not run `git commit` or `git push`.
+
+
+## Completion Report
+
+### Status
+
+Ready for Review
+
+### Files Changed
+
+- `moda-interact-background/src/services/effective-billing-policy.service.ts`
+- `moda-interact-background/src/services/free-recovery-reservation.service.ts`
+- `moda-interact-background/tests/unit/services/free-recovery-reservation.service.test.ts`
+- `moda-interact-background/tests/integration/free-recovery-reservation.concurrency.integration.test.ts`
+- `moda-interact-background/scripts/test-integration.mjs`
+
+### Work Completed
+
+- Implemented serializable Prisma transactions with bounded retries around versioned `ShopEntitlementCounter` CAS updates.
+- Added deterministic source-key replay, tenant validation, terminal transition handling, and `markAmbiguous` capacity retention.
+- Commit atomically moves reserved to committed capacity and creates/links one Free `RECOVERY_CONVERSATION` usage event using the Shared deterministic recovery idempotency helper.
+- Release decrements reserved capacity only; committed release is rejected.
+- Added unit coverage for reservation, commit/release/ambiguous behavior, replay, invalid transitions, CAS retry bounds, and cross-shop source reuse.
+- Added disposable PostgreSQL concurrency coverage for two simultaneous attempts against one remaining credit.
+
+### Validation Results
+
+- `npx tsc --noEmit` passed.
+- `npm run prisma:validate` passed.
+- `npm run build` passed.
+- Focused resolver/reservation suite passed: 21 tests.
+- Reservation unit suite passed: 6 tests.
+- Disposable PostgreSQL concurrency test passed: 1 test.
+- Default `npm test`: 249 passed, 6 skipped, with 3 pre-existing unrelated failures in recovery-routing and pending-recovery-candidate tests.
+- `git diff --check` passed.
+
+### Deviations
+
+- The disposable PostgreSQL integration test is gated behind the existing `scripts/test-integration.mjs` wrapper so the default Vitest run does not execute it against an ambient, potentially non-migrated database.
+- The full repository suite retains three unrelated baseline failures; no unrelated production code was changed to address them.
+
+### Assumptions
+
+- `@modainteract/moda-interact-shared@0.7.3` remains the authoritative dependency for this task.
+- Reservation callers provide deterministic, shop-scoped source keys.
+
+### Unresolved Issues
+
+- The existing recovery-routing and pending-recovery-candidate baseline failures remain for architect review.
+
+### Architectural Concerns
+
+- None identified within BACKGROUND-002 scope. Recovery worker integration and reconciliation remain BACKGROUND-003/008 work.
+
+## Architect Review
+
+### Review Status
+
+Pending
+
+### Review Notes
+
+None
+
+### Reviewed Files
+
+None
+
+### Validation Reviewed
+
+None
+
+### Architecture Conformance
+
+Pending
+
+### Follow-up
+
+None
+
+===== TRACKED DIFF =====
+diff --git a/scripts/test-integration.mjs b/scripts/test-integration.mjs
+index c842026..6a600c0 100644
+--- a/scripts/test-integration.mjs
++++ b/scripts/test-integration.mjs
+@@ -20,7 +20,7 @@ function runVitest(environment, tests) {
+       [vitestBinary, "run", ...tests],
+       {
+         cwd: repositoryRoot,
+-        env: { ...process.env, ...environment },
++        env: { ...process.env, ...environment, MODA_DISPOSABLE_INTEGRATION: "1" },
+         stdio: "inherit",
+       },
+     );
+diff --git a/src/services/effective-billing-policy.service.ts b/src/services/effective-billing-policy.service.ts
+index 1ec04df..f263a10 100644
+--- a/src/services/effective-billing-policy.service.ts
++++ b/src/services/effective-billing-policy.service.ts
+@@ -71,7 +71,7 @@ export type EffectiveBillingPolicy = {
+   };
+ };
+ 
+-type BillingPolicyClient = Pick<
++export type BillingPolicyClient = Pick<
+   PrismaClient,
+   | "subscription"
+   | "platformBillingPolicy"
+
+===== UNTRACKED FILES =====
+diff --git a/BACKGROUND-002-review.diff b/BACKGROUND-002-review.diff
+new file mode 100644
+index 0000000..9b3cfbd
+--- /dev/null
++++ b/BACKGROUND-002-review.diff
+@@ -0,0 +1,222 @@
++===== TASK RECORD =====
++---
++id: ARCH-007-BACKGROUND-002
++architecture_id: ARCH-007
++title: Implement concurrency-safe Free recovery reservation, commit and release
++task_kind: implementation
++domain: background
++repository: moda-interact-background
++assigned_agent: moda_background
++coordinator: moda_architect
++status: review
++priority: 70
++executor: copilot
++claimed_at: 2026-09-07T22:34:15+01:00
++attempt: 1
++depends_on: 
++  - ARCH-007-BACKGROUND-001
++enables: 
++  - ARCH-007-BACKGROUND-003
++created: 2026-09-07
++updated: 2026-09-07T22:40:09+00:00
++---
++
++# ARCH-007-BACKGROUND-002: Implement concurrency-safe Free recovery reservation, commit and release
++
++## Architecture
++
++Canonical: `docs/architecture/ARCH-007-shopify-billing-usage-cost-control.md`
++
++## Objective
++
++Implement the Prisma-only admission mutation that prevents concurrent workers from overspending the final Free lifetime recovery credit and commits/releases one deterministic reservation safely.
++
++## Context
++
++ARCH-007 explicitly forbids aggregate-then-send races. Prisma has no need for raw SQL here: use ShopEntitlementCounter.version with conditional `updateMany` CAS inside bounded interactive transactions/retries.
++
++## Scope
++
++New Background reservation service and focused unit + disposable PostgreSQL concurrency tests. No recovery worker integration yet.
++
++## Out of Scope
++
++- Sending WhatsApp messages.
++- Creating merchant notifications.
++- Shopify App Events.
++- Paid overage logic beyond returning non-Free admission semantics.
++
++## Requirements
++
++- Input includes shopId and deterministic recovery reservation sourceKey. Same sourceKey replay must return the existing terminal/current reservation outcome.
++- Inside transaction resolve/verify Free policy and effective allowance, load/create counter safely, read version/committed/reserved, and only reserve if `committed + reserved + quantity <= allowance`.
++- Perform conditional counter update using Prisma `updateMany` matching key/version and atomic increment reserved/version. Count=0 is a concurrency conflict; retry the whole bounded operation with a small fixed maximum. Do not spin indefinitely.
++- Persist UsageReservation in same correctness boundary. Handle unique-source race by re-reading existing reservation rather than creating another capacity unit.
++- Commit transition RESERVED->COMMITTED must atomically decrement reserved, increment committed, update version, create/link exactly one NOT_REPORTABLE Free RECOVERY_CONVERSATION UsageEvent and set reservation COMMITTED.
++- Release transition RESERVED->RELEASED must atomically decrement reserved/update version and never decrement committed. Releasing COMMITTED is not allowed through this API.
++- Ambiguous provider outcome can transition reservation to AMBIGUOUS without releasing capacity; reconciliation is BACKGROUND-003/008 as applicable.
++- Signed allowance adjustment reduction must not corrupt counters even if effective allowance falls below already committed usage; it simply prevents further reservation.
++- Use serializable isolation if supported by current Prisma/runtime in addition to CAS where useful, but correctness must be explicit and tested. No raw SQL/DB advisory lock.
++
++## Work Items
++
++- [x] Implement reserve/commit/release/markAmbiguous APIs.
++- [x] Add deterministic idempotency usage identity generation using Shared helper.
++- [x] Add unit tests for terminal replay and invalid transitions.
++- [x] Add disposable PostgreSQL test launching at least two concurrent final-credit reservations and prove at most one succeeds.
++- [x] Test CAS conflict retry bound.
++
++## Interfaces / Contracts
++
++State machine:
++
++```text
++RESERVED -> COMMITTED
++RESERVED -> RELEASED
++RESERVED -> AMBIGUOUS
++COMMITTED/RELEASED are terminal for automatic replay
++```
++
++## Dependencies
++
++Explicit task dependencies are authoritative in YAML frontmatter. Do not begin unless every listed dependency is architect-accepted `complete` and any accepted Shared/database artifact required by this repository is available to consume.
++
++## Enables
++
++- ARCH-007-BACKGROUND-003
++
++## Acceptance Criteria
++
++- [x] Two simultaneous attempts for one remaining credit produce exactly one reserved capacity unit.
++- [x] Same sourceKey replay never double-reserves/commits.
++- [x] Commit atomically creates one usage event and counter transition.
++- [x] Release restores reserved capacity exactly once.
++- [x] No raw SQL is introduced.
++- [x] Disposable PostgreSQL concurrency proof and repository validation pass.
++
++## Validation
++
++Inspect the repository `package.json` first. Run the focused tests required by this task plus the repository-declared typecheck/lint/build/Prisma validation that actually exists, and `git diff --check`. Do not invent missing npm scripts.
++
++## Implementation Notes
++
++Exact Shared dependency for this task: `@modainteract/moda-interact-shared@0.7.3`. Provider-status v2/Shared `0.7.4` is not required by this reservation task.
++
++
++Luna deterministic-execution guardrails:
++
++- Treat this task file as the complete implementation contract. Do not infer additional product policy from old billing code.
++- Inspect the named current implementation before editing, but if old code conflicts with ARCH-007, implement ARCH-007.
++- Do not start an enabled/dependent task. Return only this task to `review` and STOP.
++- Do not modify another repository except an explicitly permitted database submodule/package dependency pointer in this task.
++- Do not add new billing raw SQL (`$queryRaw`, `$executeRaw`, `Prisma.sql`, raw driver SQL) to compensate for an unavailable Prisma delegate. Adopt/regenerate the accepted Prisma schema instead.
++- Do not run `git commit` or `git push`.
++
++
++## Completion Report
++
++### Status
++
++Ready for Review
++
++### Files Changed
++
++- `moda-interact-background/src/services/effective-billing-policy.service.ts`
++- `moda-interact-background/src/services/free-recovery-reservation.service.ts`
++- `moda-interact-background/tests/unit/services/free-recovery-reservation.service.test.ts`
++- `moda-interact-background/tests/integration/free-recovery-reservation.concurrency.integration.test.ts`
++- `moda-interact-background/scripts/test-integration.mjs`
++
++### Work Completed
++
++- Implemented serializable Prisma transactions with bounded retries around versioned `ShopEntitlementCounter` CAS updates.
++- Added deterministic source-key replay, tenant validation, terminal transition handling, and `markAmbiguous` capacity retention.
++- Commit atomically moves reserved to committed capacity and creates/links one Free `RECOVERY_CONVERSATION` usage event using the Shared deterministic recovery idempotency helper.
++- Release decrements reserved capacity only; committed release is rejected.
++- Added unit coverage for reservation, commit/release/ambiguous behavior, replay, invalid transitions, CAS retry bounds, and cross-shop source reuse.
++- Added disposable PostgreSQL concurrency coverage for two simultaneous attempts against one remaining credit.
++
++### Validation Results
++
++- `npx tsc --noEmit` passed.
++- `npm run prisma:validate` passed.
++- `npm run build` passed.
++- Focused resolver/reservation suite passed: 21 tests.
++- Reservation unit suite passed: 6 tests.
++- Disposable PostgreSQL concurrency test passed: 1 test.
++- Default `npm test`: 249 passed, 6 skipped, with 3 pre-existing unrelated failures in recovery-routing and pending-recovery-candidate tests.
++- `git diff --check` passed.
++
++### Deviations
++
++- The disposable PostgreSQL integration test is gated behind the existing `scripts/test-integration.mjs` wrapper so the default Vitest run does not execute it against an ambient, potentially non-migrated database.
++- The full repository suite retains three unrelated baseline failures; no unrelated production code was changed to address them.
++
++### Assumptions
++
++- `@modainteract/moda-interact-shared@0.7.3` remains the authoritative dependency for this task.
++- Reservation callers provide deterministic, shop-scoped source keys.
++
++### Unresolved Issues
++
++- The existing recovery-routing and pending-recovery-candidate baseline failures remain for architect review.
++
++### Architectural Concerns
++
++- None identified within BACKGROUND-002 scope. Recovery worker integration and reconciliation remain BACKGROUND-003/008 work.
++
++## Architect Review
++
++### Review Status
++
++Pending
++
++### Review Notes
++
++None
++
++### Reviewed Files
++
++None
++
++### Validation Reviewed
++
++None
++
++### Architecture Conformance
++
++Pending
++
++### Follow-up
++
++None
++
++===== TRACKED DIFF =====
++diff --git a/scripts/test-integration.mjs b/scripts/test-integration.mjs
++index c842026..6a600c0 100644
++--- a/scripts/test-integration.mjs
+++++ b/scripts/test-integration.mjs
++@@ -20,7 +20,7 @@ function runVitest(environment, tests) {
++       [vitestBinary, "run", ...tests],
++       {
++         cwd: repositoryRoot,
++-        env: { ...process.env, ...environment },
+++        env: { ...process.env, ...environment, MODA_DISPOSABLE_INTEGRATION: "1" },
++         stdio: "inherit",
++       },
++     );
++diff --git a/src/services/effective-billing-policy.service.ts b/src/services/effective-billing-policy.service.ts
++index 1ec04df..f263a10 100644
++--- a/src/services/effective-billing-policy.service.ts
+++++ b/src/services/effective-billing-policy.service.ts
++@@ -71,7 +71,7 @@ export type EffectiveBillingPolicy = {
++   };
++ };
++ 
++-type BillingPolicyClient = Pick<
+++export type BillingPolicyClient = Pick<
++   PrismaClient,
++   | "subscription"
++   | "platformBillingPolicy"
++
++===== UNTRACKED FILES =====
+diff --git a/src/services/free-recovery-reservation.service.ts b/src/services/free-recovery-reservation.service.ts
+new file mode 100644
+index 0000000..d7ecbc2
+--- /dev/null
++++ b/src/services/free-recovery-reservation.service.ts
+@@ -0,0 +1,345 @@
++import {
++  Prisma,
++  UsageMetric,
++  UsageReservationStatus,
++} from "@prisma/client";
++import type { PrismaClient, UsageReservation } from "@prisma/client";
++import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
++
++import prisma from "../lib/db.js";
++import {
++  EffectiveBillingPolicyResolver,
++  effectiveBillingPolicyResolver,
++} from "./effective-billing-policy.service.js";
++import type {
++  BillingPolicyClient,
++  EffectiveBillingPolicy,
++} from "./effective-billing-policy.service.js";
++
++const MAX_TRANSACTION_RETRIES = 3;
++
++export type FreeRecoveryReservationInput = {
++  shopId: string;
++  sourceKey: string;
++  quantity?: number;
++};
++
++export type ReservationOutcome =
++  | { kind: "reserved"; reservation: UsageReservation }
++  | { kind: "committed"; reservation: UsageReservation }
++  | { kind: "released"; reservation: UsageReservation }
++  | { kind: "ambiguous"; reservation: UsageReservation }
++  | { kind: "already-reserved"; reservation: UsageReservation }
++  | { kind: "already-committed"; reservation: UsageReservation }
++  | { kind: "already-released"; reservation: UsageReservation }
++  | { kind: "already-ambiguous"; reservation: UsageReservation }
++  | { kind: "allowance-exhausted"; remaining: number }
++  | { kind: "paused" }
++  | { kind: "not-free"; planKind: EffectiveBillingPolicy["planKind"] };
++
++export class FreeRecoveryReservationError extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "FreeRecoveryReservationError";
++  }
++}
++
++class ReservationConcurrencyConflict extends Error {}
++
++type ReservationTransaction = Prisma.TransactionClient;
++type ReservationDatabase = Pick<
++  PrismaClient,
++  "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent"
++>;
++
++type PolicyResolverFactory = (
++  client: BillingPolicyClient,
++) => Pick<EffectiveBillingPolicyResolver, "resolve">;
++
++export class FreeRecoveryReservationService {
++  constructor(
++    private readonly database: ReservationDatabase = prisma,
++    private readonly createPolicyResolver: PolicyResolverFactory = (client) =>
++      new EffectiveBillingPolicyResolver(client),
++    private readonly maxRetries = MAX_TRANSACTION_RETRIES,
++  ) {}
++
++  async reserve(input: FreeRecoveryReservationInput): Promise<ReservationOutcome> {
++    const quantity = validateQuantity(input.quantity);
++    return this.withRetry(() =>
++      this.database.$transaction(
++        (transaction) => this.reserveInTransaction(transaction, input, quantity),
++        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
++      ),
++    );
++  }
++
++  async commit(input: FreeRecoveryReservationInput): Promise<ReservationOutcome> {
++    const quantity = validateQuantity(input.quantity);
++    return this.withRetry(() =>
++      this.database.$transaction(
++        (transaction) => this.commitInTransaction(transaction, input, quantity),
++        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
++      ),
++    );
++  }
++
++  async release(input: FreeRecoveryReservationInput): Promise<ReservationOutcome> {
++    const quantity = validateQuantity(input.quantity);
++    return this.withRetry(() =>
++      this.database.$transaction(
++        (transaction) => this.releaseInTransaction(transaction, input, quantity),
++        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
++      ),
++    );
++  }
++
++  async markAmbiguous(input: FreeRecoveryReservationInput): Promise<ReservationOutcome> {
++    validateQuantity(input.quantity);
++    return this.withRetry(() =>
++      this.database.$transaction(
++        (transaction) => this.markAmbiguousInTransaction(transaction, input),
++        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
++      ),
++    );
++  }
++
++  private async reserveInTransaction(
++    transaction: ReservationTransaction,
++    input: FreeRecoveryReservationInput,
++    quantity: number,
++  ): Promise<ReservationOutcome> {
++    const existing = await transaction.usageReservation.findUnique({
++      where: { sourceKey: input.sourceKey },
++    });
++    if (existing) {
++      assertReservationShop(existing, input.shopId);
++      return replayOutcome(existing);
++    }
++
++    const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
++    if (policy.planKind !== "FREE") return { kind: "not-free", planKind: policy.planKind };
++    if (policy.newRecoveriesPaused) return { kind: "paused" };
++
++    const remaining = policy.freeAllowance?.remaining ?? 0;
++    if (remaining < quantity) return { kind: "allowance-exhausted", remaining };
++
++    let counter = await transaction.shopEntitlementCounter.findUnique({
++      where: {
++        shopId_counter: {
++          shopId: input.shopId,
++          counter: "FREE_RECOVERY_LIFETIME",
++        },
++      },
++    });
++    if (!counter) {
++      try {
++        counter = await transaction.shopEntitlementCounter.create({
++          data: {
++            shopId: input.shopId,
++            counter: "FREE_RECOVERY_LIFETIME",
++          },
++        });
++      } catch (error) {
++        if (isUniqueConflict(error)) throw new ReservationConcurrencyConflict();
++        throw error;
++      }
++    }
++
++    if (counter.committedQuantity + counter.reservedQuantity + quantity > (policy.freeAllowance?.effective ?? 0)) {
++      return { kind: "allowance-exhausted", remaining: Math.max(
++        (policy.freeAllowance?.effective ?? 0) - counter.committedQuantity - counter.reservedQuantity,
++        0,
++      ) };
++    }
++
++    const updated = await transaction.shopEntitlementCounter.updateMany({
++      where: { id: counter.id, version: counter.version },
++      data: {
++        reservedQuantity: { increment: quantity },
++        version: { increment: 1 },
++      },
++    });
++    if (updated.count !== 1) throw new ReservationConcurrencyConflict();
++
++    const reservation = await transaction.usageReservation.create({
++      data: {
++        shopId: input.shopId,
++        counterId: counter.id,
++        sourceKey: input.sourceKey,
++        quantity,
++      },
++    });
++    return { kind: "reserved", reservation };
++  }
++
++  private async commitInTransaction(
++    transaction: ReservationTransaction,
++    input: FreeRecoveryReservationInput,
++    quantity: number,
++  ): Promise<ReservationOutcome> {
++    const reservation = await this.requireReservation(transaction, input);
++    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
++    if (reservation.quantity !== quantity) {
++      throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
++    }
++
++    const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
++      where: {
++        id: reservation.counterId,
++        version: await this.readCounterVersion(transaction, reservation.counterId),
++        reservedQuantity: { gte: quantity },
++      },
++      data: {
++        reservedQuantity: { decrement: quantity },
++        committedQuantity: { increment: quantity },
++        version: { increment: 1 },
++      },
++    });
++    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
++
++    const usageEvent = await transaction.usageEvent.create({
++      data: {
++        shopId: input.shopId,
++        metric: UsageMetric.RECOVERY_CONVERSATION,
++        quantity,
++        idempotencyKey: createRecoveryIdempotencyKey(input.shopId, input.sourceKey),
++        sourceType: "FREE_RECOVERY_RESERVATION",
++        sourceId: reservation.id,
++      },
++    });
++    const committed = await transaction.usageReservation.update({
++      where: { id: reservation.id },
++      data: {
++        status: UsageReservationStatus.COMMITTED,
++        committedUsageEventId: usageEvent.id,
++      },
++    });
++    return { kind: "committed", reservation: committed };
++  }
++
++  private async releaseInTransaction(
++    transaction: ReservationTransaction,
++    input: FreeRecoveryReservationInput,
++    quantity: number,
++  ): Promise<ReservationOutcome> {
++    const reservation = await this.requireReservation(transaction, input);
++    if (reservation.status === UsageReservationStatus.COMMITTED) {
++      throw new FreeRecoveryReservationError("Committed reservations cannot be released");
++    }
++    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
++    if (reservation.quantity !== quantity) {
++      throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
++    }
++
++    const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
++      where: {
++        id: reservation.counterId,
++        version: await this.readCounterVersion(transaction, reservation.counterId),
++        reservedQuantity: { gte: quantity },
++      },
++      data: {
++        reservedQuantity: { decrement: quantity },
++        version: { increment: 1 },
++      },
++    });
++    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
++
++    const released = await transaction.usageReservation.update({
++      where: { id: reservation.id },
++      data: { status: UsageReservationStatus.RELEASED },
++    });
++    return { kind: "released", reservation: released };
++  }
++
++  private async markAmbiguousInTransaction(
++    transaction: ReservationTransaction,
++    input: FreeRecoveryReservationInput,
++  ): Promise<ReservationOutcome> {
++    const reservation = await this.requireReservation(transaction, input);
++    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
++    const ambiguous = await transaction.usageReservation.update({
++      where: { id: reservation.id },
++      data: { status: UsageReservationStatus.AMBIGUOUS },
++    });
++    return { kind: "ambiguous", reservation: ambiguous };
++  }
++
++  private async requireReservation(
++    transaction: ReservationTransaction,
++    input: FreeRecoveryReservationInput,
++  ): Promise<UsageReservation> {
++    const reservation = await transaction.usageReservation.findUnique({
++      where: { sourceKey: input.sourceKey },
++    });
++    if (!reservation) throw new FreeRecoveryReservationError("Reservation does not exist");
++    if (reservation.shopId !== input.shopId) {
++      throw new FreeRecoveryReservationError("Reservation belongs to another shop");
++    }
++    return reservation;
++  }
++
++  private async readCounterVersion(
++    transaction: ReservationTransaction,
++    counterId: string,
++  ): Promise<number> {
++    const counter = await transaction.shopEntitlementCounter.findUnique({
++      where: { id: counterId },
++      select: { version: true },
++    });
++    if (!counter) throw new FreeRecoveryReservationError("Reservation counter does not exist");
++    return counter.version;
++  }
++
++  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
++    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
++      try {
++        return await operation();
++      } catch (error) {
++        if (!isRetryableConflict(error) || attempt === this.maxRetries - 1) throw error;
++      }
++    }
++    throw new FreeRecoveryReservationError("Reservation retry limit exceeded");
++  }
++}
++
++function validateQuantity(quantity: number | undefined): number {
++  const value = quantity ?? 1;
++  if (!Number.isSafeInteger(value) || value <= 0) {
++    throw new FreeRecoveryReservationError("Reservation quantity must be a positive safe integer");
++  }
++  return value;
++}
++
++function replayOutcome(reservation: UsageReservation): ReservationOutcome {
++  switch (reservation.status) {
++    case UsageReservationStatus.RESERVED:
++      return { kind: "already-reserved", reservation };
++    case UsageReservationStatus.COMMITTED:
++      return { kind: "already-committed", reservation };
++    case UsageReservationStatus.RELEASED:
++      return { kind: "already-released", reservation };
++    case UsageReservationStatus.AMBIGUOUS:
++      return { kind: "already-ambiguous", reservation };
++  }
++}
++
++function assertReservationShop(reservation: UsageReservation, shopId: string): void {
++  if (reservation.shopId !== shopId) {
++    throw new FreeRecoveryReservationError("Reservation belongs to another shop");
++  }
++}
++
++function isUniqueConflict(error: unknown): boolean {
++  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
++}
++
++function isRetryableConflict(error: unknown): boolean {
++  return error instanceof ReservationConcurrencyConflict ||
++    (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034");
++}
++
++export const freeRecoveryReservationService = new FreeRecoveryReservationService(
++  prisma,
++  (client) => client === prisma ? effectiveBillingPolicyResolver : new EffectiveBillingPolicyResolver(client),
++);
+\ No newline at end of file
+diff --git a/tests/integration/free-recovery-reservation.concurrency.integration.test.ts b/tests/integration/free-recovery-reservation.concurrency.integration.test.ts
+new file mode 100644
+index 0000000..7ac939e
+--- /dev/null
++++ b/tests/integration/free-recovery-reservation.concurrency.integration.test.ts
+@@ -0,0 +1,71 @@
++import "dotenv/config";
++
++import { randomUUID } from "node:crypto";
++
++import { PrismaClient } from "@prisma/client";
++import { describe, expect, it } from "vitest";
++
++import { FreeRecoveryReservationService } from "../../src/services/free-recovery-reservation.service.js";
++
++const testDatabaseUrl = process.env.TEST_DATABASE_URL;
++const describeWithDatabase =
++  testDatabaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
++    ? describe
++    : describe.skip;
++
++describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
++  it("allows at most one concurrent reservation for the final credit", async () => {
++    const shopId = randomUUID();
++    const database = new PrismaClient();
++    const firstClient = new PrismaClient();
++    const secondClient = new PrismaClient();
++
++    process.env.DATABASE_URL = testDatabaseUrl;
++    try {
++      const plan = await database.billingPlan.create({
++        data: {
++          shopifyPlanHandle: `free-${shopId}`,
++          name: "Free integration plan",
++          kind: "FREE",
++          freeLifetimeConversationAllowance: 1,
++          defaultOutboundSoftLimit: 10,
++          defaultOutboundHardLimit: 20,
++          terminalMessageReservedSlots: 1,
++        },
++      });
++      await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
++      await database.subscription.create({
++        data: {
++          shopId,
++          planId: plan.id,
++          status: "ACTIVE",
++          observedShopifyPlanHandle: plan.shopifyPlanHandle,
++        },
++      });
++      await database.platformBillingPolicy.create({
++        data: {
++          absoluteOutboundHardLimit: 20,
++          defaultWarningPercent: 80,
++        },
++      });
++
++      const [first, second] = await Promise.all([
++        new FreeRecoveryReservationService(firstClient).reserve({ shopId, sourceKey: `${shopId}:recovery:1` }),
++        new FreeRecoveryReservationService(secondClient).reserve({ shopId, sourceKey: `${shopId}:recovery:2` }),
++      ]);
++      const outcomes = [first, second];
++
++      expect(outcomes.filter((outcome) => outcome.kind === "reserved")).toHaveLength(1);
++      expect(outcomes.filter((outcome) => outcome.kind === "allowance-exhausted")).toHaveLength(1);
++
++      const counter = await database.shopEntitlementCounter.findUnique({
++        where: { shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" } },
++      });
++      expect(counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
++      expect(await database.usageReservation.count({ where: { shopId } })).toBe(1);
++    } finally {
++      await database.shop.delete({ where: { id: shopId } }).catch(() => undefined);
++      await Promise.all([database.$disconnect(), firstClient.$disconnect(), secondClient.$disconnect()]);
++    }
++  }, 30_000);
++});
+\ No newline at end of file
+diff --git a/tests/unit/services/free-recovery-reservation.service.test.ts b/tests/unit/services/free-recovery-reservation.service.test.ts
+new file mode 100644
+index 0000000..9c6e9dd
+--- /dev/null
++++ b/tests/unit/services/free-recovery-reservation.service.test.ts
+@@ -0,0 +1,162 @@
++import { Prisma } from "@prisma/client";
++import { describe, expect, it, vi } from "vitest";
++
++import type { EffectiveBillingPolicy } from "../../../src/services/effective-billing-policy.service.js";
++import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
++
++const policy = {
++  shopId: "shop-1",
++  subscriptionId: "subscription-1",
++  subscriptionStatus: "ACTIVE",
++  planId: "plan-free",
++  planHandle: "free",
++  planKind: "FREE",
++  features: {},
++  freeAllowance: {
++    base: 1,
++    adjustment: 0,
++    effective: 1,
++    committed: 0,
++    reserved: 0,
++    remaining: 1,
++  },
++  shopifyUsageEventHandle: null,
++  billingPeriod: null,
++  outboundSoftLimit: 10,
++  outboundHardLimit: 20,
++  terminalMessageReservedSlots: 1,
++  newRecoveriesPaused: false,
++  automatedWhatsappPaused: false,
++  paused: false,
++  pauseReasons: [],
++  policyVersions: { platform: 1, shopOverride: null, plan: new Date() },
++} as EffectiveBillingPolicy;
++
++function createHarness() {
++  const state = {
++    counter: {
++      id: "counter-1",
++      shopId: "shop-1",
++      counter: "FREE_RECOVERY_LIFETIME",
++      committedQuantity: 0,
++      reservedQuantity: 0,
++      version: 0,
++    },
++    reservation: null as Record<string, unknown> | null,
++    usageEvent: null as Record<string, unknown> | null,
++  };
++
++  const transaction = {
++    shopEntitlementCounter: {
++      findUnique: vi.fn(async ({ select }: { select?: { version: boolean } }) =>
++        select ? { version: state.counter.version } : state.counter),
++      create: vi.fn(async () => state.counter),
++      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
++        if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
++        if (where.reservedQuantity && state.counter.reservedQuantity < where.reservedQuantity.gte) return { count: 0 };
++        const increment = (data.reservedQuantity as { increment?: number } | undefined)?.increment ?? 0;
++        const decrement = (data.reservedQuantity as { decrement?: number } | undefined)?.decrement ?? 0;
++        state.counter.reservedQuantity += increment - decrement;
++        state.counter.committedQuantity += (data.committedQuantity as { increment?: number } | undefined)?.increment ?? 0;
++        state.counter.version += (data.version as { increment: number }).increment;
++        return { count: 1 };
++      }),
++    },
++    usageReservation: {
++      findUnique: vi.fn(async () => state.reservation),
++      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
++        state.reservation = {
++          id: "reservation-1",
++          ...data,
++          status: "RESERVED",
++          committedUsageEventId: null,
++        };
++        return state.reservation;
++      }),
++      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
++        state.reservation = { ...state.reservation, ...data };
++        return state.reservation;
++      }),
++    },
++    usageEvent: {
++      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
++        state.usageEvent = { id: "usage-1", ...data };
++        return state.usageEvent;
++      }),
++    },
++  };
++
++  const database = {
++    ...transaction,
++    $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
++  };
++  const service = new FreeRecoveryReservationService(
++    database as never,
++    () => ({ resolve: async () => policy }) as never,
++  );
++  return { service, database, transaction, state };
++}
++
++describe("FreeRecoveryReservationService", () => {
++  it("replays the same source key without reserving twice", async () => {
++    const { service, transaction } = createHarness();
++
++    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" })).resolves.toMatchObject({ kind: "reserved" });
++    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:1" })).resolves.toMatchObject({ kind: "already-reserved" });
++    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledTimes(1);
++  });
++
++  it("commits one usage event and makes commit replay terminal", async () => {
++    const { service, transaction, state } = createHarness();
++    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:2" });
++
++    await expect(service.commit({ shopId: "shop-1", sourceKey: "recovery:2" })).resolves.toMatchObject({ kind: "committed" });
++    await expect(service.commit({ shopId: "shop-1", sourceKey: "recovery:2" })).resolves.toMatchObject({ kind: "already-committed" });
++    expect(state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
++    expect(state.usageEvent?.idempotencyKey).toBe("recovery:shop-1:recovery:2");
++    expect(transaction.usageEvent.create).toHaveBeenCalledTimes(1);
++  });
++
++  it("releases once and preserves capacity without creating usage", async () => {
++    const { service, state, transaction } = createHarness();
++    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:3" });
++
++    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:3" })).resolves.toMatchObject({ kind: "released" });
++    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:3" })).resolves.toMatchObject({ kind: "already-released" });
++    expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
++    expect(transaction.usageEvent.create).not.toHaveBeenCalled();
++  });
++
++  it("rejects release after commit and cross-shop source replay", async () => {
++    const { service, state } = createHarness();
++    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" });
++    await service.commit({ shopId: "shop-1", sourceKey: "recovery:committed" });
++
++    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:committed" })).rejects.toThrow("cannot be released");
++    state.reservation!.shopId = "shop-2";
++    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" })).rejects.toThrow("another shop");
++  });
++
++  it("marks ambiguous without releasing capacity and rejects invalid transitions", async () => {
++    const { service, state } = createHarness();
++    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:4" });
++
++    await expect(service.markAmbiguous({ shopId: "shop-1", sourceKey: "recovery:4" })).resolves.toMatchObject({ kind: "ambiguous" });
++    await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:4" })).resolves.toMatchObject({ kind: "already-ambiguous" });
++    expect(state.counter.reservedQuantity).toBe(1);
++    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:5", quantity: 0 })).rejects.toThrow("positive safe integer");
++  });
++
++  it("retries a bounded serializable/CAS conflict", async () => {
++    const { service, database } = createHarness();
++    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
++      code: "P2034",
++      clientVersion: "test",
++    });
++    const transaction = database.$transaction;
++    transaction.mockRejectedValueOnce(conflict);
++
++    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:5" })).resolves.toMatchObject({ kind: "reserved" });
++    expect(transaction).toHaveBeenCalledTimes(2);
++  });
++});
+\ No newline at end of file

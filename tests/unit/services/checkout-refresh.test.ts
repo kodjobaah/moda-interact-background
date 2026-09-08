@@ -57,6 +57,19 @@ const hoisted = vi.hoisted(() => {
     pendingCandidateServiceMock: {
       refreshCandidateActivity: vi.fn(),
     },
+    recoveryBillingServiceMock: {
+      admit: vi.fn(async () => ({
+        kind: "admitted",
+        admission: {
+          kind: "paid",
+          sourceKey: "recovery:shop_1:recovery-1",
+          policy: { shopId: "shop_1" },
+        },
+      })),
+      commitSuccessfulInitiation: vi.fn(async () => undefined),
+      handleProviderFailure: vi.fn(async () => undefined),
+      releaseBeforeProvider: vi.fn(async () => undefined),
+    },
   };
 });
 
@@ -93,6 +106,9 @@ vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
 }));
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
+}));
+vi.mock("../../../src/services/recovery-billing.service.js", () => ({
+  recoveryBillingService: hoisted.recoveryBillingServiceMock,
 }));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";

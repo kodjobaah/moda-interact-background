@@ -71,7 +71,7 @@ export type EffectiveBillingPolicy = {
   };
 };
 
-type BillingPolicyClient = Pick<
+export type BillingPolicyClient = Pick<
   PrismaClient,
   | "subscription"
   | "platformBillingPolicy"

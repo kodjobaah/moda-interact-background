@@ -20,7 +20,7 @@ function runVitest(environment, tests) {
       [vitestBinary, "run", ...tests],
       {
         cwd: repositoryRoot,
-        env: { ...process.env, ...environment },
+        env: { ...process.env, ...environment, MODA_DISPOSABLE_INTEGRATION: "1" },
         stdio: "inherit",
       },
     );

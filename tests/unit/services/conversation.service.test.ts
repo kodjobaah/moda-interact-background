@@ -11,6 +11,7 @@ const { prismaMock, txConversationUpdate } = vi.hoisted(() => ({
     conversationMessage: {
       findUnique: vi.fn(),
       create: vi.fn(),
+      findMany: vi.fn(),
     },
     conversation: {
       findUniqueOrThrow: vi.fn(),
@@ -90,6 +91,33 @@ describe("ConversationService language persistence", () => {
     expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith({
       where: { id: "conversation-1", inboundVersion: 2 },
       data: { languageTag: "fr", languageSource: "DETECTED" },
+    });
+  });
+});
+
+describe("ConversationService standalone snapshots", () => {
+  it("uses the explicit shop for a standalone conversation", async () => {
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      id: "conversation-1",
+      type: "PRODUCT_DISCOVERY",
+      summary: null,
+      inboundVersion: 1,
+      languageTag: "en-GB",
+      languageSource: "SHOPIFY",
+      shop: { domain: "example.myshopify.com" },
+      checkoutRecovery: null,
+    });
+    prismaMock.conversationMessage.findMany.mockResolvedValue([
+      { direction: "INBOUND", content: "Need a black shirt" },
+    ] as any);
+
+    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
+
+    expect(snapshot).toMatchObject({
+      conversationId: "conversation-1",
+      shop: "example.myshopify.com",
+      type: "PRODUCT_DISCOVERY",
+      messages: [{ role: "user", content: "Need a black shirt" }],
     });
   });
 });

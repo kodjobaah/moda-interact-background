@@ -11,8 +11,12 @@ import type {
 import { customerService } from "./customer.service.js";
 import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
-import { whatsAppService } from "./whatsapp.service.js";
+import { outboundWhatsAppAdmissionService } from "./outbound-whatsapp-admission.service.js";
 import { whatsappTemplateSelectorService } from "./whatsapp-template-selector.service.js";
+import {
+  recoveryBillingService,
+  type RecoveryBillingService,
+} from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
 import {
   abandonedCheckoutLookupService,
@@ -59,6 +63,10 @@ export type CheckoutRefreshResult =
   | { kind: "ignored"; reason: string };
 
 export class CheckoutRecoveryService {
+  constructor(
+    private readonly billingService: RecoveryBillingService = recoveryBillingService,
+  ) {}
+
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
     const scheduled =
       await pendingRecoveryCandidateService.scheduleFromCheckoutCreated(event);
@@ -740,15 +748,9 @@ export class CheckoutRecoveryService {
     const recipient = this.resolveRecipient(event);
 
     // 4
-    const conversation =
-      await conversationService.getOrCreateRecoveryConversation(
-        recovery.id,
-        event.internationalContext,
-      );
-
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
-      providerAccountId: whatsAppService.getProviderAccountId(),
+      providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
       purpose: "checkout-recovery",
       languageTag: event.internationalContext?.languageTag ?? null,
       countryCode: event.internationalContext?.countryCode ?? null,
@@ -762,6 +764,12 @@ export class CheckoutRecoveryService {
       return recovery;
     }
 
+    const billing = await this.billingService.admit({
+      shopId: recovery.shopId,
+      recoveryId: recovery.id,
+    });
+    if (billing.kind === "blocked") return recovery;
+
     const content = conversationMessageService.buildRecoveryTemplateDescriptor({
       purpose: "checkout-recovery",
       templateName: selection.providerTemplateName,
@@ -769,43 +777,63 @@ export class CheckoutRecoveryService {
       providerLanguageCode: selection.providerLanguageCode,
     });
 
-    // 5a - persist intent to send
-    const message =
-      await conversationMessageService.createPendingRecoveryMessage(
-        conversation.id,
-        content,
+    let conversation;
+    try {
+      conversation = await conversationService.getOrCreateRecoveryConversation(
+        recovery.id,
+        event.internationalContext,
       );
+    } catch (error) {
+      await this.billingService.releaseBeforeProvider(billing.admission);
+      throw error;
+    }
 
+    let result;
     try {
       // 5b
-      const result = await whatsAppService.sendWhatsAppTemplate({
+      result = await outboundWhatsAppAdmissionService.sendTemplate({
+        shopId: recovery.shopId,
+        conversationId: conversation.id,
+        idempotencyKey: `recovery-message:${recovery.id}`,
+        senderType: "AUTOMATION",
+        content,
         to: recipient,
         templateName: selection.providerTemplateName,
         languageCode: selection.providerLanguageCode,
       });
-
-      // 6
-      await conversationMessageService.markMessageSent(
-        message.id,
-        result.providerMessageId,
-      );
-
-      await this.markRecoveryMessageSent(recovery.id);
-
-      return recovery;
     } catch (error) {
-      await prisma.conversationMessage.update({
-        where: {
-          id: message.id,
-        },
-
-        data: {
-          status: "FAILED",
-        },
+      await this.billingService.handleProviderFailure({
+        admission: billing.admission,
+        error,
       });
 
       throw error;
     }
+
+    if (result.kind === "suppressed") {
+      await this.billingService.releaseBeforeProvider(billing.admission);
+      return recovery;
+    }
+
+    try {
+      await this.billingService.commitSuccessfulInitiation({
+        admission: billing.admission,
+        recoveryId: recovery.id,
+        occurredAt: new Date(),
+      });
+    } catch (error) {
+      if (billing.admission.kind === "free") {
+        await this.billingService.handleProviderFailure({
+          admission: billing.admission,
+          error,
+        });
+      }
+      throw error;
+    }
+
+    await this.markRecoveryMessageSent(recovery.id);
+
+    return recovery;
   }
 
   async getAgentContext({

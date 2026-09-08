@@ -189,6 +189,12 @@ export class ConversationService {
           languageTag: true,
           languageSource: true,
 
+          shop: {
+            select: {
+              domain: true,
+            },
+          },
+
           checkoutRecovery: {
             select: {
               shop: {
@@ -200,12 +206,6 @@ export class ConversationService {
           },
         },
       });
-
-    if (!conversation.checkoutRecovery) {
-      throw new Error(
-        `Conversation ${conversation.id} is not linked to a checkout recovery`,
-      );
-    }
 
     const messages =
       await prisma.conversationMessage.findMany({
@@ -231,12 +231,16 @@ export class ConversationService {
         .map((message) =>
           this.toAgentMessage(message),
         );
+    const shop = conversation.checkoutRecovery?.shop.domain ?? conversation.shop?.domain;
+    if (!shop) {
+      throw new Error(`Conversation ${conversation.id} has no shop ownership`);
+    }
 
     return {
       conversationId: conversation.id,
 
       shop:
-        conversation.checkoutRecovery.shop.domain,
+        shop,
 
       type: conversation.type,
 

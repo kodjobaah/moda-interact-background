@@ -1,0 +1,322 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { RecoveryBillingService } from "../../../src/services/recovery-billing.service.js";
+
+function createDatabase() {
+  const thread = { id: "thread-1" };
+  const transactionMessageUpsert = vi.fn(async () => ({ id: "message-1" }));
+  return {
+    usageEvent: { upsert: vi.fn(async ({ create }: { create: unknown }) => ({ id: "usage-1", ...create })) },
+    merchantSupportThread: {
+      upsert: vi.fn(async () => thread),
+      update: vi.fn(async () => thread),
+    },
+    merchantSupportMessage: {
+      upsert: vi.fn(async () => ({ id: "message-1" })),
+    },
+    $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) =>
+      callback({
+        merchantSupportThread: {
+          upsert: vi.fn(async () => thread),
+          update: vi.fn(async () => thread),
+        },
+        merchantSupportMessage: {
+          upsert: transactionMessageUpsert,
+        },
+      }),
+    ),
+    transactionMessageUpsert,
+  };
+}
+
+function createIdempotentMessageDatabase() {
+  const thread = { id: "thread-1" };
+  const messages = new Map<string, { id: string }>();
+  const messageUpsert = vi.fn(async ({ where }: { where: { sourceKey: string } }) => {
+    const existing = messages.get(where.sourceKey);
+    if (existing) return existing;
+    const message = { id: `message-${messages.size + 1}` };
+    messages.set(where.sourceKey, message);
+    return message;
+  });
+
+  return {
+    usageEvent: { upsert: vi.fn(async ({ create }: { create: unknown }) => ({ id: "usage-1", ...create })) },
+    merchantSupportThread: {
+      upsert: vi.fn(async () => thread),
+      update: vi.fn(async () => thread),
+    },
+    merchantSupportMessage: { upsert: messageUpsert },
+    $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) =>
+      callback({
+        merchantSupportThread: {
+          upsert: vi.fn(async () => thread),
+          update: vi.fn(async () => thread),
+        },
+        merchantSupportMessage: { upsert: messageUpsert },
+      }),
+    ),
+    messageUpsert,
+    messages,
+  };
+}
+
+function freePolicy() {
+  return {
+    shopId: "shop-1",
+    subscriptionId: "subscription-1",
+    planKind: "FREE" as const,
+    newRecoveriesPaused: false,
+    freeAllowance: {
+      base: 5,
+      adjustment: 0,
+      effective: 5,
+      committed: 5,
+      reserved: 0,
+      remaining: 0,
+    },
+  };
+}
+
+function paidPolicy() {
+  return {
+    shopId: "shop-1",
+    planKind: "PAID_METERED" as const,
+    newRecoveriesPaused: false,
+    shopifyUsageEventHandle: "basic-recovery-conversation",
+    billingPeriod: { id: "period-1" },
+  };
+}
+
+describe("RecoveryBillingService", () => {
+  it("blocks exhausted Free admission and upserts one deterministic SYSTEM notification", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => freePolicy()) };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+      
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+
+    const first = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+    const second = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+
+    expect(first).toEqual({ kind: "blocked", reason: "allowance-exhausted" });
+    expect(second).toEqual({ kind: "blocked", reason: "allowance-exhausted" });
+    expect(database.merchantSupportMessage.upsert).toHaveBeenCalledTimes(0);
+    expect(database.$transaction).toHaveBeenCalledTimes(2);
+    expect(database.transactionMessageUpsert).toHaveBeenCalledTimes(2);
+    expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        where: { sourceKey: "billing-system:shop-1:BILLING_FREE_ALLOWANCE_EXHAUSTED:free-allowance:subscription-1:5:1" },
+      }),
+    );
+    expect(database.transactionMessageUpsert.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        where: { sourceKey: "billing-system:shop-1:BILLING_FREE_ALLOWANCE_EXHAUSTED:free-allowance:subscription-1:5:1" },
+      }),
+    );
+  });
+
+  it("deduplicates exhaustion notifications by Free allowance lifecycle", async () => {
+    const database = createIdempotentMessageDatabase();
+    const policyResolver = {
+      resolve: vi.fn()
+        .mockResolvedValueOnce(freePolicy())
+        .mockResolvedValueOnce(freePolicy())
+        .mockResolvedValueOnce({
+          ...freePolicy(),
+          subscriptionId: "subscription-2",
+          freeAllowance: { ...freePolicy().freeAllowance, effective: 4 },
+        }),
+    };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+
+    await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+    await service.admit({ shopId: "shop-1", recoveryId: "recovery-2" });
+    await service.admit({ shopId: "shop-1", recoveryId: "recovery-3" });
+
+    expect(database.messages.size).toBe(2);
+    expect(database.messageUpsert).toHaveBeenCalledTimes(3);
+    expect([...database.messages.keys()][0]).toContain(
+      "free-allowance:subscription-1:5",
+    );
+    expect([...database.messages.keys()][1]).toContain(
+      "free-allowance:subscription-2:4",
+    );
+  });
+
+  it("records paid recovery usage once with the plan meter and successful initiation time", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const reservationService = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+    const occurredAt = new Date("2026-09-08T00:45:00.000Z");
+
+    await service.commitSuccessfulInitiation({
+      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      recoveryId: "recovery-1",
+      occurredAt,
+    });
+    await service.commitSuccessfulInitiation({
+      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      recoveryId: "recovery-1",
+      occurredAt: new Date("2026-09-08T00:46:00.000Z"),
+    });
+
+    expect(database.usageEvent.upsert).toHaveBeenCalledTimes(2);
+    expect(database.usageEvent.upsert).toHaveBeenNthCalledWith(1,
+      expect.objectContaining({
+        where: { idempotencyKey: "recovery:shop-1:recovery-1" },
+        create: expect.objectContaining({
+          billingPeriodId: "period-1",
+          quantity: 1,
+          occurredAt,
+          shopifyReportState: "PENDING",
+          shopifyEventHandle: "basic-recovery-conversation",
+          sourceId: "recovery-1",
+        }),
+        update: {},
+      }),
+    );
+    expect(reservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("allows paid recovery beyond included units and keeps replay identity stable", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const reservationService = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "recovery-overage" });
+    expect(admitted.kind).toBe("admitted");
+    expect(reservationService.reserve).not.toHaveBeenCalled();
+
+    if (admitted.kind === "admitted") {
+      await service.commitSuccessfulInitiation({
+        admission: admitted.admission,
+        recoveryId: "recovery-overage",
+        occurredAt: new Date("2026-09-08T00:45:00.000Z"),
+      });
+      await service.commitSuccessfulInitiation({
+        admission: admitted.admission,
+        recoveryId: "recovery-overage",
+        occurredAt: new Date("2026-09-08T00:46:00.000Z"),
+      });
+    }
+
+    expect(database.usageEvent.upsert).toHaveBeenCalledTimes(2);
+    expect(database.usageEvent.upsert.mock.calls[0]?.[0].where).toEqual(
+      database.usageEvent.upsert.mock.calls[1]?.[0].where,
+    );
+  });
+
+  it.each([
+    {
+      name: "definitive provider rejection",
+      error: Object.assign(new Error("rejected"), {
+        name: "WhatsAppServiceError",
+        code: "provider-rejected",
+      }),
+      method: "release" as const,
+    },
+    {
+      name: "ambiguous provider response",
+      error: Object.assign(new Error("malformed response"), {
+        name: "WhatsAppServiceError",
+        code: "invalid-provider-response",
+      }),
+      method: "markAmbiguous" as const,
+    },
+  ])("$name transitions the Free reservation safely", async ({ error, method }) => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => freePolicy()) };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved", reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
+
+    await service.handleProviderFailure({
+      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      error,
+    });
+
+    expect(reservationService[method]).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:recovery-1",
+    });
+  });
+
+  it("classifies an ambiguous paid provider response without inventing usage", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const reservationService = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "paid-ambiguous" });
+
+    const disposition = await service.handleProviderFailure({
+      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      error: Object.assign(new Error("malformed response"), {
+        name: "WhatsAppServiceError",
+        code: "invalid-provider-response",
+      }),
+    });
+
+    expect(disposition).toBe("ambiguous");
+    expect(reservationService.markAmbiguous).not.toHaveBeenCalled();
+    expect(reservationService.release).not.toHaveBeenCalled();
+  });
+});
