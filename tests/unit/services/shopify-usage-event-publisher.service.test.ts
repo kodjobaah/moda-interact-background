@@ -30,12 +30,16 @@ function harness(
   const states = new Map(records.map((row) => [row.id as string, row.shopifyReportState as string]));
   const updates: Array<{ where: unknown; data: unknown }> = [];
   const database = {
-    usageEvent: {
-      findMany: vi.fn().mockImplementation(async () =>
+      usageEvent: {
+      findMany: vi.fn().mockImplementation(async ({ where, take }: { where?: { shop?: { status?: string | { not: string } } }; take?: number }) =>
         records.filter((row) =>
           ["PENDING", "RETRYABLE"].includes(String(row.shopifyReportState)) &&
-          (row.nextReportAt === null || (row.nextReportAt as Date) <= getNow()),
-        ).map((row) => ({ ...row, shop: { ...(row.shop as object) } })),
+          (row.nextReportAt === null || (row.nextReportAt as Date) <= getNow()) &&
+          (!where?.shop?.status ||
+            (typeof where.shop.status === "string"
+              ? (row.shop as { status: string }).status === where.shop.status
+              : (row.shop as { status: string }).status !== where.shop.status.not)),
+        ).slice(0, take).map((row) => ({ ...row, shop: { ...(row.shop as object) } })),
       ),
       updateMany: vi.fn().mockImplementation(async ({ where, data }: { where: { id: string; shopifyReportState?: { in: string[] } | string }; data: unknown }) => {
         const update = data as Record<string, unknown>;
@@ -127,6 +131,36 @@ describe("ShopifyUsageEventPublisherService", () => {
     });
     expect(test.provider.createBillingEvent).not.toHaveBeenCalled();
     expect(test.states.get("usage-1")).toBe("NEEDS_ATTENTION");
+  });
+
+  it("prioritizes pre-uninstall events over an ordinary due backlog", async () => {
+    const test = harness([
+      usageRow({ id: "ordinary-1" }),
+      usageRow({ id: "ordinary-2" }),
+      usageRow({
+        id: "uninstall-1",
+        shopifyIdempotencyKey: "shopify:shop-1:usage-uninstall-1",
+        occurredAt: new Date("2026-09-08T08:30:00.000Z"),
+        shop: {
+          shopifyShopId: "gid://shopify/Shop/1",
+          status: "UNINSTALLED",
+          uninstalledAt: new Date("2026-09-08T09:00:00.000Z"),
+        },
+      }),
+    ]);
+    const limited = new ShopifyUsageEventPublisherService(
+      test.database as never,
+      test.provider,
+      () => now,
+      2,
+    );
+
+    await expect(limited.publishDue()).resolves.toMatchObject({ selected: 2 });
+    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(expect.objectContaining({
+      occurredAt: "2026-09-08T08:30:00.000Z",
+      idempotencyKey: "shopify:shop-1:usage-uninstall-1",
+    }));
+    expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
   });
 
   it("schedules transient failures with bounded retry state", async () => {

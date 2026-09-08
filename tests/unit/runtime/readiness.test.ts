@@ -22,6 +22,19 @@ describe("worker readiness", () => {
     expect(postgresqlCheck).toHaveBeenCalledOnce();
   });
 
+  it("checks PostgreSQL without requiring Redis for the billing worker", async () => {
+    const redisCheck = vi.fn().mockResolvedValue(undefined);
+    const postgresqlCheck = vi.fn().mockResolvedValue(undefined);
+
+    await assertWorkerReady("moda-billing-worker", [
+      { name: "redis", check: redisCheck },
+      { name: "postgresql", check: postgresqlCheck },
+    ]);
+
+    expect(postgresqlCheck).toHaveBeenCalledOnce();
+    expect(redisCheck).not.toHaveBeenCalled();
+  });
+
   it("reports a predictable sanitized dependency failure", async () => {
     const secret = "postgresql://user:password@database.internal/moda";
     const probes: ReadinessProbe[] = [

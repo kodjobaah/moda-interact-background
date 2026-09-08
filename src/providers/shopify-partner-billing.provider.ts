@@ -31,6 +31,7 @@ type PartnerResponse = {
   data?: {
     activeSubscription: {
       cancelAtEndOfCycle: boolean;
+      billingPeriod: string;
       trialEndsAt: string | null;
       currentBillingCycle: { startTime: string; endTime: string } | null;
       legacySubscriptionId: string | null;
@@ -40,6 +41,8 @@ type PartnerResponse = {
         usage: { quantity: number | null; cost: { amount: string; currencyCode: string } | null } | null;
       }>;
       pendingUpdate: {
+        billingPeriod: string;
+        legacySubscriptionId: string | null;
         items: Array<{ handle: string | null; price: ShopifyPrice | null }>;
       } | null;
     } | null;
@@ -51,6 +54,7 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
   query ActiveSubscription($appId: ID!, $shopId: ID!) {
     activeSubscription(appId: $appId, shopId: $shopId) {
       cancelAtEndOfCycle
+      billingPeriod
       trialEndsAt
       currentBillingCycle { startTime endTime }
       legacySubscriptionId
@@ -66,6 +70,8 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
         usage { quantity cost { amount currencyCode } }
       }
       pendingUpdate {
+        billingPeriod
+        legacySubscriptionId
         items {
           handle
           price {

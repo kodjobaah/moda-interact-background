@@ -123,4 +123,53 @@ describe("BillingReconciliationService", () => {
       expect.objectContaining({ modaQuantity: 5, shopifyQuantity: 7 }),
     );
   });
+
+  it("rotates active shops with a keyset cursor and continues after a Partner failure", async () => {
+    const shops = ["A", "B", "C", "D"].map((id) => ({
+      id,
+      shopifyShopId: `gid://shopify/Shop/${id}`,
+    }));
+    const database = {
+      shop: {
+        findMany: vi.fn().mockImplementation(async ({ where, take }: { where: { id?: { gt: string } }; take: number }) =>
+          shops.filter((shop) => !where.id?.gt || shop.id > where.id.gt).slice(0, take)),
+      },
+      billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
+      billingPeriod: { upsert: vi.fn() },
+      subscription: {
+        upsert: vi.fn(),
+        findUnique: vi.fn().mockResolvedValue(null),
+      },
+      usageEvent: { aggregate: vi.fn() },
+    };
+    const partner = {
+      getActiveSubscription: vi.fn().mockImplementation(async (shopifyShopId: string) => {
+        if (shopifyShopId.endsWith("/A")) throw new Error("temporary Partner failure");
+        return null;
+      }),
+    };
+    const publisher = { publishDue: vi.fn().mockResolvedValue({}) };
+    const purchases = { reconcilePending: vi.fn().mockResolvedValue([]) };
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const service = new BillingReconciliationService(
+      database as never,
+      partner,
+      publisher,
+      purchases,
+      logger as never,
+    );
+
+    await service.reconcileOnce(2);
+    await service.reconcileOnce(2);
+    await service.reconcileOnce(2);
+
+    expect(partner.getActiveSubscription.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
+      "gid://shopify/Shop/A",
+      "gid://shopify/Shop/B",
+      "gid://shopify/Shop/C",
+      "gid://shopify/Shop/D",
+      "gid://shopify/Shop/A",
+      "gid://shopify/Shop/B",
+    ]);
+  });
 });

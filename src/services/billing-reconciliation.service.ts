@@ -39,6 +39,8 @@ export type UsageDiscrepancy = {
 };
 
 export class BillingReconciliationService {
+  private lastScannedShopId: string | undefined;
+
   constructor(
     private readonly database: BillingReconciliationDatabase = prisma,
     private readonly partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
@@ -54,15 +56,7 @@ export class BillingReconciliationService {
   async reconcileOnce(limit = DEFAULT_SHOP_PAGE_SIZE): Promise<BillingReconciliationResult> {
     const published = await this.publisher.publishDue();
     const purchaseResults = await this.purchases.reconcilePending();
-    const shops = await this.database.shop.findMany({
-      where: {
-        shopifyShopId: { not: null },
-        status: "ACTIVE",
-      },
-      orderBy: { id: "asc" },
-      take: boundedLimit(limit),
-      select: { id: true, shopifyShopId: true },
-    });
+    const shops = await this.selectRotatingShopPage(boundedLimit(limit));
 
     const result: BillingReconciliationResult = {
       published,
@@ -85,6 +79,31 @@ export class BillingReconciliationService {
       }
     }
     return result;
+  }
+
+  private async selectRotatingShopPage(limit: number) {
+    const baseQuery = {
+      where: {
+        shopifyShopId: { not: null },
+        status: "ACTIVE" as const,
+      },
+      orderBy: { id: "asc" as const },
+      take: limit,
+      select: { id: true, shopifyShopId: true },
+    };
+    const afterCursor = this.lastScannedShopId
+      ? await this.database.shop.findMany({
+          ...baseQuery,
+          where: { ...baseQuery.where, id: { gt: this.lastScannedShopId } },
+        })
+      : [];
+    const shops = afterCursor.length > 0
+      ? afterCursor
+      : await this.database.shop.findMany(baseQuery);
+
+    const lastShop = shops.at(-1);
+    if (lastShop) this.lastScannedShopId = lastShop.id;
+    return shops;
   }
 
   private async applySubscription(shopId: string, provider: PartnerSubscription | null): Promise<void> {

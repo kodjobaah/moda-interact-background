@@ -1,28 +1,25 @@
 import { closeWorkerObservability } from "../runtime/observability.js";
+import { startBillingReconciliationScheduler } from "../runtime/billing-scheduler.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
-
-const BILLING_SCAN_INTERVAL_MS = 60_000;
 
 void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
-    const [{ closeWorkerResources }, { billingReconciliationService }] = await Promise.all([
-      import("./resources.js"),
+    const [{ closeBillingResources }, { billingReconciliationService }] = await Promise.all([
+      import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
     ]);
     await billingReconciliationService.reconcileOnce();
-    const interval = setInterval(() => {
-      void billingReconciliationService.reconcileOnce().catch((error: unknown) => {
-        console.error("billing reconciliation failed", error);
-      });
-    }, BILLING_SCAN_INTERVAL_MS);
-    interval.unref();
+    const stopScheduler = startBillingReconciliationScheduler(
+      () => billingReconciliationService.reconcileOnce(),
+      60_000,
+    );
 
     return {
       workers: [],
       closeResources: [
-        async () => clearInterval(interval),
-        ...closeWorkerResources,
+        async () => stopScheduler(),
+        ...closeBillingResources,
         closeWorkerObservability,
       ],
     };
