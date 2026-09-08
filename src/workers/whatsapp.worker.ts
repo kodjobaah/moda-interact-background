@@ -11,16 +11,12 @@ import type { RecoveryAgentContext } from "../agents/types.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
-import {
-  outboundWhatsAppAdmissionService,
-  runCommerceAgentAfterAdmission,
-} from "../services/outbound-whatsapp-admission.service.js";
-import type { OutboundAdmissionResult } from "../services/outbound-whatsapp-admission.service.js";
+import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
-
-const QUIET_WINDOW_MS = 3_000;
-const MAX_SETTLE_WINDOW_MS = 10_000;
-const PROCESSING_LEASE_MS = 120_000;
+import {
+  ConversationTurnProcessor,
+  type ConversationTurnJob,
+} from "../services/conversation-turn-processor.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-messaging-worker",
@@ -38,64 +34,61 @@ const conversationTurnObservation = {
   }),
 } as const;
 
-type ConversationTurnJob = {
-  conversationId: string;
-  observedVersion: number;
-};
-
 const whatsappQueue = new Queue("whatsapp-events", {
   connection: connectionRedis,
 });
 
-export const whatsappWorker =
-  new Worker<WhatsAppInboundEvent | ConversationTurnJob>(
-    "whatsapp-events",
+const conversationTurnProcessor = new ConversationTurnProcessor<
+  RecoveryAgentContext,
+  Awaited<ReturnType<typeof runCommerceAgent>>
+>({
+  queue: whatsappQueue,
+  conversation: conversationService,
+  admission: outboundWhatsAppAdmissionService,
+  loadTurn: loadConversationTurn,
+  runAgent: runCommerceAgent,
+  getResult: (result) => result,
+});
 
-    async (job) =>
-      observeWorkerJob(workerMetricDefinition, job, async () => {
-        switch (job.name) {
-          case "message-received":
-            await observeConversationTurn(
-              "whatsapp",
-              () => processInboundMessage(job.data as WhatsAppInboundEvent),
-              conversationTurnObservation,
-            );
-            return;
+export const whatsappWorker = new Worker<
+  WhatsAppInboundEvent | ConversationTurnJob
+>(
+  "whatsapp-events",
 
-          case "process-conversation-turn":
-            await observeConversationTurn(
-              "whatsapp",
-              () => processConversationTurn(job.data as ConversationTurnJob),
-              conversationTurnObservation,
-            );
-            return;
+  async (job) =>
+    observeWorkerJob(workerMetricDefinition, job, async () => {
+      switch (job.name) {
+        case "message-received":
+          await observeConversationTurn(
+            "whatsapp",
+            () => processInboundMessage(job.data as WhatsAppInboundEvent),
+            conversationTurnObservation,
+          );
+          return;
 
-          default:
-            throw new Error(
-              `Unknown WhatsApp job: ${job.name}`,
-            );
-        }
-      }),
+        case "process-conversation-turn":
+          await conversationTurnProcessor.process(
+            job.data as ConversationTurnJob,
+            job,
+          );
+          return;
 
-    {
-      connection: connectionRedis,
-      concurrency: 20,
-      telemetry: bullMQTelemetry,
-    },
-  );
+        default:
+          throw new Error(`Unknown WhatsApp job: ${job.name}`);
+      }
+    }),
 
-async function processInboundMessage(
-  event: WhatsAppInboundEvent,
-) {
-  console.log(
-    "Processing WhatsApp message",
-    event.providerMessageId,
-  );
+  {
+    connection: connectionRedis,
+    concurrency: 20,
+    telemetry: bullMQTelemetry,
+  },
+);
 
-  const route =
-    await recoveryRoutingService.resolveInboundMessage(
-      event,
-    );
+async function processInboundMessage(event: WhatsAppInboundEvent) {
+  console.log("Processing WhatsApp message", event.providerMessageId);
+
+  const route = await recoveryRoutingService.resolveInboundMessage(event);
 
   if (route.kind === "product-only" || route.kind === "standalone") {
     if (!route.shopId || !route.conversationId) return;
@@ -109,7 +102,10 @@ async function processInboundMessage(
 
     if (received.duplicate) return;
 
-    await enqueueConversationTurn(route.conversationId, received.version);
+    await conversationTurnProcessor.enqueue(
+      route.conversationId,
+      received.version,
+    );
     return;
   }
 
@@ -123,195 +119,150 @@ async function processInboundMessage(
 
     if (received.duplicate) return;
 
-    await enqueueConversationTurn(route.conversationId, received.version);
+    await conversationTurnProcessor.enqueue(
+      route.conversationId,
+      received.version,
+    );
     return;
   }
 
   if (route.kind === "unresolved") return;
 
-  const received =
-    await conversationService.receiveMessage({
-      conversationId:
-        route.conversationId,
+  const received = await conversationService.receiveMessage({
+    conversationId: route.conversationId,
 
-      providerMessageId:
-        event.providerMessageId,
+    providerMessageId: event.providerMessageId,
 
-      inReplyToProviderId:
-        event.contextMessageId,
+    inReplyToProviderId: event.contextMessageId,
 
-      content:
-        event.text ?? "",
-    });
+    content: event.text ?? "",
+  });
 
   if (received.duplicate) {
-    console.log(
-      "Ignoring duplicate WhatsApp message",
-      event.providerMessageId,
-    );
+    console.log("Ignoring duplicate WhatsApp message", event.providerMessageId);
 
     return;
   }
 
-  await enqueueConversationTurn(route.conversationId, received.version);
-}
-
-async function enqueueConversationTurn(
-  conversationId: string,
-  observedVersion: number,
-  retrySuffix?: string,
-): Promise<void> {
-  const state = await conversationService.getTurnState(conversationId);
-  if (!state.pendingTurnStartedAt || !state.lastInboundAt) return;
-
-  const now = Date.now();
-  const quietDeadline = state.lastInboundAt.getTime() + QUIET_WINDOW_MS;
-  const maximumDeadline = state.pendingTurnStartedAt.getTime() + MAX_SETTLE_WINDOW_MS;
-  const delay = Math.max(0, Math.min(quietDeadline, maximumDeadline) - now);
-
-  await whatsappQueue.add(
-    "process-conversation-turn",
-    { conversationId, observedVersion },
-    {
-      jobId: retrySuffix
-        ? `conversation-turn:${conversationId}:${observedVersion}:${retrySuffix}`
-        : `conversation-turn:${conversationId}:${observedVersion}`,
-      delay,
-    },
+  await conversationTurnProcessor.enqueue(
+    route.conversationId,
+    received.version,
   );
 }
 
-async function processConversationTurn({
-  conversationId,
-  observedVersion,
-}: ConversationTurnJob): Promise<void> {
-  const state = await conversationService.getTurnState(conversationId);
-  if (
-    observedVersion < state.inboundVersion ||
-    observedVersion <= state.lastProcessedVersion ||
-    !state.pendingTurnStartedAt
-  ) {
-    return;
-  }
-
-  const now = new Date();
-  const quietDeadline = (state.lastInboundAt?.getTime() ?? now.getTime()) + QUIET_WINDOW_MS;
-  const maximumDeadline = state.pendingTurnStartedAt.getTime() + MAX_SETTLE_WINDOW_MS;
-  if (now.getTime() < quietDeadline && now.getTime() < maximumDeadline) {
-    await enqueueConversationTurn(
-      conversationId,
-      observedVersion,
-      `settle:${now.getTime()}`,
-    );
-    return;
-  }
-
-  if (!await conversationService.claimTurn(conversationId, observedVersion, now)) {
-    await whatsappQueue.add(
-      "process-conversation-turn",
-      { conversationId, observedVersion },
-      { jobId: `conversation-turn-retry:${conversationId}:${observedVersion}:${now.getTime()}`, delay: 250 },
-    );
-    return;
-  }
-
-  let admission: OutboundAdmissionResult | null = null;
-  try {
-    const conversation = await prisma.conversation.findUniqueOrThrow({
-      where: { id: conversationId },
-      select: {
-        id: true,
-        type: true,
-        shopId: true,
-        customer: { select: { phone: true, id: true, firstName: true } },
-        shop: { select: { domain: true } },
-        checkoutRecoveryId: true,
-        checkoutRecovery: {
-          select: {
-            id: true,
-            shopId: true,
-            customer: { select: { phone: true, id: true, firstName: true } },
-          },
+async function loadConversationTurn(
+  conversationId: string,
+  pendingTurnStartedAt: Date,
+) {
+  const conversation = await prisma.conversation.findUniqueOrThrow({
+    where: { id: conversationId },
+    select: {
+      id: true,
+      type: true,
+      shopId: true,
+      customer: { select: { phone: true, id: true, firstName: true } },
+      shop: { select: { domain: true } },
+      checkoutRecoveryId: true,
+      checkoutRecovery: {
+        select: {
+          id: true,
+          shopId: true,
+          customer: { select: { phone: true, id: true, firstName: true } },
         },
       },
-    });
-    const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
-    const to = conversation.checkoutRecovery?.customer?.phone ?? conversation.customer?.phone;
-    if (!shopId || !to) throw new Error(`Conversation ${conversationId} has no outbound ownership`);
+    },
+  });
+  const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
+  const to =
+    conversation.checkoutRecovery?.customer?.phone ??
+    conversation.customer?.phone;
+  if (!shopId || !to)
+    throw new Error(`Conversation ${conversationId} has no outbound ownership`);
 
-    const context = conversation.checkoutRecoveryId
-      ? await checkoutRecoveryService.getAgentContext({
-          checkoutRecoveryId: conversation.checkoutRecoveryId,
-          conversationId,
-          pendingTurnStartedAt: state.pendingTurnStartedAt,
-        })
-      : await buildStandaloneAgentContext(conversation, state.pendingTurnStartedAt);
-
-    const reserved = await outboundWhatsAppAdmissionService.reserve({
+  const clarification =
+    await recoveryRoutingService.getCurrentClarification(conversationId);
+  if (clarification?.kind === "unresolved") {
+    return {
       shopId,
-      conversationId,
-      idempotencyKey: `agent:${conversationId}:${observedVersion}`,
-      senderType: "AGENT",
-    });
-    admission = reserved;
-    if (reserved.kind !== "admitted") {
-      await conversationService.completeTurn(conversationId, observedVersion);
-      return;
-    }
-    const admitted = reserved;
-
-    const result = await runCommerceAgentAfterAdmission({
-      admission: admitted,
       to,
-      context,
-      runAgent: runCommerceAgent,
-      sendPreparedText: (input) => outboundWhatsAppAdmissionService.sendPreparedText(input),
-      failPrepared: (messageId) => outboundWhatsAppAdmissionService.failPrepared(messageId),
-    });
-    if (result === null) {
-      await conversationService.completeTurn(conversationId, observedVersion);
-      return;
-    }
-
-    await conversationService.applyDetectedLanguage({
-      conversationId,
-      version: observedVersion,
-      message: context.conversation.messages.filter((message) => message.role === "user").map((message) => message.content).join("\n"),
-      detectedLanguageTag: result.detectedLanguageTag,
-      detectedLanguageConfidence: result.detectedLanguageConfidence,
-    });
-
-    if (await conversationService.hasChanged(conversationId, observedVersion)) {
-      await outboundWhatsAppAdmissionService.failPrepared(admitted.messageId);
-      await conversationService.releaseTurn(conversationId, observedVersion);
-      await enqueueConversationTurn(conversationId, (await conversationService.getTurnState(conversationId)).inboundVersion);
-      return;
-    }
-
-    await outboundWhatsAppAdmissionService.sendPreparedText({ ...admitted, to, text: result.replyText });
-    await conversationService.completeTurn(conversationId, observedVersion);
-  } catch (error) {
-    if (admission?.kind === "admitted") {
-      await outboundWhatsAppAdmissionService.failPrepared(admission.messageId).catch(() => undefined);
-    }
-    await conversationService.releaseTurn(conversationId, observedVersion);
-    throw error;
+      context: null,
+      languageMessage: "",
+      handledWithoutAgent: true,
+    };
   }
+  if (clarification?.kind === "clarify") {
+    return {
+      shopId,
+      to,
+      context: null,
+      languageMessage: "",
+      clarificationText: formatClarification(clarification.recoveries),
+    };
+  }
+
+  const context =
+    clarification?.kind === "resolved"
+      ? await checkoutRecoveryService.getAgentContextForStandaloneConversation({
+          checkoutRecoveryId: clarification.checkoutRecoveryId,
+          conversationId,
+          pendingTurnStartedAt,
+        })
+      : conversation.checkoutRecoveryId
+        ? await checkoutRecoveryService.getAgentContext({
+            checkoutRecoveryId: conversation.checkoutRecoveryId,
+            conversationId,
+            pendingTurnStartedAt,
+          })
+        : await buildStandaloneAgentContext(conversation, pendingTurnStartedAt);
+
+  return {
+    shopId,
+    to,
+    context,
+    languageMessage: context.conversation.messages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n"),
+  };
+}
+
+function formatClarification(
+  recoveries: Array<{ checkoutToken: string; totalPrice: string | null }>,
+): string {
+  const options = recoveries
+    .map(
+      ({ checkoutToken, totalPrice }) =>
+        `- ${checkoutToken}${totalPrice ? ` (${totalPrice})` : ""}`,
+    )
+    .join("\n");
+  return `I found more than one recent basket. Which one would you like help with?\n${options}`;
 }
 
 async function buildStandaloneAgentContext(
   conversation: {
     id: string;
-    type: RecoveryAgentContext["conversation"]["type"];
     shop: { domain: string } | null;
-    customer: { id: string; phone: string | null; firstName: string | null } | null;
+    customer: {
+      id: string;
+      phone: string | null;
+      firstName: string | null;
+    } | null;
   },
   pendingTurnStartedAt: Date,
 ): Promise<RecoveryAgentContext> {
-  const snapshot = await conversationService.getAgentSnapshot(conversation.id, pendingTurnStartedAt);
+  const snapshot = await conversationService.getAgentSnapshot(
+    conversation.id,
+    pendingTurnStartedAt,
+  );
   return {
     shop: conversation.shop?.domain ?? snapshot.shop,
-    recovery: { id: "standalone", status: "ENGAGED", checkoutToken: "standalone", completedAt: null, totalPrice: null },
+    recovery: {
+      id: "standalone",
+      status: "ENGAGED",
+      checkoutToken: "standalone",
+      completedAt: null,
+      totalPrice: null,
+    },
     customer: conversation.customer,
     conversation: snapshot,
   };
@@ -362,33 +313,16 @@ function buildProductOnlyContext(
   };
 }
 
-whatsappWorker.on(
-  "completed",
-  (job) => {
-    console.log(
-      `WhatsApp job ${job.id} completed successfully`,
-    );
-  },
-);
+whatsappWorker.on("completed", (job) => {
+  console.log(`WhatsApp job ${job.id} completed successfully`);
+});
 
-whatsappWorker.on(
-  "failed",
-  (job, error) => {
-    console.error(
-      `WhatsApp job ${job?.id} failed`,
-      error,
-    );
-  },
-);
+whatsappWorker.on("failed", (job, error) => {
+  console.error(`WhatsApp job ${job?.id} failed`, error);
+});
 
-whatsappWorker.on(
-  "error",
-  (error) => {
-    console.error(
-      "WhatsApp worker error",
-      error,
-    );
-  },
-);
+whatsappWorker.on("error", (error) => {
+  console.error("WhatsApp worker error", error);
+});
 
 console.log("WhatsApp worker started");

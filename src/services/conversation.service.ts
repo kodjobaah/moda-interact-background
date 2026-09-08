@@ -5,9 +5,7 @@ import type {
   AgentConversationContext,
 } from "../agents/types.js";
 
-import type {
-  MessageDirection,
-} from "../domain/types.js";
+import type { MessageDirection } from "../domain/types.js";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 import {
   ConversationLanguageService,
@@ -58,36 +56,31 @@ export class ConversationService {
     version: number;
     duplicate: boolean;
   }> {
-
     /*
      * First protect against Meta delivering the
      * same message more than once.
      */
-    const existing =
-      await prisma.conversationMessage.findUnique({
-        where: {
-          providerMessageId:
-            message.providerMessageId,
-        },
+    const existing = await prisma.conversationMessage.findUnique({
+      where: {
+        providerMessageId: message.providerMessageId,
+      },
 
-        include: {
-          conversation: {
-            select: {
-              inboundVersion: true,
-              languageTag: true,
-              languageSource: true,
-            },
+      include: {
+        conversation: {
+          select: {
+            inboundVersion: true,
+            languageTag: true,
+            languageSource: true,
           },
         },
-      });
+      },
+    });
 
     if (existing) {
       return {
-        conversationId:
-          existing.conversationId,
+        conversationId: existing.conversationId,
 
-        version:
-          existing.conversation.inboundVersion,
+        version: existing.conversation.inboundVersion,
 
         duplicate: true,
       };
@@ -121,61 +114,59 @@ export class ConversationService {
      * Persist the message and increment the
      * conversation version together.
      */
-    const result = await prisma.$transaction(
-      async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.conversationMessage.create({
+        data: {
+          conversationId: message.conversationId,
 
-        await tx.conversationMessage.create({
-          data: {
-            conversationId:
-              message.conversationId,
+          providerMessageId: message.providerMessageId,
 
-            providerMessageId:
-              message.providerMessageId,
+          inReplyToProviderId: message.inReplyToProviderId,
 
-            inReplyToProviderId:
-              message.inReplyToProviderId,
+          direction: "INBOUND",
 
-            direction: "INBOUND",
+          senderType: "CUSTOMER",
 
-            senderType: "CUSTOMER",
+          status: "DELIVERED",
 
-            status: "DELIVERED",
+          content: message.content,
+          createdAt: now,
+        },
+      });
 
-            content: message.content,
-            createdAt: now,
+      if (
+        currentConversation.inboundVersion ===
+          currentConversation.lastProcessedVersion &&
+        currentConversation.pendingTurnStartedAt === null
+      ) {
+        await tx.conversation.updateMany({
+          where: {
+            id: message.conversationId,
+            inboundVersion: currentConversation.inboundVersion,
+            lastProcessedVersion: currentConversation.lastProcessedVersion,
+            pendingTurnStartedAt: null,
           },
+          data: { pendingTurnStartedAt: now },
         });
+      }
 
-        const conversation =
-          await tx.conversation.update({
-            where: {
-              id: message.conversationId,
-            },
+      const conversation = await tx.conversation.update({
+        where: { id: message.conversationId },
+        data: {
+          inboundVersion: { increment: 1 },
+          lastInboundAt: now,
+          lastMessageAt: now,
+          languageTag: language.languageTag,
+          languageSource: toPrismaLanguageSource(language.languageSource),
+        },
+        select: {
+          id: true,
+          inboundVersion: true,
+        },
+      });
 
-            data: {
-              ...(currentConversation.inboundVersion === currentConversation.lastProcessedVersion &&
-              currentConversation.pendingTurnStartedAt === null
-                ? { pendingTurnStartedAt: now }
-                : {}),
-              inboundVersion: {
-                increment: 1,
-              },
-
-              lastInboundAt: now,
-              lastMessageAt: now,
-              languageTag: language.languageTag,
-              languageSource: toPrismaLanguageSource(language.languageSource),
-            },
-
-            select: {
-              id: true,
-              inboundVersion: true,
-            },
-          });
-
-        return conversation;
-      },
-    );
+      return conversation;
+    });
 
     return {
       conversationId: result.id,
@@ -223,7 +214,10 @@ export class ConversationService {
     return claimed.count === 1;
   }
 
-  async completeTurn(conversationId: string, observedVersion: number): Promise<boolean> {
+  async completeTurn(
+    conversationId: string,
+    observedVersion: number,
+  ): Promise<boolean> {
     const completed = await prisma.conversation.updateMany({
       where: {
         id: conversationId,
@@ -240,7 +234,10 @@ export class ConversationService {
     return completed.count === 1;
   }
 
-  async releaseTurn(conversationId: string, observedVersion: number): Promise<void> {
+  async releaseTurn(
+    conversationId: string,
+    observedVersion: number,
+  ): Promise<void> {
     await prisma.conversation.updateMany({
       where: {
         id: conversationId,
@@ -253,7 +250,6 @@ export class ConversationService {
     });
   }
 
-
   /**
    * Return the bounded conversation history needed
    * by the commerce agent.
@@ -262,69 +258,62 @@ export class ConversationService {
     conversationId: string,
     pendingTurnStartedAt?: Date | null,
   ): Promise<AgentConversationContext> {
+    const conversation = await prisma.conversation.findUniqueOrThrow({
+      where: {
+        id: conversationId,
+      },
 
-    const conversation =
-      await prisma.conversation.findUniqueOrThrow({
-        where: {
-          id: conversationId,
+      select: {
+        id: true,
+        type: true,
+        summary: true,
+        inboundVersion: true,
+        languageTag: true,
+        languageSource: true,
+
+        shop: {
+          select: {
+            domain: true,
+          },
         },
 
-        select: {
-          id: true,
-          type: true,
-          summary: true,
-          inboundVersion: true,
-          languageTag: true,
-          languageSource: true,
-
-          shop: {
-            select: {
-              domain: true,
-            },
-          },
-
-          checkoutRecovery: {
-            select: {
-              shop: {
-                select: {
-                  domain: true,
-                },
+        checkoutRecovery: {
+          select: {
+            shop: {
+              select: {
+                domain: true,
               },
             },
           },
         },
-      });
+      },
+    });
 
-    const messages =
-      await prisma.conversationMessage.findMany({
-        where: pendingTurnStartedAt
-          ? {
-              conversationId,
-              createdAt: { gte: pendingTurnStartedAt },
-              direction: "INBOUND",
-              senderType: "CUSTOMER",
-            }
-          : { conversationId },
+    const messages = await prisma.conversationMessage.findMany({
+      where: pendingTurnStartedAt
+        ? {
+            conversationId,
+            createdAt: { gte: pendingTurnStartedAt },
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+          }
+        : { conversationId },
 
-        orderBy: {
-          createdAt: "desc",
-        },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
 
-        ...(pendingTurnStartedAt ? {} : { take: 20 }),
+      ...(pendingTurnStartedAt ? {} : { take: 20 }),
 
-        select: {
-          direction: true,
-          content: true,
-        },
-      });
+      select: {
+        direction: true,
+        content: true,
+      },
+    });
 
-    const normalizedMessages: AgentMessage[] =
-      messages
-        .reverse()
-        .map((message) =>
-          this.toAgentMessage(message),
-        );
-    const shop = conversation.checkoutRecovery?.shop.domain ?? conversation.shop?.domain;
+    const normalizedMessages: AgentMessage[] = messages
+      .reverse()
+      .map((message) => this.toAgentMessage(message));
+    const shop =
+      conversation.checkoutRecovery?.shop.domain ?? conversation.shop?.domain;
     if (!shop) {
       throw new Error(`Conversation ${conversation.id} has no shop ownership`);
     }
@@ -332,51 +321,39 @@ export class ConversationService {
     return {
       conversationId: conversation.id,
 
-      shop:
-        shop,
+      shop: shop,
 
       type: conversation.type,
 
-      version:
-        conversation.inboundVersion,
+      version: conversation.inboundVersion,
 
       languageTag: conversation.languageTag,
 
       languageSource: fromPrismaLanguageSource(conversation.languageSource),
 
-      summary:
-        conversation.summary,
+      summary: conversation.summary,
 
-      messages:
-        normalizedMessages,
+      messages: normalizedMessages,
     };
   }
-
 
   /**
    * Used after an LLM call to determine whether a
    * newer customer message arrived while the agent
    * was processing.
    */
-  async hasChanged(
-    conversationId: string,
-    version: number,
-  ): Promise<boolean> {
+  async hasChanged(conversationId: string, version: number): Promise<boolean> {
+    const conversation = await prisma.conversation.findUniqueOrThrow({
+      where: {
+        id: conversationId,
+      },
 
-    const conversation =
-      await prisma.conversation.findUniqueOrThrow({
-        where: {
-          id: conversationId,
-        },
+      select: {
+        inboundVersion: true,
+      },
+    });
 
-        select: {
-          inboundVersion: true,
-        },
-      });
-
-    return (
-      conversation.inboundVersion !== version
-    );
+    return conversation.inboundVersion !== version;
   }
 
   async applyDetectedLanguage({
@@ -404,7 +381,9 @@ export class ConversationService {
     const language = this.languageService.acceptDetectedLanguage({
       message,
       currentLanguageTag: conversation.languageTag,
-      currentLanguageSource: fromPrismaLanguageSource(conversation.languageSource),
+      currentLanguageSource: fromPrismaLanguageSource(
+        conversation.languageSource,
+      ),
       detectedLanguageTag,
       detectedLanguageConfidence,
     });
@@ -424,7 +403,6 @@ export class ConversationService {
     return updated.count === 1;
   }
 
-
   /**
    * Every CheckoutRecovery can have one RECOVERY
    * conversation.
@@ -437,7 +415,6 @@ export class ConversationService {
     checkoutRecoveryId: string,
     internationalContext?: InternationalContext,
   ) {
-
     return prisma.conversation.upsert({
       where: { checkoutRecoveryId },
 
@@ -447,7 +424,9 @@ export class ConversationService {
         ...(internationalContext
           ? {
               languageTag: internationalContext.languageTag,
-              languageSource: toPrismaLanguageSource(internationalContext.languageSource),
+              languageSource: toPrismaLanguageSource(
+                internationalContext.languageSource,
+              ),
               countryCode: internationalContext.countryCode,
               currencyCode: internationalContext.currencyCode,
               timeZone: internationalContext.timeZone,
@@ -459,16 +438,11 @@ export class ConversationService {
     });
   }
 
-
   /**
    * Persist an outbound agent response BEFORE
    * sending it to WhatsApp.
    */
-  async createPendingAgentMessage(
-    conversationId: string,
-    content: string,
-  ) {
-
+  async createPendingAgentMessage(conversationId: string, content: string) {
     return prisma.conversationMessage.create({
       data: {
         conversationId,
@@ -484,16 +458,11 @@ export class ConversationService {
     });
   }
 
-
   /**
    * Once Meta accepts the outbound message,
    * attach the wamid to our persisted message.
    */
-  async markMessageSent(
-    messageId: string,
-    providerMessageId: string,
-  ) {
-
+  async markMessageSent(messageId: string, providerMessageId: string) {
     return prisma.conversationMessage.update({
       where: {
         id: messageId,
@@ -507,16 +476,11 @@ export class ConversationService {
     });
   }
 
-
   /**
    * Mark which inbound version the agent has
    * successfully dealt with.
    */
-  async markProcessed(
-    conversationId: string,
-    version: number,
-  ) {
-
+  async markProcessed(conversationId: string, version: number) {
     return prisma.conversation.update({
       where: {
         id: conversationId,
@@ -528,7 +492,6 @@ export class ConversationService {
     });
   }
 
-
   /**
    * Convert our domain representation into the
    * format expected by the agent.
@@ -536,36 +499,47 @@ export class ConversationService {
    * We deliberately don't persist "user" /
    * "assistant" in the database.
    */
-  private toAgentMessage(
-    message: {
-      direction: MessageDirection;
-      content: string;
-    },
-  ): AgentMessage {
-
+  private toAgentMessage(message: {
+    direction: MessageDirection;
+    content: string;
+  }): AgentMessage {
     return {
-      role:
-        message.direction === "INBOUND"
-          ? "user"
-          : "assistant",
+      role: message.direction === "INBOUND" ? "user" : "assistant",
 
       content: message.content,
     };
   }
 }
 
-function toPrismaLanguageSource(source: InternationalContext["languageSource"]):
-  "CUSTOMER_EXPLICIT" | "DETECTED" | "SHOPIFY" | "MERCHANT_DEFAULT" | "PLATFORM_DEFAULT" | null {
+function toPrismaLanguageSource(
+  source: InternationalContext["languageSource"],
+):
+  | "CUSTOMER_EXPLICIT"
+  | "DETECTED"
+  | "SHOPIFY"
+  | "MERCHANT_DEFAULT"
+  | "PLATFORM_DEFAULT"
+  | null {
   if (!source) return null;
-  return source.replaceAll("-", "_").toUpperCase() as ReturnType<typeof toPrismaLanguageSource>;
+  return source.replaceAll("-", "_").toUpperCase() as ReturnType<
+    typeof toPrismaLanguageSource
+  >;
 }
 
 function fromPrismaLanguageSource(
-  source: "CUSTOMER_EXPLICIT" | "DETECTED" | "SHOPIFY" | "MERCHANT_DEFAULT" | "PLATFORM_DEFAULT" | null | undefined,
+  source:
+    | "CUSTOMER_EXPLICIT"
+    | "DETECTED"
+    | "SHOPIFY"
+    | "MERCHANT_DEFAULT"
+    | "PLATFORM_DEFAULT"
+    | null
+    | undefined,
 ): InternationalContext["languageSource"] {
   if (!source) return null;
-  return source.toLowerCase().replaceAll("_", "-") as NonNullable<InternationalContext["languageSource"]>;
+  return source.toLowerCase().replaceAll("_", "-") as NonNullable<
+    InternationalContext["languageSource"]
+  >;
 }
 
-export const conversationService =
-  new ConversationService();
+export const conversationService = new ConversationService();

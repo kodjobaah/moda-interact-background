@@ -31,7 +31,22 @@ const hoisted = vi.hoisted(() => {
       resolveCustomer: vi.fn(async () => null),
     },
     conversationServiceMock: {
-      getOrCreateRecoveryConversation: vi.fn(async () => ({ id: "conversation-1" })),
+      getOrCreateRecoveryConversation: vi.fn(async () => ({
+        id: "conversation-1",
+      })),
+      getAgentSnapshot: vi.fn(async () => ({
+        conversationId: "clarification-1",
+        shop: "shop.myshopify.com",
+        type: "PRODUCT_SUPPORT",
+        summary: null,
+        version: 3,
+        languageTag: "en-GB",
+        languageSource: "shopify",
+        messages: [
+          { role: "user", content: "Which basket?" },
+          { role: "user", content: "The blue one" },
+        ],
+      })),
     },
     conversationMessageServiceMock: {
       buildRecoveryMessage: vi.fn(() => "Hello!"),
@@ -40,7 +55,9 @@ const hoisted = vi.hoisted(() => {
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
-      sendWhatsAppTemplate: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
+      sendWhatsAppTemplate: vi.fn(async () => ({
+        providerMessageId: "wamid-1",
+      })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
     },
     whatsappTemplateSelectorMock: {
@@ -166,9 +183,11 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       kind: "found",
       checkout: currentCheckout,
     });
-    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
-      outcome: "not-found",
-    });
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
+      {
+        outcome: "not-found",
+      },
+    );
   });
 
   it("discards the update and does not call Shopify when no recovery exists", async () => {
@@ -225,10 +244,12 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   });
 
   it("reschedules a matching pending candidate before checking durable recovery", async () => {
-    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
-      outcome: "rescheduled",
-      jobId: "candidate-1",
-    });
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
+      {
+        outcome: "rescheduled",
+        jobId: "candidate-1",
+      },
+    );
 
     const result = await service.handleCheckoutUpdatedContract({
       ...event,
@@ -241,7 +262,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       jobId: "candidate-1",
     });
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).toHaveBeenCalledWith({
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).toHaveBeenCalledWith({
       shopId: "shop_1",
       checkoutToken: "checkout_1",
       cartToken: null,
@@ -251,10 +274,12 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   });
 
   it("handles cart activity without a Shopify lookup or candidate creation", async () => {
-    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue({
-      outcome: "cancelled",
-      jobId: "candidate-1",
-    });
+    hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
+      {
+        outcome: "cancelled",
+        jobId: "candidate-1",
+      },
+    );
 
     const result = await service.handleCartActivityContract({
       shopId: "shop_1",
@@ -269,7 +294,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       outcome: "cancelled",
       jobId: "candidate-1",
     });
-    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).toHaveBeenCalledWith({
+    expect(
+      hoisted.pendingCandidateServiceMock.refreshCandidateActivity,
+    ).toHaveBeenCalledWith({
       shopId: "shop_1",
       checkoutToken: null,
       cartToken: "cart_1",
@@ -342,9 +369,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       message: "boom",
     });
 
-    await expect(
-      service.handleCheckoutUpdatedContract(event),
-    ).rejects.toThrow(/provider error/);
+    await expect(service.handleCheckoutUpdatedContract(event)).rejects.toThrow(
+      /provider error/,
+    );
     // No write was attempted.
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
@@ -359,5 +386,95 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
 
     expect(result).toEqual({ kind: "discarded", reason: "lookup-ambiguous" });
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("CheckoutRecoveryService clarification context", () => {
+  it("combines a current recovery with standalone settled fragments", async () => {
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
+      id: "recovery-current",
+      shop: { domain: "shop.myshopify.com" },
+      status: "ENGAGED",
+      checkoutToken: "checkout-current",
+      completedAt: null,
+      totalPrice: "42.00",
+      customer: {
+        id: "customer-1",
+        phone: "+15551234567",
+        firstName: "Ada",
+      },
+    } as any);
+
+    const context = await service.getAgentContextForStandaloneConversation({
+      checkoutRecoveryId: "recovery-current",
+      conversationId: "clarification-1",
+      pendingTurnStartedAt: new Date("2026-09-08T12:00:00Z"),
+    });
+
+    expect(context.recovery.id).toBe("recovery-current");
+    expect(context.shop).toBe("shop.myshopify.com");
+    expect(context.customer).toEqual({
+      id: "customer-1",
+      phone: "+15551234567",
+      firstName: "Ada",
+    });
+    expect(context.conversation).toMatchObject({
+      conversationId: "clarification-1",
+      type: "PRODUCT_SUPPORT",
+      messages: [
+        { role: "user", content: "Which basket?" },
+        { role: "user", content: "The blue one" },
+      ],
+    });
+  });
+});
+
+describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
+  it("orders equal-timestamp recovery fragments by descending id before reversing", async () => {
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
+      id: "recovery-1",
+      shop: { domain: "shop.myshopify.com" },
+      status: "ENGAGED",
+      checkoutToken: "checkout-1",
+      completedAt: null,
+      totalPrice: "42.00",
+      customer: { id: "customer-1", phone: "+15551234567", firstName: "Ada" },
+      conversation: {
+        id: "conversation-1",
+        type: "RECOVERY",
+        summary: null,
+        inboundVersion: 2,
+        languageTag: null,
+        languageSource: null,
+        messages: [
+          { id: "message-2", direction: "INBOUND", content: "second" },
+          { id: "message-1", direction: "INBOUND", content: "first" },
+        ],
+      },
+    } as any);
+
+    const context = await service.getAgentContext({
+      checkoutRecoveryId: "recovery-1",
+      conversationId: "conversation-1",
+      pendingTurnStartedAt: new Date("2026-09-08T12:00:00.000Z"),
+    });
+
+    expect(context.conversation.messages).toEqual([
+      { role: "user", content: "first" },
+      { role: "user", content: "second" },
+    ]);
+    expect(prismaMock.checkoutRecovery.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          conversation: expect.objectContaining({
+            select: expect.objectContaining({
+              messages: expect.objectContaining({
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
   });
 });

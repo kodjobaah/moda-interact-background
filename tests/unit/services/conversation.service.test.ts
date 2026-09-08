@@ -5,22 +5,24 @@ import {
 } from "../../../src/services/conversation-language.service.js";
 import { ConversationService } from "../../../src/services/conversation.service.js";
 
-const { prismaMock, txConversationUpdate } = vi.hoisted(() => ({
-  txConversationUpdate: vi.fn(),
-  prismaMock: {
-    conversationMessage: {
-      findUnique: vi.fn(),
-      create: vi.fn(),
-      findMany: vi.fn(),
+const { prismaMock, txConversationUpdate, txConversationUpdateMany } =
+  vi.hoisted(() => ({
+    txConversationUpdate: vi.fn(),
+    txConversationUpdateMany: vi.fn(),
+    prismaMock: {
+      conversationMessage: {
+        findUnique: vi.fn(),
+        create: vi.fn(),
+        findMany: vi.fn(),
+      },
+      conversation: {
+        findUniqueOrThrow: vi.fn(),
+        update: vi.fn(),
+        updateMany: vi.fn(),
+      },
+      $transaction: vi.fn(),
     },
-    conversation: {
-      findUniqueOrThrow: vi.fn(),
-      update: vi.fn(),
-      updateMany: vi.fn(),
-    },
-    $transaction: vi.fn(),
-  },
-}));
+  }));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
 
@@ -34,22 +36,30 @@ describe("ConversationService language persistence", () => {
       languageTag: "en-GB",
       languageSource: "SHOPIFY",
     });
-    txConversationUpdate.mockResolvedValue({ id: "conversation-1", inboundVersion: 2 });
+    txConversationUpdate.mockResolvedValue({
+      id: "conversation-1",
+      inboundVersion: 2,
+    });
     prismaMock.$transaction.mockImplementation(async (callback) =>
       callback({
         conversationMessage: {
           create: vi.fn(),
         },
         conversation: {
+          updateMany: txConversationUpdateMany.mockResolvedValue({ count: 1 }),
           update: txConversationUpdate,
         },
       }),
     );
 
     const detector: LanguageDetector = {
-      detect: vi.fn().mockResolvedValue({ languageTag: "fr-FR", confidence: 0.96 }),
+      detect: vi
+        .fn()
+        .mockResolvedValue({ languageTag: "fr-FR", confidence: 0.96 }),
     };
-    const service = new ConversationService(new ConversationLanguageService(detector));
+    const service = new ConversationService(
+      new ConversationLanguageService(detector),
+    );
 
     await service.receiveMessage({
       conversationId: "conversation-1",
@@ -58,10 +68,18 @@ describe("ConversationService language persistence", () => {
       content: "Je veux modifier cette commande",
     });
 
+    expect(txConversationUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: "conversation-1",
+        inboundVersion: 1,
+        lastProcessedVersion: 1,
+        pendingTurnStartedAt: null,
+      },
+      data: { pendingTurnStartedAt: expect.any(Date) },
+    });
     expect(txConversationUpdate).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
       data: {
-        pendingTurnStartedAt: expect.any(Date),
         inboundVersion: { increment: 1 },
         lastInboundAt: expect.any(Date),
         lastMessageAt: expect.any(Date),
@@ -103,6 +121,60 @@ describe("ConversationService language persistence", () => {
       data: { languageTag: "fr", languageSource: "DETECTED" },
     });
   });
+
+  it("persists a provider duplicate only once", async () => {
+    prismaMock.conversationMessage.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        conversationId: "conversation-1",
+        conversation: {
+          inboundVersion: 1,
+          languageTag: null,
+          languageSource: null,
+        },
+      } as any);
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      inboundVersion: 1,
+      lastProcessedVersion: 1,
+      pendingTurnStartedAt: null,
+      languageTag: null,
+      languageSource: null,
+    });
+    const create = vi.fn();
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const update = vi.fn().mockResolvedValue({
+      id: "conversation-1",
+      inboundVersion: 2,
+    });
+    prismaMock.$transaction.mockImplementation(async (callback) =>
+      callback({
+        conversationMessage: { create },
+        conversation: { updateMany, update },
+      } as any),
+    );
+
+    const service = new ConversationService();
+    const message = {
+      conversationId: "conversation-1",
+      providerMessageId: "wamid.duplicate",
+      inReplyToProviderId: null,
+      content: "hello",
+    };
+
+    await expect(service.receiveMessage(message)).resolves.toMatchObject({
+      duplicate: false,
+      version: 2,
+    });
+    await expect(service.receiveMessage(message)).resolves.toEqual({
+      conversationId: "conversation-1",
+      version: 1,
+      duplicate: true,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("ConversationService standalone snapshots", () => {
@@ -121,7 +193,9 @@ describe("ConversationService standalone snapshots", () => {
       { direction: "INBOUND", content: "Need a black shirt" },
     ] as any);
 
-    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
+    const snapshot = await new ConversationService().getAgentSnapshot(
+      "conversation-1",
+    );
 
     expect(snapshot).toMatchObject({
       conversationId: "conversation-1",
@@ -148,11 +222,15 @@ describe("ConversationService turn state", () => {
 
     const service = new ConversationService();
 
-    await expect(service.getTurnState("conversation-1")).resolves.toMatchObject({
-      inboundVersion: 3,
-      lastProcessedVersion: 2,
-    });
-    await expect(service.claimTurn("conversation-1", 3, now)).resolves.toBe(true);
+    await expect(service.getTurnState("conversation-1")).resolves.toMatchObject(
+      {
+        inboundVersion: 3,
+        lastProcessedVersion: 2,
+      },
+    );
+    await expect(service.claimTurn("conversation-1", 3, now)).resolves.toBe(
+      true,
+    );
 
     expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith({
       where: {
@@ -169,6 +247,70 @@ describe("ConversationService turn state", () => {
         processingInboundVersion: 3,
         processingStartedAt: now,
       },
+    });
+  });
+
+  it("keeps the first pending-turn timestamp when concurrent receipts race", async () => {
+    const conditionalUpdate = vi
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    let nextVersion = 2;
+    prismaMock.conversationMessage.findUnique.mockResolvedValue(null);
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      inboundVersion: 1,
+      lastProcessedVersion: 1,
+      pendingTurnStartedAt: null,
+      languageTag: null,
+      languageSource: null,
+    });
+    prismaMock.$transaction.mockImplementation(async (callback) =>
+      callback({
+        conversationMessage: { create: vi.fn() },
+        conversation: {
+          updateMany: conditionalUpdate,
+          update: vi.fn().mockImplementation(async () => ({
+            id: "conversation-1",
+            inboundVersion: nextVersion++,
+          })),
+        },
+      }),
+    );
+
+    const service = new ConversationService();
+    await Promise.all([
+      service.receiveMessage({
+        conversationId: "conversation-1",
+        providerMessageId: "wamid.concurrent-1",
+        inReplyToProviderId: null,
+        content: "first",
+      }),
+      service.receiveMessage({
+        conversationId: "conversation-1",
+        providerMessageId: "wamid.concurrent-2",
+        inReplyToProviderId: null,
+        content: "second",
+      }),
+    ]);
+
+    expect(conditionalUpdate).toHaveBeenCalledTimes(2);
+    expect(conditionalUpdate).toHaveBeenNthCalledWith(1, {
+      where: {
+        id: "conversation-1",
+        inboundVersion: 1,
+        lastProcessedVersion: 1,
+        pendingTurnStartedAt: null,
+      },
+      data: { pendingTurnStartedAt: expect.any(Date) },
+    });
+    expect(conditionalUpdate).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: "conversation-1",
+        inboundVersion: 1,
+        lastProcessedVersion: 1,
+        pendingTurnStartedAt: null,
+      },
+      data: { pendingTurnStartedAt: expect.any(Date) },
     });
   });
 

@@ -1,21 +1,19 @@
-import {
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
 import prisma from "../../../src/lib/db.js";
+import { ConversationService } from "../../../src/services/conversation.service.js";
 import { RecoveryRoutingService } from "../../../src/services/recovery-routing.service.js";
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
     conversationMessage: {
       findUnique: vi.fn(),
+      create: vi.fn(),
     },
     conversation: {
+      findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       findMany: vi.fn(),
     },
     customerPhone: {
@@ -63,7 +61,8 @@ describe("RecoveryRoutingService", () => {
         },
       },
     ] as any);
-    const findUnique = vi.fn()
+    const findUnique = vi
+      .fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
         id: "standalone-1",
@@ -100,8 +99,14 @@ describe("RecoveryRoutingService", () => {
       text: "In black",
     });
 
-    expect(first).toMatchObject({ kind: "product-only", conversationId: "standalone-1" });
-    expect(second).toMatchObject({ kind: "product-only", conversationId: "standalone-1" });
+    expect(first).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-1",
+    });
+    expect(second).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-1",
+    });
     expect(create).toHaveBeenCalledTimes(1);
   });
 
@@ -141,9 +146,15 @@ describe("RecoveryRoutingService", () => {
       text: "Show me shirts",
     });
 
-    expect(route).toMatchObject({ kind: "product-only", conversationId: "standalone-new" });
+    expect(route).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-new",
+    });
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: "standalone-old", standaloneScopeKey: "standalone:shop-1:customer-1:PRODUCT_DISCOVERY" },
+      where: {
+        id: "standalone-old",
+        standaloneScopeKey: "standalone:shop-1:customer-1:PRODUCT_DISCOVERY",
+      },
       data: { outcome: "EXPIRED", standaloneScopeKey: null },
     });
   });
@@ -172,12 +183,20 @@ describe("RecoveryRoutingService", () => {
     vi.mocked(prisma.$transaction)
       .mockImplementationOnce(async (callback: any) =>
         callback({
-          conversation: { findUnique: findUniqueFirst, create, updateMany: vi.fn() },
+          conversation: {
+            findUnique: findUniqueFirst,
+            create,
+            updateMany: vi.fn(),
+          },
         }),
       )
       .mockImplementationOnce(async (callback: any) =>
         callback({
-          conversation: { findUnique: findUniqueWinner, create, updateMany: vi.fn() },
+          conversation: {
+            findUnique: findUniqueWinner,
+            create,
+            updateMany: vi.fn(),
+          },
         }),
       );
 
@@ -192,7 +211,10 @@ describe("RecoveryRoutingService", () => {
       text: "Show me shirts",
     });
 
-    expect(route).toMatchObject({ kind: "product-only", conversationId: "standalone-winner" });
+    expect(route).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-winner",
+    });
   });
 
   it("fails closed when a phone belongs to multiple merchant ownership pairs", async () => {
@@ -295,7 +317,10 @@ describe("RecoveryRoutingService", () => {
       text: "Show me shirts",
     });
 
-    expect(route).toMatchObject({ kind: "product-only", conversationId: "standalone-1" });
+    expect(route).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-1",
+    });
   });
 
   it("returns the only active recovery when there is exactly one match", async () => {
@@ -469,7 +494,10 @@ describe("RecoveryRoutingService", () => {
       text: "Show me shirts",
     });
 
-    expect(route).toMatchObject({ kind: "product-only", conversationId: "standalone-10" });
+    expect(route).toMatchObject({
+      kind: "product-only",
+      conversationId: "standalone-10",
+    });
     expect(prisma.customerPhone.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 11 }),
     );
@@ -511,7 +539,10 @@ describe("RecoveryRoutingService", () => {
       text: "Which basket?",
     });
 
-    expect(route).toMatchObject({ kind: "clarify", conversationId: "clarification-10" });
+    expect(route).toMatchObject({
+      kind: "clarify",
+      conversationId: "clarification-10",
+    });
     expect((route as any).recoveries).toHaveLength(10);
     expect(prisma.conversation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 11 }),
@@ -592,8 +623,11 @@ describe("RecoveryRoutingService", () => {
         },
       },
     ];
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue(recoveries as any);
-    const findUnique = vi.fn()
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
+      recoveries as any,
+    );
+    const findUnique = vi
+      .fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
         id: "clarification-1",
@@ -616,11 +650,210 @@ describe("RecoveryRoutingService", () => {
       type: "text" as const,
       text: "Which basket?",
     };
-    const first = await service.resolveInboundMessage({ ...input, providerMessageId: "clarify-1" });
-    const second = await service.resolveInboundMessage({ ...input, providerMessageId: "clarify-2" });
+    const first = await service.resolveInboundMessage({
+      ...input,
+      providerMessageId: "clarify-1",
+    });
+    const second = await service.resolveInboundMessage({
+      ...input,
+      providerMessageId: "clarify-2",
+    });
 
-    expect(first).toMatchObject({ kind: "clarify", conversationId: "clarification-1" });
-    expect(second).toMatchObject({ kind: "clarify", conversationId: "clarification-1" });
+    expect(first).toMatchObject({
+      kind: "clarify",
+      conversationId: "clarification-1",
+    });
+    expect(second).toMatchObject({
+      kind: "clarify",
+      conversationId: "clarification-1",
+    });
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconstructs one current recovery for a settled clarification conversation", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      type: "PRODUCT_SUPPORT",
+      shopId: "shop-1",
+      customerId: "customer-1",
+      customer: { phone: "+447700900000" },
+    } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      {
+        checkoutRecovery: {
+          id: "recovery-current",
+          shopId: "shop-1",
+          customer: { id: "customer-1", phone: "+447700900000" },
+          checkoutToken: "checkout-current",
+          totalPrice: "42.00",
+        },
+      },
+    ] as any);
+
+    await expect(
+      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
+    ).resolves.toEqual({
+      kind: "resolved",
+      shopId: "shop-1",
+      customerPhone: "+447700900000",
+      checkoutRecoveryId: "recovery-current",
+    });
+  });
+
+  it("fails closed when a resolved recovery does not match the clarification owner", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      type: "PRODUCT_SUPPORT",
+      shopId: "shop-1",
+      customerId: "customer-1",
+      customer: { phone: "+447700900000" },
+    } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      {
+        checkoutRecovery: {
+          id: "recovery-other-tenant",
+          shopId: "shop-2",
+          customer: { id: "customer-2", phone: "+447700900000" },
+          checkoutToken: "checkout-other-tenant",
+          totalPrice: "42.00",
+        },
+      },
+    ] as any);
+
+    await expect(
+      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
+    ).resolves.toEqual({
+      kind: "unresolved",
+      reason: "ambiguous-tenant",
+      customerPhone: "+447700900000",
+    });
+  });
+
+  it("persists three clarification fragments before reconstructing one current turn", async () => {
+    const persisted = vi.fn();
+    vi.mocked(prisma.conversation.findUniqueOrThrow).mockResolvedValue({
+      inboundVersion: 0,
+      lastProcessedVersion: 0,
+      pendingTurnStartedAt: null,
+      languageTag: null,
+      languageSource: null,
+    } as any);
+    vi.mocked(prisma.conversationMessage.findUnique)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
+      callback({
+        conversationMessage: { create: persisted },
+        conversation: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          update: vi
+            .fn()
+            .mockResolvedValueOnce({ id: "clarification-1", inboundVersion: 1 })
+            .mockResolvedValueOnce({ id: "clarification-1", inboundVersion: 2 })
+            .mockResolvedValueOnce({
+              id: "clarification-1",
+              inboundVersion: 3,
+            }),
+        },
+      }),
+    );
+    const conversationService = new ConversationService();
+    for (const [index, content] of [
+      "Which basket?",
+      "The jacket one",
+      "The blue one",
+    ].entries()) {
+      await conversationService.receiveMessage({
+        conversationId: "clarification-1",
+        providerMessageId: `clarification-${index}`,
+        inReplyToProviderId: null,
+        content,
+      });
+    }
+
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      type: "PRODUCT_SUPPORT",
+      shopId: "shop-1",
+      customerId: "customer-1",
+      customer: { phone: "+447700900000" },
+    } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      {
+        checkoutRecovery: {
+          id: "recovery-1",
+          shopId: "shop-1",
+          customer: { id: "customer-1", phone: "+447700900000" },
+          checkoutToken: "checkout-1",
+          totalPrice: "42.00",
+        },
+      },
+      {
+        checkoutRecovery: {
+          id: "recovery-2",
+          shopId: "shop-1",
+          customer: { id: "customer-1", phone: "+447700900000" },
+          checkoutToken: "checkout-2",
+          totalPrice: "18.00",
+        },
+      },
+    ] as any);
+
+    const route = await new RecoveryRoutingService().getCurrentClarification(
+      "clarification-1",
+    );
+
+    expect(persisted).toHaveBeenCalledTimes(3);
+    expect(route).toMatchObject({ kind: "clarify" });
+  });
+
+  it("fails closed for current recovery overflow and mixed ownership", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
+      type: "PRODUCT_SUPPORT",
+      shopId: "shop-1",
+      customerId: "customer-1",
+      customer: { phone: "+447700900000" },
+    } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
+      Array.from({ length: 11 }, (_, index) => ({
+        checkoutRecovery: {
+          id: `recovery-${index}`,
+          shopId: "shop-1",
+          customer: { id: "customer-1", phone: "+447700900000" },
+          checkoutToken: `checkout-${index}`,
+          totalPrice: "42.00",
+        },
+      })) as any,
+    );
+
+    await expect(
+      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
+    ).resolves.toMatchObject({ kind: "unresolved", reason: "overflow" });
+
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      {
+        checkoutRecovery: {
+          id: "recovery-1",
+          shopId: "shop-1",
+          customer: { id: "customer-1", phone: "+447700900000" },
+          checkoutToken: "checkout-1",
+          totalPrice: "42.00",
+        },
+      },
+      {
+        checkoutRecovery: {
+          id: "recovery-2",
+          shopId: "shop-2",
+          customer: { id: "customer-2", phone: "+447700900000" },
+          checkoutToken: "checkout-2",
+          totalPrice: "18.00",
+        },
+      },
+    ] as any);
+
+    await expect(
+      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      reason: "ambiguous-tenant",
+    });
   });
 });

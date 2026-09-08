@@ -51,33 +51,201 @@ export type RecoveryRoute =
       customerPhone: string;
     };
 
+export type CurrentTurnRouting =
+  | {
+      kind: "standalone";
+      shopId: string;
+      customerPhone: string;
+    }
+  | {
+      kind: "resolved";
+      shopId: string;
+      customerPhone: string;
+      checkoutRecoveryId: string;
+    }
+  | {
+      kind: "clarify";
+      shopId: string;
+      customerPhone: string;
+      recoveries: Array<{
+        checkoutToken: string;
+        totalPrice: string | null;
+      }>;
+    }
+  | {
+      kind: "unresolved";
+      reason: "ambiguous-tenant" | "overflow";
+      customerPhone: string;
+    };
+
 export class RecoveryRoutingService {
+  async getCurrentClarification(
+    conversationId: string,
+  ): Promise<CurrentTurnRouting | null> {
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        type: true,
+        shopId: true,
+        customerId: true,
+        customer: { select: { phone: true } },
+      },
+    });
+
+    if (
+      conversation?.type !== "PRODUCT_SUPPORT" ||
+      !conversation.shopId ||
+      !conversation.customerId ||
+      !conversation.customer?.phone
+    ) {
+      return null;
+    }
+
+    const conversations = await prisma.conversation.findMany({
+      where: {
+        checkoutRecovery: {
+          customer: { phone: conversation.customer.phone },
+          status: { in: ["MESSAGE_SENT", "ENGAGED", "COMPLETED"] },
+        },
+      },
+      orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
+      take: 11,
+      select: {
+        checkoutRecovery: {
+          select: {
+            id: true,
+            shopId: true,
+            customer: { select: { id: true, phone: true } },
+            checkoutToken: true,
+            totalPrice: true,
+          },
+        },
+      },
+    });
+
+    if (conversations.length === 11) {
+      return {
+        kind: "unresolved",
+        reason: "overflow",
+        customerPhone: conversation.customer.phone,
+      };
+    }
+
+    if (conversations.length === 0) {
+      return {
+        kind: "standalone",
+        shopId: conversation.shopId,
+        customerPhone: conversation.customer.phone,
+      };
+    }
+
+    const ownershipPairs = new Map<
+      string,
+      { shopId: string; customerId: string }
+    >();
+    for (const candidate of conversations) {
+      const recovery = candidate.checkoutRecovery;
+      const customerId = recovery?.customer?.id;
+      if (!recovery?.shopId || !customerId) {
+        return {
+          kind: "unresolved",
+          reason: "ambiguous-tenant",
+          customerPhone: conversation.customer.phone,
+        };
+      }
+      ownershipPairs.set(`${recovery.shopId}:${customerId}`, {
+        shopId: recovery.shopId,
+        customerId,
+      });
+    }
+
+    if (ownershipPairs.size !== 1) {
+      return {
+        kind: "unresolved",
+        reason: "ambiguous-tenant",
+        customerPhone: conversation.customer.phone,
+      };
+    }
+
+    const ownership = [...ownershipPairs.values()][0];
+    if (!ownership) {
+      return {
+        kind: "unresolved",
+        reason: "ambiguous-tenant",
+        customerPhone: conversation.customer.phone,
+      };
+    }
+
+    if (
+      ownership.shopId !== conversation.shopId ||
+      ownership.customerId !== conversation.customerId
+    ) {
+      return {
+        kind: "unresolved",
+        reason: "ambiguous-tenant",
+        customerPhone: conversation.customer.phone,
+      };
+    }
+
+    if (conversations.length === 1) {
+      const recovery = conversations[0]?.checkoutRecovery;
+      if (!recovery) {
+        return {
+          kind: "unresolved",
+          reason: "ambiguous-tenant",
+          customerPhone: conversation.customer.phone,
+        };
+      }
+      return {
+        kind: "resolved",
+        shopId: ownership.shopId,
+        customerPhone: conversation.customer.phone,
+        checkoutRecoveryId: recovery.id,
+      };
+    }
+
+    return {
+      kind: "clarify",
+      shopId: ownership.shopId,
+      customerPhone: conversation.customer.phone,
+      recoveries: conversations.flatMap((candidate) =>
+        candidate.checkoutRecovery
+          ? [
+              {
+                checkoutToken: candidate.checkoutRecovery.checkoutToken,
+                totalPrice:
+                  candidate.checkoutRecovery.totalPrice?.toString() ?? null,
+              },
+            ]
+          : [],
+      ),
+    };
+  }
+
   async resolveInboundMessage(
     event: WhatsAppInboundEvent,
   ): Promise<RecoveryRoute> {
     if (event.contextMessageId) {
-      const originalMessage =
-        await prisma.conversationMessage.findUnique({
-          where: {
-            providerMessageId:
-              event.contextMessageId,
-          },
+      const originalMessage = await prisma.conversationMessage.findUnique({
+        where: {
+          providerMessageId: event.contextMessageId,
+        },
 
-          select: {
-            conversationId: true,
+        select: {
+          conversationId: true,
 
-            conversation: {
-              select: {
-                checkoutRecoveryId: true,
-                shopId: true,
-                customerId: true,
-                type: true,
-                shop: { select: { domain: true } },
-                checkoutRecovery: { select: { shopId: true } },
-              },
+          conversation: {
+            select: {
+              checkoutRecoveryId: true,
+              shopId: true,
+              customerId: true,
+              type: true,
+              shop: { select: { domain: true } },
+              checkoutRecovery: { select: { shopId: true } },
             },
           },
-        });
+        },
+      });
 
       if (originalMessage) {
         if (!originalMessage.conversation.checkoutRecoveryId) {
@@ -93,80 +261,72 @@ export class RecoveryRoutingService {
               shop: originalMessage.conversation.shop.domain,
               shopId: originalMessage.conversation.shopId,
               customerId: originalMessage.conversation.customerId,
-              type: originalMessage.conversation.type as StandaloneConversationType,
+              type: originalMessage.conversation
+                .type as StandaloneConversationType,
             };
           }
-          throw new Error("Original message has no durable conversation ownership");
+          throw new Error(
+            "Original message has no durable conversation ownership",
+          );
         }
 
         return {
           kind: "resolved",
-          conversationId:
-            originalMessage.conversationId,
-          checkoutRecoveryId:
-            originalMessage.conversation.checkoutRecoveryId,
+          conversationId: originalMessage.conversationId,
+          checkoutRecoveryId: originalMessage.conversation.checkoutRecoveryId,
           shopId: originalMessage.conversation.checkoutRecovery?.shopId ?? "",
         };
       }
     }
 
-    return this.resolveWithoutContext(
-      event.customerPhone,
-    );
+    return this.resolveWithoutContext(event.customerPhone);
   }
 
   private async resolveWithoutContext(
     customerPhone: string,
   ): Promise<RecoveryRoute> {
-    const conversations =
-      await prisma.conversation.findMany({
-        where: {
-          checkoutRecovery: {
-            customer: {
-              phone: customerPhone,
-            },
+    const conversations = await prisma.conversation.findMany({
+      where: {
+        checkoutRecovery: {
+          customer: {
+            phone: customerPhone,
+          },
 
-            status: {
-              in: [
-                "MESSAGE_SENT",
-                "ENGAGED",
-                "COMPLETED",
-              ],
-            },
+          status: {
+            in: ["MESSAGE_SENT", "ENGAGED", "COMPLETED"],
           },
         },
+      },
 
-        orderBy: {
-          lastMessageAt: "desc",
-        },
+      orderBy: {
+        lastMessageAt: "desc",
+      },
 
-        take: 11,
+      take: 11,
 
-        select: {
-          id: true,
-          checkoutRecoveryId: true,
-          checkoutRecovery: {
-            select: {
-              shopId: true,
-              id: true,
-              status: true,
-              checkoutToken: true,
-              totalPrice: true,
-              customer: {
-                select: {
-                  id: true,
-                  phone: true,
-                },
+      select: {
+        id: true,
+        checkoutRecoveryId: true,
+        checkoutRecovery: {
+          select: {
+            shopId: true,
+            id: true,
+            status: true,
+            checkoutToken: true,
+            totalPrice: true,
+            customer: {
+              select: {
+                id: true,
+                phone: true,
               },
             },
           },
         },
-      });
+      },
+    });
 
     if (conversations.length === 0) {
-      return this.resolveProductOnlyCustomer(
-        customerPhone,
-      );
+      return this.resolveProductOnlyCustomer(customerPhone);
     }
 
     if (conversations.length === 11) {
@@ -177,9 +337,7 @@ export class RecoveryRoutingService {
       const conversation = conversations[0];
 
       if (!conversation) {
-        throw new Error(
-          "Expected a recovery conversation",
-        );
+        throw new Error("Expected a recovery conversation");
       }
 
       if (!conversation.checkoutRecoveryId) {
@@ -187,24 +345,32 @@ export class RecoveryRoutingService {
       }
 
       if (!conversation.checkoutRecovery) {
-        throw new Error("Recovery conversation is missing its checkout recovery");
+        throw new Error(
+          "Recovery conversation is missing its checkout recovery",
+        );
       }
 
       return {
         kind: "resolved",
         conversationId: conversation.id,
-        checkoutRecoveryId:
-          conversation.checkoutRecoveryId,
+        checkoutRecoveryId: conversation.checkoutRecoveryId,
         shopId: conversation.checkoutRecovery.shopId,
       };
     }
 
-    const ownershipPairs = new Map<string, { shopId: string; customerId: string }>();
+    const ownershipPairs = new Map<
+      string,
+      { shopId: string; customerId: string }
+    >();
     for (const conversation of conversations) {
       const recovery = conversation.checkoutRecovery;
       const customerId = recovery?.customer?.id;
       if (!recovery?.shopId || !customerId) {
-        return { kind: "unresolved", reason: "ambiguous-tenant", customerPhone };
+        return {
+          kind: "unresolved",
+          reason: "ambiguous-tenant",
+          customerPhone,
+        };
       }
       ownershipPairs.set(`${recovery.shopId}:${customerId}`, {
         shopId: recovery.shopId,
@@ -229,23 +395,23 @@ export class RecoveryRoutingService {
       customerPhone,
       shopId: ownership.shopId,
       customerId: ownership.customerId,
-      recoveries: conversations.map(
-        (conversation) => {
-          if (!conversation.checkoutRecovery) {
-            throw new Error("Recovery conversation is missing its checkout recovery");
-          }
+      recoveries: conversations.map((conversation) => {
+        if (!conversation.checkoutRecovery) {
+          throw new Error(
+            "Recovery conversation is missing its checkout recovery",
+          );
+        }
 
-          return {
-            id: conversation.checkoutRecovery.id,
-            checkoutToken: conversation.checkoutRecovery.checkoutToken,
-            status: conversation.checkoutRecovery.status,
-            totalPrice: conversation.checkoutRecovery.totalPrice?.toString() ?? null,
-          };
-        },
-      ),
+        return {
+          id: conversation.checkoutRecovery.id,
+          checkoutToken: conversation.checkoutRecovery.checkoutToken,
+          status: conversation.checkoutRecovery.status,
+          totalPrice:
+            conversation.checkoutRecovery.totalPrice?.toString() ?? null,
+        };
+      }),
     };
   }
-
 
   private async getOrCreateStandaloneConversation({
     shopId,
@@ -257,7 +423,9 @@ export class RecoveryRoutingService {
     type: StandaloneConversationType;
   }): Promise<string> {
     if (!shopId || !customerId) {
-      throw new Error("Standalone conversation requires shop and customer ownership");
+      throw new Error(
+        "Standalone conversation requires shop and customer ownership",
+      );
     }
 
     const standaloneScopeKey = `standalone:${shopId}:${customerId}:${type}`;
@@ -268,7 +436,12 @@ export class RecoveryRoutingService {
         return await prisma.$transaction(async (transaction) => {
           const existing = await transaction.conversation.findUnique({
             where: { standaloneScopeKey },
-            select: { id: true, outcome: true, lastMessageAt: true, createdAt: true },
+            select: {
+              id: true,
+              outcome: true,
+              lastMessageAt: true,
+              createdAt: true,
+            },
           });
 
           const lastActivity = existing?.lastMessageAt ?? existing?.createdAt;
@@ -318,41 +491,46 @@ export class RecoveryRoutingService {
   ): Promise<RecoveryRoute> {
     const normalizedPhone = customerPhone.trim();
 
-    const activeCustomerPhones =
-      await prisma.customerPhone.findMany({
-        where: {
-          phone: normalizedPhone,
-          endedAt: null,
-        },
-        select: {
-          customerId: true,
-          customer: {
-            select: {
-              shopId: true,
-              shop: {
-                select: {
-                  domain: true,
-                },
+    const activeCustomerPhones = await prisma.customerPhone.findMany({
+      where: {
+        phone: normalizedPhone,
+        endedAt: null,
+      },
+      select: {
+        customerId: true,
+        customer: {
+          select: {
+            shopId: true,
+            shop: {
+              select: {
+                domain: true,
               },
             },
           },
         },
-        take: 11,
-      });
+      },
+      take: 11,
+    });
 
     if (activeCustomerPhones.length === 11) {
       return { kind: "unresolved", reason: "ambiguous-tenant", customerPhone };
     }
 
-    const ownershipPairs = new Map<string, { shopId: string; customerId: string; domain: string }>();
+    const ownershipPairs = new Map<
+      string,
+      { shopId: string; customerId: string; domain: string }
+    >();
     for (const customerPhoneRecord of activeCustomerPhones) {
       const customer = customerPhoneRecord.customer;
       if (!customer) continue;
-      ownershipPairs.set(`${customer.shopId}:${customerPhoneRecord.customerId}`, {
-        shopId: customer.shopId,
-        customerId: customerPhoneRecord.customerId,
-        domain: customer.shop.domain,
-      });
+      ownershipPairs.set(
+        `${customer.shopId}:${customerPhoneRecord.customerId}`,
+        {
+          shopId: customer.shopId,
+          customerId: customerPhoneRecord.customerId,
+          domain: customer.shop.domain,
+        },
+      );
     }
 
     if (ownershipPairs.size === 0) {
@@ -388,5 +566,4 @@ export class RecoveryRoutingService {
   }
 }
 
-export const recoveryRoutingService =
-  new RecoveryRoutingService();
+export const recoveryRoutingService = new RecoveryRoutingService();

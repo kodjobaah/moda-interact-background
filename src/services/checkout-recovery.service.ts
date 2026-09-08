@@ -18,9 +18,7 @@ import {
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
-import {
-  abandonedCheckoutLookupService,
-} from "./abandoned-checkout-lookup.service.js";
+import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import {
   toLookupInput,
   type AbandonedCheckoutLookupInput,
@@ -93,8 +91,9 @@ export class CheckoutRecoveryService {
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
-    const shopDomain =
-      await abandonedCheckoutLookupService.resolveShopDomain(candidate.shopId);
+    const shopDomain = await abandonedCheckoutLookupService.resolveShopDomain(
+      candidate.shopId,
+    );
 
     // Checkout-scoped serialization with the order path (ARCH-001-BACKGROUND-005).
     return pendingRecoveryCandidateService.withCheckoutLock(
@@ -116,46 +115,68 @@ export class CheckoutRecoveryService {
           } as const;
         }
 
-        const outcome =
-          await abandonedCheckoutLookupService.lookup(
-            toLookupInput(candidate, shopDomain),
-          );
+        const outcome = await abandonedCheckoutLookupService.lookup(
+          toLookupInput(candidate, shopDomain),
+        );
 
         // Transient Shopify/API failures remain retryable and are never
         // translated into a "not recoverable" decision.
         if (outcome.kind === "provider-error") {
-      throw new Error(
-        `Abandoned checkout provider error while materializing candidate: ${outcome.message}`,
-      );
-    }
+          throw new Error(
+            `Abandoned checkout provider error while materializing candidate: ${outcome.message}`,
+          );
+        }
 
         if (outcome.kind === "not-found") {
-          return { outcome: "discarded-not-found", checkoutToken: candidate.checkoutToken } as const;
+          return {
+            outcome: "discarded-not-found",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
         }
 
         if (outcome.kind === "ambiguous") {
-          return { outcome: "discarded-ambiguous", checkoutToken: candidate.checkoutToken } as const;
+          return {
+            outcome: "discarded-ambiguous",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
         }
 
         if (outcome.kind === "bounded-limit-exceeded") {
-          return { outcome: "discarded-bound-exceeded", checkoutToken: candidate.checkoutToken } as const;
+          return {
+            outcome: "discarded-bound-exceeded",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
         }
 
-    const checkout = outcome.checkout;
+        const checkout = outcome.checkout;
 
         // Shopify reports the checkout already completed: not recoverable.
         if (checkout.completedAt != null) {
-          return { outcome: "discarded-not-recoverable", checkoutToken: candidate.checkoutToken } as const;
+          return {
+            outcome: "discarded-not-recoverable",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
         }
 
         // Idempotency guard: never reopen an existing recovery or re-run the
         // recovery-message workflow for a checkout that has already materialized.
-        const existing = await this.findExistingRecovery(shopDomain, candidate.checkoutToken);
+        const existing = await this.findExistingRecovery(
+          shopDomain,
+          candidate.checkoutToken,
+        );
         if (existing) {
           if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(existing.status)) {
-            return { outcome: "discarded-terminal", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
+            return {
+              outcome: "discarded-terminal",
+              checkoutToken: candidate.checkoutToken,
+              status: existing.status,
+            } as const;
           }
-          return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
+          return {
+            outcome: "no-op-existing",
+            checkoutToken: candidate.checkoutToken,
+            status: existing.status,
+          } as const;
         }
 
         const internationalContext = await this.resolveInternationalContext(
@@ -170,12 +191,18 @@ export class CheckoutRecoveryService {
         );
         await this.handleCheckoutCreated(seed);
 
-    return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
+        return {
+          outcome: "recovery-created",
+          checkoutToken: seed.checkoutToken,
+        } as const;
       },
     );
   }
 
-  private async findExistingRecovery(shopDomain: string, checkoutToken: string) {
+  private async findExistingRecovery(
+    shopDomain: string,
+    checkoutToken: string,
+  ) {
     const shop = await prisma.shop.findUnique({
       where: { domain: shopDomain },
       select: { id: true },
@@ -210,7 +237,10 @@ export class CheckoutRecoveryService {
       shop: shopDomain,
       checkoutToken: candidate.checkoutToken,
       cartToken: candidate.cartToken,
-      detectedAt: checkout.createdAt || candidate.checkoutCreatedAt || new Date().toISOString(),
+      detectedAt:
+        checkout.createdAt ||
+        candidate.checkoutCreatedAt ||
+        new Date().toISOString(),
       currency: checkout.currencyCode,
       totalPrice: checkout.totalPrice,
       checkoutUrl: checkout.abandonedCheckoutUrl,
@@ -264,11 +294,17 @@ export class CheckoutRecoveryService {
     const languageTag =
       eventContext?.languageTag ??
       currentContext.languageTag ??
-      safelyNormalize(merchantContext?.defaultLanguageTag, canonicaliseLanguageTag);
+      safelyNormalize(
+        merchantContext?.defaultLanguageTag,
+        canonicaliseLanguageTag,
+      );
     const countryCode =
       currentContext.countryCode ??
       eventContext?.countryCode ??
-      safelyNormalize(merchantContext?.defaultCountryCode, normalizeCountryCode);
+      safelyNormalize(
+        merchantContext?.defaultCountryCode,
+        normalizeCountryCode,
+      );
     const timeZone =
       currentContext.timeZone ??
       eventContext?.timeZone ??
@@ -282,7 +318,8 @@ export class CheckoutRecoveryService {
           : "merchant-default"
         : null,
       countryCode,
-      currencyCode: currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
+      currencyCode:
+        currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
       timeZone,
     };
   }
@@ -331,21 +368,22 @@ export class CheckoutRecoveryService {
       return { kind: "discarded", reason: "shop-not-found" } as const;
     }
 
-    const pending = await pendingRecoveryCandidateService.refreshCandidateActivity({
-      shopId: shop.id,
-      checkoutToken: event.checkoutToken,
-      cartToken: null,
-      activityAt: event.activityAt,
-      isEmpty: null,
-      ...(event.internationalContext
-        ? { internationalContext: event.internationalContext }
-        : {}),
-    });
+    const pending =
+      await pendingRecoveryCandidateService.refreshCandidateActivity({
+        shopId: shop.id,
+        checkoutToken: event.checkoutToken,
+        cartToken: null,
+        activityAt: event.activityAt,
+        isEmpty: null,
+        ...(event.internationalContext
+          ? { internationalContext: event.internationalContext }
+          : {}),
+      });
     if (pending.outcome !== "not-found") {
       return {
         kind: "pending",
         outcome: pending.outcome,
-        ...( "jobId" in pending ? { jobId: pending.jobId } : {}),
+        ...("jobId" in pending ? { jobId: pending.jobId } : {}),
       };
     }
 
@@ -442,18 +480,19 @@ export class CheckoutRecoveryService {
   }
 
   async handleCartActivityContract(event: CartActivityContractInput) {
-    const result = await pendingRecoveryCandidateService.refreshCandidateActivity({
-      shopId: event.shopId,
-      checkoutToken: null,
-      cartToken: event.cartToken,
-      activityAt: event.activityAt,
-      isEmpty: event.isEmpty,
-    });
+    const result =
+      await pendingRecoveryCandidateService.refreshCandidateActivity({
+        shopId: event.shopId,
+        checkoutToken: null,
+        cartToken: event.cartToken,
+        activityAt: event.activityAt,
+        isEmpty: event.isEmpty,
+      });
 
     return {
       kind: "pending",
       outcome: result.outcome,
-      ...( "jobId" in result ? { jobId: result.jobId } : {}),
+      ...("jobId" in result ? { jobId: result.jobId } : {}),
     } as const;
   }
 
@@ -667,9 +706,7 @@ export class CheckoutRecoveryService {
             return { kind: "discarded", reason: "recovery-not-found" } as const;
           }
 
-          if (
-            ["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)
-          ) {
+          if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
             return {
               kind: "ignored",
               reason: `terminal-${recovery.status.toLowerCase()}`,
@@ -750,7 +787,8 @@ export class CheckoutRecoveryService {
     // 4
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
-      providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
+      providerAccountId:
+        outboundWhatsAppAdmissionService.getProviderAccountId(),
       purpose: "checkout-recovery",
       languageTag: event.internationalContext?.languageTag ?? null,
       countryCode: event.internationalContext?.countryCode ?? null,
@@ -845,70 +883,67 @@ export class CheckoutRecoveryService {
     conversationId: string;
     pendingTurnStartedAt?: Date | null;
   }): Promise<RecoveryAgentContext> {
-    const recovery =
-      await prisma.checkoutRecovery.findUnique({
-        where: {
-          id: checkoutRecoveryId,
+    const recovery = await prisma.checkoutRecovery.findUnique({
+      where: {
+        id: checkoutRecoveryId,
+      },
+
+      select: {
+        id: true,
+        shop: {
+          select: {
+            domain: true,
+          },
+        },
+        status: true,
+        checkoutToken: true,
+        completedAt: true,
+        totalPrice: true,
+
+        customer: {
+          select: {
+            id: true,
+            phone: true,
+            firstName: true,
+          },
         },
 
-        select: {
-          id: true,
-          shop: {
-            select: {
-              domain: true,
-            },
-          },
-          status: true,
-          checkoutToken: true,
-          completedAt: true,
-          totalPrice: true,
-
-          customer: {
-            select: {
-              id: true,
-              phone: true,
-              firstName: true,
-            },
+        conversation: {
+          where: {
+            id: conversationId,
           },
 
-          conversation: {
-            where: {
-              id: conversationId,
-            },
+          take: 1,
 
-            take: 1,
+          select: {
+            id: true,
+            type: true,
+            summary: true,
+            inboundVersion: true,
+            languageTag: true,
+            languageSource: true,
 
-            select: {
-              id: true,
-              type: true,
-              summary: true,
-              inboundVersion: true,
-              languageTag: true,
-              languageSource: true,
-
-              messages: {
-                ...(pendingTurnStartedAt
-                  ? {
-                      where: {
-                        createdAt: { gte: pendingTurnStartedAt },
-                        direction: "INBOUND",
-                        senderType: "CUSTOMER",
-                      },
-                    }
-                  : {}),
-                orderBy: { createdAt: "desc" },
-                ...(pendingTurnStartedAt ? {} : { take: 20 }),
-                select: { direction: true, content: true },
-              },
+            messages: {
+              ...(pendingTurnStartedAt
+                ? {
+                    where: {
+                      createdAt: { gte: pendingTurnStartedAt },
+                      direction: "INBOUND",
+                      senderType: "CUSTOMER",
+                    },
+                  }
+                : {}),
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              ...(pendingTurnStartedAt ? {} : { take: 20 }),
+              select: { id: true, direction: true, content: true },
             },
           },
         },
-      });
+      },
+    });
 
     if (!recovery) {
-      throw new Error(
-        `Checkout recovery not found: ${checkoutRecoveryId}`,
-      );
+      throw new Error(`Checkout recovery not found: ${checkoutRecoveryId}`);
     }
 
     const conversation = recovery.conversation;
@@ -923,17 +958,13 @@ export class CheckoutRecoveryService {
      * We queried newest-first for efficiency.
      * Reverse them before passing them to the LLM.
      */
-    const messages: AgentMessage[] =
-      conversation.messages
-        .reverse()
-        .map((message) => ({
-          role:
-            message.direction === "INBOUND"
-              ? "user"
-              : "assistant",
+    const messages: AgentMessage[] = conversation.messages
+      .reverse()
+      .map((message) => ({
+        role: message.direction === "INBOUND" ? "user" : "assistant",
 
-          content: message.content,
-        }));
+        content: message.content,
+      }));
 
     return {
       shop: recovery.shop.domain,
@@ -943,26 +974,20 @@ export class CheckoutRecoveryService {
 
         status: recovery.status,
 
-        checkoutToken:
-          recovery.checkoutToken,
+        checkoutToken: recovery.checkoutToken,
 
-        completedAt:
-          recovery.completedAt,
+        completedAt: recovery.completedAt,
 
-        totalPrice:
-          recovery.totalPrice?.toString() ??
-          null,
+        totalPrice: recovery.totalPrice?.toString() ?? null,
       },
 
       customer: recovery.customer
         ? {
             id: recovery.customer.id,
 
-            phone:
-              recovery.customer.phone,
+            phone: recovery.customer.phone,
 
-            firstName:
-              recovery.customer.firstName,
+            firstName: recovery.customer.firstName,
           }
         : null,
 
@@ -973,26 +998,83 @@ export class CheckoutRecoveryService {
 
         type: conversation.type,
 
-        summary:
-          conversation.summary,
+        summary: conversation.summary,
 
-        version:
-          conversation.inboundVersion,
+        version: conversation.inboundVersion,
 
         languageTag: conversation.languageTag,
 
         languageSource: conversation.languageSource
-          ? conversation.languageSource.toLowerCase().replaceAll("_", "-") as NonNullable<RecoveryAgentContext["conversation"]["languageSource"]>
+          ? (conversation.languageSource
+              .toLowerCase()
+              .replaceAll("_", "-") as NonNullable<
+              RecoveryAgentContext["conversation"]["languageSource"]
+            >)
           : null,
 
         messages,
       },
     };
   }
+
+  async getAgentContextForStandaloneConversation({
+    checkoutRecoveryId,
+    conversationId,
+    pendingTurnStartedAt,
+  }: {
+    checkoutRecoveryId: string;
+    conversationId: string;
+    pendingTurnStartedAt?: Date | null;
+  }): Promise<RecoveryAgentContext> {
+    const recovery = await prisma.checkoutRecovery.findUnique({
+      where: { id: checkoutRecoveryId },
+      select: {
+        id: true,
+        shop: { select: { domain: true } },
+        status: true,
+        checkoutToken: true,
+        completedAt: true,
+        totalPrice: true,
+        customer: {
+          select: { id: true, phone: true, firstName: true },
+        },
+      },
+    });
+
+    if (!recovery) {
+      throw new Error(`Checkout recovery not found: ${checkoutRecoveryId}`);
+    }
+
+    const conversation = await conversationService.getAgentSnapshot(
+      conversationId,
+      pendingTurnStartedAt,
+    );
+
+    return {
+      shop: recovery.shop.domain,
+      recovery: {
+        id: recovery.id,
+        status: recovery.status,
+        checkoutToken: recovery.checkoutToken,
+        completedAt: recovery.completedAt,
+        totalPrice: recovery.totalPrice?.toString() ?? null,
+      },
+      customer: recovery.customer
+        ? {
+            id: recovery.customer.id,
+            phone: recovery.customer.phone,
+            firstName: recovery.customer.firstName,
+          }
+        : null,
+      conversation: {
+        ...conversation,
+        shop: recovery.shop.domain,
+      },
+    };
+  }
 }
 
-export const checkoutRecoveryService =
-  new CheckoutRecoveryService();
+export const checkoutRecoveryService = new CheckoutRecoveryService();
 
 function safelyNormalize(
   value: string | null | undefined,
@@ -1006,5 +1088,3 @@ function safelyNormalize(
     return null;
   }
 }
-
-
