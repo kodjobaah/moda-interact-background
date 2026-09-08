@@ -20,7 +20,7 @@ function createHarness(grantedQuantity = 1) {
   const transaction = {
     shopEntitlementCounter: {
       findUnique: vi.fn(async ({ select }: { select?: { version: boolean } }) =>
-        select ? { version: state.counter.version } : state.counter),
+        select ? { version: state.counter.version } : { ...state.counter }),
       create: vi.fn(async () => state.counter),
       updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
         if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
@@ -63,6 +63,7 @@ function createHarness(grantedQuantity = 1) {
   };
   return {
     service: new PurchasedRecoveryReservationService(database as never),
+    database,
     transaction,
     state,
   };
@@ -120,8 +121,35 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
   });
 
-  it("uses counter CAS to prevent concurrent reservations beyond the balance", async () => {
-    const { service, state } = createHarness();
+  it("retries after a counter CAS loss before observing exhausted capacity", async () => {
+    const { service, state, transaction, database } = createHarness();
+    let counterReads = 0;
+    let casAttempts = 0;
+    let casConflicts = 0;
+    let bothCasReadyResolve!: () => void;
+    const bothCasReady = new Promise<void>((resolve) => {
+      bothCasReadyResolve = resolve;
+    });
+    const originalFindUnique = transaction.shopEntitlementCounter.findUnique;
+    transaction.shopEntitlementCounter.findUnique = vi.fn(async (args) => {
+      const result = await originalFindUnique(args);
+      if (!args.select) {
+        counterReads += 1;
+        if (counterReads === 2) bothCasReadyResolve();
+      }
+      return result;
+    });
+    const originalUpdateMany = transaction.shopEntitlementCounter.updateMany;
+    transaction.shopEntitlementCounter.updateMany = vi.fn(async (args) => {
+      casAttempts += 1;
+      if (casAttempts <= 2) {
+        if (casAttempts === 2) bothCasReadyResolve();
+        await bothCasReady;
+      }
+      const result = await originalUpdateMany(args);
+      if (result.count === 0) casConflicts += 1;
+      return result;
+    });
 
     const results = await Promise.all([
       service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-a" }),
@@ -131,5 +159,9 @@ describe("PurchasedRecoveryReservationService", () => {
     expect(results.filter((result) => result.kind === "reserved")).toHaveLength(1);
     expect(results.filter((result) => result.kind === "credits-exhausted")).toHaveLength(1);
     expect(state.counter.reservedQuantity).toBe(1);
+    expect(counterReads).toBeGreaterThanOrEqual(2);
+    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledTimes(2);
+    expect(database.$transaction).toHaveBeenCalledTimes(3);
+    expect(casConflicts).toBe(1);
   });
 });

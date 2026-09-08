@@ -114,12 +114,12 @@ describe("RecoveryCreditPurchaseService", () => {
     expect(counter.grantedQuantity).toBe(5);
   });
 
-  it("prioritizes terminal purchases without exceeding the reconciliation limit", async () => {
+  it("prioritizes reported purchases over stable attention rows within the limit", async () => {
     const { service, database } = createActivationHarness();
-    const olderNonTerminal = Array.from({ length: 100 }, (_, index) => ({ id: `pending-${index}` }));
+    const olderAttention = Array.from({ length: 100 }, (_, index) => ({ id: `attention-${index}` }));
     const findMany = vi.fn()
       .mockResolvedValueOnce([{ id: "reported-1" }])
-      .mockResolvedValueOnce(olderNonTerminal.slice(0, 49));
+      .mockResolvedValueOnce(olderAttention.slice(0, 49));
     database.recoveryCreditPurchase.findMany = findMany;
 
     const results = await service.reconcilePending(50);
@@ -129,9 +129,10 @@ describe("RecoveryCreditPurchaseService", () => {
     expect(findMany.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
       take: 50,
       where: expect.objectContaining({
-        usageEvent: { shopifyReportState: { in: ["REPORTED", "NEEDS_ATTENTION"] } },
+        usageEvent: { shopifyReportState: "REPORTED" },
       }),
     }));
     expect(findMany.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ take: 49 }));
+    expect(results[0]).toMatchObject({ id: "reported-1", result: { kind: "activated" } });
   });
 });

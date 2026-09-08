@@ -205,29 +205,35 @@ export class RecoveryCreditPurchaseService {
       { id: "asc" },
     ];
     const select = { id: true } as const;
-    const terminalStates = [
-      ShopifyReportState.REPORTED,
-      ShopifyReportState.NEEDS_ATTENTION,
-    ];
     const nonTerminalStates = [
       ShopifyReportState.PENDING,
       ShopifyReportState.IN_FLIGHT,
       ShopifyReportState.RETRYABLE,
     ];
-    const terminalPurchases = await this.database.recoveryCreditPurchase.findMany({
+    const reportedPurchases = await this.database.recoveryCreditPurchase.findMany({
       where: {
         ...baseWhere,
-        usageEvent: { shopifyReportState: { in: terminalStates } },
+        usageEvent: { shopifyReportState: ShopifyReportState.REPORTED },
       },
       orderBy,
       take: boundedLimit,
       select,
     });
-    const remaining = boundedLimit - terminalPurchases.length;
-    const purchases = remaining > 0
-      ? [
-          ...terminalPurchases,
-          ...(await this.database.recoveryCreditPurchase.findMany({
+    let remaining = boundedLimit - reportedPurchases.length;
+    const attentionPurchases = remaining > 0
+      ? await this.database.recoveryCreditPurchase.findMany({
+          where: {
+            ...baseWhere,
+            usageEvent: { shopifyReportState: ShopifyReportState.NEEDS_ATTENTION },
+          },
+          orderBy,
+          take: remaining,
+          select,
+        })
+      : [];
+    remaining -= attentionPurchases.length;
+    const nonTerminalPurchases = remaining > 0
+      ? await this.database.recoveryCreditPurchase.findMany({
             where: {
               ...baseWhere,
               usageEvent: { shopifyReportState: { in: nonTerminalStates } },
@@ -235,9 +241,13 @@ export class RecoveryCreditPurchaseService {
             orderBy,
             take: remaining,
             select,
-          })),
-        ]
-      : terminalPurchases;
+          })
+      : [];
+    const purchases = [
+      ...reportedPurchases,
+      ...attentionPurchases,
+      ...nonTerminalPurchases,
+    ];
 
     const results = [];
     for (const purchase of purchases) {
