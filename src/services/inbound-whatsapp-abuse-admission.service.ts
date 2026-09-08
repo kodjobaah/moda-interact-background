@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import type { Redis } from "ioredis";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 
 import { connectionRedis } from "../lib/redis.js";
 
@@ -20,6 +24,12 @@ export type InboundAbuseAdmission =
         | "LIMITER_UNAVAILABLE";
     };
 
+export type InboundAbuseConversationType =
+  | "RECOVERY"
+  | "PRODUCT_DISCOVERY"
+  | "PRODUCT_SUPPORT"
+  | "POST_PURCHASE";
+
 type Scope = {
   key: string;
   windowMs: number;
@@ -33,6 +43,11 @@ type AdmissionReason = Extract<
 >;
 
 type RedisLike = Pick<Redis, "eval">;
+
+type AdmissionTelemetry = {
+  conversationType?: InboundAbuseConversationType;
+  recoveryLinked?: boolean;
+};
 
 const RAW_SENDER_WINDOW_MS = 60_000;
 const RAW_SENDER_LIMIT = 60;
@@ -62,12 +77,25 @@ local nowMs = (nowReply[1] * 1000) + math.floor(nowReply[2] / 1000)
 local member = ARGV[1]
 local scopeCount = #KEYS
 local offset = 2
+local seenAnywhere = false
 
 for index = 1, scopeCount do
   local windowMs = tonumber(ARGV[offset])
-  local limit = tonumber(ARGV[offset + 1])
   redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', nowMs - windowMs)
-  if redis.call('ZSCORE', KEYS[index], member) == false and redis.call('ZCARD', KEYS[index]) >= limit then
+  if redis.call('ZSCORE', KEYS[index], member) ~= false then
+    seenAnywhere = true
+  end
+  offset = offset + 2
+end
+
+if seenAnywhere then
+  return 0
+end
+
+offset = 2
+for index = 1, scopeCount do
+  local limit = tonumber(ARGV[offset + 1])
+  if redis.call('ZCARD', KEYS[index]) >= limit then
     return index
   end
   offset = offset + 2
@@ -76,8 +104,10 @@ end
 offset = 2
 for index = 1, scopeCount do
   local windowMs = tonumber(ARGV[offset])
-  redis.call('ZADD', KEYS[index], nowMs, member)
-  redis.call('EXPIRE', KEYS[index], math.ceil(windowMs / 1000) + 1)
+  if redis.call('ZSCORE', KEYS[index], member) == false then
+    redis.call('ZADD', KEYS[index], nowMs, member)
+    redis.call('EXPIRE', KEYS[index], math.ceil(windowMs / 1000) + 1)
+  end
   offset = offset + 2
 end
 
@@ -85,13 +115,19 @@ return 0
 `;
 
 export class InboundWhatsAppAbuseAdmissionService {
-  constructor(private readonly redis: RedisLike = connectionRedis) {}
+  constructor(
+    private readonly redis: RedisLike = connectionRedis,
+    private readonly logger: StructuredLogger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: process.env.NODE_ENV ?? "development",
+    }),
+  ) {}
 
   async admitRaw(input: {
     providerMessageId: string;
     customerPhone: string;
   }): Promise<InboundAbuseAdmission> {
-    return this.admit("raw", input.providerMessageId, input.customerPhone, [
+    return this.admit("raw", input.providerMessageId, [
       {
         key: `raw:sender:${senderHash(input.customerPhone)}:60s`,
         windowMs: RAW_SENDER_WINDOW_MS,
@@ -112,7 +148,7 @@ export class InboundWhatsAppAbuseAdmissionService {
     observedVersion: number;
     shopId: string;
     customerPhone: string;
-    conversationType: "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
+    conversationType: InboundAbuseConversationType;
     hasReplyContext: boolean;
     checkoutRecoveryId: string | null;
   }): Promise<InboundAbuseAdmission> {
@@ -168,16 +204,19 @@ export class InboundWhatsAppAbuseAdmissionService {
     return this.admit(
       "settled-turn",
       `${input.conversationId}:${input.observedVersion}`,
-      input.customerPhone,
       scopes,
+      {
+        conversationType: input.conversationType,
+        recoveryLinked: input.checkoutRecoveryId !== null,
+      },
     );
   }
 
   private async admit(
     stage: "raw" | "settled-turn",
     member: string,
-    customerPhone: string,
     scopes: Scope[],
+    telemetry: AdmissionTelemetry = {},
   ): Promise<InboundAbuseAdmission> {
     try {
       const result = Number(
@@ -193,20 +232,47 @@ export class InboundWhatsAppAbuseAdmissionService {
         ),
       );
       if (result === 0) {
-        recordAdmission(stage, "allowed");
+        this.recordAdmission(stage, "allowed", undefined, telemetry);
         return { kind: "allowed" };
       }
       const denied = scopes[result - 1];
       const reason = denied?.reason ?? "LIMITER_UNAVAILABLE";
-      recordAdmission(stage, reason);
+      this.recordAdmission(stage, "denied", reason, telemetry);
       return { kind: "denied", stage, reason };
     } catch {
-      recordAdmission(stage, "LIMITER_UNAVAILABLE");
+      this.recordAdmission(
+        stage,
+        "denied",
+        "LIMITER_UNAVAILABLE",
+        telemetry,
+      );
       return { kind: "denied", stage, reason: "LIMITER_UNAVAILABLE" };
     }
   }
-}
 
+  private recordAdmission(
+    stage: "raw" | "settled-turn",
+    outcome: "allowed" | "denied",
+    reason?: AdmissionReason,
+    telemetry: AdmissionTelemetry = {},
+  ): void {
+    const fields = {
+      stage,
+      outcome,
+      ...telemetry,
+      ...(reason ? { reason } : {}),
+    };
+    try {
+      if (outcome === "denied") {
+        this.logger.warn("whatsapp.abuse_admission", fields);
+      } else {
+        this.logger.info("whatsapp.abuse_admission", fields);
+      }
+    } catch {
+      // Admission telemetry must never change the admission decision.
+    }
+  }
+}
 export const inboundWhatsAppAbuseAdmissionService =
   new InboundWhatsAppAbuseAdmissionService();
 
@@ -218,15 +284,4 @@ function normalizePhone(phone: string): string {
   const trimmed = phone.trim();
   const plus = trimmed.startsWith("+") ? "+" : "";
   return `${plus}${trimmed.replace(/\D/g, "")}`;
-}
-
-function recordAdmission(
-  stage: "raw" | "settled-turn",
-  result: string,
-): void {
-  try {
-    console.log("Inbound WhatsApp abuse admission", { stage, result });
-  } catch {
-    // Admission telemetry must not affect job handling.
-  }
 }

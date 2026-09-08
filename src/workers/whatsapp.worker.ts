@@ -202,9 +202,7 @@ async function loadConversationTurn(
 
   const settledMetadata = {
     customerPhone: to,
-    conversationType: conversation.type as
-      | "PRODUCT_DISCOVERY"
-      | "PRODUCT_SUPPORT",
+    conversationType: conversation.type,
     checkoutRecoveryId: conversation.checkoutRecoveryId,
     hasReplyContext: conversation.messages.some(
       (message) => message.inReplyToProviderId !== null,
