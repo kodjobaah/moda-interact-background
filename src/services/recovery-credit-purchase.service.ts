@@ -192,19 +192,62 @@ export class RecoveryCreditPurchaseService {
       Math.max(Number.isInteger(limit) ? limit : DEFAULT_RECONCILIATION_LIMIT, 1),
       MAX_RECONCILIATION_LIMIT,
     );
-    const purchases = await this.database.recoveryCreditPurchase.findMany({
-      where: {
-        status: {
-          in: [
-            RecoveryCreditPurchaseStatus.PENDING_BILLING,
-            RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
-          ],
-        },
+    const baseWhere: Prisma.RecoveryCreditPurchaseWhereInput = {
+      status: {
+        in: [
+          RecoveryCreditPurchaseStatus.PENDING_BILLING,
+          RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
+        ],
       },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    };
+    const orderBy: Prisma.RecoveryCreditPurchaseOrderByWithRelationInput[] = [
+      { createdAt: "asc" },
+      { id: "asc" },
+    ];
+    const select = { id: true } as const;
+    const nonTerminalStates = [
+      ShopifyReportState.PENDING,
+      ShopifyReportState.IN_FLIGHT,
+      ShopifyReportState.RETRYABLE,
+    ];
+    const reportedPurchases = await this.database.recoveryCreditPurchase.findMany({
+      where: {
+        ...baseWhere,
+        usageEvent: { shopifyReportState: ShopifyReportState.REPORTED },
+      },
+      orderBy,
       take: boundedLimit,
-      select: { id: true },
+      select,
     });
+    let remaining = boundedLimit - reportedPurchases.length;
+    const attentionPurchases = remaining > 0
+      ? await this.database.recoveryCreditPurchase.findMany({
+          where: {
+            ...baseWhere,
+            usageEvent: { shopifyReportState: ShopifyReportState.NEEDS_ATTENTION },
+          },
+          orderBy,
+          take: remaining,
+          select,
+        })
+      : [];
+    remaining -= attentionPurchases.length;
+    const nonTerminalPurchases = remaining > 0
+      ? await this.database.recoveryCreditPurchase.findMany({
+            where: {
+              ...baseWhere,
+              usageEvent: { shopifyReportState: { in: nonTerminalStates } },
+            },
+            orderBy,
+            take: remaining,
+            select,
+          })
+      : [];
+    const purchases = [
+      ...reportedPurchases,
+      ...attentionPurchases,
+      ...nonTerminalPurchases,
+    ];
 
     const results = [];
     for (const purchase of purchases) {

@@ -21,7 +21,11 @@ function usageRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function harness(rows = [usageRow()], getNow: () => Date = () => now) {
+function harness(
+  rows = [usageRow()],
+  getNow: () => Date = () => now,
+  recoveryCreditPurchaseActivator = { activateForUsageEvent: vi.fn().mockResolvedValue({ kind: "activated", creditsGranted: 1 }) },
+) {
   const records = rows.map((row) => ({ ...row }));
   const states = new Map(records.map((row) => [row.id as string, row.shopifyReportState as string]));
   const updates: Array<{ where: unknown; data: unknown }> = [];
@@ -65,8 +69,11 @@ function harness(rows = [usageRow()], getNow: () => Date = () => now) {
     database as never,
     provider,
     () => now,
+    50,
+    undefined,
+    recoveryCreditPurchaseActivator,
   );
-  return { database, provider, service, states, updates };
+  return { database, provider, service, states, updates, recoveryCreditPurchaseActivator };
 }
 
 describe("ShopifyUsageEventPublisherService", () => {
@@ -273,5 +280,48 @@ describe("ShopifyUsageEventPublisherService", () => {
     expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
     expect(test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey)
       .toBe(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey);
+  });
+
+  it("activates a reported recovery-credit purchase exactly once", async () => {
+    const activator = { activateForUsageEvent: vi.fn().mockResolvedValue({ kind: "activated", creditsGranted: 5 }) };
+    const test = harness([
+      usageRow({ metric: "RECOVERY_CREDIT_PACK_PURCHASE" }),
+    ], () => now, activator);
+
+    await test.service.publishDue();
+
+    expect(test.states.get("usage-1")).toBe("REPORTED");
+    expect(activator.activateForUsageEvent).toHaveBeenCalledTimes(1);
+    expect(activator.activateForUsageEvent).toHaveBeenCalledWith("usage-1");
+  });
+
+  it("does not activate a purchase for an ordinary recovery metric", async () => {
+    const activator = { activateForUsageEvent: vi.fn() };
+    const test = harness([usageRow({ metric: "RECOVERY_CONVERSATION" })], () => now, activator);
+
+    await test.service.publishDue();
+
+    expect(test.states.get("usage-1")).toBe("REPORTED");
+    expect(activator.activateForUsageEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a successfully reported event reported when activation fails", async () => {
+    const activator = {
+      activateForUsageEvent: vi.fn().mockRejectedValue(new Error("activation unavailable")),
+    };
+    const test = harness([
+      usageRow({ metric: "RECOVERY_CREDIT_PACK_PURCHASE" }),
+    ], () => now, activator);
+
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      reported: 1,
+      retryable: 0,
+      needsAttention: 0,
+    });
+    expect(test.states.get("usage-1")).toBe("REPORTED");
+    expect(test.updates.map((update) => (update.data as { shopifyReportState?: string }).shopifyReportState))
+      .not.toContain("RETRYABLE");
+    expect(test.updates.map((update) => (update.data as { shopifyReportState?: string }).shopifyReportState))
+      .not.toContain("NEEDS_ATTENTION");
   });
 });

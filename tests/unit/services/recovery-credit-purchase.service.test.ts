@@ -24,7 +24,8 @@ function createActivationHarness(reportState = "REPORTED") {
         if (select && typeof select === "object" && "usageEvent" in select) return purchase;
         return purchase;
       }),
-      updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      updateMany: vi.fn(async ({ where, data }: { where: { status?: { in?: string[] } }; data: Record<string, unknown> }) => {
+        if (where.status?.in && !where.status.in.includes(purchase.status)) return { count: 0 };
         Object.assign(purchase, data);
         return { count: 1 };
       }),
@@ -50,6 +51,7 @@ function createActivationHarness(reportState = "REPORTED") {
   };
   return {
     service: new RecoveryCreditPurchaseService(database as never, 3, () => new Date("2026-09-08T12:00:00.000Z")),
+    database,
     transaction,
     purchase,
     counter,
@@ -81,6 +83,10 @@ describe("RecoveryCreditPurchaseService", () => {
     const attention = createActivationHarness("NEEDS_ATTENTION");
     await expect(attention.service.activateFromUsageEvent("purchase-1")).resolves.toEqual({ kind: "needs-attention" });
     expect(attention.counter.grantedQuantity).toBe(0);
+
+    const retryable = createActivationHarness("RETRYABLE");
+    await expect(retryable.service.activateFromUsageEvent("purchase-1")).resolves.toEqual({ kind: "pending" });
+    expect(retryable.counter.grantedQuantity).toBe(0);
   });
 
   it("activates after a previously attention-state event is later reported", async () => {
@@ -94,5 +100,39 @@ describe("RecoveryCreditPurchaseService", () => {
     });
 
     expect(counter.grantedQuantity).toBe(5);
+  });
+
+  it("grants exactly once when activation is replayed concurrently", async () => {
+    const { service, counter } = createActivationHarness();
+
+    const results = await Promise.all([
+      service.activateFromUsageEvent("purchase-1"),
+      service.activateFromUsageEvent("purchase-1"),
+    ]);
+
+    expect(results.map((result) => result.kind).sort()).toEqual(["activated", "already-active"]);
+    expect(counter.grantedQuantity).toBe(5);
+  });
+
+  it("prioritizes reported purchases over stable attention rows within the limit", async () => {
+    const { service, database } = createActivationHarness();
+    const olderAttention = Array.from({ length: 100 }, (_, index) => ({ id: `attention-${index}` }));
+    const findMany = vi.fn()
+      .mockResolvedValueOnce([{ id: "reported-1" }])
+      .mockResolvedValueOnce(olderAttention.slice(0, 49));
+    database.recoveryCreditPurchase.findMany = findMany;
+
+    const results = await service.reconcilePending(50);
+
+    expect(results).toHaveLength(50);
+    expect(findMany).toHaveBeenCalledTimes(2);
+    expect(findMany.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      take: 50,
+      where: expect.objectContaining({
+        usageEvent: { shopifyReportState: "REPORTED" },
+      }),
+    }));
+    expect(findMany.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ take: 49 }));
+    expect(results[0]).toMatchObject({ id: "reported-1", result: { kind: "activated" } });
   });
 });

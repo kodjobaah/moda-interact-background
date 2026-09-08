@@ -362,6 +362,36 @@ describe("RecoveryBillingService", () => {
     });
   });
 
+  it("admits Free recovery after a newly activated pack restores purchased capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), recoveryCreditPack: purchasedPack() })) };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn()
+        .mockResolvedValueOnce({ kind: "credits-exhausted", available: 0 })
+        .mockResolvedValueOnce({ kind: "reserved", reservation: {} }),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+      purchasedReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "before-pack" }))
+      .resolves.toMatchObject({ kind: "blocked", reason: "allowance-exhausted" });
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "after-pack" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+  });
+
   it("prefers remaining Free capacity over purchased credits", async () => {
     const database = createDatabase();
     const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), recoveryCreditPack: purchasedPack() })) };
@@ -443,6 +473,38 @@ describe("RecoveryBillingService", () => {
 
     expect(result).toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
     expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns to paid purchased-before-overage after another pack activates", async () => {
+    const database = createDatabase();
+    const policyResolver = {
+      resolve: vi.fn(async () => ({
+        ...paidPolicy(),
+        recoveryCreditPack: purchasedPack({
+          includedRecoveryConversationAllowance: 200,
+          normalRecoveryUsageQuantity: 200,
+        }),
+      })),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn()
+        .mockResolvedValueOnce({ kind: "credits-exhausted", available: 0 })
+        .mockResolvedValueOnce({ kind: "reserved", reservation: {} }),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "overage-before-pack" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "purchased-after-pack" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
   });
 
   it("commits purchased recovery usage locally without creating a normal paid meter event", async () => {
