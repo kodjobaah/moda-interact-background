@@ -88,4 +88,20 @@ describe("production worker entrypoints", () => {
     expect(source).not.toContain("connectionRedis");
     expect(source).toContain('import("./billing-resources.js")');
   });
+
+  it("wires bounded Shared logging for scheduled billing failures", async () => {
+    const source = await readFile("src/entrypoints/billing.ts", "utf8");
+    const reporterStart = source.indexOf("function reportBillingReconciliationFailure");
+    const reporterEnd = source.indexOf("\n\nvoid startReadyWorkerProcess", reporterStart);
+    const reporter = source.slice(reporterStart, reporterEnd);
+
+    expect(source).toContain('import { createLogger } from "@modainteract/moda-interact-shared/logging"');
+    expect(source).toContain('serviceName: "moda-billing-worker"');
+    expect(source).toContain('logger.error("billing.reconciliation.scan_failed"');
+    expect(source).toContain("reportBillingReconciliationFailure,");
+    expect(reporter).toContain("error.name.slice(0, 64)");
+    expect(reporter).toContain("error.message.slice(0, 256)");
+    expect(reporter).not.toContain("error,");
+    expect(reporter).not.toContain("error: error");
+  });
 });

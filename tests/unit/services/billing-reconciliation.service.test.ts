@@ -195,7 +195,7 @@ describe("BillingReconciliationService", () => {
     expect(test.database.subscription.upsert.mock.calls[0]?.[0].update).not.toHaveProperty("planId");
   });
 
-  it("reports a current-cycle usage discrepancy without creating a correction", async () => {
+  it("B008-R7 reports a current-cycle usage discrepancy without creating a correction", async () => {
     const test = harness();
 
     const result = await test.service.reconcileOnce();

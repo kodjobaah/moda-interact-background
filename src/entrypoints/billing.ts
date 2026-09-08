@@ -12,7 +12,7 @@ const logger = createLogger({
 function reportBillingReconciliationFailure(error: unknown): void {
   const message = error instanceof Error ? error.message.slice(0, 256) : "unknown failure";
   logger.error("billing.reconciliation.scan_failed", {
-    errorName: error instanceof Error ? error.name : "UnknownError",
+    errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
     errorMessage: message,
   });
 }

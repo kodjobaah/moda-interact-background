@@ -73,7 +73,7 @@ describe("ShopifyPartnerBillingApi", () => {
     expect(body.query).toContain("legacySubscriptionId");
     expect(body.query).toContain("currentBillingCycle");
     expect(body.query).toContain("items {\n        handle\n        description");
-    expect(body.query).toContain("pendingUpdate {\n        billingPeriod");
+    expect(body.query).toContain("pendingUpdate {\n        billingPeriod\n        legacySubscriptionId");
   });
 
   it("represents a null active subscription as no contract", async () => {
