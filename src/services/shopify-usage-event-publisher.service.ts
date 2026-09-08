@@ -37,7 +37,7 @@ type UsageEventRecord = {
   reportAttemptCount: number;
   nextReportAt: Date | null;
   lastReportAttemptAt: Date | null;
-  shop: { shopifyShopId: string | null };
+  shop: { shopifyShopId: string | null; status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED"; uninstalledAt: Date | null };
 };
 
 type PublisherDatabase = Pick<PrismaClient, "$transaction" | "usageEvent">;
@@ -69,37 +69,52 @@ export class ShopifyUsageEventPublisherService {
     const pageSize = boundedPageSize(this.pageSize);
     await this.recoverStaleClaims(now);
 
-    const rows = await this.database.usageEvent.findMany({
-      where: {
-        shopifyReportState: {
-          in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE],
-        },
-        OR: [
-          { nextReportAt: null },
-          { nextReportAt: { lte: now } },
-        ],
+    const dueWhere = {
+      shopifyReportState: {
+        in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE],
       },
+      OR: [
+        { nextReportAt: null },
+        { nextReportAt: { lte: now } },
+      ],
+    };
+    const select = {
+      id: true,
+      shopId: true,
+      quantity: true,
+      occurredAt: true,
+      shopifyEventHandle: true,
+      shopifyIdempotencyKey: true,
+      shopifyReportState: true,
+      metric: true,
+      reportAttemptCount: true,
+      nextReportAt: true,
+      lastReportAttemptAt: true,
+      shop: { select: { shopifyShopId: true, status: true, uninstalledAt: true } },
+    } as const;
+    const uninstallRows = await this.database.usageEvent.findMany({
+      where: { ...dueWhere, shop: { status: "UNINSTALLED" } },
       orderBy: [
         { nextReportAt: "asc" },
         { occurredAt: "asc" },
         { id: "asc" },
       ],
       take: pageSize,
-      select: {
-        id: true,
-        shopId: true,
-        quantity: true,
-        occurredAt: true,
-        shopifyEventHandle: true,
-        shopifyIdempotencyKey: true,
-        shopifyReportState: true,
-        metric: true,
-        reportAttemptCount: true,
-        nextReportAt: true,
-        lastReportAttemptAt: true,
-        shop: { select: { shopifyShopId: true } },
-      },
+      select,
     });
+    const ordinaryRows = uninstallRows.length >= pageSize
+      ? []
+      : await this.database.usageEvent.findMany({
+      where: { ...dueWhere, shop: { status: { not: "UNINSTALLED" } } },
+      orderBy: [
+        { nextReportAt: "asc" },
+        { occurredAt: "asc" },
+        { id: "asc" },
+      ],
+      take: pageSize - uninstallRows.length,
+      select,
+    });
+    const rows = [...uninstallRows, ...ordinaryRows];
 
     const result: ShopifyUsageEventPublisherResult = {
       selected: rows.length,
@@ -267,6 +282,9 @@ function boundedPageSize(value: number): number {
 }
 
 function validateReportableUsage(row: UsageEventRecord): string | null {
+  if (row.shop.status !== "ACTIVE" && (!row.shop.uninstalledAt || row.occurredAt > row.shop.uninstalledAt)) {
+    return "Usage event is after the shop uninstall cutoff";
+  }
   if (!row.shop.shopifyShopId?.trim()) return "Shop has no Shopify shop GID";
   if (!row.shopifyEventHandle?.trim()) return "Usage event handle is missing";
   if (!row.shopifyIdempotencyKey?.trim()) return "Shopify idempotency key is missing";

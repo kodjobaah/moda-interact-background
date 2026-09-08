@@ -40,6 +40,16 @@ const entrypoints = [
       "pending-recovery-candidate.worker.js",
     ],
   },
+  {
+    file: "src/entrypoints/billing.ts",
+    script: "start:billing-worker",
+    command: "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
+    readinessScript: "readiness:billing-worker",
+    readinessCommand: "node dist/readiness.js moda-billing-worker",
+    serviceName: "moda-billing-worker",
+    ownedWorkers: [],
+    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "pending-recovery-candidate.worker.js", "whatsapp.worker.js"],
+  },
 ] as const;
 
 describe("production worker entrypoints", () => {
@@ -69,5 +79,29 @@ describe("production worker entrypoints", () => {
         entrypoint.readinessCommand,
       );
     }
+  });
+
+  it("keeps the billing entrypoint free of the Redis resource bundle", async () => {
+    const source = await readFile("src/entrypoints/billing.ts", "utf8");
+
+    expect(source).not.toContain('import("./resources.js")');
+    expect(source).not.toContain("connectionRedis");
+    expect(source).toContain('import("./billing-resources.js")');
+  });
+
+  it("wires bounded Shared logging for scheduled billing failures", async () => {
+    const source = await readFile("src/entrypoints/billing.ts", "utf8");
+    const reporterStart = source.indexOf("function reportBillingReconciliationFailure");
+    const reporterEnd = source.indexOf("\n\nvoid startReadyWorkerProcess", reporterStart);
+    const reporter = source.slice(reporterStart, reporterEnd);
+
+    expect(source).toContain('import { createLogger } from "@modainteract/moda-interact-shared/logging"');
+    expect(source).toContain('serviceName: "moda-billing-worker"');
+    expect(source).toContain('logger.error("billing.reconciliation.scan_failed"');
+    expect(source).toContain("reportBillingReconciliationFailure,");
+    expect(reporter).toContain("error.name.slice(0, 64)");
+    expect(reporter).toContain("error.message.slice(0, 256)");
+    expect(reporter).not.toContain("error,");
+    expect(reporter).not.toContain("error: error");
   });
 });
