@@ -20,6 +20,7 @@ describe("ShopifyPartnerBillingApi", () => {
             items: [
               {
                 handle: "recovery-meter",
+                description: "Recovery conversations",
                 price: {
                   __typename: "TieredPrice",
                   active: true,
@@ -31,6 +32,7 @@ describe("ShopifyPartnerBillingApi", () => {
               },
               {
                 handle: "growth-plan",
+                description: "Growth plan",
                 price: { __typename: "FlatRatePrice", active: true, currency: "USD", amount: "75.00" },
                 usage: null,
               },
@@ -40,6 +42,7 @@ describe("ShopifyPartnerBillingApi", () => {
               legacySubscriptionId: "legacy-pending",
               items: [{
                 handle: "scale-plan",
+                description: "Scale plan",
                 price: { __typename: "FlatRatePrice", active: true, currency: "USD", amount: "149.00" },
               }],
             },
@@ -69,6 +72,8 @@ describe("ShopifyPartnerBillingApi", () => {
     expect(body.query).toContain("pendingUpdate");
     expect(body.query).toContain("legacySubscriptionId");
     expect(body.query).toContain("currentBillingCycle");
+    expect(body.query).toContain("items {\n        handle\n        description");
+    expect(body.query).toContain("pendingUpdate {\n        billingPeriod");
   });
 
   it("represents a null active subscription as no contract", async () => {

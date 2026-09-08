@@ -37,11 +37,12 @@ type PartnerResponse = {
       legacySubscriptionId: string | null;
       items: Array<{
         handle: string | null;
+        description: string | null;
         price: ShopifyPrice | null;
         usage: { quantity: number | null; cost: { amount: string; currencyCode: string } | null } | null;
       }>;
       pendingUpdate: {
-        billingPeriod: string;
+        billingPeriod: string | null;
         legacySubscriptionId: string | null;
         items: Array<{ handle: string | null; price: ShopifyPrice | null }>;
       } | null;
@@ -60,6 +61,7 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
       legacySubscriptionId
       items {
         handle
+        description
         price {
           __typename
           active

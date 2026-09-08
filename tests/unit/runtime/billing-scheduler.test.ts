@@ -44,4 +44,21 @@ describe("billing reconciliation scheduler", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reports scheduled failures through the supplied bounded reporter", async () => {
+    vi.useFakeTimers();
+    try {
+      const failure = new Error("provider failure");
+      const scan = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+      const reporter = vi.fn();
+      const stop = startBillingReconciliationScheduler(scan, 60_000, reporter);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(reporter).toHaveBeenCalledWith(failure);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

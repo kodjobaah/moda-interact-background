@@ -1,9 +1,10 @@
 export type BillingReconcile = () => Promise<unknown>;
+export type BillingReconciliationErrorReporter = (error: unknown) => void;
 
 export function startBillingReconciliationScheduler(
   reconcile: BillingReconcile,
   intervalMs = 60_000,
-  onError: (error: unknown) => void = (error) => console.error("billing reconciliation failed", error),
+  onError: BillingReconciliationErrorReporter = () => undefined,
 ): () => void {
   let closed = false;
   let timer: NodeJS.Timeout | undefined;

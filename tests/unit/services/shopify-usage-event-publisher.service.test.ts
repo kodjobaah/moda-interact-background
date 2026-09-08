@@ -277,6 +277,27 @@ describe("ShopifyUsageEventPublisherService", () => {
     )).toEqual(new Set(["shopify:shop-1:usage-1"]));
   });
 
+  it("B008-R8 recovers stale in-flight work while preserving its permanent identity", async () => {
+    let currentNow = new Date(now);
+    const test = harness([usageRow({
+      shopifyReportState: "IN_FLIGHT",
+      lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000),
+    })], () => currentNow);
+    test.provider.createBillingEvent.mockRejectedValueOnce(
+      new ShopifyAppEventsError("throttled", "throttled"),
+    ).mockResolvedValueOnce(undefined);
+
+    await expect(test.service.publishDue()).resolves.toMatchObject({ retryable: 1 });
+    currentNow = new Date(now.getTime() + 16 * 60_000);
+    await expect(test.service.publishDue()).resolves.toMatchObject({ reported: 1 });
+
+    expect(test.provider.createBillingEvent).toHaveBeenCalledTimes(2);
+    expect(test.provider.createBillingEvent.mock.calls[0]?.[0].idempotencyKey)
+      .toBe("shopify:shop-1:usage-1");
+    expect(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey)
+      .toBe("shopify:shop-1:usage-1");
+  });
+
   it("marks permanent provider failures for attention without retrying", async () => {
     const test = harness();
     test.provider.createBillingEvent.mockRejectedValue(

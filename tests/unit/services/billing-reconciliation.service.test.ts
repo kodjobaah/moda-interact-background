@@ -71,6 +71,95 @@ function harness({
 }
 
 describe("BillingReconciliationService", () => {
+  it("B008-R1 updates the durable projection when Shopify changes plans", async () => {
+    const test = harness();
+    test.partner.getActiveSubscription
+      .mockResolvedValueOnce({ ...providerSubscription, planHandle: "plan-a" })
+      .mockResolvedValueOnce({ ...providerSubscription, planHandle: "plan-b" });
+    test.database.billingPlan.findUnique.mockResolvedValue({
+      id: "plan-1", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter",
+    });
+
+    await test.service.reconcileOnce();
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ observedShopifyPlanHandle: "plan-b" }),
+    }));
+  });
+
+  it("B008-R2 maps an unknown plan after Admin registration without a restart", async () => {
+    const test = harness({
+      plan: null,
+      partnerResult: {
+        ...providerSubscription,
+        planHandle: "future-plan",
+        pendingPlanHandle: null,
+        pendingEffectiveAt: null,
+      },
+    });
+    test.database.billingPlan.findUnique.mockReset()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "plan-new", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter" });
+
+    await test.service.reconcileOnce();
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ status: "ACTIVE", planId: "plan-new" }),
+    }));
+  });
+
+  it("B008-R3 projects a genuine no-contract response without downgrading to Free", async () => {
+    const test = harness({ partnerResult: null });
+
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ status: "NO_CONTRACT", planId: null }),
+    }));
+  });
+
+  it("B008-R4 persists pending plan and effective boundary without changing current entitlement", async () => {
+    const test = harness();
+
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        planId: "plan-1",
+        pendingShopifyPlanHandle: "pro-2027",
+        pendingPlanId: "plan-2",
+        pendingEffectiveAt: providerSubscription.pendingEffectiveAt,
+      }),
+    }));
+  });
+
+  it("B008-R5 links the latest open billing cycle as current", async () => {
+    const test = harness();
+    test.partner.getActiveSubscription
+      .mockResolvedValueOnce(providerSubscription)
+      .mockResolvedValueOnce({
+        ...providerSubscription,
+        currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2026-11-01T00:00:00.000Z"),
+      });
+    test.database.billingPeriod.upsert
+      .mockResolvedValueOnce({ id: "period-old" })
+      .mockResolvedValueOnce({ id: "period-new" });
+
+    await test.service.reconcileOnce();
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        billingPeriodId: "period-new",
+        currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2026-11-01T00:00:00.000Z"),
+      }),
+    }));
+  });
+
   it("bounds the active-shop scan and keeps an unknown plan unmapped", async () => {
     const test = harness({
       plan: null,
@@ -122,6 +211,16 @@ describe("BillingReconciliationService", () => {
       "billing.usage_reconciliation.discrepancy",
       expect.objectContaining({ modaQuantity: 5, shopifyQuantity: 7 }),
     );
+    expect(test.database.usageEvent).not.toHaveProperty("create");
+  });
+
+  it("B008-R6 rediscovers interrupted recovery-credit activation through B009", async () => {
+    const test = harness();
+
+    const result = await test.service.reconcileOnce();
+
+    expect(test.purchases.reconcilePending).toHaveBeenCalledOnce();
+    expect(result.purchasesActivated).toBe(1);
   });
 
   it("rotates active shops with a keyset cursor and continues after a Partner failure", async () => {
