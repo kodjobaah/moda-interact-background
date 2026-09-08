@@ -7,6 +7,7 @@ import {
   runCommerceAgentAfterAdmission,
   type OutboundAdmissionResult,
 } from "./outbound-whatsapp-admission.service.js";
+import type { InboundAbuseAdmission } from "./inbound-whatsapp-abuse-admission.service.js";
 
 export const QUIET_WINDOW_MS = 3_000;
 export const MAX_SETTLE_WINDOW_MS = 10_000;
@@ -40,6 +41,10 @@ type Admitted = Extract<OutboundAdmissionResult, { kind: "admitted" }>;
 export type LoadedConversationTurn<TContext> = {
   shopId: string;
   to: string;
+  customerPhone?: string;
+  conversationType?: "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
+  checkoutRecoveryId?: string | null;
+  hasReplyContext?: boolean;
   context: TContext | null;
   languageMessage: string;
   clarificationText?: string;
@@ -69,6 +74,17 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       input: Admitted & { to: string; text: string },
     ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
+  };
+  abuseAdmission?: {
+    admitSettledTurn: (input: {
+      conversationId: string;
+      observedVersion: number;
+      shopId: string;
+      customerPhone: string;
+      conversationType: "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
+      hasReplyContext: boolean;
+      checkoutRecoveryId: string | null;
+    }) => Promise<InboundAbuseAdmission>;
   };
   loadTurn: (
     conversationId: string,
@@ -153,6 +169,29 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         state.pendingTurnStartedAt as Date,
       );
+
+      if (
+        this.dependencies.abuseAdmission &&
+        loaded.customerPhone &&
+        loaded.conversationType
+      ) {
+        const abuse = await this.dependencies.abuseAdmission.admitSettledTurn({
+          conversationId,
+          observedVersion,
+          shopId: loaded.shopId,
+          customerPhone: loaded.customerPhone,
+          conversationType: loaded.conversationType,
+          hasReplyContext: loaded.hasReplyContext ?? false,
+          checkoutRecoveryId: loaded.checkoutRecoveryId ?? null,
+        });
+        if (abuse.kind !== "allowed") {
+          await this.dependencies.conversation.completeTurn(
+            conversationId,
+            observedVersion,
+          );
+          return;
+        }
+      }
 
       if (loaded.handledWithoutAgent) {
         await this.dependencies.conversation.completeTurn(

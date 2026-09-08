@@ -297,6 +297,42 @@ describe("ConversationTurnProcessor", () => {
     );
   });
 
+  it("handles a settled abuse denial without outbound or agent work", async () => {
+    const test = harness();
+    test.loaded.customerPhone = "+447700900000";
+    test.loaded.conversationType = "PRODUCT_SUPPORT";
+    test.loaded.hasReplyContext = false;
+    test.loaded.checkoutRecoveryId = "recovery-1";
+    test.processor = new ConversationTurnProcessor({
+      queue: test.queue,
+      conversation: test.conversation,
+      admission: test.admission,
+      abuseAdmission: {
+        admitSettledTurn: vi.fn().mockResolvedValue({
+          kind: "denied",
+          stage: "settled-turn",
+          reason: "TURN_SENDER_SHORT",
+        }),
+      },
+      loadTurn: vi.fn().mockResolvedValue(test.loaded),
+      runAgent: test.runAgent,
+      getResult: (result: any) => result,
+      now: () => new Date(first.getTime() + 20_000),
+    });
+
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+
+    expect(test.conversation.completeTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+    );
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
   it("coalesces product-only standalone fragments through one agent call", async () => {
     const test = harness();
     test.loaded.context.conversation.type = "PRODUCT_DISCOVERY";

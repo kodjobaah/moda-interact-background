@@ -11,6 +11,7 @@ import type { RecoveryAgentContext } from "../agents/types.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
+import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
@@ -46,6 +47,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   queue: whatsappQueue,
   conversation: conversationService,
   admission: outboundWhatsAppAdmissionService,
+  abuseAdmission: inboundWhatsAppAbuseAdmissionService,
   loadTurn: loadConversationTurn,
   runAgent: runCommerceAgent,
   getResult: (result) => result,
@@ -92,6 +94,12 @@ export const whatsappWorker = new Worker<
 
 async function processInboundMessage(event: WhatsAppInboundEvent) {
   console.log("Processing WhatsApp message", event.providerMessageId);
+
+  const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
+    providerMessageId: event.providerMessageId,
+    customerPhone: event.customerPhone,
+  });
+  if (abuse.kind !== "allowed") return;
 
   const route = await recoveryRoutingService.resolveInboundMessage(event);
 
@@ -175,6 +183,14 @@ async function loadConversationTurn(
           customer: { select: { phone: true, id: true, firstName: true } },
         },
       },
+      messages: {
+        where: {
+          createdAt: { gte: pendingTurnStartedAt },
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+        },
+        select: { inReplyToProviderId: true },
+      },
     },
   });
   const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
@@ -184,12 +200,24 @@ async function loadConversationTurn(
   if (!shopId || !to)
     throw new Error(`Conversation ${conversationId} has no outbound ownership`);
 
+  const settledMetadata = {
+    customerPhone: to,
+    conversationType: conversation.type as
+      | "PRODUCT_DISCOVERY"
+      | "PRODUCT_SUPPORT",
+    checkoutRecoveryId: conversation.checkoutRecoveryId,
+    hasReplyContext: conversation.messages.some(
+      (message) => message.inReplyToProviderId !== null,
+    ),
+  } as const;
+
   const clarification =
     await recoveryRoutingService.getCurrentClarification(conversationId);
   if (clarification?.kind === "unresolved") {
     return {
       shopId,
       to,
+      ...settledMetadata,
       context: null,
       languageMessage: "",
       handledWithoutAgent: true,
@@ -199,6 +227,7 @@ async function loadConversationTurn(
     return {
       shopId,
       to,
+      ...settledMetadata,
       context: null,
       languageMessage: "",
       clarificationText: formatClarification(clarification.recoveries),
@@ -223,6 +252,7 @@ async function loadConversationTurn(
   return {
     shopId,
     to,
+    ...settledMetadata,
     context,
     languageMessage: context.conversation.messages
       .filter((message) => message.role === "user")
