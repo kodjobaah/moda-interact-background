@@ -107,4 +107,29 @@ describe("PurchasedRecoveryReservationService", () => {
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
   });
+
+  it("keeps ambiguous provider outcomes consuming reserved capacity", async () => {
+    const { service, state } = createHarness();
+
+    await service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-ambiguous" });
+    await expect(service.markAmbiguous({ shopId: "shop-1", sourceKey: "purchased:recovery-ambiguous" }))
+      .resolves.toMatchObject({ kind: "ambiguous" });
+
+    expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-next" }))
+      .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
+  });
+
+  it("uses counter CAS to prevent concurrent reservations beyond the balance", async () => {
+    const { service, state } = createHarness();
+
+    const results = await Promise.all([
+      service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-a" }),
+      service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-b" }),
+    ]);
+
+    expect(results.filter((result) => result.kind === "reserved")).toHaveLength(1);
+    expect(results.filter((result) => result.kind === "credits-exhausted")).toHaveLength(1);
+    expect(state.counter.reservedQuantity).toBe(1);
+  });
 });

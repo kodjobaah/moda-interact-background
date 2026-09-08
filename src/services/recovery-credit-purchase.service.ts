@@ -192,19 +192,52 @@ export class RecoveryCreditPurchaseService {
       Math.max(Number.isInteger(limit) ? limit : DEFAULT_RECONCILIATION_LIMIT, 1),
       MAX_RECONCILIATION_LIMIT,
     );
-    const purchases = await this.database.recoveryCreditPurchase.findMany({
-      where: {
-        status: {
-          in: [
-            RecoveryCreditPurchaseStatus.PENDING_BILLING,
-            RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
-          ],
-        },
+    const baseWhere: Prisma.RecoveryCreditPurchaseWhereInput = {
+      status: {
+        in: [
+          RecoveryCreditPurchaseStatus.PENDING_BILLING,
+          RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
+        ],
       },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    };
+    const orderBy: Prisma.RecoveryCreditPurchaseOrderByWithRelationInput[] = [
+      { createdAt: "asc" },
+      { id: "asc" },
+    ];
+    const select = { id: true } as const;
+    const terminalStates = [
+      ShopifyReportState.REPORTED,
+      ShopifyReportState.NEEDS_ATTENTION,
+    ];
+    const nonTerminalStates = [
+      ShopifyReportState.PENDING,
+      ShopifyReportState.IN_FLIGHT,
+      ShopifyReportState.RETRYABLE,
+    ];
+    const terminalPurchases = await this.database.recoveryCreditPurchase.findMany({
+      where: {
+        ...baseWhere,
+        usageEvent: { shopifyReportState: { in: terminalStates } },
+      },
+      orderBy,
       take: boundedLimit,
-      select: { id: true },
+      select,
     });
+    const remaining = boundedLimit - terminalPurchases.length;
+    const purchases = remaining > 0
+      ? [
+          ...terminalPurchases,
+          ...(await this.database.recoveryCreditPurchase.findMany({
+            where: {
+              ...baseWhere,
+              usageEvent: { shopifyReportState: { in: nonTerminalStates } },
+            },
+            orderBy,
+            take: remaining,
+            select,
+          })),
+        ]
+      : terminalPurchases;
 
     const results = [];
     for (const purchase of purchases) {

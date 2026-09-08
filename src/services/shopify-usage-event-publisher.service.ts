@@ -3,6 +3,7 @@ import {
   ShopifyReportState,
   UsageMetric,
 } from "@prisma/client";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
@@ -19,6 +20,10 @@ const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 60 * 60_000;
 const IN_FLIGHT_RECOVERY_MS = 15 * 60_000;
 const MAX_RESPONSE_SUMMARY_LENGTH = 2000;
+const logger = createLogger({
+  serviceName: "moda-shopify-event-worker",
+  environment: process.env.NODE_ENV ?? "development",
+});
 
 type UsageEventRecord = {
   id: string;
@@ -127,7 +132,14 @@ export class ShopifyUsageEventPublisherService {
         });
         await this.markReported(row.id, now);
         result.reported += 1;
-        await this.activateRecoveryCreditPurchase(row);
+        try {
+          await this.activateRecoveryCreditPurchase(row);
+        } catch (activationError) {
+          logger.error("billing.recovery_credit.activation_failed", {
+            usageEventId: row.id,
+            error: activationError,
+          });
+        }
       } catch (error) {
         if (isRetryable(error)) {
           await this.markRetryable(row, error, now);
