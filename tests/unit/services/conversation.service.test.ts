@@ -28,6 +28,9 @@ describe("ConversationService language persistence", () => {
   it("persists initial language during receipt and applies detection after the agent", async () => {
     prismaMock.conversationMessage.findUnique.mockResolvedValue(null);
     prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      inboundVersion: 1,
+      lastProcessedVersion: 1,
+      pendingTurnStartedAt: null,
       languageTag: "en-GB",
       languageSource: "SHOPIFY",
     });
@@ -58,6 +61,7 @@ describe("ConversationService language persistence", () => {
     expect(txConversationUpdate).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
       data: {
+        pendingTurnStartedAt: expect.any(Date),
         inboundVersion: { increment: 1 },
         lastInboundAt: expect.any(Date),
         lastMessageAt: expect.any(Date),
@@ -68,7 +72,13 @@ describe("ConversationService language persistence", () => {
     });
     expect(prismaMock.conversation.findUniqueOrThrow).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
-      select: { languageTag: true, languageSource: true },
+      select: {
+        inboundVersion: true,
+        lastProcessedVersion: true,
+        pendingTurnStartedAt: true,
+        languageTag: true,
+        languageSource: true,
+      },
     });
     expect(detector.detect).not.toHaveBeenCalled();
 
@@ -118,6 +128,74 @@ describe("ConversationService standalone snapshots", () => {
       shop: "example.myshopify.com",
       type: "PRODUCT_DISCOVERY",
       messages: [{ role: "user", content: "Need a black shirt" }],
+    });
+  });
+});
+
+describe("ConversationService turn state", () => {
+  it("claims only the expected version and permits stale lease reclamation", async () => {
+    prismaMock.conversation.updateMany.mockClear();
+    const now = new Date("2026-09-08T12:00:00.000Z");
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      inboundVersion: 3,
+      lastProcessedVersion: 2,
+      lastInboundAt: new Date("2026-09-08T11:59:59.000Z"),
+      pendingTurnStartedAt: new Date("2026-09-08T11:59:50.000Z"),
+      processingInboundVersion: null,
+      processingStartedAt: null,
+    });
+    prismaMock.conversation.updateMany.mockResolvedValue({ count: 1 });
+
+    const service = new ConversationService();
+
+    await expect(service.getTurnState("conversation-1")).resolves.toMatchObject({
+      inboundVersion: 3,
+      lastProcessedVersion: 2,
+    });
+    await expect(service.claimTurn("conversation-1", 3, now)).resolves.toBe(true);
+
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "conversation-1",
+        inboundVersion: 3,
+        lastProcessedVersion: { lt: 3 },
+        pendingTurnStartedAt: { not: null },
+        OR: [
+          { processingInboundVersion: null },
+          { processingStartedAt: { lt: new Date("2026-09-08T11:58:00.000Z") } },
+        ],
+      },
+      data: {
+        processingInboundVersion: 3,
+        processingStartedAt: now,
+      },
+    });
+  });
+
+  it("clears pending and processing state only for the claimed version", async () => {
+    prismaMock.conversation.updateMany.mockClear();
+    prismaMock.conversation.updateMany.mockResolvedValue({ count: 1 });
+    const service = new ConversationService();
+
+    await expect(service.completeTurn("conversation-1", 4)).resolves.toBe(true);
+    await service.releaseTurn("conversation-1", 5);
+
+    expect(prismaMock.conversation.updateMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        id: "conversation-1",
+        inboundVersion: 4,
+        processingInboundVersion: 4,
+      },
+      data: {
+        lastProcessedVersion: 4,
+        pendingTurnStartedAt: null,
+        processingInboundVersion: null,
+        processingStartedAt: null,
+      },
+    });
+    expect(prismaMock.conversation.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: "conversation-1", processingInboundVersion: 5 },
+      data: { processingInboundVersion: null, processingStartedAt: null },
     });
   });
 });

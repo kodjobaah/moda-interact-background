@@ -839,9 +839,11 @@ export class CheckoutRecoveryService {
   async getAgentContext({
     checkoutRecoveryId,
     conversationId,
+    pendingTurnStartedAt,
   }: {
     checkoutRecoveryId: string;
     conversationId: string;
+    pendingTurnStartedAt?: Date | null;
   }): Promise<RecoveryAgentContext> {
     const recovery =
       await prisma.checkoutRecovery.findUnique({
@@ -885,16 +887,18 @@ export class CheckoutRecoveryService {
               languageSource: true,
 
               messages: {
-                orderBy: {
-                  createdAt: "desc",
-                },
-
-                take: 20,
-
-                select: {
-                  direction: true,
-                  content: true,
-                },
+                ...(pendingTurnStartedAt
+                  ? {
+                      where: {
+                        createdAt: { gte: pendingTurnStartedAt },
+                        direction: "INBOUND",
+                        senderType: "CUSTOMER",
+                      },
+                    }
+                  : {}),
+                orderBy: { createdAt: "desc" },
+                ...(pendingTurnStartedAt ? {} : { take: 20 }),
+                select: { direction: true, content: true },
               },
             },
           },

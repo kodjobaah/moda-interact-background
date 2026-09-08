@@ -1,8 +1,9 @@
-import { Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
 
 import { connectionRedis } from "../lib/redis.js";
+import prisma from "../lib/db.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 
 import { runCommerceAgent } from "../agents/commerce.agent.js";
@@ -14,7 +15,12 @@ import {
   outboundWhatsAppAdmissionService,
   runCommerceAgentAfterAdmission,
 } from "../services/outbound-whatsapp-admission.service.js";
+import type { OutboundAdmissionResult } from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
+
+const QUIET_WINDOW_MS = 3_000;
+const MAX_SETTLE_WINDOW_MS = 10_000;
+const PROCESSING_LEASE_MS = 120_000;
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-messaging-worker",
@@ -23,7 +29,7 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "whatsapp",
   queueName: "whatsapp-events",
-  jobNames: ["message-received"],
+  jobNames: ["message-received", "process-conversation-turn"],
 } as const;
 const conversationTurnObservation = {
   mapException: () => ({
@@ -32,8 +38,17 @@ const conversationTurnObservation = {
   }),
 } as const;
 
+type ConversationTurnJob = {
+  conversationId: string;
+  observedVersion: number;
+};
+
+const whatsappQueue = new Queue("whatsapp-events", {
+  connection: connectionRedis,
+});
+
 export const whatsappWorker =
-  new Worker<WhatsAppInboundEvent>(
+  new Worker<WhatsAppInboundEvent | ConversationTurnJob>(
     "whatsapp-events",
 
     async (job) =>
@@ -42,7 +57,15 @@ export const whatsappWorker =
           case "message-received":
             await observeConversationTurn(
               "whatsapp",
-              () => processInboundMessage(job.data),
+              () => processInboundMessage(job.data as WhatsAppInboundEvent),
+              conversationTurnObservation,
+            );
+            return;
+
+          case "process-conversation-turn":
+            await observeConversationTurn(
+              "whatsapp",
+              () => processConversationTurn(job.data as ConversationTurnJob),
               conversationTurnObservation,
             );
             return;
@@ -86,38 +109,7 @@ async function processInboundMessage(
 
     if (received.duplicate) return;
 
-    const admission = await outboundWhatsAppAdmissionService.reserve({
-      shopId: route.shopId,
-      conversationId: route.conversationId,
-      idempotencyKey: `agent:${event.providerMessageId}`,
-      senderType: "AGENT",
-    });
-    if (admission.kind !== "admitted") return;
-
-    const context = buildProductOnlyContext(
-      route,
-      event,
-      route.conversationId,
-    );
-
-    const result = await runCommerceAgentAfterAdmission({
-      admission,
-      to: event.customerPhone,
-      context,
-      runAgent: runCommerceAgent,
-      sendPreparedText: (input) =>
-        outboundWhatsAppAdmissionService.sendPreparedText(input),
-      failPrepared: (messageId) =>
-        outboundWhatsAppAdmissionService.failPrepared(messageId),
-    });
-    if (result === null) return;
-
-    await outboundWhatsAppAdmissionService.sendPreparedText({
-      ...admission,
-      to: event.customerPhone,
-      text: result.replyText,
-    });
-
+    await enqueueConversationTurn(route.conversationId, received.version);
     return;
   }
 
@@ -131,23 +123,7 @@ async function processInboundMessage(
 
     if (received.duplicate) return;
 
-    const options = route.recoveries
-      .map((recovery) =>
-        `- ${recovery.checkoutToken}${recovery.totalPrice ? ` (${recovery.totalPrice})` : ""}`,
-      )
-      .join("\n");
-
-    await outboundWhatsAppAdmissionService.sendText({
-      shopId: route.shopId,
-      conversationId: route.conversationId,
-      idempotencyKey: `clarify:${event.providerMessageId}`,
-      senderType: "AUTOMATION",
-      to: event.customerPhone,
-      text:
-        "I found more than one active abandoned basket for your account. Please tell me which one you mean by replying with the basket reference below:\n\n" +
-        options,
-    });
-
+    await enqueueConversationTurn(route.conversationId, received.version);
     return;
   }
 
@@ -177,87 +153,168 @@ async function processInboundMessage(
     return;
   }
 
-  const context =
-    await checkoutRecoveryService.getAgentContext({
-      checkoutRecoveryId:
-        route.checkoutRecoveryId,
+  await enqueueConversationTurn(route.conversationId, received.version);
+}
 
-      conversationId:
-        route.conversationId,
+async function enqueueConversationTurn(
+  conversationId: string,
+  observedVersion: number,
+  retrySuffix?: string,
+): Promise<void> {
+  const state = await conversationService.getTurnState(conversationId);
+  if (!state.pendingTurnStartedAt || !state.lastInboundAt) return;
+
+  const now = Date.now();
+  const quietDeadline = state.lastInboundAt.getTime() + QUIET_WINDOW_MS;
+  const maximumDeadline = state.pendingTurnStartedAt.getTime() + MAX_SETTLE_WINDOW_MS;
+  const delay = Math.max(0, Math.min(quietDeadline, maximumDeadline) - now);
+
+  await whatsappQueue.add(
+    "process-conversation-turn",
+    { conversationId, observedVersion },
+    {
+      jobId: retrySuffix
+        ? `conversation-turn:${conversationId}:${observedVersion}:${retrySuffix}`
+        : `conversation-turn:${conversationId}:${observedVersion}`,
+      delay,
+    },
+  );
+}
+
+async function processConversationTurn({
+  conversationId,
+  observedVersion,
+}: ConversationTurnJob): Promise<void> {
+  const state = await conversationService.getTurnState(conversationId);
+  if (
+    observedVersion < state.inboundVersion ||
+    observedVersion <= state.lastProcessedVersion ||
+    !state.pendingTurnStartedAt
+  ) {
+    return;
+  }
+
+  const now = new Date();
+  const quietDeadline = (state.lastInboundAt?.getTime() ?? now.getTime()) + QUIET_WINDOW_MS;
+  const maximumDeadline = state.pendingTurnStartedAt.getTime() + MAX_SETTLE_WINDOW_MS;
+  if (now.getTime() < quietDeadline && now.getTime() < maximumDeadline) {
+    await enqueueConversationTurn(
+      conversationId,
+      observedVersion,
+      `settle:${now.getTime()}`,
+    );
+    return;
+  }
+
+  if (!await conversationService.claimTurn(conversationId, observedVersion, now)) {
+    await whatsappQueue.add(
+      "process-conversation-turn",
+      { conversationId, observedVersion },
+      { jobId: `conversation-turn-retry:${conversationId}:${observedVersion}:${now.getTime()}`, delay: 250 },
+    );
+    return;
+  }
+
+  let admission: OutboundAdmissionResult | null = null;
+  try {
+    const conversation = await prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: {
+        id: true,
+        type: true,
+        shopId: true,
+        customer: { select: { phone: true, id: true, firstName: true } },
+        shop: { select: { domain: true } },
+        checkoutRecoveryId: true,
+        checkoutRecovery: {
+          select: {
+            id: true,
+            shopId: true,
+            customer: { select: { phone: true, id: true, firstName: true } },
+          },
+        },
+      },
+    });
+    const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
+    const to = conversation.checkoutRecovery?.customer?.phone ?? conversation.customer?.phone;
+    if (!shopId || !to) throw new Error(`Conversation ${conversationId} has no outbound ownership`);
+
+    const context = conversation.checkoutRecoveryId
+      ? await checkoutRecoveryService.getAgentContext({
+          checkoutRecoveryId: conversation.checkoutRecoveryId,
+          conversationId,
+          pendingTurnStartedAt: state.pendingTurnStartedAt,
+        })
+      : await buildStandaloneAgentContext(conversation, state.pendingTurnStartedAt);
+
+    const reserved = await outboundWhatsAppAdmissionService.reserve({
+      shopId,
+      conversationId,
+      idempotencyKey: `agent:${conversationId}:${observedVersion}`,
+      senderType: "AGENT",
+    });
+    admission = reserved;
+    if (reserved.kind !== "admitted") {
+      await conversationService.completeTurn(conversationId, observedVersion);
+      return;
+    }
+    const admitted = reserved;
+
+    const result = await runCommerceAgentAfterAdmission({
+      admission: admitted,
+      to,
+      context,
+      runAgent: runCommerceAgent,
+      sendPreparedText: (input) => outboundWhatsAppAdmissionService.sendPreparedText(input),
+      failPrepared: (messageId) => outboundWhatsAppAdmissionService.failPrepared(messageId),
+    });
+    if (result === null) {
+      await conversationService.completeTurn(conversationId, observedVersion);
+      return;
+    }
+
+    await conversationService.applyDetectedLanguage({
+      conversationId,
+      version: observedVersion,
+      message: context.conversation.messages.filter((message) => message.role === "user").map((message) => message.content).join("\n"),
+      detectedLanguageTag: result.detectedLanguageTag,
+      detectedLanguageConfidence: result.detectedLanguageConfidence,
     });
 
-  const admission = await outboundWhatsAppAdmissionService.reserve({
-    shopId: route.shopId,
-    conversationId: route.conversationId,
-    idempotencyKey: `agent:${route.conversationId}:${received.version}`,
-    senderType: "AGENT",
-  });
-  if (admission.kind !== "admitted") {
-    await conversationService.markProcessed(
-      route.conversationId,
-      received.version,
-    );
-    return;
+    if (await conversationService.hasChanged(conversationId, observedVersion)) {
+      await outboundWhatsAppAdmissionService.failPrepared(admitted.messageId);
+      await conversationService.releaseTurn(conversationId, observedVersion);
+      await enqueueConversationTurn(conversationId, (await conversationService.getTurnState(conversationId)).inboundVersion);
+      return;
+    }
+
+    await outboundWhatsAppAdmissionService.sendPreparedText({ ...admitted, to, text: result.replyText });
+    await conversationService.completeTurn(conversationId, observedVersion);
+  } catch (error) {
+    if (admission?.kind === "admitted") {
+      await outboundWhatsAppAdmissionService.failPrepared(admission.messageId).catch(() => undefined);
+    }
+    await conversationService.releaseTurn(conversationId, observedVersion);
+    throw error;
   }
+}
 
-  const result = await runCommerceAgentAfterAdmission({
-    admission,
-    to: event.customerPhone,
-    context,
-    runAgent: runCommerceAgent,
-    sendPreparedText: (input) =>
-      outboundWhatsAppAdmissionService.sendPreparedText(input),
-    failPrepared: (messageId) =>
-      outboundWhatsAppAdmissionService.failPrepared(messageId),
-  });
-  if (result === null) {
-    await conversationService.markProcessed(
-      route.conversationId,
-      received.version,
-    );
-    return;
-  }
-
-  await conversationService.applyDetectedLanguage({
-    conversationId: route.conversationId,
-    version: received.version,
-    message: event.text ?? "",
-    detectedLanguageTag: result.detectedLanguageTag,
-    detectedLanguageConfidence: result.detectedLanguageConfidence,
-  });
-
-  const changed =
-    await conversationService.hasChanged(
-      route.conversationId,
-      received.version,
-    );
-
-  if (changed) {
-    console.log(
-      "Conversation changed while agent was processing; dropping stale response",
-      {
-        conversationId:
-          route.conversationId,
-
-        processedVersion:
-          received.version,
-      },
-    );
-
-    await outboundWhatsAppAdmissionService.failPrepared(admission.messageId);
-    return;
-  }
-
-  await outboundWhatsAppAdmissionService.sendPreparedText({
-    ...admission,
-      to: event.customerPhone,
-      text: result.replyText,
-  });
-
-  await conversationService.markProcessed(
-    route.conversationId,
-    received.version,
-  );
+async function buildStandaloneAgentContext(
+  conversation: {
+    id: string;
+    type: RecoveryAgentContext["conversation"]["type"];
+    shop: { domain: string } | null;
+    customer: { id: string; phone: string | null; firstName: string | null } | null;
+  },
+  pendingTurnStartedAt: Date,
+): Promise<RecoveryAgentContext> {
+  const snapshot = await conversationService.getAgentSnapshot(conversation.id, pendingTurnStartedAt);
+  return {
+    shop: conversation.shop?.domain ?? snapshot.shop,
+    recovery: { id: "standalone", status: "ENGAGED", checkoutToken: "standalone", completedAt: null, totalPrice: null },
+    customer: conversation.customer,
+    conversation: snapshot,
+  };
 }
 
 function buildProductOnlyContext(

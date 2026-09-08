@@ -1,6 +1,7 @@
 import {
   Prisma,
   ShopifyReportState,
+  UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
@@ -10,6 +11,7 @@ import {
   ShopifyAppEventsClient,
   readShopifyAppEventsConfig,
 } from "../providers/shopify-app-events.provider.js";
+import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.service.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
@@ -26,6 +28,7 @@ type UsageEventRecord = {
   shopifyEventHandle: string | null;
   shopifyIdempotencyKey: string | null;
   shopifyReportState: ShopifyReportState;
+  metric: UsageMetric;
   reportAttemptCount: number;
   nextReportAt: Date | null;
   lastReportAttemptAt: Date | null;
@@ -34,6 +37,7 @@ type UsageEventRecord = {
 
 type PublisherDatabase = Pick<PrismaClient, "$transaction" | "usageEvent">;
 type BillingEventClient = Pick<ShopifyAppEventsClient, "createBillingEvent">;
+type RecoveryCreditPurchaseActivator = Pick<typeof recoveryCreditPurchaseService, "activateForUsageEvent">;
 
 export type ShopifyUsageEventPublisherResult = {
   selected: number;
@@ -52,6 +56,7 @@ export class ShopifyUsageEventPublisherService {
     private readonly now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
     private readonly createProvider: () => BillingEventClient = createDefaultClient,
+    private readonly recoveryCreditPurchaseActivator: RecoveryCreditPurchaseActivator = recoveryCreditPurchaseService,
   ) {}
 
   async publishDue(): Promise<ShopifyUsageEventPublisherResult> {
@@ -83,6 +88,7 @@ export class ShopifyUsageEventPublisherService {
         shopifyEventHandle: true,
         shopifyIdempotencyKey: true,
         shopifyReportState: true,
+        metric: true,
         reportAttemptCount: true,
         nextReportAt: true,
         lastReportAttemptAt: true,
@@ -121,6 +127,7 @@ export class ShopifyUsageEventPublisherService {
         });
         await this.markReported(row.id, now);
         result.reported += 1;
+        await this.activateRecoveryCreditPurchase(row);
       } catch (error) {
         if (isRetryable(error)) {
           await this.markRetryable(row, error, now);
@@ -133,6 +140,11 @@ export class ShopifyUsageEventPublisherService {
     }
 
     return result;
+  }
+
+  private async activateRecoveryCreditPurchase(row: UsageEventRecord): Promise<void> {
+    if (row.metric !== UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE) return;
+    await this.recoveryCreditPurchaseActivator.activateForUsageEvent(row.id);
   }
 
   private async claim(row: UsageEventRecord, now: Date): Promise<boolean> {

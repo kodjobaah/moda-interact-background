@@ -22,6 +22,10 @@ import {
   freeRecoveryReservationService,
   type FreeRecoveryReservationInput,
 } from "./free-recovery-reservation.service.js";
+import {
+  purchasedRecoveryReservationService,
+  type PurchasedRecoveryReservationInput,
+} from "./purchased-recovery-reservation.service.js";
 
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
@@ -33,6 +37,10 @@ type FreeReservationService = Pick<
   typeof freeRecoveryReservationService,
   "reserve" | "commit" | "release" | "markAmbiguous"
 >;
+type PurchasedReservationService = Pick<
+  typeof purchasedRecoveryReservationService,
+  "reserve" | "commit" | "release" | "markAmbiguous"
+>;
 
 export type RecoveryBillingAdmission =
   | {
@@ -42,6 +50,11 @@ export type RecoveryBillingAdmission =
     }
   | {
       kind: "paid";
+      sourceKey: string;
+      policy: EffectiveBillingPolicy;
+    }
+  | {
+      kind: "purchased";
       sourceKey: string;
       policy: EffectiveBillingPolicy;
     };
@@ -60,6 +73,7 @@ export class RecoveryBillingService {
     private readonly database: RecoveryBillingDatabase = prisma,
     private readonly policyResolver: RecoveryPolicyResolver = effectiveBillingPolicyResolver,
     private readonly reservationService: FreeReservationService = freeRecoveryReservationService,
+    private readonly purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
   ) {}
 
   async admit(input: {
@@ -74,6 +88,8 @@ export class RecoveryBillingService {
     }
 
     if (policy.planKind === "PAID_METERED") {
+      const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, true);
+      if (purchased) return purchased;
       return { kind: "admitted", admission: { kind: "paid", sourceKey, policy } };
     }
 
@@ -84,6 +100,8 @@ export class RecoveryBillingService {
     const reservation = await this.reservationService.reserve(reservationInput);
 
     if (reservation.kind === "allowance-exhausted") {
+      const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, false);
+      if (purchased) return purchased;
       await this.createAllowanceExhaustedMessage(input.shopId, policy);
       return { kind: "blocked", reason: "allowance-exhausted" };
     }
@@ -124,6 +142,14 @@ export class RecoveryBillingService {
       return;
     }
 
+    if (input.admission.kind === "purchased") {
+      await this.purchasedReservationService.commit({
+        shopId: input.admission.policy.shopId,
+        sourceKey: input.admission.sourceKey,
+      });
+      return;
+    }
+
     const idempotencyKey = createRecoveryIdempotencyKey(
       input.admission.policy.shopId,
       input.recoveryId,
@@ -158,6 +184,19 @@ export class RecoveryBillingService {
       ? "definitive"
       : "ambiguous";
 
+    if (input.admission.kind === "purchased") {
+      const reservationInput = {
+        shopId: input.admission.policy.shopId,
+        sourceKey: input.admission.sourceKey,
+      };
+      if (disposition === "definitive") {
+        await this.purchasedReservationService.release(reservationInput);
+      } else {
+        await this.purchasedReservationService.markAmbiguous(reservationInput);
+      }
+      return disposition;
+    }
+
     if (input.admission.kind !== "free") return disposition;
 
     const reservationInput = {
@@ -175,11 +214,54 @@ export class RecoveryBillingService {
   }
 
   async releaseBeforeProvider(admission: RecoveryBillingAdmission): Promise<void> {
+    if (admission.kind === "purchased") {
+      await this.purchasedReservationService.release({
+        shopId: admission.policy.shopId,
+        sourceKey: admission.sourceKey,
+      });
+      return;
+    }
     if (admission.kind !== "free") return;
     await this.reservationService.release({
       shopId: admission.policy.shopId,
       sourceKey: admission.sourceKey,
     });
+  }
+
+  private async tryPurchasedAdmission(
+    shopId: string,
+    sourceKey: string,
+    policy: EffectiveBillingPolicy,
+    paid: boolean,
+  ): Promise<RecoveryBillingAdmissionResult | null> {
+    const pack = policy.recoveryCreditPack;
+    if (!pack?.enabled) return null;
+    if (
+      paid &&
+      (pack.includedRecoveryConversationAllowance === null ||
+        pack.normalRecoveryUsageQuantity === null ||
+        pack.normalRecoveryUsageQuantity < pack.includedRecoveryConversationAllowance)
+    ) {
+      return null;
+    }
+
+    const reservationInput: PurchasedRecoveryReservationInput = {
+      shopId,
+      sourceKey: purchasedReservationSourceKey(sourceKey),
+    };
+    const reservation = await this.purchasedReservationService.reserve(reservationInput);
+    if (reservation.kind === "reserved") {
+      return {
+        kind: "admitted",
+        admission: {
+          kind: "purchased",
+          sourceKey: reservationInput.sourceKey,
+          policy,
+        },
+      };
+    }
+    if (reservation.kind === "credits-exhausted") return null;
+    return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
   private async createAllowanceExhaustedMessage(
@@ -226,6 +308,10 @@ export class RecoveryBillingService {
       });
     });
   }
+}
+
+function purchasedReservationSourceKey(sourceKey: string): string {
+  return `purchased:${sourceKey}`;
 }
 
 function isDefinitiveProviderFailure(error: unknown): boolean {

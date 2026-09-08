@@ -30,6 +30,15 @@ export interface ResolvedIncomingMessage {
   explicitLanguageTag?: string | null;
 }
 
+export interface ConversationTurnState {
+  inboundVersion: number;
+  lastProcessedVersion: number;
+  lastInboundAt: Date | null;
+  pendingTurnStartedAt: Date | null;
+  processingInboundVersion: number | null;
+  processingStartedAt: Date | null;
+}
+
 export class ConversationService {
   constructor(
     private readonly languageService: ConversationLanguageService = conversationLanguageService,
@@ -43,6 +52,7 @@ export class ConversationService {
    */
   async receiveMessage(
     message: ResolvedIncomingMessage,
+    now: Date = new Date(),
   ): Promise<{
     conversationId: string;
     version: number;
@@ -86,6 +96,9 @@ export class ConversationService {
     const currentConversation = await prisma.conversation.findUniqueOrThrow({
       where: { id: message.conversationId },
       select: {
+        inboundVersion: true,
+        lastProcessedVersion: true,
+        pendingTurnStartedAt: true,
         languageTag: true,
         languageSource: true,
       },
@@ -129,6 +142,7 @@ export class ConversationService {
             status: "DELIVERED",
 
             content: message.content,
+            createdAt: now,
           },
         });
 
@@ -139,12 +153,16 @@ export class ConversationService {
             },
 
             data: {
+              ...(currentConversation.inboundVersion === currentConversation.lastProcessedVersion &&
+              currentConversation.pendingTurnStartedAt === null
+                ? { pendingTurnStartedAt: now }
+                : {}),
               inboundVersion: {
                 increment: 1,
               },
 
-              lastInboundAt: new Date(),
-              lastMessageAt: new Date(),
+              lastInboundAt: now,
+              lastMessageAt: now,
               languageTag: language.languageTag,
               languageSource: toPrismaLanguageSource(language.languageSource),
             },
@@ -166,6 +184,75 @@ export class ConversationService {
     };
   }
 
+  async getTurnState(conversationId: string): Promise<ConversationTurnState> {
+    return prisma.conversation.findUniqueOrThrow({
+      where: { id: conversationId },
+      select: {
+        inboundVersion: true,
+        lastProcessedVersion: true,
+        lastInboundAt: true,
+        pendingTurnStartedAt: true,
+        processingInboundVersion: true,
+        processingStartedAt: true,
+      },
+    });
+  }
+
+  async claimTurn(
+    conversationId: string,
+    observedVersion: number,
+    now: Date,
+  ): Promise<boolean> {
+    const staleBefore = new Date(now.getTime() - 120_000);
+    const claimed = await prisma.conversation.updateMany({
+      where: {
+        id: conversationId,
+        inboundVersion: observedVersion,
+        lastProcessedVersion: { lt: observedVersion },
+        pendingTurnStartedAt: { not: null },
+        OR: [
+          { processingInboundVersion: null },
+          { processingStartedAt: { lt: staleBefore } },
+        ],
+      },
+      data: {
+        processingInboundVersion: observedVersion,
+        processingStartedAt: now,
+      },
+    });
+    return claimed.count === 1;
+  }
+
+  async completeTurn(conversationId: string, observedVersion: number): Promise<boolean> {
+    const completed = await prisma.conversation.updateMany({
+      where: {
+        id: conversationId,
+        inboundVersion: observedVersion,
+        processingInboundVersion: observedVersion,
+      },
+      data: {
+        lastProcessedVersion: observedVersion,
+        pendingTurnStartedAt: null,
+        processingInboundVersion: null,
+        processingStartedAt: null,
+      },
+    });
+    return completed.count === 1;
+  }
+
+  async releaseTurn(conversationId: string, observedVersion: number): Promise<void> {
+    await prisma.conversation.updateMany({
+      where: {
+        id: conversationId,
+        processingInboundVersion: observedVersion,
+      },
+      data: {
+        processingInboundVersion: null,
+        processingStartedAt: null,
+      },
+    });
+  }
+
 
   /**
    * Return the bounded conversation history needed
@@ -173,6 +260,7 @@ export class ConversationService {
    */
   async getAgentSnapshot(
     conversationId: string,
+    pendingTurnStartedAt?: Date | null,
   ): Promise<AgentConversationContext> {
 
     const conversation =
@@ -209,15 +297,20 @@ export class ConversationService {
 
     const messages =
       await prisma.conversationMessage.findMany({
-        where: {
-          conversationId,
-        },
+        where: pendingTurnStartedAt
+          ? {
+              conversationId,
+              createdAt: { gte: pendingTurnStartedAt },
+              direction: "INBOUND",
+              senderType: "CUSTOMER",
+            }
+          : { conversationId },
 
         orderBy: {
           createdAt: "desc",
         },
 
-        take: 20,
+        ...(pendingTurnStartedAt ? {} : { take: 20 }),
 
         select: {
           direction: true,

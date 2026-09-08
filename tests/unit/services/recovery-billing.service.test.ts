@@ -88,6 +88,17 @@ function paidPolicy() {
   };
 }
 
+function purchasedPack(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    creditsPerPack: 5,
+    shopifyEventHandle: "recovery-pack",
+    includedRecoveryConversationAllowance: null,
+    normalRecoveryUsageQuantity: null,
+    ...overrides,
+  };
+}
+
 describe("RecoveryBillingService", () => {
   it("blocks exhausted Free admission and upserts one deterministic SYSTEM notification", async () => {
     const database = createDatabase();
@@ -318,5 +329,149 @@ describe("RecoveryBillingService", () => {
     expect(disposition).toBe("ambiguous");
     expect(reservationService.markAmbiguous).not.toHaveBeenCalled();
     expect(reservationService.release).not.toHaveBeenCalled();
+  });
+
+  it("uses purchased credits after Free lifetime capacity is exhausted", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), recoveryCreditPack: purchasedPack() })) };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved", reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+      purchasedReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-purchased" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "purchased:recovery:shop-1:recovery-purchased",
+    });
+  });
+
+  it("prefers remaining Free capacity over purchased credits", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), recoveryCreditPack: purchasedPack() })) };
+    const reservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved", reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      reservationService as never,
+      purchasedReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-free" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "free" } });
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("uses the normal paid path until included usage is exhausted", async () => {
+    const database = createDatabase();
+    const policyResolver = {
+      resolve: vi.fn(async () => ({
+        ...paidPolicy(),
+        recoveryCreditPack: purchasedPack({
+          includedRecoveryConversationAllowance: 200,
+          normalRecoveryUsageQuantity: 199,
+        }),
+      })),
+    };
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-included" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("uses purchased credits after paid included usage and resumes overage when exhausted", async () => {
+    const database = createDatabase();
+    const policyResolver = {
+      resolve: vi.fn(async () => ({
+        ...paidPolicy(),
+        recoveryCreditPack: purchasedPack({
+          includedRecoveryConversationAllowance: 200,
+          normalRecoveryUsageQuantity: 200,
+        }),
+      })),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "credits-exhausted", available: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-overage" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
+  });
+
+  it("commits purchased recovery usage locally without creating a normal paid meter event", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), recoveryCreditPack: purchasedPack({ includedRecoveryConversationAllowance: 1, normalRecoveryUsageQuantity: 1 }) })) };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved", reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "recovery-topup" });
+
+    await service.commitSuccessfulInitiation({
+      admission: admitted.kind === "admitted" ? admitted.admission : (() => { throw new Error("not admitted"); })(),
+      recoveryId: "recovery-topup",
+      occurredAt: new Date("2026-09-08T00:45:00.000Z"),
+    });
+
+    expect(purchasedReservationService.commit).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "purchased:recovery:shop-1:recovery-topup",
+    });
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 });

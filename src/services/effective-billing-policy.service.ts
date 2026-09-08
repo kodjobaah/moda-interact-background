@@ -40,6 +40,14 @@ export type PaidBillingPeriodProjection = {
   status: BillingPeriodStatus;
 };
 
+export type RecoveryCreditPackPolicy = {
+  enabled: boolean;
+  creditsPerPack: number;
+  shopifyEventHandle: string;
+  includedRecoveryConversationAllowance: number | null;
+  normalRecoveryUsageQuantity: number | null;
+};
+
 export type BillingPauseReason =
   | "GLOBAL_NEW_RECOVERIES_PAUSED"
   | "SHOP_NEW_RECOVERIES_PAUSED"
@@ -57,6 +65,7 @@ export type EffectiveBillingPolicy = {
   freeAllowance: FreeAllowancePolicy | null;
   shopifyUsageEventHandle: string | null;
   billingPeriod: PaidBillingPeriodProjection | null;
+  recoveryCreditPack: RecoveryCreditPackPolicy | null;
   outboundSoftLimit: number;
   outboundHardLimit: number;
   terminalMessageReservedSlots: number;
@@ -78,6 +87,7 @@ export type BillingPolicyClient = Pick<
   | "shopBillingPolicyOverride"
   | "billingAllowanceAdjustment"
   | "shopEntitlementCounter"
+  | "usageEvent"
 >;
 
 const activeSubscriptionStatuses: SubscriptionProjectionStatus[] = [
@@ -194,6 +204,32 @@ export class EffectiveBillingPolicyResolver {
       throw invalidConfiguration(shopId, "paid plan usage event handle is missing");
     }
 
+    const packConfiguration = resolveRecoveryCreditPackConfiguration(plan);
+    const normalRecoveryUsageQuantity =
+      packConfiguration && plan.kind === BillingPlanKind.PAID_METERED && subscription.billingPeriod
+        ? Number(
+            (
+              await this.client.usageEvent.aggregate({
+                where: {
+                  shopId,
+                  billingPeriodId: subscription.billingPeriod.id,
+                  metric: "RECOVERY_CONVERSATION",
+                  shopifyEventHandle: plan.shopifyUsageEventHandle,
+                },
+                _sum: { quantity: true },
+              })
+            )._sum.quantity ?? 0,
+          )
+        : null;
+    const recoveryCreditPack = packConfiguration
+      ? {
+          ...packConfiguration,
+          normalRecoveryUsageQuantity,
+          includedRecoveryConversationAllowance:
+            plan.includedRecoveryConversationAllowance,
+        }
+      : null;
+
     const newRecoveriesPaused =
       platformPolicy.globalPauseNewRecoveries || activeOverride?.pauseNewRecoveries === true;
     const automatedWhatsappPaused =
@@ -239,6 +275,7 @@ export class EffectiveBillingPolicyResolver {
               status: subscription.billingPeriod.status,
             }
           : null,
+          recoveryCreditPack,
       outboundSoftLimit: limits.soft,
       outboundHardLimit: limits.hard,
       terminalMessageReservedSlots,
@@ -253,6 +290,39 @@ export class EffectiveBillingPolicyResolver {
       },
     };
   }
+}
+
+function resolveRecoveryCreditPackConfiguration(
+  plan: {
+    recoveryCreditPackEnabled: boolean;
+    recoveryCreditsPerPack: number | null;
+    shopifyRecoveryCreditPackEventHandle: string | null;
+    shopifyUsageEventHandle: string | null;
+    kind: BillingPlanKind;
+    includedRecoveryConversationAllowance: number | null;
+  },
+): Omit<RecoveryCreditPackPolicy, "normalRecoveryUsageQuantity" | "includedRecoveryConversationAllowance"> | null {
+  if (!plan.recoveryCreditPackEnabled) return null;
+  const creditsPerPack = plan.recoveryCreditsPerPack;
+  if (typeof creditsPerPack !== "number" || !Number.isSafeInteger(creditsPerPack) || creditsPerPack <= 0) return null;
+  const eventHandle = plan.shopifyRecoveryCreditPackEventHandle?.trim();
+  if (!eventHandle) return null;
+  if (eventHandle === plan.shopifyUsageEventHandle) return null;
+  const includedAllowance = plan.includedRecoveryConversationAllowance;
+  if (
+    plan.kind === BillingPlanKind.PAID_METERED &&
+    (typeof includedAllowance !== "number" ||
+      !Number.isSafeInteger(includedAllowance) ||
+      includedAllowance < 0)
+  ) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    creditsPerPack,
+    shopifyEventHandle: eventHandle,
+  };
 }
 
 function resolveFreeAllowance(
