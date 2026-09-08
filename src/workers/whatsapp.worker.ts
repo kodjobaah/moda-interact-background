@@ -13,6 +13,7 @@ import { checkoutRecoveryService } from "../services/checkout-recovery.service.j
 import { conversationService } from "../services/conversation.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
+import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
 import {
   ConversationTurnProcessor,
   type ConversationTurnJob,
@@ -25,7 +26,7 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "whatsapp",
   queueName: "whatsapp-events",
-  jobNames: ["message-received", "process-conversation-turn"],
+  jobNames: ["message-received", "message-status", "process-conversation-turn"],
 } as const;
 const conversationTurnObservation = {
   mapException: () => ({
@@ -71,6 +72,10 @@ export const whatsappWorker = new Worker<
             job.data as ConversationTurnJob,
             job,
           );
+          return;
+
+        case "message-status":
+          await whatsappProviderStatusService.process(job.data);
           return;
 
         default:
