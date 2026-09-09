@@ -10,21 +10,40 @@ import { createShopifyUsageIdempotencyKey } from "@modainteract/moda-interact-sh
 import prisma from "../lib/db.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
-const DEFAULT_RECONCILIATION_LIMIT = 50;
-const MAX_RECONCILIATION_LIMIT = 200;
 
 type PurchaseDatabase = Pick<
   PrismaClient,
   "$transaction" | "recoveryCreditPurchase" | "shopEntitlementCounter" | "usageEvent"
 >;
 
-type PurchaseActivationResult =
-  | { kind: "activated"; creditsGranted: number }
-  | { kind: "already-active"; creditsGranted: number }
-  | { kind: "pending" }
-  | { kind: "needs-attention" }
-  | { kind: "not-found" }
-  | { kind: "cancelled" };
+export type ProviderConfirmedPurchaseReconciliationInput = {
+  shopId: string;
+  billingPeriodId: string;
+  providerPlanHandle: string;
+  packMeterHandle: string;
+  providerUnits: number;
+};
+
+export type PurchaseReconciliationDiscrepancy = {
+  kind: "under" | "over" | "ambiguous" | "invalid-provider-units" | "invalid-scope";
+  shopId: string;
+  billingPeriodId: string;
+  providerPlanHandle: string;
+  packMeterHandle: string;
+  providerUnits: number;
+  alreadyMatchedUnits: number;
+  eligibleCandidateCount: number;
+  confirmedDelta: number;
+  detail?: string;
+};
+
+export type ProviderConfirmedPurchaseReconciliationResult = {
+  activatedCount: number;
+  alreadyMatchedUnits: number;
+  eligibleCandidateCount: number;
+  confirmedDelta: number;
+  discrepancy: PurchaseReconciliationDiscrepancy | null;
+};
 
 export type RecoveryCreditPurchaseInput = {
   id: string;
@@ -86,174 +105,123 @@ export class RecoveryCreditPurchaseService {
     );
   }
 
-  async activateFromUsageEvent(purchaseId: string): Promise<PurchaseActivationResult> {
+  async reconcileProviderConfirmed(
+    input: ProviderConfirmedPurchaseReconciliationInput,
+  ): Promise<ProviderConfirmedPurchaseReconciliationResult> {
+    const empty = {
+      activatedCount: 0,
+      alreadyMatchedUnits: 0,
+      eligibleCandidateCount: 0,
+      confirmedDelta: 0,
+      discrepancy: null,
+    } satisfies ProviderConfirmedPurchaseReconciliationResult;
+    if (!Number.isInteger(input.providerUnits) || input.providerUnits < 0) {
+      return {
+        ...empty,
+        discrepancy: {
+          kind: "invalid-provider-units",
+          ...input,
+          alreadyMatchedUnits: 0,
+          eligibleCandidateCount: 0,
+          confirmedDelta: 0,
+          detail: "Provider pack usage must be a finite non-negative integer",
+        },
+      };
+    }
+
     return this.withRetry(() =>
       this.database.$transaction(async (transaction) => {
-        const purchase = await transaction.recoveryCreditPurchase.findUnique({
-          where: { id: purchaseId },
-          select: {
-            shopId: true,
-            creditsGranted: true,
-            status: true,
-            usageEvent: { select: { shopifyReportState: true } },
+        const scope = {
+          shopId: input.shopId,
+          shopifyPlanHandleSnapshot: input.providerPlanHandle,
+          shopifyEventHandleSnapshot: input.packMeterHandle,
+          usageEvent: {
+            metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
+            quantity: 1,
+            shopifyReportState: ShopifyReportState.REPORTED,
+            billingPeriodId: input.billingPeriodId,
           },
+        } satisfies Prisma.RecoveryCreditPurchaseWhereInput;
+        const alreadyMatchedUnits = await transaction.recoveryCreditPurchase.count({
+          where: { ...scope, status: RecoveryCreditPurchaseStatus.ACTIVE },
         });
-        if (!purchase) return { kind: "not-found" };
-        if (purchase.status === RecoveryCreditPurchaseStatus.CANCELLED) return { kind: "cancelled" };
-        if (purchase.status === RecoveryCreditPurchaseStatus.ACTIVE) {
-          return { kind: "already-active", creditsGranted: purchase.creditsGranted };
-        }
-
-        if (purchase.usageEvent.shopifyReportState === ShopifyReportState.NEEDS_ATTENTION) {
-          await transaction.recoveryCreditPurchase.updateMany({
-            where: {
-              id: purchaseId,
-              status: {
-                in: [
-                  RecoveryCreditPurchaseStatus.PENDING_BILLING,
-                  RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
-                ],
-              },
-            },
-            data: { status: RecoveryCreditPurchaseStatus.NEEDS_ATTENTION },
-          });
-          return { kind: "needs-attention" };
-        }
-
-        if (purchase.usageEvent.shopifyReportState !== ShopifyReportState.REPORTED) {
-          if (purchase.status === RecoveryCreditPurchaseStatus.NEEDS_ATTENTION) {
-            await transaction.recoveryCreditPurchase.updateMany({
-              where: { id: purchaseId, status: RecoveryCreditPurchaseStatus.NEEDS_ATTENTION },
-              data: { status: RecoveryCreditPurchaseStatus.PENDING_BILLING },
-            });
-          }
-          return { kind: "pending" };
-        }
-
-        const activated = await transaction.recoveryCreditPurchase.updateMany({
-          where: {
-            id: purchaseId,
-            status: {
-              in: [
-                RecoveryCreditPurchaseStatus.PENDING_BILLING,
-                RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
-              ],
-            },
-          },
-          data: {
-            status: RecoveryCreditPurchaseStatus.ACTIVE,
-            activatedAt: this.now(),
-          },
+        const candidates = await transaction.recoveryCreditPurchase.findMany({
+          where: { ...scope, status: RecoveryCreditPurchaseStatus.PENDING_BILLING },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: { id: true, creditsGranted: true },
         });
-        if (activated.count !== 1) {
-          const current = await transaction.recoveryCreditPurchase.findUnique({
-            where: { id: purchaseId },
-            select: { status: true, creditsGranted: true },
-          });
-          return current?.status === RecoveryCreditPurchaseStatus.ACTIVE
-            ? { kind: "already-active", creditsGranted: current.creditsGranted }
-            : { kind: "pending" };
+        const confirmedDelta = input.providerUnits - alreadyMatchedUnits;
+        const discrepancy = (kind: PurchaseReconciliationDiscrepancy["kind"], detail?: string): PurchaseReconciliationDiscrepancy => ({
+          kind,
+          ...input,
+          alreadyMatchedUnits,
+          eligibleCandidateCount: candidates.length,
+          confirmedDelta,
+          ...(detail ? { detail } : {}),
+        });
+        if (confirmedDelta <= 0 || candidates.length === 0) {
+          return {
+            activatedCount: 0,
+            alreadyMatchedUnits,
+            eligibleCandidateCount: candidates.length,
+            confirmedDelta,
+            discrepancy: confirmedDelta < 0
+              ? discrepancy("under", "Provider quantity is below already matched local purchases")
+              : candidates.length > 0 && confirmedDelta === 0
+                ? null
+                : input.providerUnits > alreadyMatchedUnits
+                  ? discrepancy("over", "Provider units have no eligible local purchase")
+                  : null,
+          };
         }
 
-        const counter = await transaction.shopEntitlementCounter.upsert({
-          where: {
-            shopId_counter: {
-              shopId: purchase.shopId,
+        const selected = candidates.slice(0, confirmedDelta);
+        const boundaryCandidate = candidates[confirmedDelta - 1];
+        const nextCandidate = candidates[confirmedDelta];
+        if (
+          confirmedDelta < candidates.length &&
+          (new Set(candidates.map((candidate) => candidate.creditsGranted)).size > 1 ||
+            boundaryCandidate?.creditsGranted !== nextCandidate?.creditsGranted)
+        ) {
+          return {
+            activatedCount: 0,
+            alreadyMatchedUnits,
+            eligibleCandidateCount: candidates.length,
+            confirmedDelta,
+            discrepancy: discrepancy("ambiguous", "Partial provider confirmation crosses non-equivalent credit packs"),
+          };
+        }
+
+        for (const candidate of selected) {
+          const activated = await transaction.recoveryCreditPurchase.updateMany({
+            where: { id: candidate.id, status: RecoveryCreditPurchaseStatus.PENDING_BILLING },
+            data: { status: RecoveryCreditPurchaseStatus.ACTIVE, activatedAt: this.now() },
+          });
+          if (activated.count !== 1) continue;
+          await transaction.shopEntitlementCounter.upsert({
+            where: { shopId_counter: { shopId: input.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
+            create: {
+              shopId: input.shopId,
               counter: "PURCHASED_RECOVERY_CREDITS",
+              grantedQuantity: candidate.creditsGranted,
             },
-          },
-          create: {
-            shopId: purchase.shopId,
-            counter: "PURCHASED_RECOVERY_CREDITS",
-            grantedQuantity: purchase.creditsGranted,
-          },
-          update: {
-            grantedQuantity: { increment: purchase.creditsGranted },
-            version: { increment: 1 },
-          },
-        });
-        void counter;
-        return { kind: "activated", creditsGranted: purchase.creditsGranted };
+            update: {
+              grantedQuantity: { increment: candidate.creditsGranted },
+              version: { increment: 1 },
+            },
+          });
+        }
+        return {
+          activatedCount: selected.length,
+          alreadyMatchedUnits,
+          eligibleCandidateCount: candidates.length,
+          confirmedDelta,
+          discrepancy: confirmedDelta > candidates.length
+            ? discrepancy("over", "Provider units exceed eligible local purchases")
+            : null,
+        };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
     );
-  }
-
-  async activateForUsageEvent(usageEventId: string): Promise<PurchaseActivationResult> {
-    const purchase = await this.database.recoveryCreditPurchase.findUnique({
-      where: { usageEventId },
-      select: { id: true },
-    });
-    if (!purchase) return { kind: "not-found" };
-    return this.activateFromUsageEvent(purchase.id);
-  }
-
-  async reconcilePending(limit = DEFAULT_RECONCILIATION_LIMIT) {
-    const boundedLimit = Math.min(
-      Math.max(Number.isInteger(limit) ? limit : DEFAULT_RECONCILIATION_LIMIT, 1),
-      MAX_RECONCILIATION_LIMIT,
-    );
-    const baseWhere: Prisma.RecoveryCreditPurchaseWhereInput = {
-      status: {
-        in: [
-          RecoveryCreditPurchaseStatus.PENDING_BILLING,
-          RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
-        ],
-      },
-    };
-    const orderBy: Prisma.RecoveryCreditPurchaseOrderByWithRelationInput[] = [
-      { createdAt: "asc" },
-      { id: "asc" },
-    ];
-    const select = { id: true } as const;
-    const nonTerminalStates = [
-      ShopifyReportState.PENDING,
-      ShopifyReportState.IN_FLIGHT,
-      ShopifyReportState.RETRYABLE,
-    ];
-    const reportedPurchases = await this.database.recoveryCreditPurchase.findMany({
-      where: {
-        ...baseWhere,
-        usageEvent: { shopifyReportState: ShopifyReportState.REPORTED },
-      },
-      orderBy,
-      take: boundedLimit,
-      select,
-    });
-    let remaining = boundedLimit - reportedPurchases.length;
-    const attentionPurchases = remaining > 0
-      ? await this.database.recoveryCreditPurchase.findMany({
-          where: {
-            ...baseWhere,
-            usageEvent: { shopifyReportState: ShopifyReportState.NEEDS_ATTENTION },
-          },
-          orderBy,
-          take: remaining,
-          select,
-        })
-      : [];
-    remaining -= attentionPurchases.length;
-    const nonTerminalPurchases = remaining > 0
-      ? await this.database.recoveryCreditPurchase.findMany({
-            where: {
-              ...baseWhere,
-              usageEvent: { shopifyReportState: { in: nonTerminalStates } },
-            },
-            orderBy,
-            take: remaining,
-            select,
-          })
-      : [];
-    const purchases = [
-      ...reportedPurchases,
-      ...attentionPurchases,
-      ...nonTerminalPurchases,
-    ];
-
-    const results = [];
-    for (const purchase of purchases) {
-      results.push({ id: purchase.id, result: await this.activateFromUsageEvent(purchase.id) });
-    }
-    return results;
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
