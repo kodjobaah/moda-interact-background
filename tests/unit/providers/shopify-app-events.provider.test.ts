@@ -250,6 +250,7 @@ describe("ShopifyAppEventsClient", () => {
   it.each([
     [429, "throttled"],
     [408, "transient"],
+    [409, "transient"],
     [500, "server"],
     [400, "request"],
   ] as const)("classifies HTTP %s as %s", async (status, kind) => {

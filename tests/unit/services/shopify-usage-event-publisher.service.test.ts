@@ -102,6 +102,13 @@ describe("ShopifyUsageEventPublisherService", () => {
     }));
     expect(test.states.get("usage-1")).toBe("REPORTED");
     expect(test.states.get("usage-2")).toBe("REPORTED");
+    expect(test.updates.filter((update) =>
+      (update.data as { shopifyReportState?: string }).shopifyReportState === "REPORTED",
+    ).map((update) => (update.data as { providerResponseSummary?: string }).providerResponseSummary))
+      .toEqual([
+        "submitted-to-shopify-app-events",
+        "submitted-to-shopify-app-events",
+      ]);
   });
 
   it("fails closed before the provider when reportable mapping is incomplete", async () => {
