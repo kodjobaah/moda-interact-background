@@ -228,7 +228,7 @@ export class ShopifyUsageEventPublisherService {
         reportedAt: now,
         nextReportAt: null,
         providerErrorCode: null,
-        providerResponseSummary: "reported",
+        providerResponseSummary: "submitted-to-shopify-app-events",
       },
     });
     if (updated.count !== 1) {

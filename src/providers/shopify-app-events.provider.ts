@@ -251,7 +251,7 @@ export class ShopifyAppEventsClient {
         "Shopify App Events server error",
       );
     }
-    if (response.status === 408 || response.status === 425) {
+    if (response.status === 408 || response.status === 409 || response.status === 425) {
       return new ShopifyAppEventsError(
         "transient",
         "Shopify App Events request is temporarily unavailable",
