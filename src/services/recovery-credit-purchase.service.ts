@@ -136,6 +136,8 @@ export class RecoveryCreditPurchaseService {
           shopifyPlanHandleSnapshot: input.providerPlanHandle,
           shopifyEventHandleSnapshot: input.packMeterHandle,
           usageEvent: {
+            shopId: input.shopId,
+            shopifyEventHandle: input.packMeterHandle,
             metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
             quantity: 1,
             shopifyReportState: ShopifyReportState.REPORTED,
@@ -146,7 +148,15 @@ export class RecoveryCreditPurchaseService {
           where: { ...scope, status: RecoveryCreditPurchaseStatus.ACTIVE },
         });
         const candidates = await transaction.recoveryCreditPurchase.findMany({
-          where: { ...scope, status: RecoveryCreditPurchaseStatus.PENDING_BILLING },
+          where: {
+            ...scope,
+            status: {
+              in: [
+                RecoveryCreditPurchaseStatus.PENDING_BILLING,
+                RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
+              ],
+            },
+          },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
           select: { id: true, creditsGranted: true },
         });
@@ -192,12 +202,22 @@ export class RecoveryCreditPurchaseService {
           };
         }
 
+        let activatedCount = 0;
         for (const candidate of selected) {
           const activated = await transaction.recoveryCreditPurchase.updateMany({
-            where: { id: candidate.id, status: RecoveryCreditPurchaseStatus.PENDING_BILLING },
+            where: {
+              id: candidate.id,
+              status: {
+                in: [
+                  RecoveryCreditPurchaseStatus.PENDING_BILLING,
+                  RecoveryCreditPurchaseStatus.NEEDS_ATTENTION,
+                ],
+              },
+            },
             data: { status: RecoveryCreditPurchaseStatus.ACTIVE, activatedAt: this.now() },
           });
           if (activated.count !== 1) continue;
+          activatedCount += 1;
           await transaction.shopEntitlementCounter.upsert({
             where: { shopId_counter: { shopId: input.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
             create: {
@@ -212,7 +232,7 @@ export class RecoveryCreditPurchaseService {
           });
         }
         return {
-          activatedCount: selected.length,
+          activatedCount,
           alreadyMatchedUnits,
           eligibleCandidateCount: candidates.length,
           confirmedDelta,

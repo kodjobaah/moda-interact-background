@@ -104,8 +104,25 @@ export class BillingReconciliationService {
     provider: PartnerSubscription | null,
     projection: { billingPeriodId: string | null; packMeterHandle: string | null },
   ) {
-    if (!provider?.currentPeriodStart || !provider.currentPeriodEnd) {
+    if (!provider) {
       return { activatedCount: 0, discrepancy: null };
+    }
+    if (!provider.currentPeriodStart || !provider.currentPeriodEnd) {
+      return {
+        activatedCount: 0,
+        discrepancy: {
+          kind: "invalid-scope" as const,
+          shopId,
+          billingPeriodId: projection.billingPeriodId ?? "",
+          providerPlanHandle: provider.planHandle,
+          packMeterHandle: projection.packMeterHandle ?? "",
+          providerUnits: 0,
+          alreadyMatchedUnits: 0,
+          eligibleCandidateCount: 0,
+          confirmedDelta: 0,
+          detail: "Present Partner subscription has no exact current billing cycle",
+        },
+      };
     }
     const packMeterHandle = projection.packMeterHandle;
     if (!packMeterHandle || !projection.billingPeriodId) {

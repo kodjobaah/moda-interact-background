@@ -18,6 +18,11 @@ const providerSubscription = {
     quantity: 7,
     costAmount: "7.00",
     costCurrency: "USD",
+  }, {
+    handle: "pack-meter",
+    quantity: 2,
+    costAmount: "20.00",
+    costCurrency: "USD",
   }],
 };
 
@@ -232,9 +237,29 @@ describe("BillingReconciliationService", () => {
       billingPeriodId: "period-1",
       providerPlanHandle: "pro-2026",
       packMeterHandle: "pack-meter",
-      providerUnits: expect.any(Number),
+      providerUnits: 2,
     });
     expect(result.purchasesActivated).toBe(1);
+  });
+
+  it("surfaces an invalid scope when a present subscription has no current cycle", async () => {
+    const test = harness({
+      partnerResult: {
+        ...providerSubscription,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+      },
+    });
+
+    const result = await test.service.reconcileOnce();
+
+    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(result.purchasesActivated).toBe(0);
+    expect(result.discrepancies).toContainEqual(expect.objectContaining({
+      shopId: "shop-1",
+      kind: "invalid-scope",
+      detail: "Present Partner subscription has no exact current billing cycle",
+    }));
   });
 
   it("rotates active shops with a keyset cursor and continues after a Partner failure", async () => {
