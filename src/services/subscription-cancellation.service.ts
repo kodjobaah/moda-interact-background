@@ -238,7 +238,10 @@ function errorCode(error: unknown): string {
 }
 
 function errorSummary(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, MAX_SUMMARY_LENGTH);
+  const summary = error instanceof Error ? error.message : String(error);
+  return summary
+    .replace(/((?:access[_ -]?token|authorization|bearer)\s*[:=]?\s*)(\S+)/gi, "$1[REDACTED]")
+    .slice(0, MAX_SUMMARY_LENGTH);
 }
 
 export const subscriptionCancellationService = new SubscriptionCancellationService();
