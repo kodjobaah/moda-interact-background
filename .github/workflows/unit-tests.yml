@@ -30,4 +30,6 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run unit tests
+	env:
+          REDIS_URL: redis://localhost:6379
         run: npm run test:unit
