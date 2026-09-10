@@ -75,7 +75,7 @@ export class SubscriptionCancellationService {
       needsAttention: 0,
     };
     for (const request of requests) {
-      const claimed = await this.claim(request.id, request.version, now);
+      const claimed = await this.claim(request.id, request.version, request.status, now);
       if (!claimed) continue;
       result.claimed += 1;
       const outcome = await this.processClaimed(request, now);
@@ -112,6 +112,7 @@ export class SubscriptionCancellationService {
         data: {
           status: SubscriptionCancellationStatus.PROVIDER_ACCEPTED,
           providerAcceptedAt: now,
+          providerErrorCode: null,
           providerResponseSummary: accepted.summary.slice(0, MAX_SUMMARY_LENGTH),
           processingStartedAt: null,
           nextAttemptAt: null,
@@ -137,14 +138,17 @@ export class SubscriptionCancellationService {
     return this.retry(request, now, new Error("Provider cancellation has not reached the required confirmation state"));
   }
 
-  private async claim(id: string, version: number, now: Date): Promise<boolean> {
+  private async claim(
+    id: string,
+    version: number,
+    status: SubscriptionCancellationStatus,
+    now: Date,
+  ): Promise<boolean> {
     const updated = await this.database.subscriptionCancellationRequest.updateMany({
       where: {
         id,
         version,
-        status: {
-          in: [SubscriptionCancellationStatus.APPROVED, SubscriptionCancellationStatus.RETRYABLE, SubscriptionCancellationStatus.PROVIDER_ACCEPTED],
-        },
+        status,
       },
       data: {
         status: SubscriptionCancellationStatus.PROCESSING,
