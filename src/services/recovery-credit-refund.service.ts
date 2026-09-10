@@ -92,7 +92,7 @@ export class RecoveryCreditRefundService {
         result.held += 1;
       }
       const outcome = await this.advance(refund.id, now);
-      result[outcome] += 1;
+      if (outcome !== "none") result[outcome] += 1;
     }
     return result;
   }
@@ -175,13 +175,17 @@ export class RecoveryCreditRefundService {
     }
   }
 
-  private async advance(refundId: string, now: Date): Promise<"pending" | "actionRequired" | "attention"> {
-    return this.database.$transaction(async (transaction) => {
+  private async advance(refundId: string, now: Date): Promise<"pending" | "actionRequired" | "attention" | "none"> {
+    return this.withConflictRetry(() => this.database.$transaction(async (transaction) => {
       const refund = await transaction.recoveryCreditRefund.findUnique({
         where: { id: refundId },
         include: { purchase: { include: { usageEvent: true } } },
       });
-      if (!refund || !refund.holdAppliedAt) return "attention";
+      if (!refund || !refund.holdAppliedAt) return "none";
+      if (
+        refund.status !== RecoveryCreditRefundStatus.PROCESSING &&
+        refund.status !== RecoveryCreditRefundStatus.PROVIDER_PENDING
+      ) return "none";
       if (refund.settlementMode === RecoveryCreditRefundSettlementMode.PARTNER_DASHBOARD_REFUND) {
         await transition(transaction, refund, RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED, now);
         return "actionRequired";
@@ -204,7 +208,7 @@ export class RecoveryCreditRefundService {
       return nextStatus === RecoveryCreditRefundStatus.PROVIDER_PENDING
         ? "pending"
         : nextStatus === RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED ? "actionRequired" : "attention";
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
   }
 
   private async createCorrection(transaction: RefundTransaction, refund: RefundWithRelations, now: Date) {
@@ -213,6 +217,7 @@ export class RecoveryCreditRefundService {
       original.metric !== UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE ||
       Number(original.quantity) !== 1 ||
       original.shopifyReportState !== ShopifyReportState.REPORTED ||
+      original.shopifyEventHandle !== refund.eventHandleSnapshot ||
       !original.billingPeriodId ||
       original.billingPeriodId !== refund.billingPeriodIdSnapshot ||
       refund.purchase.status !== RecoveryCreditPurchaseStatus.ACTIVE
@@ -246,10 +251,18 @@ export class RecoveryCreditRefundService {
       },
       update: {},
     });
-    await transaction.recoveryCreditRefund.updateMany({
-      where: { id: refund.id, correctionUsageEventId: null },
-      data: { correctionUsageEventId: correction.id },
+    const linked = await transaction.recoveryCreditRefund.updateMany({
+      where: {
+        id: refund.id,
+        version: refund.version,
+        status: refund.status,
+        correctionUsageEventId: null,
+      },
+      data: { correctionUsageEventId: correction.id, version: { increment: 1 } },
     });
+    if (linked.count !== 1) throw new RefundConcurrencyConflict();
+    refund.correctionUsageEventId = correction.id;
+    refund.version += 1;
     return correction;
   }
 
@@ -346,10 +359,11 @@ export class RecoveryCreditRefundService {
 }
 
 async function transition(transaction: RefundTransaction, refund: RefundWithRelations, status: RecoveryCreditRefundStatus, now: Date): Promise<void> {
-  await transaction.recoveryCreditRefund.updateMany({
-    where: { id: refund.id, version: refund.version },
+  const updated = await transaction.recoveryCreditRefund.updateMany({
+    where: { id: refund.id, version: refund.version, status: refund.status },
     data: { status, processingStartedAt: null, nextAttemptAt: null, version: { increment: 1 }, ...(status === RecoveryCreditRefundStatus.NEEDS_ATTENTION ? { providerErrorCode: "REFUND_REQUIRES_ATTENTION" } : {}) },
   });
+  if (updated.count !== 1) throw new RefundConcurrencyConflict();
 }
 
 function boundedLimit(value: number): number {
