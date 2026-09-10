@@ -50,6 +50,7 @@
     "prisma-generator-plantuml-erd": "^1.7.1",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
+    "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.11"
   },
   "allowScripts": {

@@ -162,7 +162,6 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_1",
       abandonedCheckoutUrl: "https://shop.example/recover",
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
     });
 
     expect(result.outcome).toBe("enqueued");
@@ -214,7 +213,6 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
       internationalContext: initialContext,
-      legacyV1Transition: null,
     });
 
     const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -232,10 +230,8 @@ describe("pending recovery candidate service", () => {
       },
     });
 
-    expect(refreshed).toMatchObject({ outcome: "rescheduled", jobId: result.jobId });
-    expect(queueInstance.jobs.get(result.jobId)?.updatedData?.internationalContext).toEqual(
-      initialContext,
-    );
+    expect(refreshed).toMatchObject({ outcome: "stale", jobId: result.jobId });
+    expect(queueInstance.jobs.get(result.jobId)?.updatedData).toBeNull();
   });
 
   it("merges newer non-null context dimensions without erasing others", async () => {
@@ -244,7 +240,7 @@ describe("pending recovery candidate service", () => {
       checkoutToken: "checkout_context_merge",
       cartToken: "cart_context_merge",
       abandonedCheckoutUrl: null,
-      checkoutCreatedAt: "2026-09-06T00:00:00Z",
+      checkoutCreatedAt: "2026-10-06T00:00:00Z",
       internationalContext: {
         languageTag: "en-GB",
         languageSource: "shopify",
@@ -252,14 +248,13 @@ describe("pending recovery candidate service", () => {
         currencyCode: "GBP",
         timeZone: "Europe/London",
       },
-      legacyV1Transition: null,
     });
 
     await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
       shopId: "shop_1",
       checkoutToken: "checkout_context_merge",
       cartToken: "cart_context_merge",
-      activityAt: "2026-09-06T00:01:00Z",
+      activityAt: "2026-11-06T00:01:00Z",
       isEmpty: false,
       internationalContext: {
         languageTag: "fr-FR",
@@ -286,7 +281,6 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_1",
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
     });
 
     const shopIndexKey = domainModule.pendingCandidateShopIndexKey("shop_1");
@@ -300,7 +294,6 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_2",
       abandonedCheckoutUrl: "https://shop.example/recover-2",
       checkoutCreatedAt: "2026-08-28T00:01:00Z",
-      legacyV1Transition: null,
     });
     nowSpy.mockRestore();
 
@@ -326,7 +319,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T00:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
 
     const second = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
@@ -336,7 +329,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T01:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
 
     expect(second.jobId).toBe(first.jobId);
@@ -359,7 +352,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T02:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
     const job = queueInstance.jobs.get(first.jobId)!;
 
@@ -370,7 +363,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T01:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
 
     expect(result.candidate.lastActivityAt).toBe("2026-08-28T02:00:00.000Z");
@@ -398,7 +391,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
-      legacyV1Transition: null,
+      
     });
 
     expect(result.outcome).toBe("refreshed");
@@ -432,7 +425,7 @@ describe("pending recovery candidate service", () => {
         cartToken: null,
         abandonedCheckoutUrl: null,
         checkoutCreatedAt: null,
-        legacyV1Transition: null,
+        
       });
 
       expect(result.jobId).toBe(jobId);
@@ -464,7 +457,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
-      legacyV1Transition: null,
+      
     });
 
     expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.has(jobId) ?? false).toBe(false);
@@ -519,7 +512,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
-      legacyV1Transition: null,
+      
     });
 
     expect(result.jobId).toBe(activeJobId);
@@ -536,7 +529,7 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_1",
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
+      
     });
 
     const checkoutJobId = await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCheckout(
@@ -577,7 +570,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
+      
     });
 
     const removed =
@@ -602,7 +595,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
-      legacyV1Transition: null,
+      
     });
     const second = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
       shopDomain: "shop.myshopify.com",
@@ -610,7 +603,7 @@ describe("pending recovery candidate service", () => {
       cartToken: null,
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
-      legacyV1Transition: null,
+      
     });
 
     expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.has(first.jobId)).toBe(true);
@@ -646,7 +639,7 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_9",
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
+      
     });
 
     // No checkout token supplied: fall back to the indexed cart correlation.
@@ -668,7 +661,7 @@ describe("pending recovery candidate service", () => {
       cartToken: "cart_9",
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
-      legacyV1Transition: null,
+      
     });
 
     const matched = await serviceModule.pendingRecoveryCandidateService.resolveCandidate({
@@ -714,7 +707,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
       activityAt: "2026-08-28T00:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
     const job = queueInstance.jobs.get(result.jobId)!;
     const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -751,7 +744,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T02:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
 
     const stale = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -779,7 +772,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T00:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
     const lockSpy = vi
       .spyOn(serviceModule.pendingRecoveryCandidateService, "withCheckoutLock")
@@ -811,7 +804,7 @@ describe("pending recovery candidate service", () => {
         abandonedCheckoutUrl: null,
         checkoutCreatedAt: null,
         activityAt: "2026-08-28T00:00:00.000Z",
-        legacyV1Transition: null,
+        
       });
       const job = queueInstance.jobs.get(result.jobId)!;
       if (state === "missing") {
@@ -846,7 +839,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T00:00:00.000Z",
-      legacyV1Transition: null,
+     
     });
 
     const cancelled = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -879,7 +872,7 @@ describe("pending recovery candidate service", () => {
         abandonedCheckoutUrl: null,
         checkoutCreatedAt: null,
         activityAt: "2026-08-28T00:00:00.000Z",
-        legacyV1Transition: null,
+        
       });
       queueInstance.jobs.get(result.jobId)!.state = state;
 
@@ -907,7 +900,7 @@ describe("pending recovery candidate service", () => {
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: null,
       activityAt: "2026-08-28T00:00:00.000Z",
-      legacyV1Transition: null,
+      
     });
     const job = queueInstance.jobs.get(result.jobId)!;
     job.state = "active";

@@ -18,13 +18,18 @@ const providerSubscription = {
     quantity: 7,
     costAmount: "7.00",
     costCurrency: "USD",
+  }, {
+    handle: "pack-meter",
+    quantity: 2,
+    costAmount: "20.00",
+    costCurrency: "USD",
   }],
 };
 
 function harness({
   partnerResult = providerSubscription,
   partnerError,
-  plan = { id: "plan-1", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter" },
+  plan = { id: "plan-1", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter" },
   modaQuantity = 5,
 } = {}) {
   const subscriptionUpsert = vi.fn();
@@ -58,7 +63,15 @@ function harness({
     }),
   };
   const publisher = { publishDue: vi.fn().mockResolvedValue({ selected: 0, claimed: 0, reported: 0, retryable: 0, needsAttention: 0 }) };
-  const purchases = { reconcilePending: vi.fn().mockResolvedValue([{ id: "purchase-1", result: { kind: "activated" } }]) };
+  const purchases = {
+    reconcileProviderConfirmed: vi.fn().mockResolvedValue({
+      activatedCount: 1,
+      alreadyMatchedUnits: 0,
+      eligibleCandidateCount: 1,
+      confirmedDelta: 1,
+      discrepancy: null,
+    }),
+  };
   const logger = { warn: vi.fn(), error: vi.fn() };
   const service = new BillingReconciliationService(
     database as never,
@@ -214,13 +227,39 @@ describe("BillingReconciliationService", () => {
     expect(test.database.usageEvent).not.toHaveProperty("create");
   });
 
-  it("B008-R6 rediscovers interrupted recovery-credit activation through B009", async () => {
+  it("B008-R6 activates packs only through provider-confirmed current-cycle reconciliation", async () => {
     const test = harness();
 
     const result = await test.service.reconcileOnce();
 
-    expect(test.purchases.reconcilePending).toHaveBeenCalledOnce();
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      billingPeriodId: "period-1",
+      providerPlanHandle: "pro-2026",
+      packMeterHandle: "pack-meter",
+      providerUnits: 2,
+    });
     expect(result.purchasesActivated).toBe(1);
+  });
+
+  it("surfaces an invalid scope when a present subscription has no current cycle", async () => {
+    const test = harness({
+      partnerResult: {
+        ...providerSubscription,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+      },
+    });
+
+    const result = await test.service.reconcileOnce();
+
+    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(result.purchasesActivated).toBe(0);
+    expect(result.discrepancies).toContainEqual(expect.objectContaining({
+      shopId: "shop-1",
+      kind: "invalid-scope",
+      detail: "Present Partner subscription has no exact current billing cycle",
+    }));
   });
 
   it("rotates active shops with a keyset cursor and continues after a Partner failure", async () => {
@@ -248,7 +287,7 @@ describe("BillingReconciliationService", () => {
       }),
     };
     const publisher = { publishDue: vi.fn().mockResolvedValue({}) };
-    const purchases = { reconcilePending: vi.fn().mockResolvedValue([]) };
+    const purchases = { reconcileProviderConfirmed: vi.fn().mockResolvedValue({ activatedCount: 0, discrepancy: null }) };
     const logger = { warn: vi.fn(), error: vi.fn() };
     const service = new BillingReconciliationService(
       database as never,
