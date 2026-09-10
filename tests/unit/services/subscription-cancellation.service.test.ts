@@ -323,6 +323,29 @@ describe("SubscriptionCancellationService", () => {
     expect(test.row.providerResponseSummary.length).toBeLessThanOrEqual(2000);
   });
 
+  it.each([
+    "Authorization: Bearer partner-secret",
+    "Authorization=Bearer partner-secret",
+    "X-Shopify-Access-Token: partner-secret",
+    "X-Shopify-Access-Token=partner-secret",
+    "access_token=partner-secret",
+    "access-token: partner-secret",
+    "Bearer partner-secret",
+  ])("redacts persisted credential form: %s", async (credential) => {
+    const test = statefulDatabase({ nextAttemptAt: new Date("2026-09-10T11:00:00.000Z") });
+    const provider = {
+      getActiveSubscription: vi.fn().mockResolvedValue(active()),
+      cancelSubscription: vi.fn().mockRejectedValue(new ShopifyPartnerBillingError(`${credential}; ${"x".repeat(2200)}`, "http-429", true)),
+    };
+
+    await new SubscriptionCancellationService(test.db, provider, () => now).processDue();
+
+    expect(test.row.status).toBe(SubscriptionCancellationStatus.RETRYABLE);
+    expect(test.row.providerErrorCode).toBe("http-429");
+    expect(test.row.providerResponseSummary).not.toContain("partner-secret");
+    expect(test.row.providerResponseSummary.length).toBeLessThanOrEqual(2000);
+  });
+
   it("persists bounded secret-free permanent provider failures", async () => {
     const secret = "partner-access-token-secret";
     const test = statefulDatabase();

@@ -240,6 +240,10 @@ function errorCode(error: unknown): string {
 function errorSummary(error: unknown): string {
   const summary = error instanceof Error ? error.message : String(error);
   return summary
+    .replace(/\bauthorization\s*[:=]\s*bearer\s+\S+/gi, "Authorization: [REDACTED]")
+    .replace(/\bx-shopify-access-token\s*[:=]\s*\S+/gi, "X-Shopify-Access-Token: [REDACTED]")
+    .replace(/\baccess[_ -]?token\s*[:=]\s*\S+/gi, "access_token=[REDACTED]")
+    .replace(/\bbearer\s+\S+/gi, "Bearer [REDACTED]")
     .replace(/((?:access[_ -]?token|authorization|bearer)\s*[:=]?\s*)(\S+)/gi, "$1[REDACTED]")
     .slice(0, MAX_SUMMARY_LENGTH);
 }
