@@ -176,7 +176,7 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   beforeEach(() => {
     vi.clearAllMocks();
 
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(activeRecovery);
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
     lookupServiceMock.lookup.mockResolvedValue({

@@ -94,7 +94,7 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     redisMock.get.mockResolvedValue(null);
     redisMock.del.mockResolvedValue(1);
 
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
       id: "recovery-1",
       status: "MESSAGE_SENT",

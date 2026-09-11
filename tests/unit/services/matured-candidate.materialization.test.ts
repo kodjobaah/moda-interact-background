@@ -235,6 +235,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     // Default: shop exists, no existing recovery, recoverable lookup result.
     prismaMock.shop.findUnique.mockResolvedValue({
       id: "shop_1",
+      status: "ACTIVE",
       settings: {
         defaultLanguageTag: "pt-BR",
         defaultCountryCode: "BR",
@@ -255,7 +256,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("creates a recovery from current Shopify data when the lookup is found and recoverable", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
 
     const result = await service.materializeMaturedCandidate(candidate);
