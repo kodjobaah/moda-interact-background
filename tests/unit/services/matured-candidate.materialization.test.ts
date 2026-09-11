@@ -287,6 +287,24 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
   });
 
+  it("discards an inactive matured candidate before resolving Shopify data", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+
+    const result = await service.materializeMaturedCandidate(candidate);
+
+    expect(result).toEqual({
+      outcome: "discarded-shop-unavailable",
+      checkoutToken: "checkout_1",
+    });
+    expect(lookupServiceMock.resolveShopDomain).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
+    expect(conversationServiceMock.getOrCreateRecoveryConversation).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
   it("allows provider-check-required templates to reach the provider", async () => {
     whatsappTemplateSelectorMock.select.mockResolvedValue({
       outcome: "provider-check-required",

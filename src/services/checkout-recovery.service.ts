@@ -53,7 +53,8 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-not-recoverable"; checkoutToken: string }
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
-  | { outcome: "discarded-order-completed"; checkoutToken: string };
+  | { outcome: "discarded-order-completed"; checkoutToken: string }
+  | { outcome: "discarded-shop-unavailable"; checkoutToken: string };
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -652,7 +653,7 @@ export class CheckoutRecoveryService {
 
     const shop = await prisma.shop.findUnique({
       where: { domain: event.shop },
-      select: { id: true },
+      select: { id: true, status: true },
     });
 
     if (!shop) {

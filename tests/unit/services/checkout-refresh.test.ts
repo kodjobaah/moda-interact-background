@@ -127,6 +127,11 @@ vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
 }));
+vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
+  outboundWhatsAppAdmissionService: {
+    getProviderAccountId: vi.fn(() => "provider-account-1"),
+  },
+}));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
 
@@ -243,6 +248,18 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     });
   });
 
+  it("stops an inactive checkout update before candidate refresh or Shopify work", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+
+    const result = await service.handleCheckoutUpdatedContract(event);
+
+    expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
   it("reschedules a matching pending candidate before checking durable recovery", async () => {
     hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
       {
@@ -305,6 +322,21 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     });
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
+  });
+
+  it("stops inactive cart activity before refreshing a pending candidate", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+
+    const result = await service.handleCartActivityContract({
+      shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
+      cartToken: "cart_1",
+      isEmpty: false,
+      activityAt: "2026-08-28T00:04:00.000Z",
+    });
+
+    expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
   });
 
   it("does not use webhook basket data (only the Shopify lookup result)", async () => {
