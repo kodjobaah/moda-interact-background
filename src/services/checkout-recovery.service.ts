@@ -18,6 +18,7 @@ import {
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import {
   toLookupInput,
@@ -52,7 +53,8 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-not-recoverable"; checkoutToken: string }
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
-  | { outcome: "discarded-order-completed"; checkoutToken: string };
+  | { outcome: "discarded-order-completed"; checkoutToken: string }
+  | { outcome: "discarded-shop-unavailable"; checkoutToken: string };
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -68,6 +70,16 @@ export class CheckoutRecoveryService {
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
     const scheduled =
       await pendingRecoveryCandidateService.scheduleFromCheckoutCreated(event);
+
+    if (scheduled.outcome === "discarded-shop-unavailable") {
+      return {
+        kind: "ignored",
+        reason: "shop-unavailable",
+        shopDomain: scheduled.shopDomain,
+        checkoutToken: event.checkoutToken,
+        source: "v2",
+      } as const;
+    }
 
     return {
       kind: "scheduled",
@@ -91,6 +103,12 @@ export class CheckoutRecoveryService {
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
+    if (!await shopExecutionEligibilityService.isShopExecutionActive(candidate.shopId)) {
+      return {
+        outcome: "discarded-shop-unavailable",
+        checkoutToken: candidate.checkoutToken,
+      } as const;
+    }
     const shopDomain = await abandonedCheckoutLookupService.resolveShopDomain(
       candidate.shopId,
     );
@@ -362,10 +380,13 @@ export class CheckoutRecoveryService {
   ): Promise<CheckoutRefreshResult> {
     const shop = await prisma.shop.findUnique({
       where: { domain: event.shopDomain },
-      select: { id: true },
+      select: { id: true, status: true },
     });
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
+    }
+    if (shop.status !== "ACTIVE") {
+      return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
 
     const pending =
@@ -480,6 +501,9 @@ export class CheckoutRecoveryService {
   }
 
   async handleCartActivityContract(event: CartActivityContractInput) {
+    if (!await shopExecutionEligibilityService.isShopExecutionActive(event.shopId)) {
+      return { kind: "ignored", reason: "shop-unavailable" } as const;
+    }
     const result =
       await pendingRecoveryCandidateService.refreshCandidateActivity({
         shopId: event.shopId,
@@ -629,11 +653,14 @@ export class CheckoutRecoveryService {
 
     const shop = await prisma.shop.findUnique({
       where: { domain: event.shop },
-      select: { id: true },
+      select: { id: true, status: true },
     });
 
     if (!shop) {
       return { kind: "ignored", reason: "shop-not-found" } as const;
+    }
+    if (shop.status !== "ACTIVE") {
+      return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
 
     // Cart-only orders must be correlated through the indexed transient

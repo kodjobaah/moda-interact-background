@@ -28,12 +28,13 @@ import { connectionRedis } from "../lib/redis.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
 });
 
-type CandidateEnqueueOutcome = "enqueued" | "refreshed";
+type CandidateEnqueueOutcome = "enqueued" | "refreshed" | "discarded-shop-unavailable";
 
 export type CandidateActivityResult =
   | { outcome: "rescheduled"; jobId: string; candidate: PendingRecoveryCandidate }
@@ -71,29 +72,23 @@ export async function resetPendingCandidateQueueForTests() {
 }
 
 export class PendingRecoveryCandidateService {
-  async scheduleFromCheckoutCreated(input: CheckoutCreatedContractInput): Promise<{
-    outcome: CandidateEnqueueOutcome;
-    jobId: string;
-    delayMinutes: number;
-    candidate: PendingRecoveryCandidate;
-  }> {
+  async scheduleFromCheckoutCreated(input: CheckoutCreatedContractInput): Promise<
+    | {
+        outcome: "enqueued" | "refreshed";
+        jobId: string;
+        delayMinutes: number;
+        candidate: PendingRecoveryCandidate;
+      }
+    | { outcome: "discarded-shop-unavailable"; shopDomain: string }
+  > {
     const shopDomain = input.shopDomain.trim().toLowerCase();
-    const shop = await prisma.shop.findUnique({
-      where: {
-        domain: shopDomain,
-      },
-      select: {
-        id: true,
-        settings: {
-          select: {
-            recoveryDelayMinutes: true,
-          },
-        },
-      },
-    });
+    const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
 
     if (!shop) {
       throw new Error(`Shop not found for domain: ${shopDomain}`);
+    }
+    if (shop.status !== "ACTIVE") {
+      return { outcome: "discarded-shop-unavailable", shopDomain };
     }
 
     const delayMinutes =

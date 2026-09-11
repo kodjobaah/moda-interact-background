@@ -46,6 +46,20 @@ vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   resetPendingCandidateQueueForTests: vi.fn(async () => undefined),
 }));
 
+vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
+  outboundWhatsAppAdmissionService: {
+    getProviderAccountId: vi.fn(() => "provider-account-1"),
+  },
+}));
+vi.mock("../../../src/services/recovery-billing.service.js", () => ({
+  recoveryBillingService: {
+    admit: vi.fn(),
+    commitSuccessfulInitiation: vi.fn(),
+    handleProviderFailure: vi.fn(),
+    releaseBeforeProvider: vi.fn(),
+  },
+}));
+
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
 
 const service = new CheckoutRecoveryService();
@@ -94,7 +108,7 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     redisMock.get.mockResolvedValue(null);
     redisMock.del.mockResolvedValue(1);
 
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
       id: "recovery-1",
       status: "MESSAGE_SENT",
@@ -132,6 +146,21 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       "checkout_1",
     );
     // The order must not complete an existing recovery.
+  });
+
+  it("stops an inactive order before candidate or recovery work", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+
+    const result = await service.handleOrderCompleted(buildInput());
+
+    expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
+    expect(prismaMock.shop.findUnique).toHaveBeenCalledWith({
+      where: { domain: "shop.myshopify.com" },
+      select: { id: true, status: true },
+    });
+    expect(pendingCandidateServiceMock.resolveCandidate).not.toHaveBeenCalled();
+    expect(pendingCandidateServiceMock.cancelCandidate).not.toHaveBeenCalled();
+    expect(pendingCandidateServiceMock.markOrderProcessed).not.toHaveBeenCalled();
   });
 
   it("completes an eligible existing recovery and transitions it once to COMPLETED", async () => {
