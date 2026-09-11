@@ -109,6 +109,7 @@ const prismaMock = {
   shop: {
     findUnique: vi.fn(async () => ({
       id: "shop_1",
+      status: "ACTIVE",
       settings: { recoveryDelayMinutes: 45 },
     })),
   },
@@ -197,6 +198,32 @@ describe("pending recovery candidate service", () => {
       lastActivityAt: expect.any(String),
     }));
   });
+
+  it.each(["UNINSTALLED", "SUSPENDED"] as const)(
+    "does not enqueue or index a %s shop candidate",
+    async (status) => {
+      prismaMock.shop.findUnique.mockResolvedValueOnce({
+        id: "shop_1",
+        status,
+        settings: { recoveryDelayMinutes: 45 },
+      });
+
+      const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+        shopDomain: "shop.myshopify.com",
+        checkoutToken: `checkout_${status.toLowerCase()}`,
+        cartToken: "cart_1",
+        abandonedCheckoutUrl: null,
+        checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      });
+
+      expect(result).toEqual({
+        outcome: "discarded-shop-unavailable",
+        shopDomain: "shop.myshopify.com",
+      });
+      expect(queueInstance.addCalls).toHaveLength(0);
+      expect(redisZsets).toHaveLength(0);
+    },
+  );
 
   it("preserves known context when a checkout update supplies only nulls", async () => {
     const initialContext: InternationalContext = {
@@ -586,8 +613,8 @@ describe("pending recovery candidate service", () => {
 
   it("keeps different shops in separate ordered indexes", async () => {
     prismaMock.shop.findUnique
-      .mockResolvedValueOnce({ id: "shop_1", settings: { recoveryDelayMinutes: 45 } })
-      .mockResolvedValueOnce({ id: "shop_2", settings: { recoveryDelayMinutes: 10 } });
+      .mockResolvedValueOnce({ id: "shop_1", status: "ACTIVE", settings: { recoveryDelayMinutes: 45 } })
+      .mockResolvedValueOnce({ id: "shop_2", status: "ACTIVE", settings: { recoveryDelayMinutes: 10 } });
 
     const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
       shopDomain: "shop.myshopify.com",

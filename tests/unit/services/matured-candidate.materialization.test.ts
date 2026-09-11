@@ -235,6 +235,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     // Default: shop exists, no existing recovery, recoverable lookup result.
     prismaMock.shop.findUnique.mockResolvedValue({
       id: "shop_1",
+      status: "ACTIVE",
       settings: {
         defaultLanguageTag: "pt-BR",
         defaultCountryCode: "BR",
@@ -255,7 +256,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("creates a recovery from current Shopify data when the lookup is found and recoverable", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1" });
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
 
     const result = await service.materializeMaturedCandidate(candidate);
@@ -284,6 +285,24 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     // The recovery-message workflow should run for a newly materialized recovery.
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards an inactive matured candidate before resolving Shopify data", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+
+    const result = await service.materializeMaturedCandidate(candidate);
+
+    expect(result).toEqual({
+      outcome: "discarded-shop-unavailable",
+      checkoutToken: "checkout_1",
+    });
+    expect(lookupServiceMock.resolveShopDomain).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
+    expect(conversationServiceMock.getOrCreateRecoveryConversation).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("allows provider-check-required templates to reach the provider", async () => {
