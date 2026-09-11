@@ -356,6 +356,55 @@ describe("RecoveryRoutingService", () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
+  it("keeps mixed inactive and active ownership ambiguous when two active owners remain", async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
+      {
+        customerId: "customer-inactive",
+        customer: {
+          shopId: "shop-inactive",
+          shop: { domain: "inactive.myshopify.com" },
+        },
+      },
+      {
+        customerId: "customer-active-1",
+        customer: {
+          shopId: "shop-active-1",
+          shop: { domain: "active-one.myshopify.com" },
+        },
+      },
+      {
+        customerId: "customer-active-2",
+        customer: {
+          shopId: "shop-active-2",
+          shop: { domain: "active-two.myshopify.com" },
+        },
+      },
+    ] as any);
+    vi.mocked(prisma.shop.findUnique)
+      .mockResolvedValueOnce({ status: "UNINSTALLED" } as any)
+      .mockResolvedValueOnce({ status: "ACTIVE" } as any)
+      .mockResolvedValueOnce({ status: "ACTIVE" } as any);
+
+    const route = await new RecoveryRoutingService().resolveInboundMessage({
+      provider: "whatsapp",
+      providerMessageId: "mixed-ambiguous-product",
+      customerPhone: "+447700900000",
+      contextMessageId: null,
+      phoneNumberId: "phone-1",
+      timestamp: Date.now(),
+      type: "text",
+      text: "Show me shirts",
+    });
+
+    expect(route).toEqual({
+      kind: "unresolved",
+      reason: "ambiguous-tenant",
+      customerPhone: "+447700900000",
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it("fails closed when the product phone lookup reaches its overflow sentinel", async () => {
     vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
     vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([

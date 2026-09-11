@@ -175,7 +175,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       );
 
       if (loaded.shopUnavailable) {
-        await this.finishSuppressedTurn(conversationId, observedVersion);
+        await this.finishInactiveTurn(conversationId, observedVersion);
         return;
       }
 
@@ -356,6 +356,22 @@ export class ConversationTurnProcessor<TContext, TResult> {
       latest.pendingTurnStartedAt !== null
     ) {
       await this.enqueue(conversationId, latest.inboundVersion);
+    }
+  }
+
+  private async finishInactiveTurn(
+    conversationId: string,
+    observedVersion: number,
+  ): Promise<void> {
+    const completed = await this.dependencies.conversation.completeTurn(
+      conversationId,
+      observedVersion,
+    );
+    if (!completed) {
+      await this.dependencies.conversation.releaseTurn(
+        conversationId,
+        observedVersion,
+      );
     }
   }
 }
