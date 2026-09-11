@@ -204,6 +204,16 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.usageEvents[0]).toMatchObject({ shopId: "durable-shop" });
   });
 
+  it("finalizes an existing outbound message after its shop becomes inactive", async () => {
+    const test = harness();
+
+    await expect(test.service.process(baseEvent)).resolves.toBe("applied");
+
+    expect(test.message.status).toBe("DELIVERED");
+    expect(test.usageEvents).toHaveLength(1);
+    expect(test.transaction.conversationMessage.updateMany).toHaveBeenCalled();
+  });
+
   it("retries a CAS loser so concurrent READ and DELIVERED remain monotonic", async () => {
     const test = harness();
     let updateAttempts = 0;

@@ -92,7 +92,7 @@ export const whatsappWorker = new Worker<
   },
 );
 
-async function processInboundMessage(event: WhatsAppInboundEvent) {
+export async function processInboundMessage(event: WhatsAppInboundEvent) {
   console.log("Processing WhatsApp message", event.providerMessageId);
 
   const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
@@ -165,7 +165,7 @@ async function processInboundMessage(event: WhatsAppInboundEvent) {
   );
 }
 
-async function loadConversationTurn(
+export async function loadConversationTurn(
   conversationId: string,
   pendingTurnStartedAt: Date,
 ) {
