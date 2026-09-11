@@ -11,6 +11,7 @@ function createHarness(grantedQuantity = 1) {
       grantedQuantity,
       committedQuantity: 0,
       reservedQuantity: 0,
+      refundingQuantity: 0,
       version: 0,
     },
     reservation: null as Record<string, unknown> | null,
@@ -28,6 +29,7 @@ function createHarness(grantedQuantity = 1) {
         state.counter.reservedQuantity += (data.reservedQuantity as { increment?: number; decrement?: number } | undefined)?.increment ?? 0;
         state.counter.reservedQuantity -= (data.reservedQuantity as { increment?: number; decrement?: number } | undefined)?.decrement ?? 0;
         state.counter.committedQuantity += (data.committedQuantity as { increment?: number } | undefined)?.increment ?? 0;
+        state.counter.refundingQuantity += (data.refundingQuantity as { increment?: number } | undefined)?.increment ?? 0;
         state.counter.version += (data.version as { increment: number }).increment;
         return { count: 1 };
       }),
@@ -97,6 +99,36 @@ describe("PurchasedRecoveryReservationService", () => {
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-2" }))
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
     expect(state.counter.reservedQuantity).toBe(1);
+  });
+
+  it("does not reserve credits held by an approved refund", async () => {
+    const { service, state } = createHarness(1);
+    state.counter.refundingQuantity = 1;
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:refund-held" }))
+      .resolves.toEqual({ kind: "credits-exhausted", available: 0 });
+    expect(state.counter.reservedQuantity).toBe(0);
+  });
+
+  it("allows at most one of a full refund hold and recovery reservation to consume shared capacity", async () => {
+    const { service, state, database } = createHarness(5);
+    const hold = async () => database.$transaction(async (transaction) => {
+      const counter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId: "shop-1", counter: "PURCHASED_RECOVERY_CREDITS" } } });
+      const updated = await transaction.shopEntitlementCounter.updateMany({
+        where: { id: counter.id, version: counter.version },
+        data: { refundingQuantity: { increment: 5 }, version: { increment: 1 } },
+      });
+      return updated.count === 1;
+    });
+
+    const [refundHeld, reservation] = await Promise.all([
+      hold(),
+      service.reserve({ shopId: "shop-1", sourceKey: "purchased:race" }),
+    ]);
+
+    expect([refundHeld, reservation.kind === "reserved"]).toEqual(expect.arrayContaining([true, false]));
+    expect(state.counter.grantedQuantity - state.counter.committedQuantity - state.counter.reservedQuantity - state.counter.refundingQuantity).toBeGreaterThanOrEqual(0);
+    expect(state.counter.refundingQuantity + state.counter.reservedQuantity).toBeLessThanOrEqual(5);
   });
 
   it("releases a definitive failure and preserves the credit", async () => {
