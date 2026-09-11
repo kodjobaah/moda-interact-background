@@ -144,9 +144,22 @@ export class RecoveryCreditPurchaseService {
             billingPeriodId: input.billingPeriodId,
           },
         } satisfies Prisma.RecoveryCreditPurchaseWhereInput;
-        const alreadyMatchedUnits = await transaction.recoveryCreditPurchase.count({
+        const activeMatchedUnits = await transaction.recoveryCreditPurchase.count({
           where: { ...scope, status: RecoveryCreditPurchaseStatus.ACTIVE },
         });
+        const dashboardRefundedMatchedUnits = await transaction.recoveryCreditPurchase.count({
+          where: {
+            ...scope,
+            status: RecoveryCreditPurchaseStatus.REFUNDED,
+            refund: {
+              is: {
+                status: "COMPLETED",
+                settlementMode: "PARTNER_DASHBOARD_REFUND",
+              },
+            },
+          },
+        });
+        const alreadyMatchedUnits = activeMatchedUnits + dashboardRefundedMatchedUnits;
         const candidates = await transaction.recoveryCreditPurchase.findMany({
           where: {
             ...scope,

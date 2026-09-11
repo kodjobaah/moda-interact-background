@@ -5,7 +5,10 @@ import {
   UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient, UsageReservation } from "@prisma/client";
-import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import {
+  availablePurchasedRecoveryCredits,
+  createRecoveryIdempotencyKey,
+} from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
 
@@ -124,7 +127,12 @@ export class PurchasedRecoveryReservationService {
       }
     }
 
-    const available = counter.grantedQuantity - counter.committedQuantity - counter.reservedQuantity;
+    const available = availablePurchasedRecoveryCredits({
+      grantedQuantity: counter.grantedQuantity,
+      committedQuantity: counter.committedQuantity,
+      reservedQuantity: counter.reservedQuantity,
+      refundingQuantity: counter.refundingQuantity ?? 0,
+    });
     if (available < quantity) return { kind: "credits-exhausted", available: Math.max(available, 0) };
 
     const updated = await transaction.shopEntitlementCounter.updateMany({
