@@ -20,22 +20,15 @@ function reportBillingReconciliationFailure(error: unknown): void {
 void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
-    const [{ closeBillingResources }, { billingReconciliationService }, { recoveryCreditRefundService },{ subscriptionCancellationService }] = await Promise.all([
+    const [{ closeBillingResources }, { billingReconciliationService }, { subscriptionCancellationService }, { recoveryCreditRefundService }] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
       import("../services/subscription-cancellation.service.js"),
       import("../services/recovery-credit-refund.service.js"),
     ]);
-    await billingReconciliationService.reconcileOnce();
-    await subscriptionCancellationService.processDue();
-    const stopScheduler = startBillingReconciliationScheduler(
-      async () => {
-        await billingReconciliationService.reconcileOnce();
-        await subscriptionCancellationService.processDue();
-      },
-
     const runBillingCycle = async () => {
       await billingReconciliationService.reconcileOnce();
+      await subscriptionCancellationService.processDue();
       await recoveryCreditRefundService.processDue();
     };
     await runBillingCycle();
