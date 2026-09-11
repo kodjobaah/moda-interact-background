@@ -92,7 +92,7 @@ export const whatsappWorker = new Worker<
   },
 );
 
-async function processInboundMessage(event: WhatsAppInboundEvent) {
+export async function processInboundMessage(event: WhatsAppInboundEvent) {
   console.log("Processing WhatsApp message", event.providerMessageId);
 
   const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
@@ -102,6 +102,8 @@ async function processInboundMessage(event: WhatsAppInboundEvent) {
   if (abuse.kind !== "allowed") return;
 
   const route = await recoveryRoutingService.resolveInboundMessage(event);
+
+  if (route.kind === "shop-unavailable") return;
 
   if (route.kind === "product-only" || route.kind === "standalone") {
     if (!route.shopId || !route.conversationId) return;
@@ -163,7 +165,7 @@ async function processInboundMessage(event: WhatsAppInboundEvent) {
   );
 }
 
-async function loadConversationTurn(
+export async function loadConversationTurn(
   conversationId: string,
   pendingTurnStartedAt: Date,
 ) {
@@ -174,12 +176,13 @@ async function loadConversationTurn(
       type: true,
       shopId: true,
       customer: { select: { phone: true, id: true, firstName: true } },
-      shop: { select: { domain: true } },
+      shop: { select: { domain: true, status: true } },
       checkoutRecoveryId: true,
       checkoutRecovery: {
         select: {
           id: true,
           shopId: true,
+          shop: { select: { domain: true, status: true } },
           customer: { select: { phone: true, id: true, firstName: true } },
         },
       },
@@ -197,6 +200,21 @@ async function loadConversationTurn(
   const to =
     conversation.checkoutRecovery?.customer?.phone ??
     conversation.customer?.phone;
+  const shopStatus =
+    conversation.checkoutRecovery?.shop?.status ?? conversation.shop?.status;
+  if (shopId && shopStatus !== "ACTIVE") {
+    return {
+      shopId,
+      to: to ?? "",
+      customerPhone: to ?? "",
+      conversationType: conversation.type,
+      checkoutRecoveryId: conversation.checkoutRecoveryId,
+      hasReplyContext: false,
+      context: null,
+      languageMessage: "",
+      shopUnavailable: true,
+    };
+  }
   if (!shopId || !to)
     throw new Error(`Conversation ${conversationId} has no outbound ownership`);
 

@@ -1,5 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
+vi.mock("@prisma/client", () => ({
+  MessageStatus: {
+    PENDING: "PENDING",
+    FAILED: "FAILED",
+    SENT: "SENT",
+    DELIVERED: "DELIVERED",
+    READ: "READ",
+  },
+  Prisma: {
+    ConversationMessageUpdateInput: class {},
+    PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {
+      code = "";
+    },
+    TransactionIsolationLevel: { Serializable: "Serializable" },
+  },
+  UsageMetric: { DELIVERED_WHATSAPP_MESSAGE: "DELIVERED_WHATSAPP_MESSAGE" },
+}));
+
 import { WhatsAppProviderStatusService } from "../../../src/services/whatsapp-provider-status.service.js";
 
 const baseEvent = {
@@ -65,6 +84,11 @@ function harness(status = "SENT") {
     },
   };
   const database = {
+    shop: {
+      findUnique: vi.fn().mockRejectedValue(
+        new Error("provider status must not resolve Shop execution eligibility"),
+      ),
+    },
     $transaction: vi
       .fn()
       .mockImplementation(
@@ -202,6 +226,19 @@ describe("WhatsAppProviderStatusService", () => {
     });
 
     expect(test.usageEvents[0]).toMatchObject({ shopId: "durable-shop" });
+  });
+
+  it("finalizes an existing outbound message after its shop becomes inactive without an execution gate lookup", async () => {
+    const test = harness();
+
+    await expect(
+      test.service.process({ ...baseEvent, status: "READ" }),
+    ).resolves.toBe("applied");
+
+    expect(test.message.status).toBe("READ");
+    expect(test.usageEvents).toHaveLength(1);
+    expect(test.transaction.conversationMessage.updateMany).toHaveBeenCalled();
+    expect(test.database.shop.findUnique).not.toHaveBeenCalled();
   });
 
   it("retries a CAS loser so concurrent READ and DELIVERED remain monotonic", async () => {

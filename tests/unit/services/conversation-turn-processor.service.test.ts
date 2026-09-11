@@ -1,4 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
+vi.mock(
+  "../../../src/services/outbound-whatsapp-admission.service.js",
+  () => ({
+    runCommerceAgentAfterAdmission: async (input: any) => {
+      if (input.admission.terminal) {
+        await input.sendPreparedText({
+          ...input.admission,
+          to: input.to,
+          text: "terminal response",
+        });
+        return null;
+      }
+      const result = await input.runAgent(input.context);
+      return result;
+    },
+  }),
+);
+
 import {
   ConversationTurnProcessor,
   MAX_SETTLE_WINDOW_MS,
@@ -158,6 +178,46 @@ describe("ConversationTurnProcessor", () => {
       observedVersion: 3,
     });
 
+    expect(test.runAgent).not.toHaveBeenCalled();
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+  });
+
+  it("terminally completes a turn when its shop is inactive", async () => {
+    const test = harness();
+    test.loaded.shopUnavailable = true;
+
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+
+    expect(test.conversation.completeTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+    );
+    expect(test.abuseAdmission.admitSettledTurn).not.toHaveBeenCalled();
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not re-enqueue a newer version when inactive completion loses a race", async () => {
+    const test = harness();
+    test.loaded.shopUnavailable = true;
+    test.conversation.completeTurn.mockResolvedValue(false);
+    test.conversation.getTurnState
+      .mockResolvedValueOnce(state())
+      .mockResolvedValueOnce(state({ inboundVersion: 4 }));
+
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+
+    expect(test.conversation.releaseTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+    );
+    expect(test.queue.add).not.toHaveBeenCalled();
     expect(test.runAgent).not.toHaveBeenCalled();
     expect(test.admission.reserve).not.toHaveBeenCalled();
   });

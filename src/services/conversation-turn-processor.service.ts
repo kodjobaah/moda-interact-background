@@ -52,6 +52,7 @@ export type LoadedConversationTurn<TContext> = {
   languageMessage: string;
   clarificationText?: string;
   handledWithoutAgent?: boolean;
+  shopUnavailable?: boolean;
 };
 
 export type ConversationTurnProcessorDependencies<TContext, TResult> = {
@@ -172,6 +173,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         state.pendingTurnStartedAt as Date,
       );
+
+      if (loaded.shopUnavailable) {
+        await this.finishInactiveTurn(conversationId, observedVersion);
+        return;
+      }
 
       const abuse = await this.dependencies.abuseAdmission.admitSettledTurn({
         conversationId,
@@ -350,6 +356,22 @@ export class ConversationTurnProcessor<TContext, TResult> {
       latest.pendingTurnStartedAt !== null
     ) {
       await this.enqueue(conversationId, latest.inboundVersion);
+    }
+  }
+
+  private async finishInactiveTurn(
+    conversationId: string,
+    observedVersion: number,
+  ): Promise<void> {
+    const completed = await this.dependencies.conversation.completeTurn(
+      conversationId,
+      observedVersion,
+    );
+    if (!completed) {
+      await this.dependencies.conversation.releaseTurn(
+        conversationId,
+        observedVersion,
+      );
     }
   }
 }
