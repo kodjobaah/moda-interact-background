@@ -103,6 +103,8 @@ async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   const route = await recoveryRoutingService.resolveInboundMessage(event);
 
+  if (route.kind === "shop-unavailable") return;
+
   if (route.kind === "product-only" || route.kind === "standalone") {
     if (!route.shopId || !route.conversationId) return;
 
@@ -174,12 +176,13 @@ async function loadConversationTurn(
       type: true,
       shopId: true,
       customer: { select: { phone: true, id: true, firstName: true } },
-      shop: { select: { domain: true } },
+      shop: { select: { domain: true, status: true } },
       checkoutRecoveryId: true,
       checkoutRecovery: {
         select: {
           id: true,
           shopId: true,
+          shop: { select: { domain: true, status: true } },
           customer: { select: { phone: true, id: true, firstName: true } },
         },
       },
@@ -197,6 +200,21 @@ async function loadConversationTurn(
   const to =
     conversation.checkoutRecovery?.customer?.phone ??
     conversation.customer?.phone;
+  const shopStatus =
+    conversation.checkoutRecovery?.shop?.status ?? conversation.shop?.status;
+  if (shopId && shopStatus !== "ACTIVE") {
+    return {
+      shopId,
+      to: to ?? "",
+      customerPhone: to ?? "",
+      conversationType: conversation.type,
+      checkoutRecoveryId: conversation.checkoutRecoveryId,
+      hasReplyContext: false,
+      context: null,
+      languageMessage: "",
+      shopUnavailable: true,
+    };
+  }
   if (!shopId || !to)
     throw new Error(`Conversation ${conversationId} has no outbound ownership`);
 

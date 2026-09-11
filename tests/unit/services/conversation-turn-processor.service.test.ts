@@ -162,6 +162,24 @@ describe("ConversationTurnProcessor", () => {
     expect(test.admission.reserve).not.toHaveBeenCalled();
   });
 
+  it("terminally completes a turn when its shop is inactive", async () => {
+    const test = harness();
+    test.loaded.shopUnavailable = true;
+
+    await test.processor.process({
+      conversationId: "conversation-1",
+      observedVersion: 3,
+    });
+
+    expect(test.conversation.completeTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+    );
+    expect(test.abuseAdmission.admitSettledTurn).not.toHaveBeenCalled();
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
   it("does not process a newer version from a stale job", async () => {
     const test = harness();
     test.conversation.getTurnState.mockResolvedValue(

@@ -16,6 +16,9 @@ vi.mock("../../../src/lib/db.js", () => ({
       findUniqueOrThrow: vi.fn(),
       findMany: vi.fn(),
     },
+    shop: {
+      findUnique: vi.fn().mockResolvedValue({ status: "ACTIVE" }),
+    },
     customerPhone: {
       findMany: vi.fn(),
     },
@@ -26,6 +29,7 @@ vi.mock("../../../src/lib/db.js", () => ({
 describe("RecoveryRoutingService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(prisma.shop.findUnique).mockResolvedValue({ status: "ACTIVE" } as any);
   });
 
   it("returns product-only when the customer has no active checkout recoveries", async () => {
@@ -46,6 +50,109 @@ describe("RecoveryRoutingService", () => {
 
     expect(route).toMatchObject({
       kind: "product-only",
+      customerPhone: "+447700900000",
+    });
+  });
+
+  it.each(["UNINSTALLED", "SUSPENDED"] as const)(
+    "returns a terminal route for a %s context-linked recovery",
+    async (status) => {
+      vi.mocked(prisma.conversationMessage.findUnique).mockResolvedValue({
+        conversationId: "conversation-1",
+        conversation: {
+          checkoutRecoveryId: "recovery-1",
+          shopId: null,
+          customerId: "customer-1",
+          type: "RECOVERY",
+          shop: null,
+          checkoutRecovery: { shopId: "shop-1" },
+        },
+      } as any);
+      vi.mocked(prisma.shop.findUnique).mockResolvedValue({ status } as any);
+
+      const route = await new RecoveryRoutingService().resolveInboundMessage({
+        provider: "whatsapp",
+        providerMessageId: `inactive-${status}`,
+        customerPhone: "+447700900000",
+        contextMessageId: "outbound-1",
+        phoneNumberId: "phone-1",
+        timestamp: Date.now(),
+        type: "text",
+        text: "Can you help?",
+      });
+
+      expect(route).toEqual({
+        kind: "shop-unavailable",
+        customerPhone: "+447700900000",
+      });
+    },
+  );
+
+  it("does not create a standalone conversation for an inactive product owner", async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
+      {
+        customerId: "customer-1",
+        customer: {
+          shopId: "shop-1",
+          shop: { domain: "example.myshopify.com" },
+        },
+      },
+    ] as any);
+    vi.mocked(prisma.shop.findUnique).mockResolvedValue({
+      status: "UNINSTALLED",
+    } as any);
+
+    const route = await new RecoveryRoutingService().resolveInboundMessage({
+      provider: "whatsapp",
+      providerMessageId: "inactive-product",
+      customerPhone: "+447700900000",
+      contextMessageId: null,
+      phoneNumberId: "phone-1",
+      timestamp: Date.now(),
+      type: "text",
+      text: "Show me shirts",
+    });
+
+    expect(route).toEqual({
+      kind: "shop-unavailable",
+      customerPhone: "+447700900000",
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns a terminal route when all recovery ownership is inactive", async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
+      {
+        id: "conversation-1",
+        checkoutRecoveryId: "recovery-1",
+        checkoutRecovery: {
+          shopId: "shop-1",
+          id: "recovery-1",
+          status: "ENGAGED",
+          checkoutToken: "checkout-1",
+          totalPrice: "42.00",
+          customer: { id: "customer-1", phone: "+447700900000" },
+        },
+      },
+    ] as any);
+    vi.mocked(prisma.shop.findUnique).mockResolvedValue({
+      status: "UNINSTALLED",
+    } as any);
+
+    const route = await new RecoveryRoutingService().resolveInboundMessage({
+      provider: "whatsapp",
+      providerMessageId: "inactive-recovery",
+      customerPhone: "+447700900000",
+      contextMessageId: null,
+      phoneNumberId: "phone-1",
+      timestamp: Date.now(),
+      type: "text",
+      text: "Can you help with my order?",
+    });
+
+    expect(route).toEqual({
+      kind: "shop-unavailable",
       customerPhone: "+447700900000",
     });
   });

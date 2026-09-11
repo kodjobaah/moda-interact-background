@@ -3,6 +3,7 @@
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
 import { Prisma } from "@prisma/client";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 
 const STANDALONE_CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000;
 type StandaloneConversationType = "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
@@ -48,6 +49,10 @@ export type RecoveryRoute =
   | {
       kind: "unresolved";
       reason: "ambiguous-tenant";
+      customerPhone: string;
+    }
+  | {
+      kind: "shop-unavailable";
       customerPhone: string;
     };
 
@@ -248,6 +253,16 @@ export class RecoveryRoutingService {
       });
 
       if (originalMessage) {
+        const shopId =
+          originalMessage.conversation.checkoutRecovery?.shopId ??
+          originalMessage.conversation.shopId;
+        if (
+          shopId &&
+          !(await shopExecutionEligibilityService.isShopExecutionActive(shopId))
+        ) {
+          return { kind: "shop-unavailable", customerPhone: event.customerPhone };
+        }
+
         if (!originalMessage.conversation.checkoutRecoveryId) {
           if (
             originalMessage.conversation.shopId &&
@@ -350,6 +365,14 @@ export class RecoveryRoutingService {
         );
       }
 
+      if (
+        !(await shopExecutionEligibilityService.isShopExecutionActive(
+          conversation.checkoutRecovery.shopId,
+        ))
+      ) {
+        return { kind: "shop-unavailable", customerPhone };
+      }
+
       return {
         kind: "resolved",
         conversationId: conversation.id,
@@ -358,11 +381,40 @@ export class RecoveryRoutingService {
       };
     }
 
+    const candidateShopIds = [
+      ...new Set(
+        conversations.flatMap((conversation) =>
+          conversation.checkoutRecovery?.shopId
+            ? [conversation.checkoutRecovery.shopId]
+            : [],
+        ),
+      ),
+    ];
+    const activeShopIds = new Set(
+      (
+        await Promise.all(
+          candidateShopIds.map(async (shopId) =>
+            (await shopExecutionEligibilityService.isShopExecutionActive(shopId))
+              ? shopId
+              : null,
+          ),
+        )
+      ).filter((shopId): shopId is string => shopId !== null),
+    );
+    const actionableConversations = conversations.filter(
+      (conversation) =>
+        conversation.checkoutRecovery?.shopId !== undefined &&
+        activeShopIds.has(conversation.checkoutRecovery.shopId),
+    );
+    if (actionableConversations.length === 0) {
+      return { kind: "shop-unavailable", customerPhone };
+    }
+
     const ownershipPairs = new Map<
       string,
       { shopId: string; customerId: string }
     >();
-    for (const conversation of conversations) {
+    for (const conversation of actionableConversations) {
       const recovery = conversation.checkoutRecovery;
       const customerId = recovery?.customer?.id;
       if (!recovery?.shopId || !customerId) {
@@ -395,7 +447,7 @@ export class RecoveryRoutingService {
       customerPhone,
       shopId: ownership.shopId,
       customerId: ownership.customerId,
-      recoveries: conversations.map((conversation) => {
+      recoveries: actionableConversations.map((conversation) => {
         if (!conversation.checkoutRecovery) {
           throw new Error(
             "Recovery conversation is missing its checkout recovery",
@@ -540,10 +592,25 @@ export class RecoveryRoutingService {
         type: "PRODUCT_DISCOVERY",
       };
     }
-    if (ownershipPairs.size !== 1) {
+
+    const activeOwnerships = (
+      await Promise.all(
+        [...ownershipPairs.values()].map(async (ownership) =>
+          (await shopExecutionEligibilityService.isShopExecutionActive(
+            ownership.shopId,
+          ))
+            ? ownership
+            : null,
+        ),
+      )
+    ).filter((ownership): ownership is NonNullable<typeof ownership> => ownership !== null);
+    if (activeOwnerships.length === 0) {
+      return { kind: "shop-unavailable", customerPhone };
+    }
+    if (activeOwnerships.length !== 1) {
       return { kind: "unresolved", reason: "ambiguous-tenant", customerPhone };
     }
-    const ownership = [...ownershipPairs.values()][0];
+    const ownership = activeOwnerships[0];
     if (!ownership) {
       return { kind: "unresolved", reason: "ambiguous-tenant", customerPhone };
     }

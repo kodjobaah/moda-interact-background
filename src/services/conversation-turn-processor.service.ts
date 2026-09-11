@@ -52,6 +52,7 @@ export type LoadedConversationTurn<TContext> = {
   languageMessage: string;
   clarificationText?: string;
   handledWithoutAgent?: boolean;
+  shopUnavailable?: boolean;
 };
 
 export type ConversationTurnProcessorDependencies<TContext, TResult> = {
@@ -172,6 +173,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         state.pendingTurnStartedAt as Date,
       );
+
+      if (loaded.shopUnavailable) {
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
 
       const abuse = await this.dependencies.abuseAdmission.admitSettledTurn({
         conversationId,
