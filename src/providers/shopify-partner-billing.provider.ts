@@ -1,3 +1,8 @@
+import {
+  SHOPIFY_SUBSCRIPTION_CANCELLATION_ARGS,
+  type SubscriptionCancellationMode,
+} from "@modainteract/moda-interact-shared/billing";
+
 export type PartnerUsageSnapshot = {
   handle: string;
   quantity: number | null;
@@ -21,6 +26,21 @@ export type PartnerSubscription = {
 
 export interface ShopifyPartnerBillingProvider {
   getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null>;
+  cancelSubscription(input: {
+    shopifyShopId: string;
+    mode: SubscriptionCancellationMode;
+  }): Promise<{ summary: string }>;
+}
+
+export class ShopifyPartnerBillingError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "ShopifyPartnerBillingError";
+  }
 }
 
 type ShopifyPrice =
@@ -47,6 +67,16 @@ type PartnerResponse = {
         items: Array<{ handle: string | null; price: ShopifyPrice | null }>;
       } | null;
     } | null;
+  };
+  errors?: Array<{ message: string }>;
+};
+
+type CancellationResponse = {
+  data?: {
+    appSubscriptionCancel?: {
+      appSubscription: { id: string } | null;
+      userErrors: Array<{ field: string[] | null; message: string }>;
+    };
   };
   errors?: Array<{ message: string }>;
 };
@@ -89,6 +119,27 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
   }
 `;
 
+const CANCEL_SUBSCRIPTION_MUTATION = `
+  mutation CancelSubscription(
+    $appId: ID!
+    $shopId: ID!
+    $deferCancellation: Boolean!
+    $prorate: Boolean!
+    $skipFinalUsageCharge: Boolean!
+  ) {
+    appSubscriptionCancel(
+      appId: $appId
+      shopId: $shopId
+      deferCancellation: $deferCancellation
+      prorate: $prorate
+      skipFinalUsageCharge: $skipFinalUsageCharge
+    ) {
+      appSubscription { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
@@ -97,31 +148,30 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
   ) {}
 
   async getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null> {
-    const orgId = this.environment.SHOPIFY_PARTNER_ORG_ID?.trim();
-    const accessToken = this.environment.SHOPIFY_PARTNER_ACCESS_TOKEN?.trim();
-    const appId = this.environment.SHOPIFY_APP_ID?.trim();
-    if (!orgId || !accessToken || !appId) {
-      throw new Error("Shopify Partner API configuration is missing");
-    }
+    const config = this.readConfig();
 
     const response = await this.fetchImpl(
-      `https://partners.shopify.com/${orgId}/api/2026-07/graphql.json`,
+      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
+          "X-Shopify-Access-Token": config.accessToken,
         },
         body: JSON.stringify({
           query: ACTIVE_SUBSCRIPTION_QUERY,
-          variables: { appId, shopId: shopifyShopId },
+          variables: { appId: config.appId, shopId: shopifyShopId },
         }),
       },
     );
-    if (!response.ok) throw new Error(`Shopify Partner API request failed: ${response.status}`);
+    if (!response.ok) throw providerHttpError(response.status);
 
     const result = await response.json() as PartnerResponse;
-    if (result.errors?.length) throw new Error(result.errors.map((error) => error.message).join(", "));
+    if (result.errors?.length) throw new ShopifyPartnerBillingError(
+      result.errors.map((error) => error.message).join(", ").slice(0, 2000),
+      "graphql-error",
+      true,
+    );
     const subscription = result.data?.activeSubscription;
     if (!subscription) return null;
 
@@ -168,6 +218,74 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       }] : []),
     };
   }
+
+  async cancelSubscription(input: {
+    shopifyShopId: string;
+    mode: SubscriptionCancellationMode;
+  }): Promise<{ summary: string }> {
+    const config = this.readConfig();
+    const args = SHOPIFY_SUBSCRIPTION_CANCELLATION_ARGS[input.mode];
+    if (!args) {
+      throw new ShopifyPartnerBillingError("Unsupported subscription cancellation mode", "invalid-mode", false);
+    }
+    const response = await this.fetchImpl(
+      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": config.accessToken,
+        },
+        body: JSON.stringify({
+          query: CANCEL_SUBSCRIPTION_MUTATION,
+          variables: {
+            appId: config.appId,
+            shopId: input.shopifyShopId,
+            ...args,
+          },
+        }),
+      },
+    );
+    if (!response.ok) throw providerHttpError(response.status);
+    const result = await response.json() as CancellationResponse;
+    if (result.errors?.length) {
+      throw new ShopifyPartnerBillingError(
+        result.errors.map((error) => error.message).join(", ").slice(0, 2000),
+        "graphql-error",
+        true,
+      );
+    }
+    const payload = result.data?.appSubscriptionCancel;
+    if (!payload) {
+      throw new ShopifyPartnerBillingError("Shopify Partner cancellation response was empty", "empty-response", true);
+    }
+    if (payload.userErrors.length > 0) {
+      throw new ShopifyPartnerBillingError(
+        payload.userErrors.map((error) => error.message).join(", ").slice(0, 2000),
+        "user-error",
+        false,
+      );
+    }
+    return { summary: "Shopify Partner accepted appSubscriptionCancel" };
+  }
+
+  private readConfig(): { orgId: string; accessToken: string; appId: string } {
+    const orgId = this.environment.SHOPIFY_PARTNER_ORG_ID?.trim();
+    const accessToken = this.environment.SHOPIFY_PARTNER_ACCESS_TOKEN?.trim();
+    const appId = this.environment.SHOPIFY_APP_ID?.trim();
+    if (!orgId || !accessToken || !appId) {
+      throw new ShopifyPartnerBillingError("Shopify Partner API configuration is missing", "configuration-missing", false);
+    }
+    return { orgId, accessToken, appId };
+  }
+}
+
+function providerHttpError(status: number): ShopifyPartnerBillingError {
+  return new ShopifyPartnerBillingError(
+    `Shopify Partner API request failed: ${status}`,
+    `http-${status}`,
+    [408, 409, 425, 429].includes(status) || status >= 500,
+  );
 }
 
 export const shopifyPartnerBillingApi = new ShopifyPartnerBillingApi();

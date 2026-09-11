@@ -88,4 +88,96 @@ describe("ShopifyPartnerBillingApi", () => {
 
     await expect(api.getActiveSubscription("gid://shopify/Shop/1")).resolves.toBeNull();
   });
+
+  it.each([
+    ["END_OF_CYCLE", true, false, false],
+    ["IMMEDIATE_NO_PRORATION", false, false, false],
+    ["IMMEDIATE_PRORATED", false, true, false],
+    ["IMMEDIATE_SKIP_FINAL_USAGE", false, false, true],
+  ] as const)("maps %s through the Partner mutation exactly", async (mode, deferCancellation, prorate, skipFinalUsageCharge) => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { appSubscriptionCancel: { appSubscription: { id: "sub-1" }, userErrors: [] } } }),
+    });
+    const api = new ShopifyPartnerBillingApi(
+      { SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_PARTNER_ACCESS_TOKEN: "token-1", SHOPIFY_APP_ID: "app-1" },
+      fetchImpl as never,
+    );
+
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode })).resolves.toEqual({
+      summary: "Shopify Partner accepted appSubscriptionCancel",
+    });
+    const request = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body)).variables).toMatchObject({
+      deferCancellation,
+      prorate,
+      skipFinalUsageCharge,
+    });
+  });
+
+  it.each([408, 409, 425, 429, 500, 503])("classifies HTTP %s as retryable", async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status });
+    const api = new ShopifyPartnerBillingApi(
+      { SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_PARTNER_ACCESS_TOKEN: "secret-token", SHOPIFY_APP_ID: "app-1" },
+      fetchImpl as never,
+    );
+
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode: "END_OF_CYCLE" }))
+      .rejects.toMatchObject({ code: `http-${status}`, retryable: true });
+  });
+
+  it.each([400, 401, 403, 404])("classifies HTTP %s as permanent attention", async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status });
+    const api = new ShopifyPartnerBillingApi(
+      { SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_PARTNER_ACCESS_TOKEN: "secret-token", SHOPIFY_APP_ID: "app-1" },
+      fetchImpl as never,
+    );
+
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode: "END_OF_CYCLE" }))
+      .rejects.toMatchObject({ code: `http-${status}`, retryable: false });
+  });
+
+  it("classifies GraphQL user errors as non-retryable without exposing credentials", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          appSubscriptionCancel: {
+            appSubscription: null,
+            userErrors: [{ field: ["shopId"], message: "Subscription cannot be cancelled" }],
+          },
+        },
+      }),
+    });
+    const api = new ShopifyPartnerBillingApi(
+      { SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_PARTNER_ACCESS_TOKEN: "secret-token", SHOPIFY_APP_ID: "app-1" },
+      fetchImpl as never,
+    );
+
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode: "END_OF_CYCLE" }))
+      .rejects.toMatchObject({ code: "user-error", retryable: false });
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode: "END_OF_CYCLE" }))
+      .rejects.not.toThrow("secret-token");
+  });
+
+  it("classifies missing Partner configuration as permanent without persisting the token", async () => {
+    const api = new ShopifyPartnerBillingApi({ SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_APP_ID: "app-1" }, vi.fn() as never);
+
+    await expect(api.cancelSubscription({ shopifyShopId: "gid://shopify/Shop/1", mode: "END_OF_CYCLE" }))
+      .rejects.toMatchObject({ code: "configuration-missing", retryable: false });
+  });
+
+  it("classifies an invalid cancellation mode as permanent", async () => {
+    const fetchImpl = vi.fn();
+    const api = new ShopifyPartnerBillingApi(
+      { SHOPIFY_PARTNER_ORG_ID: "org-1", SHOPIFY_PARTNER_ACCESS_TOKEN: "secret-token", SHOPIFY_APP_ID: "app-1" },
+      fetchImpl as never,
+    );
+
+    await expect(api.cancelSubscription({
+      shopifyShopId: "gid://shopify/Shop/1",
+      mode: "INVALID_MODE" as never,
+    })).rejects.toMatchObject({ code: "invalid-mode", retryable: false });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
