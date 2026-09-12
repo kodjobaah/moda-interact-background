@@ -42,6 +42,17 @@ function client(overrides: Record<string, unknown> = {}) {
     shopEntitlementCounter: {
       findUnique: async () => ({ grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 }),
     },
+    billingPeriodEntitlementCounter: {
+      findUnique: async () => ({
+        id: "period-counter-1",
+        shopId: "shop-1",
+        billingPeriodId: "period-1",
+        grantedQuantity: 10,
+        committedQuantity: 2,
+        reservedQuantity: 1,
+        forfeitedQuantity: 0,
+      }),
+    },
     ...overrides,
   } as never;
 }
@@ -81,10 +92,15 @@ describe("EffectiveBillingPolicyResolver", () => {
           },
           billingPeriod: {
             id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
             periodStart: new Date("2026-09-01T00:00:00.000Z"),
             periodEnd: new Date("2026-10-01T00:00:00.000Z"),
             status: "OPEN",
           },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
           shop: { status: "ACTIVE" },
         }),
       },
@@ -94,6 +110,7 @@ describe("EffectiveBillingPolicyResolver", () => {
     expect(policy.shopifyUsageEventHandle).toBe("basic-usage");
     expect(policy.billingPeriod?.start).toEqual(new Date("2026-09-01T00:00:00.000Z"));
     expect(policy.billingPeriod?.status).toBe("OPEN");
+    expect(policy.billingPeriod?.includedCounter.grantedQuantity).toBe(10);
   });
 
   it("fails closed when the lifetime Free counter is missing", async () => {
@@ -284,7 +301,17 @@ describe("EffectiveBillingPolicyResolver", () => {
             updatedAt: now,
             features: [],
           },
-          billingPeriod: null,
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
           shop: { status: "ACTIVE" },
         }),
       },
@@ -327,7 +354,7 @@ describe("EffectiveBillingPolicyResolver", () => {
     },
   );
 
-  it("preserves valid terminal slots and paid null billing periods", async () => {
+  it("fails closed when a paid subscription has no current billing period", async () => {
     const fake = client({
       subscription: {
         findUnique: async () => ({
@@ -359,9 +386,8 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
-    expect(policy.terminalMessageReservedSlots).toBe(14);
-    expect(policy.billingPeriod).toBeNull();
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "INVALID_CONFIGURATION" });
   });
 
   it("fails closed when a paid plan has no usage event handle", async () => {
@@ -382,7 +408,17 @@ describe("EffectiveBillingPolicyResolver", () => {
             updatedAt: now,
             features: [],
           },
-          billingPeriod: null,
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
           shop: { status: "ACTIVE" },
         }),
       },
@@ -393,6 +429,8 @@ describe("EffectiveBillingPolicyResolver", () => {
     ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
       reason: "INVALID_CONFIGURATION",
     });
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toThrow("paid plan usage event handle is missing");
   });
 
   it("fails closed for missing contracts and invalid limits", async () => {

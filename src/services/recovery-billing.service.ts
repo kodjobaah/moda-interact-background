@@ -3,13 +3,10 @@ import {
   BILLING_SYSTEM_MESSAGE_CODES,
   createMerchantBillingSystemSourceKey,
   createRecoveryIdempotencyKey,
-  createShopifyUsageIdempotencyKey,
 } from "@modainteract/moda-interact-shared/billing";
 import {
   MerchantSupportMessageKind,
   MerchantSupportMessageState,
-  ShopifyReportState,
-  UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
@@ -26,10 +23,14 @@ import {
   purchasedRecoveryReservationService,
   type PurchasedRecoveryReservationInput,
 } from "./purchased-recovery-reservation.service.js";
+import {
+  paidIncludedRecoveryReservationService,
+  type PaidIncludedReservationOutcome,
+} from "./paid-included-recovery-reservation.service.js";
 
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
-  "$transaction" | "usageEvent" | "merchantSupportThread" | "merchantSupportMessage"
+  "$transaction" | "merchantSupportThread" | "merchantSupportMessage"
 >;
 
 type RecoveryPolicyResolver = Pick<typeof effectiveBillingPolicyResolver, "resolve">;
@@ -39,6 +40,10 @@ type FreeReservationService = Pick<
 >;
 type PurchasedReservationService = Pick<
   typeof purchasedRecoveryReservationService,
+  "reserve" | "commit" | "release" | "markAmbiguous"
+>;
+type PaidIncludedReservationService = Pick<
+  typeof paidIncludedRecoveryReservationService,
   "reserve" | "commit" | "release" | "markAmbiguous"
 >;
 
@@ -79,6 +84,7 @@ export class RecoveryBillingService {
     private readonly policyResolver: RecoveryPolicyResolver = effectiveBillingPolicyResolver,
     private readonly reservationService: FreeReservationService = freeRecoveryReservationService,
     private readonly purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
+    private readonly paidIncludedReservationService: PaidIncludedReservationService = paidIncludedRecoveryReservationService,
   ) {}
 
   async admit(input: {
@@ -93,7 +99,24 @@ export class RecoveryBillingService {
     }
 
     if (policy.planKind === "PAID_METERED") {
-      return { kind: "admitted", admission: { kind: "paid", sourceKey, policy } };
+      const paid = await this.paidIncludedReservationService.reserve({
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+      });
+      if (isPaidIncludedAdmission(paid)) {
+        return {
+          kind: "admitted",
+          admission: { kind: "paid", sourceKey: paid.sourceKey, policy },
+        };
+      }
+      if (paid.kind === "allowance-exhausted") {
+        const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
+        if (purchased) return purchased;
+        const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
+        if (lifetimeFree) return lifetimeFree;
+        return { kind: "blocked", reason: "allowance-exhausted" };
+      }
+      return { kind: "blocked", reason: "reservation-in-flight" };
     }
 
     const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
@@ -125,29 +148,10 @@ export class RecoveryBillingService {
       return;
     }
 
-    const idempotencyKey = createRecoveryIdempotencyKey(
-      input.admission.policy.shopId,
-      input.recoveryId,
-    );
-    await this.database.usageEvent.upsert({
-      where: { idempotencyKey },
-      create: {
-        shopId: input.admission.policy.shopId,
-        billingPeriodId: input.admission.policy.billingPeriod?.id ?? null,
-        metric: UsageMetric.RECOVERY_CONVERSATION,
-        quantity: 1,
-        idempotencyKey,
-        sourceType: "PAID_RECOVERY_CONVERSATION",
-        sourceId: input.recoveryId,
-        occurredAt: input.occurredAt,
-        shopifyReportState: ShopifyReportState.PENDING,
-        shopifyEventHandle: input.admission.policy.shopifyUsageEventHandle,
-        shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(
-          input.admission.policy.shopId,
-          idempotencyKey,
-        ),
-      },
-      update: {},
+    await this.paidIncludedReservationService.commit({
+      shopId: input.admission.policy.shopId,
+      sourceKey: input.admission.sourceKey,
+      occurredAt: input.occurredAt,
     });
   }
 
@@ -172,6 +176,19 @@ export class RecoveryBillingService {
       return disposition;
     }
 
+    if (input.admission.kind === "paid") {
+      const reservationInput = {
+        shopId: input.admission.policy.shopId,
+        sourceKey: input.admission.sourceKey,
+      };
+      if (disposition === "definitive") {
+        await this.paidIncludedReservationService.release(reservationInput);
+      } else {
+        await this.paidIncludedReservationService.markAmbiguous(reservationInput);
+      }
+      return disposition;
+    }
+
     if (input.admission.kind !== "free" && input.admission.kind !== "lifetime-free") return disposition;
 
     const reservationInput = {
@@ -191,6 +208,13 @@ export class RecoveryBillingService {
   async releaseBeforeProvider(admission: RecoveryBillingAdmission): Promise<void> {
     if (admission.kind === "purchased") {
       await this.purchasedReservationService.release({
+        shopId: admission.policy.shopId,
+        sourceKey: admission.sourceKey,
+      });
+      return;
+    }
+    if (admission.kind === "paid") {
+      await this.paidIncludedReservationService.release({
         shopId: admission.policy.shopId,
         sourceKey: admission.sourceKey,
       });
@@ -357,6 +381,17 @@ function isAdmittedReplay(
 ): boolean {
   return isOwnedBy(reservation, counter) &&
     (reservation.kind === "reserved" || reservation.kind === "already-reserved" || reservation.kind === "already-committed");
+}
+
+function isPaidIncludedAdmission(
+  reservation: PaidIncludedReservationOutcome,
+): reservation is Extract<
+  PaidIncludedReservationOutcome,
+  { sourceKey: string }
+> {
+  return reservation.kind === "reserved" ||
+    reservation.kind === "already-reserved" ||
+    reservation.kind === "already-committed";
 }
 
 export const recoveryBillingService = new RecoveryBillingService();
