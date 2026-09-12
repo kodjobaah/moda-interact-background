@@ -13,7 +13,6 @@ function client(overrides: Record<string, unknown> = {}) {
     kind: "FREE",
     active: true,
     shopifyUsageEventHandle: null,
-    freeLifetimeConversationAllowance: 5,
     defaultOutboundSoftLimit: 10,
     defaultOutboundHardLimit: 20,
     terminalMessageReservedSlots: 1,
@@ -40,25 +39,23 @@ function client(overrides: Record<string, unknown> = {}) {
       }),
     },
     shopBillingPolicyOverride: { findUnique: async () => null },
-    billingAllowanceAdjustment: { findMany: async () => [{ quantity: 2 }, { quantity: -1 }] },
     shopEntitlementCounter: {
-      findUnique: async () => ({ committedQuantity: 2, reservedQuantity: 1 }),
+      findUnique: async () => ({ grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 }),
     },
     ...overrides,
   } as never;
 }
 
 describe("EffectiveBillingPolicyResolver", () => {
-  it("resolves Free allowance with signed adjustments and counters", async () => {
+  it("resolves the plan-independent lifetime Free grant from the durable counter", async () => {
     const policy = await new EffectiveBillingPolicyResolver(client()).resolve("shop-1", now);
 
     expect(policy.freeAllowance).toEqual({
-      base: 5,
-      adjustment: 1,
-      effective: 6,
+      grant: 5,
+      effective: 5,
       committed: 2,
       reserved: 1,
-      remaining: 3,
+      remaining: 2,
     });
     expect(policy.outboundHardLimit).toBe(15);
     expect(policy.features.CHECKOUT_RECOVERY).toBe(true);
@@ -76,7 +73,6 @@ describe("EffectiveBillingPolicyResolver", () => {
             kind: "PAID_METERED",
             active: true,
             shopifyUsageEventHandle: "basic-usage",
-            freeLifetimeConversationAllowance: null,
             defaultOutboundSoftLimit: 10,
             defaultOutboundHardLimit: 20,
             terminalMessageReservedSlots: 1,
@@ -94,10 +90,35 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
     const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
-    expect(policy.freeAllowance).toBeNull();
+    expect(policy.freeAllowance).toMatchObject({ grant: 5, effective: 5, committed: 2, reserved: 1 });
     expect(policy.shopifyUsageEventHandle).toBe("basic-usage");
     expect(policy.billingPeriod?.start).toEqual(new Date("2026-09-01T00:00:00.000Z"));
     expect(policy.billingPeriod?.status).toBe("OPEN");
+  });
+
+  it("fails closed when the lifetime Free counter is missing", async () => {
+    const fake = client({
+      shopEntitlementCounter: { findUnique: async () => null },
+    });
+
+    await expect(
+      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "INVALID_CONFIGURATION",
+    });
+  });
+
+  it("fails closed when lifetime usage exceeds the durable grant", async () => {
+    const fake = client({
+      shopEntitlementCounter: {
+        findUnique: async () => ({ grantedQuantity: 2, committedQuantity: 1, reservedQuantity: 2 }),
+      },
+    });
+
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+        reason: "INVALID_CONFIGURATION",
+      });
   });
 
   it("ignores expired overrides and always bounds hard limits by platform", async () => {
@@ -257,7 +278,6 @@ describe("EffectiveBillingPolicyResolver", () => {
             kind: "FREE",
             active: false,
             shopifyUsageEventHandle: null,
-            freeLifetimeConversationAllowance: 5,
             defaultOutboundSoftLimit: 10,
             defaultOutboundHardLimit: 20,
             terminalMessageReservedSlots: 1,
@@ -288,7 +308,6 @@ describe("EffectiveBillingPolicyResolver", () => {
               kind: "FREE",
               active: true,
               shopifyUsageEventHandle: null,
-              freeLifetimeConversationAllowance: 5,
               defaultOutboundSoftLimit: 10,
               defaultOutboundHardLimit: 20,
               terminalMessageReservedSlots,
@@ -320,7 +339,6 @@ describe("EffectiveBillingPolicyResolver", () => {
             kind: "PAID_METERED",
             active: true,
             shopifyUsageEventHandle: "basic-usage",
-            freeLifetimeConversationAllowance: null,
             defaultOutboundSoftLimit: 10,
             defaultOutboundHardLimit: 20,
             terminalMessageReservedSlots: 14,
@@ -358,7 +376,6 @@ describe("EffectiveBillingPolicyResolver", () => {
             kind: "PAID_METERED",
             active: true,
             shopifyUsageEventHandle: null,
-            freeLifetimeConversationAllowance: null,
             defaultOutboundSoftLimit: 10,
             defaultOutboundHardLimit: 20,
             terminalMessageReservedSlots: 1,

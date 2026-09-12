@@ -20,15 +20,17 @@ export type PurchasedRecoveryReservationInput = {
   quantity?: number;
 };
 
+export type ReservationCounter = "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS";
+
 export type PurchasedReservationOutcome =
-  | { kind: "reserved"; reservation: UsageReservation }
+  | { kind: "reserved"; reservation: UsageReservation; counter: ReservationCounter }
   | { kind: "committed"; reservation: UsageReservation }
   | { kind: "released"; reservation: UsageReservation }
   | { kind: "ambiguous"; reservation: UsageReservation }
-  | { kind: "already-reserved"; reservation: UsageReservation }
-  | { kind: "already-committed"; reservation: UsageReservation }
-  | { kind: "already-released"; reservation: UsageReservation }
-  | { kind: "already-ambiguous"; reservation: UsageReservation }
+  | { kind: "already-reserved"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-committed"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-released"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-ambiguous"; reservation: UsageReservation; counter: ReservationCounter }
   | { kind: "credits-exhausted"; available: number };
 
 export class PurchasedRecoveryReservationError extends Error {
@@ -102,7 +104,39 @@ export class PurchasedRecoveryReservationService {
     });
     if (existing) {
       assertReservationShop(existing, input.shopId);
-      return replayOutcome(existing);
+      const counter = await this.readReservationCounter(transaction, existing);
+      if (existing.status === UsageReservationStatus.RELEASED && counter === "PURCHASED_RECOVERY_CREDITS") {
+        if (existing.quantity !== quantity) {
+          throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
+        }
+        const purchasedCounter = await transaction.shopEntitlementCounter.findUnique({
+          where: { id: existing.counterId ?? "" },
+        });
+        if (!purchasedCounter) {
+          throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+        }
+        const available = availablePurchasedRecoveryCredits({
+          grantedQuantity: purchasedCounter.grantedQuantity,
+          committedQuantity: purchasedCounter.committedQuantity,
+          reservedQuantity: purchasedCounter.reservedQuantity,
+          refundingQuantity: purchasedCounter.refundingQuantity ?? 0,
+        });
+        if (available < quantity) return replayOutcome(existing, counter);
+        const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
+          where: { id: purchasedCounter.id, version: purchasedCounter.version },
+          data: {
+            reservedQuantity: { increment: quantity },
+            version: { increment: 1 },
+          },
+        });
+        if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        const reactivated = await transaction.usageReservation.update({
+          where: { id: existing.id },
+          data: { status: UsageReservationStatus.RESERVED },
+        });
+        return { kind: "reserved", reservation: reactivated, counter };
+      }
+      return replayOutcome(existing, counter);
     }
 
     let counter = await transaction.shopEntitlementCounter.findUnique({
@@ -152,7 +186,7 @@ export class PurchasedRecoveryReservationService {
         quantity,
       },
     });
-    return { kind: "reserved", reservation };
+    return { kind: "reserved", reservation, counter: "PURCHASED_RECOVERY_CREDITS" };
   }
 
   private async commitInTransaction(
@@ -161,20 +195,24 @@ export class PurchasedRecoveryReservationService {
     quantity: number,
   ): Promise<PurchasedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
+    }
     if (reservation.quantity !== quantity) {
       throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
 
+    const counterId = reservation.counterId;
+    if (!counterId) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
     const counter = await transaction.shopEntitlementCounter.findUnique({
-      where: { id: reservation.counterId },
+      where: { id: counterId },
       select: { version: true },
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
-        id: reservation.counterId,
+        id: counterId,
         version: counter.version,
         reservedQuantity: { gte: quantity },
       },
@@ -216,20 +254,24 @@ export class PurchasedRecoveryReservationService {
     if (reservation.status === UsageReservationStatus.COMMITTED) {
       throw new PurchasedRecoveryReservationError("Committed reservations cannot be released");
     }
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
+    }
     if (reservation.quantity !== quantity) {
       throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
 
+    const counterId = reservation.counterId;
+    if (!counterId) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
     const counter = await transaction.shopEntitlementCounter.findUnique({
-      where: { id: reservation.counterId },
+      where: { id: counterId },
       select: { version: true },
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
-        id: reservation.counterId,
+        id: counterId,
         version: counter.version,
         reservedQuantity: { gte: quantity },
       },
@@ -252,7 +294,9 @@ export class PurchasedRecoveryReservationService {
     input: PurchasedRecoveryReservationInput,
   ): Promise<PurchasedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
+    }
     const ambiguous = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.AMBIGUOUS },
@@ -272,6 +316,23 @@ export class PurchasedRecoveryReservationService {
       throw new PurchasedRecoveryReservationError("Reservation belongs to another shop");
     }
     return reservation;
+  }
+
+  private async readReservationCounter(
+    transaction: ReservationTransaction,
+    reservation: UsageReservation,
+  ): Promise<ReservationCounter> {
+    if (!reservation.counterId) {
+      throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+    }
+    const counter = await transaction.shopEntitlementCounter.findUnique({
+      where: { id: reservation.counterId },
+      select: { counter: true },
+    });
+    if (counter?.counter !== "PURCHASED_RECOVERY_CREDITS" && counter?.counter !== "LIFETIME_FREE_RECOVERY_CREDITS") {
+      throw new PurchasedRecoveryReservationError("Reservation counter is not a recovery capacity counter");
+    }
+    return counter.counter;
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
@@ -294,16 +355,16 @@ function validateQuantity(quantity: number | undefined): number {
   return value;
 }
 
-function replayOutcome(reservation: UsageReservation): PurchasedReservationOutcome {
+function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): PurchasedReservationOutcome {
   switch (reservation.status) {
     case UsageReservationStatus.RESERVED:
-      return { kind: "already-reserved", reservation };
+      return { kind: "already-reserved", reservation, counter };
     case UsageReservationStatus.COMMITTED:
-      return { kind: "already-committed", reservation };
+      return { kind: "already-committed", reservation, counter };
     case UsageReservationStatus.RELEASED:
-      return { kind: "already-released", reservation };
+      return { kind: "already-released", reservation, counter };
     case UsageReservationStatus.AMBIGUOUS:
-      return { kind: "already-ambiguous", reservation };
+      return { kind: "already-ambiguous", reservation, counter };
   }
 }
 

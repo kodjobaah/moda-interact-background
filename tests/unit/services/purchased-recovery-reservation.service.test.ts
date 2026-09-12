@@ -20,8 +20,12 @@ function createHarness(grantedQuantity = 1) {
 
   const transaction = {
     shopEntitlementCounter: {
-      findUnique: vi.fn(async ({ select }: { select?: { version: boolean } }) =>
-        select ? { version: state.counter.version } : { ...state.counter }),
+      findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
+        select?.counter
+          ? { counter: state.counter.counter }
+          : select?.version
+            ? { version: state.counter.version }
+            : { ...state.counter }),
       create: vi.fn(async () => state.counter),
       updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
         if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
@@ -139,6 +143,19 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "released" });
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
+  });
+
+  it("reactivates a released reservation on the same row and counter", async () => {
+    const { service, state, transaction } = createHarness();
+    await service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
+    const reservationId = state.reservation!.id;
+    const counterId = state.reservation!.counterId;
+    await service.release({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+    expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
+    expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
   });
 
   it("keeps ambiguous provider outcomes consuming reserved capacity", async () => {

@@ -887,7 +887,7 @@ export class CheckoutRecoveryService {
         occurredAt: new Date(),
       });
     } catch (error) {
-      if (billing.admission.kind === "free") {
+      if (billing.admission.kind === "free" || billing.admission.kind === "lifetime-free") {
         await this.billingService.handleProviderFailure({
           admission: billing.admission,
           error,

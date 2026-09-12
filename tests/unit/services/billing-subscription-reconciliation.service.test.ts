@@ -252,7 +252,11 @@ describe("BillingSubscriptionReconciliationService", () => {
     }));
     expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: {},
-      create: expect.objectContaining({ grantedQuantity: 7 }),
+      create: expect.objectContaining({
+        shopId: "shop-1",
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 7,
+      }),
     }));
     expect(test.queue.add).toHaveBeenCalled();
   });
@@ -342,7 +346,14 @@ describe("BillingSubscriptionReconciliationService", () => {
   });
 
   it("preserves an existing lifetime counter and exact period replay state", async () => {
-    const existingCounter = { id: "lifetime-1", grantedQuantity: 5, committedQuantity: 2 };
+    const existingCounter = {
+      id: "lifetime-1",
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+      refundingQuantity: 1,
+      version: 9,
+    };
     const test = harness({
       row: pendingRow(),
       providerResult: freeProvider,
@@ -352,6 +363,45 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob(payload);
     expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+    expect(existingCounter).toEqual({
+      id: "lifetime-1",
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+      refundingQuantity: 1,
+      version: 9,
+    });
+  });
+
+  it("does not change an existing lifetime grant when platform policy changes", async () => {
+    const existingCounter = {
+      id: "lifetime-1",
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+      refundingQuantity: 1,
+      version: 9,
+    };
+    const test = harness({
+      row: pendingRow(),
+      providerResult: freeProvider,
+      plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: false },
+      policy: { lifetimeFreeRecoveryAllowance: 99 },
+      lifetimeCounter: existingCounter,
+    });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.transaction.platformBillingPolicy.findUnique).not.toHaveBeenCalled();
+    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(existingCounter).toEqual({
+      id: "lifetime-1",
+      grantedQuantity: 5,
+      committedQuantity: 2,
+      reservedQuantity: 1,
+      refundingQuantity: 1,
+      version: 9,
+    });
   });
 
   it("fails closed when the first lifetime grant policy is missing", async () => {

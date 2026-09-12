@@ -13,8 +13,7 @@ const policy = {
   planKind: "FREE",
   features: {},
   freeAllowance: {
-    base: 1,
-    adjustment: 0,
+    grant: 1,
     effective: 1,
     committed: 0,
     reserved: 0,
@@ -37,7 +36,8 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
     counter: {
       id: "counter-1",
       shopId: "shop-1",
-      counter: "FREE_RECOVERY_LIFETIME",
+      counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      grantedQuantity: 1,
       committedQuantity: 0,
       reservedQuantity: 0,
       version: 0,
@@ -48,8 +48,12 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
 
   const transaction = {
     shopEntitlementCounter: {
-      findUnique: vi.fn(async ({ select }: { select?: { version: boolean } }) =>
-        select ? { version: state.counter.version } : state.counter),
+      findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
+        select?.counter
+          ? { counter: state.counter.counter }
+          : select?.version
+            ? { version: state.counter.version }
+            : state.counter),
       create: vi.fn(async () => state.counter),
       updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
         if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
@@ -129,6 +133,19 @@ describe("FreeRecoveryReservationService", () => {
     await expect(service.release({ shopId: "shop-1", sourceKey: "recovery:3" })).resolves.toMatchObject({ kind: "already-released" });
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
     expect(transaction.usageEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("reactivates a released reservation on the same row and counter", async () => {
+    const { service, state, transaction } = createHarness();
+    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+    const reservationId = state.reservation!.id;
+    const counterId = state.reservation!.counterId;
+    await service.release({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+    expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
+    expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
   });
 
   it("rejects release after commit and cross-shop source replay", async () => {
@@ -218,7 +235,7 @@ describe("FreeRecoveryReservationService", () => {
     state.counter.committedQuantity = 2;
     state.counter.reservedQuantity = 1;
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reduced" }))
-      .resolves.toMatchObject({ kind: "allowance-exhausted", remaining: 0 });
+      .rejects.toThrow("Invalid lifetime Free recovery counter");
     expect(state.counter).toMatchObject({ committedQuantity: 2, reservedQuantity: 1, version: 0 });
   });
 });

@@ -57,6 +57,11 @@ export type RecoveryBillingAdmission =
       kind: "purchased";
       sourceKey: string;
       policy: EffectiveBillingPolicy;
+    }
+  | {
+      kind: "lifetime-free";
+      sourceKey: string;
+      policy: EffectiveBillingPolicy;
     };
 
 export type RecoveryBillingAdmissionResult =
@@ -88,45 +93,15 @@ export class RecoveryBillingService {
     }
 
     if (policy.planKind === "PAID_METERED") {
-      const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, true);
-      if (purchased) return purchased;
       return { kind: "admitted", admission: { kind: "paid", sourceKey, policy } };
     }
 
-    const reservationInput: FreeRecoveryReservationInput = {
-      shopId: input.shopId,
-      sourceKey,
-    };
-    const reservation = await this.reservationService.reserve(reservationInput);
-
-    if (reservation.kind === "allowance-exhausted") {
-      const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, false);
-      if (purchased) return purchased;
-      await this.createCapacityExhaustedMessage(input.shopId, policy);
-      return { kind: "blocked", reason: "allowance-exhausted" };
-    }
-
-    if (reservation.kind === "paused") {
-      return { kind: "blocked", reason: "paused" };
-    }
-
-    if (reservation.kind === "not-free") {
-      return { kind: "blocked", reason: "paused" };
-    }
-
-    if (
-      reservation.kind === "already-reserved" ||
-      reservation.kind === "already-committed" ||
-      reservation.kind === "already-released" ||
-      reservation.kind === "already-ambiguous"
-    ) {
-      return { kind: "blocked", reason: "reservation-in-flight" };
-    }
-
-    return {
-      kind: "admitted",
-      admission: { kind: "free", sourceKey, policy },
-    };
+    const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
+    if (purchased) return purchased;
+    const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
+    if (lifetimeFree) return lifetimeFree;
+    await this.createCapacityExhaustedMessage(input.shopId, policy);
+    return { kind: "blocked", reason: "allowance-exhausted" };
   }
 
   async commitSuccessfulInitiation(input: {
@@ -134,7 +109,7 @@ export class RecoveryBillingService {
     recoveryId: string;
     occurredAt: Date;
   }): Promise<void> {
-    if (input.admission.kind === "free") {
+    if (input.admission.kind === "free" || input.admission.kind === "lifetime-free") {
       await this.reservationService.commit({
         shopId: input.admission.policy.shopId,
         sourceKey: input.admission.sourceKey,
@@ -197,7 +172,7 @@ export class RecoveryBillingService {
       return disposition;
     }
 
-    if (input.admission.kind !== "free") return disposition;
+    if (input.admission.kind !== "free" && input.admission.kind !== "lifetime-free") return disposition;
 
     const reservationInput = {
       shopId: input.admission.policy.shopId,
@@ -221,7 +196,7 @@ export class RecoveryBillingService {
       });
       return;
     }
-    if (admission.kind !== "free") return;
+    if (admission.kind !== "free" && admission.kind !== "lifetime-free") return;
     await this.reservationService.release({
       shopId: admission.policy.shopId,
       sourceKey: admission.sourceKey,
@@ -232,25 +207,16 @@ export class RecoveryBillingService {
     shopId: string,
     sourceKey: string,
     policy: EffectiveBillingPolicy,
-    paid: boolean,
   ): Promise<RecoveryBillingAdmissionResult | null> {
-    const pack = policy.recoveryCreditPack;
-    if (!pack?.enabled) return null;
-    if (
-      paid &&
-      (pack.includedRecoveryConversationAllowance === null ||
-        pack.normalRecoveryUsageQuantity === null ||
-        pack.normalRecoveryUsageQuantity < pack.includedRecoveryConversationAllowance)
-    ) {
-      return null;
-    }
-
     const reservationInput: PurchasedRecoveryReservationInput = {
       shopId,
-      sourceKey: purchasedReservationSourceKey(sourceKey),
+      sourceKey,
     };
     const reservation = await this.purchasedReservationService.reserve(reservationInput);
-    if (reservation.kind === "reserved") {
+    if (reservation.kind === "reserved" || isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation) || isReleased(reservation)) {
+        return { kind: "blocked", reason: "reservation-in-flight" };
+      }
       return {
         kind: "admitted",
         admission: {
@@ -261,6 +227,55 @@ export class RecoveryBillingService {
       };
     }
     if (reservation.kind === "credits-exhausted") return null;
+    if (isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isReleased(reservation)) {
+        const reactivated = await this.reservationService.reserve({ shopId, sourceKey });
+        if (!isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+          return { kind: "blocked", reason: "reservation-in-flight" };
+        }
+      }
+      return {
+        kind: "admitted",
+        admission: { kind: "lifetime-free", sourceKey, policy },
+      };
+    }
+    return { kind: "blocked", reason: "reservation-in-flight" };
+  }
+
+  private async tryLifetimeFreeAdmission(
+    shopId: string,
+    sourceKey: string,
+    policy: EffectiveBillingPolicy,
+  ): Promise<RecoveryBillingAdmissionResult | null> {
+    const reservation = await this.reservationService.reserve({
+      shopId,
+      sourceKey,
+    });
+    if (reservation.kind === "reserved" || isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation) || isReleased(reservation)) {
+        return { kind: "blocked", reason: "reservation-in-flight" };
+      }
+      return {
+        kind: "admitted",
+        admission: { kind: "lifetime-free", sourceKey, policy },
+      };
+    }
+    if (reservation.kind === "allowance-exhausted") return null;
+    if (reservation.kind === "paused") return { kind: "blocked", reason: "paused" };
+    if (isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isReleased(reservation)) {
+        const reactivated = await this.purchasedReservationService.reserve({ shopId, sourceKey });
+        if (!isAdmittedReplay(reactivated, "PURCHASED_RECOVERY_CREDITS")) {
+          return { kind: "blocked", reason: "reservation-in-flight" };
+        }
+      }
+      return {
+        kind: "admitted",
+        admission: { kind: "purchased", sourceKey, policy },
+      };
+    }
     return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
@@ -310,10 +325,6 @@ export class RecoveryBillingService {
   }
 }
 
-function purchasedReservationSourceKey(sourceKey: string): string {
-  return `purchased:${sourceKey}`;
-}
-
 function isDefinitiveProviderFailure(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -323,6 +334,29 @@ function isDefinitiveProviderFailure(error: unknown): boolean {
     "code" in error &&
     (error.code === "configuration-missing" || error.code === "provider-rejected")
   );
+}
+
+function isOwnedBy(
+  reservation: { kind: string; counter?: string },
+  counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
+): boolean {
+  return "counter" in reservation && reservation.counter === counter;
+}
+
+function isAmbiguous(reservation: { kind: string }): boolean {
+  return reservation.kind === "ambiguous" || reservation.kind === "already-ambiguous";
+}
+
+function isReleased(reservation: { kind: string }): boolean {
+  return reservation.kind === "released" || reservation.kind === "already-released";
+}
+
+function isAdmittedReplay(
+  reservation: { kind: string; counter?: string },
+  counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
+): boolean {
+  return isOwnedBy(reservation, counter) &&
+    (reservation.kind === "reserved" || reservation.kind === "already-reserved" || reservation.kind === "already-committed");
 }
 
 export const recoveryBillingService = new RecoveryBillingService();

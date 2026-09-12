@@ -429,7 +429,7 @@ export class BillingSubscriptionReconciliationService {
         || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt?.toISOString()
         || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()
       ) return false;
-      const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" } }, select: { id: true } });
+      const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } }, select: { id: true } });
       const policy = lifetimeCounter
         ? null
         : await transaction.platformBillingPolicy.findUnique({ where: { id: "default" }, select: { lifetimeFreeRecoveryAllowance: true } });
@@ -476,9 +476,9 @@ export class BillingSubscriptionReconciliationService {
       if (!lifetimeCounter) {
         if (!policy) throw new Error("PlatformBillingPolicy.default is required for first lifetime Free grant");
         await transaction.shopEntitlementCounter.upsert({
-          where: { shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" } },
+          where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
           update: {},
-          create: { shopId, counter: "FREE_RECOVERY_LIFETIME", grantedQuantity: policy.lifetimeFreeRecoveryAllowance },
+          create: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: policy.lifetimeFreeRecoveryAllowance },
         });
       }
       return true;
