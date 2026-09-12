@@ -16,6 +16,7 @@ import type {
   BillingPolicyClient,
   EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
+import type { ReservationCounter } from "./purchased-recovery-reservation.service.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
 
@@ -26,14 +27,14 @@ export type FreeRecoveryReservationInput = {
 };
 
 export type ReservationOutcome =
-  | { kind: "reserved"; reservation: UsageReservation }
+  | { kind: "reserved"; reservation: UsageReservation; counter: ReservationCounter }
   | { kind: "committed"; reservation: UsageReservation }
   | { kind: "released"; reservation: UsageReservation }
   | { kind: "ambiguous"; reservation: UsageReservation }
-  | { kind: "already-reserved"; reservation: UsageReservation }
-  | { kind: "already-committed"; reservation: UsageReservation }
-  | { kind: "already-released"; reservation: UsageReservation }
-  | { kind: "already-ambiguous"; reservation: UsageReservation }
+  | { kind: "already-reserved"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-committed"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-released"; reservation: UsageReservation; counter: ReservationCounter }
+  | { kind: "already-ambiguous"; reservation: UsageReservation; counter: ReservationCounter }
   | { kind: "allowance-exhausted"; remaining: number }
   | { kind: "paused" };
 
@@ -114,7 +115,7 @@ export class FreeRecoveryReservationService {
     });
     if (existing) {
       assertReservationShop(existing, input.shopId);
-      return replayOutcome(existing);
+      return replayOutcome(existing, await this.readReservationCounter(transaction, existing));
     }
 
     const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
@@ -157,7 +158,7 @@ export class FreeRecoveryReservationService {
         quantity,
       },
     });
-    return { kind: "reserved", reservation };
+    return { kind: "reserved", reservation, counter: "LIFETIME_FREE_RECOVERY_CREDITS" };
   }
 
   private async commitInTransaction(
@@ -166,7 +167,9 @@ export class FreeRecoveryReservationService {
     quantity: number,
   ): Promise<ReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "LIFETIME_FREE_RECOVERY_CREDITS");
+    }
     if (reservation.quantity !== quantity) {
       throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
@@ -217,7 +220,9 @@ export class FreeRecoveryReservationService {
     if (reservation.status === UsageReservationStatus.COMMITTED) {
       throw new FreeRecoveryReservationError("Committed reservations cannot be released");
     }
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "LIFETIME_FREE_RECOVERY_CREDITS");
+    }
     if (reservation.quantity !== quantity) {
       throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
@@ -249,7 +254,9 @@ export class FreeRecoveryReservationService {
     input: FreeRecoveryReservationInput,
   ): Promise<ReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) return replayOutcome(reservation);
+    if (reservation.status !== UsageReservationStatus.RESERVED) {
+      return replayOutcome(reservation, "LIFETIME_FREE_RECOVERY_CREDITS");
+    }
     const ambiguous = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.AMBIGUOUS },
@@ -283,6 +290,23 @@ export class FreeRecoveryReservationService {
     return counter.version;
   }
 
+  private async readReservationCounter(
+    transaction: ReservationTransaction,
+    reservation: UsageReservation,
+  ): Promise<ReservationCounter> {
+    if (!reservation.counterId) {
+      throw new FreeRecoveryReservationError("Reservation counter does not exist");
+    }
+    const counter = await transaction.shopEntitlementCounter.findUnique({
+      where: { id: reservation.counterId },
+      select: { counter: true },
+    });
+    if (counter?.counter !== "PURCHASED_RECOVERY_CREDITS" && counter?.counter !== "LIFETIME_FREE_RECOVERY_CREDITS") {
+      throw new FreeRecoveryReservationError("Reservation counter is not a recovery capacity counter");
+    }
+    return counter.counter;
+  }
+
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
     for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
       try {
@@ -303,16 +327,16 @@ function validateQuantity(quantity: number | undefined): number {
   return value;
 }
 
-function replayOutcome(reservation: UsageReservation): ReservationOutcome {
+function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): ReservationOutcome {
   switch (reservation.status) {
     case UsageReservationStatus.RESERVED:
-      return { kind: "already-reserved", reservation };
+      return { kind: "already-reserved", reservation, counter };
     case UsageReservationStatus.COMMITTED:
-      return { kind: "already-committed", reservation };
+      return { kind: "already-committed", reservation, counter };
     case UsageReservationStatus.RELEASED:
-      return { kind: "already-released", reservation };
+      return { kind: "already-released", reservation, counter };
     case UsageReservationStatus.AMBIGUOUS:
-      return { kind: "already-ambiguous", reservation };
+      return { kind: "already-ambiguous", reservation, counter };
   }
 }
 

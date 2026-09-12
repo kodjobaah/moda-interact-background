@@ -93,17 +93,10 @@ export class RecoveryBillingService {
     }
 
     if (policy.planKind === "PAID_METERED") {
-      if (!paidIncludedCapacityExhausted(policy)) {
-        return { kind: "admitted", admission: { kind: "paid", sourceKey, policy } };
-      }
-      const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, true);
-      if (purchased) return purchased;
-      const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
-      if (lifetimeFree) return lifetimeFree;
-      return { kind: "blocked", reason: "allowance-exhausted" };
+      return { kind: "admitted", admission: { kind: "paid", sourceKey, policy } };
     }
 
-    const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, false);
+    const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
     if (purchased) return purchased;
     const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
     if (lifetimeFree) return lifetimeFree;
@@ -214,26 +207,13 @@ export class RecoveryBillingService {
     shopId: string,
     sourceKey: string,
     policy: EffectiveBillingPolicy,
-    paid: boolean,
   ): Promise<RecoveryBillingAdmissionResult | null> {
-    const pack = policy.recoveryCreditPack;
-    if (!pack?.enabled) return null;
-    if (paid) {
-      if (
-        pack.includedRecoveryConversationAllowance === null ||
-        pack.normalRecoveryUsageQuantity === null ||
-        pack.normalRecoveryUsageQuantity < pack.includedRecoveryConversationAllowance
-      ) {
-        return null;
-      }
-    }
-
     const reservationInput: PurchasedRecoveryReservationInput = {
       shopId,
-      sourceKey: purchasedReservationSourceKey(sourceKey),
+      sourceKey,
     };
     const reservation = await this.purchasedReservationService.reserve(reservationInput);
-    if (reservation.kind === "reserved") {
+    if (reservation.kind === "reserved" || isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
       return {
         kind: "admitted",
         admission: {
@@ -244,6 +224,12 @@ export class RecoveryBillingService {
       };
     }
     if (reservation.kind === "credits-exhausted") return null;
+    if (isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+      return {
+        kind: "admitted",
+        admission: { kind: "lifetime-free", sourceKey, policy },
+      };
+    }
     return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
@@ -256,7 +242,7 @@ export class RecoveryBillingService {
       shopId,
       sourceKey,
     });
-    if (reservation.kind === "reserved") {
+    if (reservation.kind === "reserved" || isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
       return {
         kind: "admitted",
         admission: { kind: "lifetime-free", sourceKey, policy },
@@ -264,6 +250,12 @@ export class RecoveryBillingService {
     }
     if (reservation.kind === "allowance-exhausted") return null;
     if (reservation.kind === "paused") return { kind: "blocked", reason: "paused" };
+    if (isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+      return {
+        kind: "admitted",
+        admission: { kind: "purchased", sourceKey, policy },
+      };
+    }
     return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
@@ -313,20 +305,6 @@ export class RecoveryBillingService {
   }
 }
 
-function purchasedReservationSourceKey(sourceKey: string): string {
-  return `purchased:${sourceKey}`;
-}
-
-function paidIncludedCapacityExhausted(policy: EffectiveBillingPolicy): boolean {
-  const pack = policy.recoveryCreditPack;
-  return Boolean(
-    pack?.enabled &&
-      pack.includedRecoveryConversationAllowance !== null &&
-      pack.normalRecoveryUsageQuantity !== null &&
-      pack.normalRecoveryUsageQuantity >= pack.includedRecoveryConversationAllowance,
-  );
-}
-
 function isDefinitiveProviderFailure(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -336,6 +314,13 @@ function isDefinitiveProviderFailure(error: unknown): boolean {
     "code" in error &&
     (error.code === "configuration-missing" || error.code === "provider-rejected")
   );
+}
+
+function isOwnedBy(
+  reservation: { kind: string; counter?: string },
+  counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
+): boolean {
+  return "counter" in reservation && reservation.counter === counter;
 }
 
 export const recoveryBillingService = new RecoveryBillingService();

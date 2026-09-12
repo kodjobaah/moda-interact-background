@@ -41,8 +41,10 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
           observedShopifyPlanHandle: plan.shopifyPlanHandle,
         },
       });
-      await database.platformBillingPolicy.create({
-        data: {
+      await database.platformBillingPolicy.upsert({
+        where: { id: "default" },
+        update: {},
+        create: {
           absoluteOutboundHardLimit: 20,
           defaultWarningPercent: 80,
         },

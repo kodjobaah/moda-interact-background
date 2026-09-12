@@ -20,8 +20,12 @@ function createHarness(grantedQuantity = 1) {
 
   const transaction = {
     shopEntitlementCounter: {
-      findUnique: vi.fn(async ({ select }: { select?: { version: boolean } }) =>
-        select ? { version: state.counter.version } : { ...state.counter }),
+      findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
+        select?.counter
+          ? { counter: state.counter.counter }
+          : select?.version
+            ? { version: state.counter.version }
+            : { ...state.counter }),
       create: vi.fn(async () => state.counter),
       updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; reservedQuantity?: { gte: number } }; data: Record<string, unknown> }) => {
         if (where.id !== state.counter.id || where.version !== state.counter.version) return { count: 0 };
