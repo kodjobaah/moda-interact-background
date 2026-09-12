@@ -110,6 +110,10 @@ export class RecoveryBillingService {
         };
       }
       if (paid.kind === "allowance-exhausted") {
+        const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
+        if (purchased) return purchased;
+        const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
+        if (lifetimeFree) return lifetimeFree;
         return { kind: "blocked", reason: "allowance-exhausted" };
       }
       return { kind: "blocked", reason: "reservation-in-flight" };

@@ -246,18 +246,20 @@ describe("RecoveryBillingService", () => {
     const database = createDatabase();
     const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
     const paidReservationService = paidIncludedReservationService("allowance-exhausted");
-    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const purchasedReservationService = { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const lifetimeReservationService = { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
     const service = new RecoveryBillingService(
       database as never,
       policyResolver as never,
-      undefined as never,
+      lifetimeReservationService as never,
       purchasedReservationService as never,
       paidReservationService as never,
     );
 
     await expect(service.admit({ shopId: "shop-1", recoveryId: "recovery-overage" }))
       .resolves.toEqual({ kind: "blocked", reason: "allowance-exhausted" });
-    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+    expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
+    expect(lifetimeReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 

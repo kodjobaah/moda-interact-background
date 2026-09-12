@@ -160,12 +160,15 @@ export class PaidIncludedRecoveryReservationService {
 
     if (existing) {
       assertReservationShop(existing, input.shopId);
+      const periodCounter = await this.requireCounter(transaction, period);
+      if (existing.billingPeriodEntitlementCounterId !== periodCounter.id) {
+        throw new PaidIncludedRecoveryReservationError("Reservation belongs to another billing period counter");
+      }
       const counter = await this.readCounter(transaction, existing);
       if (existing.status === UsageReservationStatus.RELEASED) {
         if (existing.quantity !== quantity) {
           throw new PaidIncludedRecoveryReservationError("Reservation quantity does not match the requested transition");
         }
-        const periodCounter = await this.requireCounter(transaction, period);
         const available = availableQuantity(periodCounter);
         if (available < quantity) return replayOutcome(existing, sourceKey, counter);
         const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
@@ -245,10 +248,22 @@ export class PaidIncludedRecoveryReservationService {
       period.status !== BillingPeriodStatus.OPEN ||
       period.periodEnd <= now ||
       subscription.billingPeriodId !== period.id ||
+      period.shopId !== input.shopId ||
+      period.subscriptionId !== subscription.id ||
+      counter.shopId !== input.shopId ||
+      counter.billingPeriodId !== period.id ||
       subscription.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
       subscription.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
     ) {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer current and open");
+    }
+
+    const plan = await transaction.subscription.findUnique({
+      where: { shopId: input.shopId },
+      select: { plan: { select: { kind: true, shopifyUsageEventHandle: true } } },
+    });
+    if (plan?.plan?.kind !== BillingPlanKind.PAID_METERED || !plan.plan.shopifyUsageEventHandle) {
+      throw new PaidIncludedRecoveryReservationError("Paid normal usage meter is missing");
     }
 
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
@@ -353,8 +368,12 @@ export class PaidIncludedRecoveryReservationService {
       !subscription ||
       !period ||
       !policy.billingPeriod ||
+      policy.shopId !== shopId ||
+      policy.subscriptionId !== subscription.id ||
       policy.billingPeriod.id !== period.id ||
       subscription.billingPeriodId !== period.id ||
+      period.shopId !== shopId ||
+      period.subscriptionId !== subscription.id ||
       period.status !== BillingPeriodStatus.OPEN ||
       period.periodEnd <= now ||
       subscription.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
