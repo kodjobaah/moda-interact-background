@@ -1013,4 +1013,105 @@ describe("RecoveryBillingService", () => {
     expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(lifetimeReservationService.reserve).not.toHaveBeenCalled();
   });
+
+  it("reserves selected promotion before paid included capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({
+        kind: "reserved" as const,
+        reservation: {},
+        sourceKey,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "promo-first" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "promotional" } });
+    expect(promotionalReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:promo-first",
+      planId: "plan-1",
+    });
+    expect(paidReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("falls back to purchased capacity when the selected promotion is unavailable", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "promo-fallback" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:promo-fallback",
+    });
+  });
+
+  it("routes promotional lifecycle transitions to the exact-grant service", async () => {
+    const database = createDatabase();
+    const policy = { ...freePolicy(), planId: "plan-1" };
+    const policyResolver = { resolve: vi.fn(async () => policy) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({
+        kind: "reserved" as const,
+        reservation: {},
+        sourceKey,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "promo-lifecycle" });
+
+    if (admitted.kind !== "admitted") throw new Error("expected promotional admission");
+    await service.commitSuccessfulInitiation({ admission: admitted.admission, recoveryId: "promo-lifecycle", occurredAt: new Date() });
+
+    expect(promotionalReservationService.commit).toHaveBeenCalledWith({
+      shopId: policy.shopId,
+      sourceKey: "recovery:shop-1:promo-lifecycle",
+      planId: "plan-1",
+    });
+  });
 });
