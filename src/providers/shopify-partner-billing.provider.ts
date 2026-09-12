@@ -1,8 +1,3 @@
-import {
-  SHOPIFY_SUBSCRIPTION_CANCELLATION_ARGS,
-  type SubscriptionCancellationMode,
-} from "@modainteract/moda-interact-shared/billing";
-
 export type PartnerUsageSnapshot = {
   handle: string;
   quantity: number | null;
@@ -26,10 +21,6 @@ export type PartnerSubscription = {
 
 export interface ShopifyPartnerBillingProvider {
   getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null>;
-  cancelSubscription(input: {
-    shopifyShopId: string;
-    mode: SubscriptionCancellationMode;
-  }): Promise<{ summary: string }>;
 }
 
 export class ShopifyPartnerBillingError extends Error {
@@ -71,16 +62,6 @@ type PartnerResponse = {
   errors?: Array<{ message: string }>;
 };
 
-type CancellationResponse = {
-  data?: {
-    appSubscriptionCancel?: {
-      appSubscription: { id: string } | null;
-      userErrors: Array<{ field: string[] | null; message: string }>;
-    };
-  };
-  errors?: Array<{ message: string }>;
-};
-
 const ACTIVE_SUBSCRIPTION_QUERY = `
   query ActiveSubscription($appId: ID!, $shopId: ID!) {
     activeSubscription(appId: $appId, shopId: $shopId) {
@@ -115,27 +96,6 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
           }
         }
       }
-    }
-  }
-`;
-
-const CANCEL_SUBSCRIPTION_MUTATION = `
-  mutation CancelSubscription(
-    $appId: ID!
-    $shopId: ID!
-    $deferCancellation: Boolean!
-    $prorate: Boolean!
-    $skipFinalUsageCharge: Boolean!
-  ) {
-    appSubscriptionCancel(
-      appId: $appId
-      shopId: $shopId
-      deferCancellation: $deferCancellation
-      prorate: $prorate
-      skipFinalUsageCharge: $skipFinalUsageCharge
-    ) {
-      appSubscription { id }
-      userErrors { field message }
     }
   }
 `;
@@ -217,56 +177,6 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
         costCurrency: item.usage?.cost?.currencyCode ?? null,
       }] : []),
     };
-  }
-
-  async cancelSubscription(input: {
-    shopifyShopId: string;
-    mode: SubscriptionCancellationMode;
-  }): Promise<{ summary: string }> {
-    const config = this.readConfig();
-    const args = SHOPIFY_SUBSCRIPTION_CANCELLATION_ARGS[input.mode];
-    if (!args) {
-      throw new ShopifyPartnerBillingError("Unsupported subscription cancellation mode", "invalid-mode", false);
-    }
-    const response = await this.fetchImpl(
-      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": config.accessToken,
-        },
-        body: JSON.stringify({
-          query: CANCEL_SUBSCRIPTION_MUTATION,
-          variables: {
-            appId: config.appId,
-            shopId: input.shopifyShopId,
-            ...args,
-          },
-        }),
-      },
-    );
-    if (!response.ok) throw providerHttpError(response.status);
-    const result = await response.json() as CancellationResponse;
-    if (result.errors?.length) {
-      throw new ShopifyPartnerBillingError(
-        result.errors.map((error) => error.message).join(", ").slice(0, 2000),
-        "graphql-error",
-        true,
-      );
-    }
-    const payload = result.data?.appSubscriptionCancel;
-    if (!payload) {
-      throw new ShopifyPartnerBillingError("Shopify Partner cancellation response was empty", "empty-response", true);
-    }
-    if (payload.userErrors.length > 0) {
-      throw new ShopifyPartnerBillingError(
-        payload.userErrors.map((error) => error.message).join(", ").slice(0, 2000),
-        "user-error",
-        false,
-      );
-    }
-    return { summary: "Shopify Partner accepted appSubscriptionCancel" };
   }
 
   private readConfig(): { orgId: string; accessToken: string; appId: string } {

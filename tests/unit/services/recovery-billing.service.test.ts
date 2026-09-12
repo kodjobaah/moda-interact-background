@@ -126,12 +126,12 @@ describe("RecoveryBillingService", () => {
     expect(database.transactionMessageUpsert).toHaveBeenCalledTimes(2);
     expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_FREE_ALLOWANCE_EXHAUSTED:free-allowance:subscription-1:5:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:capacity-exhausted:free-allowance:subscription-1:5:1" },
       }),
     );
     expect(database.transactionMessageUpsert.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_FREE_ALLOWANCE_EXHAUSTED:free-allowance:subscription-1:5:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:capacity-exhausted:free-allowance:subscription-1:5:1" },
       }),
     );
   });
@@ -167,10 +167,10 @@ describe("RecoveryBillingService", () => {
     expect(database.messages.size).toBe(2);
     expect(database.messageUpsert).toHaveBeenCalledTimes(3);
     expect([...database.messages.keys()][0]).toContain(
-      "free-allowance:subscription-1:5",
+      "capacity-exhausted:free-allowance:subscription-1:5",
     );
     expect([...database.messages.keys()][1]).toContain(
-      "free-allowance:subscription-2:4",
+      "capacity-exhausted:free-allowance:subscription-2:4",
     );
   });
 

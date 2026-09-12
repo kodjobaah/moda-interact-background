@@ -102,7 +102,7 @@ export class RecoveryBillingService {
     if (reservation.kind === "allowance-exhausted") {
       const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy, false);
       if (purchased) return purchased;
-      await this.createAllowanceExhaustedMessage(input.shopId, policy);
+      await this.createCapacityExhaustedMessage(input.shopId, policy);
       return { kind: "blocked", reason: "allowance-exhausted" };
     }
 
@@ -264,12 +264,12 @@ export class RecoveryBillingService {
     return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
-  private async createAllowanceExhaustedMessage(
+  private async createCapacityExhaustedMessage(
     shopId: string,
     policy: EffectiveBillingPolicy,
   ): Promise<void> {
-    const systemCode = BILLING_SYSTEM_MESSAGE_CODES.FREE_ALLOWANCE_EXHAUSTED;
-    const exhaustionLifecycle = `free-allowance:${policy.subscriptionId}:${policy.freeAllowance!.effective}`;
+    const systemCode = BILLING_SYSTEM_MESSAGE_CODES.RECOVERY_CAPACITY_EXHAUSTED;
+    const exhaustionLifecycle = `capacity-exhausted:free-allowance:${policy.subscriptionId}:${policy.freeAllowance!.effective}`;
     const sourceKey = createMerchantBillingSystemSourceKey(
       shopId,
       systemCode,
@@ -292,7 +292,7 @@ export class RecoveryBillingService {
           kind: MerchantSupportMessageKind.SYSTEM,
           state: MerchantSupportMessageState.AVAILABLE,
           originalBody:
-            "Your free recovery allowance has been used. Choose a paid plan to start new recovery conversations.",
+            "Your recovery capacity has been used. Choose a paid plan to start new recovery conversations.",
           sourceLanguageTag: "en-GB",
           systemCode,
           systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
