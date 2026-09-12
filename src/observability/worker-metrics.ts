@@ -13,14 +13,16 @@ type WorkerName =
   | "order"
   | "pending-recovery-candidate"
   | "whatsapp"
-  | "merchant-communications";
+  | "merchant-communications"
+  | "billing-subscription-reconciliation";
 
 type QueueName =
   | "checkout-events"
   | "order-events"
   | "pending-recovery-candidates"
   | "whatsapp-events"
-  | "merchant-communications";
+  | "merchant-communications"
+  | "billing-subscription-reconcile";
 
 type WorkerMetricDefinition = {
   workerName: WorkerName;

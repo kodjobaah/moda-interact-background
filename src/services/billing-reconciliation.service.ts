@@ -181,6 +181,25 @@ export class BillingReconciliationService {
   private async applySubscription(shopId: string, provider: PartnerSubscription | null): Promise<{ billingPeriodId: string | null; packMeterHandle: string | null }> {
     const now = this.now();
     if (!provider) {
+      const existing = await this.database.subscription.findUnique({
+        where: { shopId },
+        select: {
+          pendingShopifyPlanHandle: true,
+          pendingPlanId: true,
+          pendingEffectiveAt: true,
+        },
+      });
+      const pending = existing?.pendingPlanId && existing.pendingShopifyPlanHandle
+        ? {
+            pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle,
+            pendingPlanId: existing.pendingPlanId,
+            pendingEffectiveAt: existing.pendingEffectiveAt,
+          }
+        : {
+            pendingShopifyPlanHandle: null,
+            pendingPlanId: null,
+            pendingEffectiveAt: null,
+          };
       await this.database.subscription.upsert({
         where: { shopId },
         update: {
@@ -196,9 +215,7 @@ export class BillingReconciliationService {
           lastSyncedAt: now,
           lastSyncErrorCode: null,
           lastSyncErrorAt: null,
-          pendingShopifyPlanHandle: null,
-          pendingPlanId: null,
-          pendingEffectiveAt: null,
+          ...pending,
         },
         create: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT, lastSyncedAt: now },
       });
@@ -215,6 +232,23 @@ export class BillingReconciliationService {
         shopifyRecoveryCreditPackEventHandle: true,
       },
     });
+    const existing = await this.database.subscription.findUnique({
+      where: { shopId },
+      select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
+    });
+    const settings = await this.database.shopSettings.findUnique({
+      where: { shopId },
+      select: { onboardingCompleted: true },
+    });
+    if (
+      settings?.onboardingCompleted === false
+      && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
+      && existing.planId === null
+      && existing.pendingPlanId !== null
+      && existing.pendingShopifyPlanHandle === provider.planHandle
+    ) {
+      return { billingPeriodId: null, packMeterHandle: null };
+    }
     const planUsable = Boolean(plan?.active);
     const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED ||
       Boolean(plan?.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
@@ -242,6 +276,7 @@ export class BillingReconciliationService {
           update: { status: BillingPeriodStatus.OPEN },
           create: {
             shopId,
+            subscriptionId: (await this.database.subscription.findUniqueOrThrow({ where: { shopId }, select: { id: true } })).id,
             periodStart: provider.currentPeriodStart,
             periodEnd: provider.currentPeriodEnd,
             status: BillingPeriodStatus.OPEN,
@@ -338,13 +373,12 @@ export class BillingReconciliationService {
     await this.database.subscription.upsert({
       where: { shopId },
       update: {
-        status: SubscriptionProjectionStatus.SYNC_ERROR,
         lastSyncErrorCode: "PARTNER_API_ERROR",
         lastSyncErrorAt: this.now(),
       },
       create: {
         shopId,
-        status: SubscriptionProjectionStatus.SYNC_ERROR,
+        status: SubscriptionProjectionStatus.NO_CONTRACT,
         lastSyncErrorCode: "PARTNER_API_ERROR",
         lastSyncErrorAt: this.now(),
       },

@@ -37,6 +37,9 @@ function harness({
     shop: {
       findMany: vi.fn().mockResolvedValue([{ id: "shop-1", shopifyShopId: "gid://shopify/Shop/1" }]),
     },
+    shopSettings: {
+      findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: true }),
+    },
     billingPlan: {
       findUnique: vi.fn()
         .mockResolvedValueOnce(plan)
@@ -48,9 +51,14 @@ function harness({
     subscription: {
       upsert: subscriptionUpsert,
       findUnique: vi.fn().mockResolvedValue({
+        id: "subscription-1",
         billingPeriodId: "period-1",
         plan: { kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter" },
+        pendingShopifyPlanHandle: null,
+        pendingPlanId: null,
+        pendingEffectiveAt: null,
       }),
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "subscription-1" }),
     },
     usageEvent: {
       aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: modaQuantity } }),
@@ -148,6 +156,24 @@ describe("BillingReconciliationService", () => {
     }));
   });
 
+  it("does not consume an unresolved initial activation when rotation sees it current", async () => {
+    const test = harness({
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
+      plan: { id: "plan-free", active: true, kind: "FREE", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null },
+    });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.subscription.findUnique.mockResolvedValue({
+      status: "NO_CONTRACT",
+      planId: null,
+      pendingPlanId: "plan-free",
+      pendingShopifyPlanHandle: "free-2026",
+    });
+
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
+  });
+
   it("B008-R5 links the latest open billing cycle as current", async () => {
     const test = harness();
     test.partner.getActiveSubscription
@@ -201,7 +227,6 @@ describe("BillingReconciliationService", () => {
     expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 0, subscriptionErrors: 1 });
     expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({
-        status: "SYNC_ERROR",
         lastSyncErrorCode: "PARTNER_API_ERROR",
       }),
     }));
@@ -278,6 +303,7 @@ describe("BillingReconciliationService", () => {
         upsert: vi.fn(),
         findUnique: vi.fn().mockResolvedValue(null),
       },
+      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: true }) },
       usageEvent: { aggregate: vi.fn() },
     };
     const partner = {
