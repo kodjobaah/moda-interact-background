@@ -10,7 +10,10 @@ import type { PrismaClient, UsageReservation } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
-import { EffectiveBillingPolicyResolver } from "./effective-billing-policy.service.js";
+import {
+  EffectiveBillingPolicyResolver,
+  type BillingPolicyClient,
+} from "./effective-billing-policy.service.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
 
@@ -47,11 +50,14 @@ type ReservationDatabase = Pick<
   PrismaClient,
   "$transaction" | "usageReservation" | "promotionalCreditGrant" | "merchantPromotionSelection" | "usageEvent"
 >;
+type PolicyResolverFactory = (client: BillingPolicyClient) => Pick<EffectiveBillingPolicyResolver, "resolve">;
 
 export class PromotionalRecoveryReservationService {
   constructor(
     private readonly database: ReservationDatabase = prisma,
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
+    private readonly now: () => Date = () => new Date(),
+    private readonly createPolicyResolver: PolicyResolverFactory = (client) => new EffectiveBillingPolicyResolver(client),
   ) {}
 
   async reserve(input: PromotionalRecoveryReservationInput): Promise<PromotionalReservationOutcome> {
@@ -113,7 +119,7 @@ export class PromotionalRecoveryReservationService {
         if (!grant || grant.id !== existing.promotionalCreditGrantId || availableQuantity(grant) < quantity) {
           return { kind: "already-released", reservation: existing, sourceKey: input.sourceKey };
         }
-        await this.reserveGrant(transaction, grant, quantity, input.now ?? new Date());
+        await this.reserveGrant(transaction, grant, quantity);
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
           data: { status: UsageReservationStatus.RESERVED },
@@ -126,7 +132,7 @@ export class PromotionalRecoveryReservationService {
     const grant = await this.findUsableGrant(transaction, input);
     if (!grant || availableQuantity(grant) < quantity) return { kind: "unavailable" };
 
-    await this.reserveGrant(transaction, grant, quantity, input.now ?? new Date());
+    await this.reserveGrant(transaction, grant, quantity);
     const reservation = await transaction.usageReservation.create({
       data: {
         shopId: input.shopId,
@@ -157,8 +163,14 @@ export class PromotionalRecoveryReservationService {
     if (!grant || grant.shopId !== input.shopId || grant.reservedQuantity < quantity) {
       throw new PromotionalRecoveryReservationError("Promotional grant does not exist or has insufficient reservation");
     }
-    const now = input.now ?? new Date();
-    const remainingAfterCommit = grant.quantity - grant.committedQuantity - grant.reservedQuantity;
+    const now = input.now ?? this.now();
+    const committedAfter = grant.committedQuantity + quantity;
+    const reservedAfter = grant.reservedQuantity - quantity;
+    const remainingAfterCommit = grant.quantity - committedAfter - reservedAfter;
+    if (reservedAfter < 0 || remainingAfterCommit < 0) {
+      throw new PromotionalRecoveryReservationError("Promotional grant accounting would become negative");
+    }
+    const exhaustedAt = grant.exhaustedAt ?? (remainingAfterCommit === 0 ? now : undefined);
     const updatedGrant = await transaction.promotionalCreditGrant.updateMany({
       where: { id: grant.id, version: grant.version, reservedQuantity: { gte: quantity } },
       data: {
@@ -166,7 +178,7 @@ export class PromotionalRecoveryReservationService {
         committedQuantity: { increment: quantity },
         firstUsedAt: grant.firstUsedAt ?? now,
         lastUsedAt: now,
-        exhaustedAt: remainingAfterCommit <= quantity ? now : grant.exhaustedAt,
+        ...(exhaustedAt !== undefined ? { exhaustedAt } : {}),
         version: { increment: 1 },
       },
     });
@@ -242,8 +254,8 @@ export class PromotionalRecoveryReservationService {
     transaction: ReservationTransaction,
     input: PromotionalRecoveryReservationInput,
   ) {
-    const now = input.now ?? new Date();
-    const policy = await new EffectiveBillingPolicyResolver(transaction).resolve(input.shopId, now);
+    const now = input.now ?? this.now();
+    const policy = await this.createPolicyResolver(transaction).resolve(input.shopId, now);
     if (policy.newRecoveriesPaused) return null;
     const selection = await transaction.merchantPromotionSelection.findUnique({
       where: { shopId: input.shopId },
@@ -265,7 +277,6 @@ export class PromotionalRecoveryReservationService {
     transaction: ReservationTransaction,
     grant: NonNullable<Awaited<ReturnType<PromotionalRecoveryReservationService["findUsableGrant"]>>>,
     quantity: number,
-    now: Date,
   ): Promise<void> {
     const updatedGrant = await transaction.promotionalCreditGrant.updateMany({
       where: {
@@ -275,9 +286,6 @@ export class PromotionalRecoveryReservationService {
       },
       data: {
         reservedQuantity: { increment: quantity },
-        firstSelectedAt: grant.firstSelectedAt ?? now,
-        lastSelectedAt: now,
-        selectionCount: { increment: 1 },
         version: { increment: 1 },
       },
     });
