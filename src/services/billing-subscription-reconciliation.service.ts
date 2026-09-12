@@ -411,7 +411,7 @@ export class BillingSubscriptionReconciliationService {
         ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS))
         : new Date(now.getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS)
       : null;
-    await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+    const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, subscriptionId);
       const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
@@ -428,7 +428,7 @@ export class BillingSubscriptionReconciliationService {
         || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle
         || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt?.toISOString()
         || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()
-      ) return;
+      ) return false;
       const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" } }, select: { id: true } });
       const policy = lifetimeCounter
         ? null
@@ -481,8 +481,9 @@ export class BillingSubscriptionReconciliationService {
           create: { shopId, counter: "FREE_RECOVERY_LIFETIME", grantedQuantity: policy.lifetimeFreeRecoveryAllowance },
         });
       }
+      return true;
     });
-    if (nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+    if (committed === true && nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
   }
 
   private async applyOtherCurrentPlan(

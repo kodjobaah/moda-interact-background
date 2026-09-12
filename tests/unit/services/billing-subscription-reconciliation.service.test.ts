@@ -264,6 +264,31 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(test.transaction.$queryRaw.mock.invocationCallOrder[1]);
   });
 
+  it("does not commit or publish when the locked Free activation state is stale", async () => {
+    const test = harness({
+      row: pendingRow(),
+      providerResult: freeProvider,
+      plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true },
+    });
+    test.transaction.subscription.findUnique.mockResolvedValue({
+      status: "NO_CONTRACT",
+      planId: null,
+      pendingPlanId: "plan-newer",
+      pendingShopifyPlanHandle: "free-newer",
+      pendingEffectiveAt,
+      nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"),
+    });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
+    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
+    expect(test.queue.add).not.toHaveBeenCalled();
+  });
+
   it("replays an existing lifetime counter without requiring the policy", async () => {
     const test = harness({
       row: pendingRow(),
