@@ -19,8 +19,30 @@ export type PartnerSubscription = {
   providerUsageSnapshot: PartnerUsageSnapshot[];
 };
 
+export type PartnerSubscriptionLifecycleEvent = {
+  id: string;
+  eventType:
+    | "SUBSCRIPTION_CREATED"
+    | "SUBSCRIPTION_UPDATED"
+    | "SUBSCRIPTION_CANCELLATION_SCHEDULED"
+    | "SUBSCRIPTION_CANCELED"
+    | "SUBSCRIPTION_FROZEN"
+    | "SUBSCRIPTION_UNFROZEN";
+  state: "CREATED" | "UPDATED" | "CANCELLATION_SCHEDULED" | "CANCELED" | "FROZEN" | "UNFROZEN";
+  occurredAt: Date;
+  cancelEffectiveOn: string | null;
+  planHandle: string | null;
+  billingPeriod: string | null;
+};
+
+export type PartnerSubscriptionReconciliationSnapshot = {
+  activeSubscription: PartnerSubscription | null;
+  latestLifecycleEvent: PartnerSubscriptionLifecycleEvent | null;
+};
+
 export interface ShopifyPartnerBillingProvider {
   getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null>;
+  getSubscriptionReconciliationSnapshot(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot>;
 }
 
 export class ShopifyPartnerBillingError extends Error {
@@ -100,6 +122,93 @@ const ACTIVE_SUBSCRIPTION_QUERY = `
   }
 `;
 
+const SUBSCRIPTION_RECONCILIATION_SNAPSHOT_QUERY = `
+  query SubscriptionReconciliationSnapshot(
+    $appId: ID!
+    $shopId: ID!
+    $occurredAtMin: DateTime!
+    $occurredAtMax: DateTime!
+    $eventTypes: [EventType!]
+  ) {
+    activeSubscription(appId: $appId, shopId: $shopId) {
+      cancelAtEndOfCycle
+      billingPeriod
+      trialEndsAt
+      currentBillingCycle { startTime endTime }
+      legacySubscriptionId
+      items {
+        handle
+        description
+        price {
+          __typename
+          active
+          currency
+          ... on FlatRatePrice { amount }
+          ... on TieredPrice { tiersMode tiers { upTo amountPerUnit amount } }
+        }
+        usage { quantity cost { amount currencyCode } }
+      }
+      pendingUpdate {
+        billingPeriod
+        legacySubscriptionId
+        items {
+          handle
+          price {
+            __typename
+            active
+            currency
+            ... on FlatRatePrice { amount }
+            ... on TieredPrice { tiersMode tiers { upTo amountPerUnit amount } }
+          }
+        }
+      }
+    }
+    events(
+      first: 1
+      filter: {
+        subjectId: $appId
+        shopId: $shopId
+        eventTypes: $eventTypes
+        occurredAtMin: $occurredAtMin
+        occurredAtMax: $occurredAtMax
+      }
+      orderBy: OCCURRED_AT_DESC
+    ) {
+      nodes {
+        id
+        occurredAt
+        eventType
+        subject {
+          __typename
+          ... on SubscriptionStatus {
+            state
+            cancelEffectiveOn
+            planHandle
+            billingPeriod
+            appId
+            shopId
+          }
+        }
+      }
+    }
+  }
+`;
+
+const LIFECYCLE_EVENT_TYPES = [
+  "SUBSCRIPTION_CREATED",
+  "SUBSCRIPTION_UPDATED",
+  "SUBSCRIPTION_CANCELLATION_SCHEDULED",
+  "SUBSCRIPTION_CANCELED",
+  "SUBSCRIPTION_FROZEN",
+  "SUBSCRIPTION_UNFROZEN",
+] as const;
+
+type SubscriptionReconciliationResponse = PartnerResponse & {
+  data?: PartnerResponse["data"] & {
+    events?: { nodes?: unknown[] };
+  };
+};
+
 export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
@@ -132,7 +241,58 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       "graphql-error",
       true,
     );
-    const subscription = result.data?.activeSubscription;
+    return this.parseActiveSubscription(result.data?.activeSubscription ?? null);
+  }
+
+  async getSubscriptionReconciliationSnapshot(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot> {
+    const config = this.readConfig();
+    const occurredAtMax = this.now();
+    const occurredAtMin = new Date(occurredAtMax.getTime() - 365 * 24 * 60 * 60 * 1000);
+
+    const response = await this.fetchImpl(
+      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": config.accessToken,
+        },
+        body: JSON.stringify({
+          query: SUBSCRIPTION_RECONCILIATION_SNAPSHOT_QUERY,
+          variables: {
+            appId: config.appId,
+            shopId: shopifyShopId,
+            occurredAtMin: occurredAtMin.toISOString(),
+            occurredAtMax: occurredAtMax.toISOString(),
+            eventTypes: LIFECYCLE_EVENT_TYPES,
+          },
+        }),
+      },
+    );
+    if (!response.ok) throw providerHttpError(response.status);
+
+    const result = await response.json() as SubscriptionReconciliationResponse;
+    if (result.errors?.length) throw new ShopifyPartnerBillingError(
+      result.errors.map((error) => error.message).join(", ").slice(0, 2000),
+      "graphql-error",
+      true,
+    );
+    if (!result.data
+      || !Object.prototype.hasOwnProperty.call(result.data, "activeSubscription")
+      || !result.data.events
+      || !Array.isArray(result.data.events.nodes)) {
+      throw new ShopifyPartnerBillingError("Shopify Partner API returned a malformed reconciliation snapshot", "malformed-response", true);
+    }
+
+    return {
+      activeSubscription: this.parseActiveSubscription(result.data.activeSubscription ?? null),
+      latestLifecycleEvent: result.data.events.nodes.length === 0
+        ? null
+        : parseLifecycleEvent(result.data.events.nodes[0], config.appId, shopifyShopId),
+    };
+  }
+
+  private parseActiveSubscription(subscription: NonNullable<PartnerResponse["data"]>["activeSubscription"] | null): PartnerSubscription | null {
     if (!subscription) return null;
 
     const flatRateItems = subscription.items.filter(
@@ -188,6 +348,76 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
     }
     return { orgId, accessToken, appId };
   }
+}
+
+function parseLifecycleEvent(value: unknown, appId: string, shopId: string): PartnerSubscriptionLifecycleEvent {
+  if (!isRecord(value)
+    || typeof value.id !== "string"
+    || typeof value.occurredAt !== "string"
+    || typeof value.eventType !== "string"
+    || !isRecord(value.subject)) {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned a malformed subscription lifecycle event", "malformed-lifecycle-event", true);
+  }
+  const subject = value.subject;
+  if (subject.__typename !== "SubscriptionStatus") {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned a non-SubscriptionStatus lifecycle event", "malformed-lifecycle-event", true);
+  }
+  if (subject.appId !== appId || subject.shopId !== shopId) {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned a lifecycle event for a different app or shop", "malformed-lifecycle-event", true);
+  }
+  const occurredAt = new Date(value.occurredAt);
+  if (Number.isNaN(occurredAt.getTime())) {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned an invalid lifecycle event timestamp", "malformed-lifecycle-event", true);
+  }
+  const state = subject.state;
+  const eventType = lifecycleEventType(state, value.eventType);
+  if (!eventType) {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned an invalid subscription lifecycle state", "malformed-lifecycle-event", true);
+  }
+
+  return {
+    id: value.id,
+    eventType,
+    state,
+    occurredAt,
+    cancelEffectiveOn: nullableString(subject.cancelEffectiveOn, "cancelEffectiveOn"),
+    planHandle: nullableString(subject.planHandle, "planHandle"),
+    billingPeriod: nullableString(subject.billingPeriod, "billingPeriod"),
+  };
+}
+
+function lifecycleEventType(
+  state: unknown,
+  rawEventType: unknown,
+): PartnerSubscriptionLifecycleEvent["eventType"] | null {
+  const stateToEventType: Record<string, PartnerSubscriptionLifecycleEvent["eventType"]> = {
+    CREATED: "SUBSCRIPTION_CREATED",
+    UPDATED: "SUBSCRIPTION_UPDATED",
+    CANCELLATION_SCHEDULED: "SUBSCRIPTION_CANCELLATION_SCHEDULED",
+    CANCELED: "SUBSCRIPTION_CANCELED",
+    FROZEN: "SUBSCRIPTION_FROZEN",
+    UNFROZEN: "SUBSCRIPTION_UNFROZEN",
+  };
+  if (typeof state !== "string" || !(state in stateToEventType)) return null;
+  const expected = stateToEventType[state];
+  if (rawEventType !== expected) return null;
+  return expected;
+}
+
+function nullableString(value: unknown, fieldName: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new ShopifyPartnerBillingError(
+      `Shopify Partner API returned an invalid lifecycle ${fieldName}`,
+      "malformed-lifecycle-event",
+      true,
+    );
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null;
 }
 
 function providerHttpError(status: number): ShopifyPartnerBillingError {
