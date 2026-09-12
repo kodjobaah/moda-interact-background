@@ -327,13 +327,19 @@ function resolveFreeAllowance(
   const grantValue = validateNonNegativeInteger(shopId, "lifetime Free grant", grant);
   const committedValue = validateNonNegativeInteger(shopId, "committed lifetime Free credits", committed);
   const reservedValue = validateNonNegativeInteger(shopId, "reserved lifetime Free credits", reserved);
+  if (committedValue + reservedValue > grantValue) {
+    throw invalidConfiguration(
+      shopId,
+      "committed and reserved lifetime Free credits exceed the lifetime Free grant",
+    );
+  }
 
   return {
     grant: grantValue,
     effective: grantValue,
     committed: committedValue,
     reserved: reservedValue,
-    remaining: Math.max(grantValue - committedValue - reservedValue, 0),
+    remaining: grantValue - committedValue - reservedValue,
   };
 }
 

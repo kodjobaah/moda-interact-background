@@ -115,14 +115,39 @@ export class FreeRecoveryReservationService {
     });
     if (existing) {
       assertReservationShop(existing, input.shopId);
-      return replayOutcome(existing, await this.readReservationCounter(transaction, existing));
+      const counter = await this.readReservationCounter(transaction, existing);
+      if (existing.status === UsageReservationStatus.RELEASED && counter === "LIFETIME_FREE_RECOVERY_CREDITS") {
+        if (existing.quantity !== quantity) {
+          throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
+        }
+        const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({
+          where: { id: existing.counterId ?? "" },
+        });
+        if (!lifetimeCounter) {
+          throw new FreeRecoveryReservationError("Reservation counter does not exist");
+        }
+        assertLifetimeCounter(lifetimeCounter.grantedQuantity, lifetimeCounter.committedQuantity, lifetimeCounter.reservedQuantity, input.shopId);
+        const remaining = lifetimeCounter.grantedQuantity - lifetimeCounter.committedQuantity - lifetimeCounter.reservedQuantity;
+        if (remaining < quantity) return replayOutcome(existing, counter);
+        const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
+          where: { id: lifetimeCounter.id, version: lifetimeCounter.version },
+          data: {
+            reservedQuantity: { increment: quantity },
+            version: { increment: 1 },
+          },
+        });
+        if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        const reactivated = await transaction.usageReservation.update({
+          where: { id: existing.id },
+          data: { status: UsageReservationStatus.RESERVED },
+        });
+        return { kind: "reserved", reservation: reactivated, counter };
+      }
+      return replayOutcome(existing, counter);
     }
 
     const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
     if (policy.newRecoveriesPaused) return { kind: "paused" };
-
-    const remaining = policy.freeAllowance?.remaining ?? 0;
-    if (remaining < quantity) return { kind: "allowance-exhausted", remaining };
 
     const counter = await transaction.shopEntitlementCounter.findUnique({
       where: {
@@ -133,12 +158,11 @@ export class FreeRecoveryReservationService {
       },
     });
     if (!counter) throw new FreeRecoveryReservationError("Lifetime Free recovery counter does not exist");
+    assertLifetimeCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, input.shopId);
 
-    if (counter.committedQuantity + counter.reservedQuantity + quantity > (policy.freeAllowance?.effective ?? 0)) {
-      return { kind: "allowance-exhausted", remaining: Math.max(
-        (policy.freeAllowance?.effective ?? 0) - counter.committedQuantity - counter.reservedQuantity,
-        0,
-      ) };
+    const remaining = counter.grantedQuantity - counter.committedQuantity - counter.reservedQuantity;
+    if (remaining < quantity) {
+      return { kind: "allowance-exhausted", remaining };
     }
 
     const updated = await transaction.shopEntitlementCounter.updateMany({
@@ -325,6 +349,25 @@ function validateQuantity(quantity: number | undefined): number {
     throw new FreeRecoveryReservationError("Reservation quantity must be a positive safe integer");
   }
   return value;
+}
+
+function assertLifetimeCounter(
+  grantedQuantity: number,
+  committedQuantity: number,
+  reservedQuantity: number,
+  shopId: string,
+): void {
+  if (
+    !Number.isSafeInteger(grantedQuantity) ||
+    !Number.isSafeInteger(committedQuantity) ||
+    !Number.isSafeInteger(reservedQuantity) ||
+    grantedQuantity < 0 ||
+    committedQuantity < 0 ||
+    reservedQuantity < 0 ||
+    committedQuantity + reservedQuantity > grantedQuantity
+  ) {
+    throw new FreeRecoveryReservationError(`Invalid lifetime Free recovery counter for shop ${shopId}`);
+  }
 }
 
 function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): ReservationOutcome {

@@ -214,6 +214,9 @@ export class RecoveryBillingService {
     };
     const reservation = await this.purchasedReservationService.reserve(reservationInput);
     if (reservation.kind === "reserved" || isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation) || isReleased(reservation)) {
+        return { kind: "blocked", reason: "reservation-in-flight" };
+      }
       return {
         kind: "admitted",
         admission: {
@@ -225,6 +228,13 @@ export class RecoveryBillingService {
     }
     if (reservation.kind === "credits-exhausted") return null;
     if (isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isReleased(reservation)) {
+        const reactivated = await this.reservationService.reserve({ shopId, sourceKey });
+        if (!isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+          return { kind: "blocked", reason: "reservation-in-flight" };
+        }
+      }
       return {
         kind: "admitted",
         admission: { kind: "lifetime-free", sourceKey, policy },
@@ -243,6 +253,9 @@ export class RecoveryBillingService {
       sourceKey,
     });
     if (reservation.kind === "reserved" || isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation) || isReleased(reservation)) {
+        return { kind: "blocked", reason: "reservation-in-flight" };
+      }
       return {
         kind: "admitted",
         admission: { kind: "lifetime-free", sourceKey, policy },
@@ -251,6 +264,13 @@ export class RecoveryBillingService {
     if (reservation.kind === "allowance-exhausted") return null;
     if (reservation.kind === "paused") return { kind: "blocked", reason: "paused" };
     if (isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isReleased(reservation)) {
+        const reactivated = await this.purchasedReservationService.reserve({ shopId, sourceKey });
+        if (!isAdmittedReplay(reactivated, "PURCHASED_RECOVERY_CREDITS")) {
+          return { kind: "blocked", reason: "reservation-in-flight" };
+        }
+      }
       return {
         kind: "admitted",
         admission: { kind: "purchased", sourceKey, policy },
@@ -321,6 +341,22 @@ function isOwnedBy(
   counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
 ): boolean {
   return "counter" in reservation && reservation.counter === counter;
+}
+
+function isAmbiguous(reservation: { kind: string }): boolean {
+  return reservation.kind === "ambiguous" || reservation.kind === "already-ambiguous";
+}
+
+function isReleased(reservation: { kind: string }): boolean {
+  return reservation.kind === "released" || reservation.kind === "already-released";
+}
+
+function isAdmittedReplay(
+  reservation: { kind: string; counter?: string },
+  counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
+): boolean {
+  return isOwnedBy(reservation, counter) &&
+    (reservation.kind === "reserved" || reservation.kind === "already-reserved" || reservation.kind === "already-committed");
 }
 
 export const recoveryBillingService = new RecoveryBillingService();

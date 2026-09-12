@@ -108,6 +108,19 @@ describe("EffectiveBillingPolicyResolver", () => {
     });
   });
 
+  it("fails closed when lifetime usage exceeds the durable grant", async () => {
+    const fake = client({
+      shopEntitlementCounter: {
+        findUnique: async () => ({ grantedQuantity: 2, committedQuantity: 1, reservedQuantity: 2 }),
+      },
+    });
+
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+        reason: "INVALID_CONFIGURATION",
+      });
+  });
+
   it("ignores expired overrides and always bounds hard limits by platform", async () => {
     const fake = client({
       shopBillingPolicyOverride: {

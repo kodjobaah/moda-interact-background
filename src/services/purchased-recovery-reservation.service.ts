@@ -104,7 +104,39 @@ export class PurchasedRecoveryReservationService {
     });
     if (existing) {
       assertReservationShop(existing, input.shopId);
-      return replayOutcome(existing, await this.readReservationCounter(transaction, existing));
+      const counter = await this.readReservationCounter(transaction, existing);
+      if (existing.status === UsageReservationStatus.RELEASED && counter === "PURCHASED_RECOVERY_CREDITS") {
+        if (existing.quantity !== quantity) {
+          throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
+        }
+        const purchasedCounter = await transaction.shopEntitlementCounter.findUnique({
+          where: { id: existing.counterId ?? "" },
+        });
+        if (!purchasedCounter) {
+          throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+        }
+        const available = availablePurchasedRecoveryCredits({
+          grantedQuantity: purchasedCounter.grantedQuantity,
+          committedQuantity: purchasedCounter.committedQuantity,
+          reservedQuantity: purchasedCounter.reservedQuantity,
+          refundingQuantity: purchasedCounter.refundingQuantity ?? 0,
+        });
+        if (available < quantity) return replayOutcome(existing, counter);
+        const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
+          where: { id: purchasedCounter.id, version: purchasedCounter.version },
+          data: {
+            reservedQuantity: { increment: quantity },
+            version: { increment: 1 },
+          },
+        });
+        if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        const reactivated = await transaction.usageReservation.update({
+          where: { id: existing.id },
+          data: { status: UsageReservationStatus.RESERVED },
+        });
+        return { kind: "reserved", reservation: reactivated, counter };
+      }
+      return replayOutcome(existing, counter);
     }
 
     let counter = await transaction.shopEntitlementCounter.findUnique({

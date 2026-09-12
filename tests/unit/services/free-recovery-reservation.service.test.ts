@@ -37,6 +37,7 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
       id: "counter-1",
       shopId: "shop-1",
       counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      grantedQuantity: 1,
       committedQuantity: 0,
       reservedQuantity: 0,
       version: 0,
@@ -134,6 +135,19 @@ describe("FreeRecoveryReservationService", () => {
     expect(transaction.usageEvent.create).not.toHaveBeenCalled();
   });
 
+  it("reactivates a released reservation on the same row and counter", async () => {
+    const { service, state, transaction } = createHarness();
+    await service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+    const reservationId = state.reservation!.id;
+    const counterId = state.reservation!.counterId;
+    await service.release({ shopId: "shop-1", sourceKey: "recovery:reactivate" });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reactivate" }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+    expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
+    expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects release after commit and cross-shop source replay", async () => {
     const { service, state } = createHarness();
     await service.reserve({ shopId: "shop-1", sourceKey: "recovery:committed" });
@@ -221,7 +235,7 @@ describe("FreeRecoveryReservationService", () => {
     state.counter.committedQuantity = 2;
     state.counter.reservedQuantity = 1;
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "recovery:reduced" }))
-      .resolves.toMatchObject({ kind: "allowance-exhausted", remaining: 0 });
+      .rejects.toThrow("Invalid lifetime Free recovery counter");
     expect(state.counter).toMatchObject({ committedQuantity: 2, reservedQuantity: 1, version: 0 });
   });
 });

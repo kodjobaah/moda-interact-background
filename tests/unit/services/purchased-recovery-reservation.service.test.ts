@@ -145,6 +145,19 @@ describe("PurchasedRecoveryReservationService", () => {
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
   });
 
+  it("reactivates a released reservation on the same row and counter", async () => {
+    const { service, state, transaction } = createHarness();
+    await service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
+    const reservationId = state.reservation!.id;
+    const counterId = state.reservation!.counterId;
+    await service.release({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+    expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
+    expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps ambiguous provider outcomes consuming reserved capacity", async () => {
     const { service, state } = createHarness();
 
