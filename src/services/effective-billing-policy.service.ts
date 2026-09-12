@@ -25,8 +25,7 @@ export class EffectiveBillingPolicyError extends Error {
 }
 
 export type FreeAllowancePolicy = {
-  base: number;
-  adjustment: number;
+  grant: number;
   effective: number;
   committed: number;
   reserved: number;
@@ -85,7 +84,6 @@ export type BillingPolicyClient = Pick<
   | "subscription"
   | "platformBillingPolicy"
   | "shopBillingPolicyOverride"
-  | "billingAllowanceAdjustment"
   | "shopEntitlementCounter"
   | "usageEvent"
 >;
@@ -148,23 +146,22 @@ export class EffectiveBillingPolicyResolver {
 
     const plan = subscription.plan;
 
-    const [platformPolicy, override, adjustments, counter] = await Promise.all([
+    const [platformPolicy, override, counter] = await Promise.all([
       this.client.platformBillingPolicy.findUnique({ where: { id: "default" } }),
       this.client.shopBillingPolicyOverride.findUnique({ where: { shopId } }),
-      this.client.billingAllowanceAdjustment.findMany({
-        where: { shopId, counter: "FREE_RECOVERY_LIFETIME" },
-        select: { quantity: true },
-      }),
       this.client.shopEntitlementCounter.findUnique({
         where: {
-          shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" },
+          shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
         },
-        select: { committedQuantity: true, reservedQuantity: true },
+        select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true },
       }),
     ]);
 
     if (!platformPolicy) {
       throw invalidConfiguration(shopId, "platform policy is missing");
+    }
+    if (!counter) {
+      throw invalidConfiguration(shopId, "lifetime Free recovery counter is missing");
     }
 
     const activeOverride =
@@ -189,16 +186,12 @@ export class EffectiveBillingPolicyResolver {
       ]),
     ) as Record<BillingPlanFeatureIdentifier, boolean>;
 
-    const freeAllowance =
-      plan.kind === BillingPlanKind.FREE
-        ? resolveFreeAllowance(
-            shopId,
-            plan.freeLifetimeConversationAllowance,
-            adjustments.reduce((total, adjustment) => total + adjustment.quantity, 0),
-            counter?.committedQuantity ?? 0,
-            counter?.reservedQuantity ?? 0,
-          )
-        : null;
+    const freeAllowance = resolveFreeAllowance(
+      shopId,
+      counter.grantedQuantity,
+      counter.committedQuantity,
+      counter.reservedQuantity,
+    );
 
     if (plan.kind === BillingPlanKind.PAID_METERED && !plan.shopifyUsageEventHandle) {
       throw invalidConfiguration(shopId, "paid plan usage event handle is missing");
@@ -327,26 +320,20 @@ function resolveRecoveryCreditPackConfiguration(
 
 function resolveFreeAllowance(
   shopId: string,
-  base: number | null,
-  adjustment: number,
+  grant: number,
   committed: number,
   reserved: number,
 ): FreeAllowancePolicy {
-  if (base === null) {
-    throw invalidConfiguration(shopId, "Free plan allowance is missing");
-  }
-
-  const effective = validateNonNegativeInteger(shopId, "Free plan allowance", base + adjustment);
-  const committedValue = validateNonNegativeInteger(shopId, "committed allowance", committed);
-  const reservedValue = validateNonNegativeInteger(shopId, "reserved allowance", reserved);
+  const grantValue = validateNonNegativeInteger(shopId, "lifetime Free grant", grant);
+  const committedValue = validateNonNegativeInteger(shopId, "committed lifetime Free credits", committed);
+  const reservedValue = validateNonNegativeInteger(shopId, "reserved lifetime Free credits", reserved);
 
   return {
-    base: validateNonNegativeInteger(shopId, "Free plan allowance", base),
-    adjustment,
-    effective,
+    grant: grantValue,
+    effective: grantValue,
     committed: committedValue,
     reserved: reservedValue,
-    remaining: Math.max(effective - committedValue - reservedValue, 0),
+    remaining: Math.max(grantValue - committedValue - reservedValue, 0),
   };
 }
 

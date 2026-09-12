@@ -13,8 +13,7 @@ const policy = {
   planKind: "FREE",
   features: {},
   freeAllowance: {
-    base: 1,
-    adjustment: 0,
+    grant: 1,
     effective: 1,
     committed: 0,
     reserved: 0,
@@ -37,7 +36,7 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
     counter: {
       id: "counter-1",
       shopId: "shop-1",
-      counter: "FREE_RECOVERY_LIFETIME",
+      counter: "LIFETIME_FREE_RECOVERY_CREDITS",
       committedQuantity: 0,
       reservedQuantity: 0,
       version: 0,

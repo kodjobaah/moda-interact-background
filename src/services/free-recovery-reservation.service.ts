@@ -35,8 +35,7 @@ export type ReservationOutcome =
   | { kind: "already-released"; reservation: UsageReservation }
   | { kind: "already-ambiguous"; reservation: UsageReservation }
   | { kind: "allowance-exhausted"; remaining: number }
-  | { kind: "paused" }
-  | { kind: "not-free"; planKind: EffectiveBillingPolicy["planKind"] };
+  | { kind: "paused" };
 
 export class FreeRecoveryReservationError extends Error {
   constructor(message: string) {
@@ -119,33 +118,20 @@ export class FreeRecoveryReservationService {
     }
 
     const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
-    if (policy.planKind !== "FREE") return { kind: "not-free", planKind: policy.planKind };
     if (policy.newRecoveriesPaused) return { kind: "paused" };
 
     const remaining = policy.freeAllowance?.remaining ?? 0;
     if (remaining < quantity) return { kind: "allowance-exhausted", remaining };
 
-    let counter = await transaction.shopEntitlementCounter.findUnique({
+    const counter = await transaction.shopEntitlementCounter.findUnique({
       where: {
         shopId_counter: {
           shopId: input.shopId,
-          counter: "FREE_RECOVERY_LIFETIME",
+          counter: "LIFETIME_FREE_RECOVERY_CREDITS",
         },
       },
     });
-    if (!counter) {
-      try {
-        counter = await transaction.shopEntitlementCounter.create({
-          data: {
-            shopId: input.shopId,
-            counter: "FREE_RECOVERY_LIFETIME",
-          },
-        });
-      } catch (error) {
-        if (isUniqueConflict(error)) throw new ReservationConcurrencyConflict();
-        throw error;
-      }
-    }
+    if (!counter) throw new FreeRecoveryReservationError("Lifetime Free recovery counter does not exist");
 
     if (counter.committedQuantity + counter.reservedQuantity + quantity > (policy.freeAllowance?.effective ?? 0)) {
       return { kind: "allowance-exhausted", remaining: Math.max(
@@ -184,11 +170,13 @@ export class FreeRecoveryReservationService {
     if (reservation.quantity !== quantity) {
       throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
+    const counterId = reservation.counterId;
+    if (!counterId) throw new FreeRecoveryReservationError("Reservation counter does not exist");
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
-        id: reservation.counterId,
-        version: await this.readCounterVersion(transaction, reservation.counterId),
+        id: counterId,
+        version: await this.readCounterVersion(transaction, counterId),
         reservedQuantity: { gte: quantity },
       },
       data: {
@@ -233,11 +221,13 @@ export class FreeRecoveryReservationService {
     if (reservation.quantity !== quantity) {
       throw new FreeRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
+    const counterId = reservation.counterId;
+    if (!counterId) throw new FreeRecoveryReservationError("Reservation counter does not exist");
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
-        id: reservation.counterId,
-        version: await this.readCounterVersion(transaction, reservation.counterId),
+        id: counterId,
+        version: await this.readCounterVersion(transaction, counterId),
         reservedQuantity: { gte: quantity },
       },
       data: {

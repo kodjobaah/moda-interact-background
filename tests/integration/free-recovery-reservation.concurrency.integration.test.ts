@@ -27,7 +27,6 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
           shopifyPlanHandle: `free-${shopId}`,
           name: "Free integration plan",
           kind: "FREE",
-          freeLifetimeConversationAllowance: 1,
           defaultOutboundSoftLimit: 10,
           defaultOutboundHardLimit: 20,
           terminalMessageReservedSlots: 1,
@@ -48,6 +47,13 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
           defaultWarningPercent: 80,
         },
       });
+      await database.shopEntitlementCounter.create({
+        data: {
+          shopId,
+          counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+          grantedQuantity: 1,
+        },
+      });
 
       const [first, second] = await Promise.all([
         new FreeRecoveryReservationService(firstClient).reserve({ shopId, sourceKey: `${shopId}:recovery:1` }),
@@ -59,7 +65,7 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
       expect(outcomes.filter((outcome) => outcome.kind === "allowance-exhausted")).toHaveLength(1);
 
       const counter = await database.shopEntitlementCounter.findUnique({
-        where: { shopId_counter: { shopId, counter: "FREE_RECOVERY_LIFETIME" } },
+        where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
       });
       expect(counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
       expect(await database.usageReservation.count({ where: { shopId } })).toBe(1);
