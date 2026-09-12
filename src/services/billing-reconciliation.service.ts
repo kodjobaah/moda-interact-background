@@ -232,6 +232,23 @@ export class BillingReconciliationService {
         shopifyRecoveryCreditPackEventHandle: true,
       },
     });
+    const existing = await this.database.subscription.findUnique({
+      where: { shopId },
+      select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
+    });
+    const settings = await this.database.shopSettings.findUnique({
+      where: { shopId },
+      select: { onboardingCompleted: true },
+    });
+    if (
+      settings?.onboardingCompleted === false
+      && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
+      && existing.planId === null
+      && existing.pendingPlanId !== null
+      && existing.pendingShopifyPlanHandle === provider.planHandle
+    ) {
+      return { billingPeriodId: null, packMeterHandle: null };
+    }
     const planUsable = Boolean(plan?.active);
     const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED ||
       Boolean(plan?.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));

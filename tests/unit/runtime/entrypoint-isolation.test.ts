@@ -81,11 +81,11 @@ describe("production worker entrypoints", () => {
     }
   });
 
-  it("keeps the billing entrypoint free of the Redis resource bundle", async () => {
+  it("keeps the billing entrypoint on its dedicated resource bundle", async () => {
     const source = await readFile("src/entrypoints/billing.ts", "utf8");
 
     expect(source).not.toContain('import("./resources.js")');
-    expect(source).not.toContain("connectionRedis");
+    expect(source).toContain("connectionRedis");
     expect(source).toContain('import("./billing-resources.js")');
   });
 

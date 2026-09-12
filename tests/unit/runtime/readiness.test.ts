@@ -22,7 +22,7 @@ describe("worker readiness", () => {
     expect(postgresqlCheck).toHaveBeenCalledOnce();
   });
 
-  it("checks PostgreSQL without requiring Redis for the billing worker", async () => {
+  it("requires Redis and PostgreSQL for the billing worker", async () => {
     const redisCheck = vi.fn().mockResolvedValue(undefined);
     const postgresqlCheck = vi.fn().mockResolvedValue(undefined);
 
@@ -32,7 +32,7 @@ describe("worker readiness", () => {
     ]);
 
     expect(postgresqlCheck).toHaveBeenCalledOnce();
-    expect(redisCheck).not.toHaveBeenCalled();
+    expect(redisCheck).toHaveBeenCalledOnce();
   });
 
   it("reports a predictable sanitized dependency failure", async () => {

@@ -3,6 +3,8 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { startBillingReconciliationScheduler } from "../runtime/billing-scheduler.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
+import { connectionRedis } from "../lib/redis.js";
+import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -26,19 +28,24 @@ void startReadyWorkerProcess({
       import("../services/subscription-cancellation.service.js"),
       import("../services/recovery-credit-refund.service.js"),
     ]);
-    const [{ billingSubscriptionQueue }, { BillingSubscriptionReconciliationService }, { billingSubscriptionReconciliationWorker }] = await Promise.all([
+    const [{ billingSubscriptionQueue }, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-subscription-reconciliation.service.js"),
       import("../workers/billing-subscription-reconciliation.worker.js"),
     ]);
     const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
+    const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
+    const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
+      connection: connectionRedis,
+      queueNames: ["billing-subscription-reconcile"],
+    });
     const runBillingCycle = async () => {
       await billingReconciliationService.reconcileOnce();
       await subscriptionCancellationService.processDue();
       await recoveryCreditRefundService.processDue();
+      await subscriptionReconciliation.reconstruct();
     };
     await runBillingCycle();
-    await subscriptionReconciliation.reconstruct();
     const stopScheduler = startBillingReconciliationScheduler(
       runBillingCycle,
       60_000,
@@ -49,6 +56,7 @@ void startReadyWorkerProcess({
       workers: [billingSubscriptionReconciliationWorker],
       closeResources: [
         async () => stopScheduler(),
+        stopQueuePerformanceTelemetry,
         ...closeBillingResources,
         closeWorkerObservability,
       ],

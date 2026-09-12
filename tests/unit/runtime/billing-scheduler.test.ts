@@ -61,4 +61,21 @@ describe("billing reconciliation scheduler", () => {
       vi.useRealTimers();
     }
   });
+
+  it("runs periodic reconstruction when it is part of the billing cadence", async () => {
+    vi.useFakeTimers();
+    try {
+      const reconstruct = vi.fn().mockResolvedValue(undefined);
+      const scan = vi.fn(async () => {
+        await reconstruct();
+      });
+      const stop = startBillingReconciliationScheduler(scan, 60_000);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reconstruct).toHaveBeenCalledOnce();
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

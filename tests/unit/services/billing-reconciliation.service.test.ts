@@ -37,6 +37,9 @@ function harness({
     shop: {
       findMany: vi.fn().mockResolvedValue([{ id: "shop-1", shopifyShopId: "gid://shopify/Shop/1" }]),
     },
+    shopSettings: {
+      findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: true }),
+    },
     billingPlan: {
       findUnique: vi.fn()
         .mockResolvedValueOnce(plan)
@@ -151,6 +154,24 @@ describe("BillingReconciliationService", () => {
         pendingEffectiveAt: providerSubscription.pendingEffectiveAt,
       }),
     }));
+  });
+
+  it("does not consume an unresolved initial activation when rotation sees it current", async () => {
+    const test = harness({
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
+      plan: { id: "plan-free", active: true, kind: "FREE", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null },
+    });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.subscription.findUnique.mockResolvedValue({
+      status: "NO_CONTRACT",
+      planId: null,
+      pendingPlanId: "plan-free",
+      pendingShopifyPlanHandle: "free-2026",
+    });
+
+    await test.service.reconcileOnce();
+
+    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
   });
 
   it("B008-R5 links the latest open billing cycle as current", async () => {
@@ -282,6 +303,7 @@ describe("BillingReconciliationService", () => {
         upsert: vi.fn(),
         findUnique: vi.fn().mockResolvedValue(null),
       },
+      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: true }) },
       usageEvent: { aggregate: vi.fn() },
     };
     const partner = {
