@@ -28,24 +28,32 @@ const activeSubscription = {
 
 function lifecycleEvent(
   state: string,
-  eventType = `SUBSCRIPTION_${state}`,
+  eventType = ({
+    CREATED: "SUBSCRIPTION_CREATED",
+    UPDATED: "SUBSCRIPTION_UPDATED",
+    CANCELLATION_SCHEDULED: "SUBSCRIPTION_CANCELLATION_SCHEDULED",
+    CANCELED: "SUBSCRIPTION_CANCELED",
+    FROZEN: "SUBSCRIPTION_FROZEN",
+    UNFROZEN: "SUBSCRIPTION_UNFROZEN",
+  } as Record<string, string>)[state],
   overrides: Record<string, unknown> = {},
 ) {
   return {
+    __typename: "SubscriptionStatus",
     id: "event-1",
     occurredAt: "2026-09-12T12:00:00.000Z",
     eventType,
-    subject: {
-      __typename: "SubscriptionStatus",
-      state,
-      appId: "app-1",
-      shopId: "gid://shopify/Shop/1",
-      cancelEffectiveOn: null,
-      planHandle: "growth-plan",
-      billingPeriod: "EVERY_30_DAYS",
-      ...overrides,
-    },
+    state,
+    cancelEffectiveOn: null,
+    plan: { handle: "growth-plan", billingPeriod: "EVERY_30_DAYS" },
+    subject: { __typename: "AppReference", id: "app-1" },
+    shop: { id: "gid://shopify/Shop/1" },
+    ...overrides,
   };
+}
+
+function eventEdges(event: Record<string, unknown>) {
+  return { edges: [{ node: event }] };
 }
 
 function snapshotFetch(data: Record<string, unknown>, now = new Date("2026-09-12T12:00:00.000Z")) {
@@ -139,17 +147,19 @@ describe("ShopifyPartnerBillingApi", () => {
 
   it.each([
     ["CREATED", "SUBSCRIPTION_CREATED"],
+    ["UPDATED", "SUBSCRIPTION_UPDATED"],
+    ["CANCELLATION_SCHEDULED", "SUBSCRIPTION_CANCELLATION_SCHEDULED"],
     ["FROZEN", "SUBSCRIPTION_FROZEN"],
     ["CANCELED", "SUBSCRIPTION_CANCELED"],
     ["UNFROZEN", "SUBSCRIPTION_UNFROZEN"],
   ] as const)("parses the latest %s lifecycle event", async (state, eventType) => {
     const { api } = snapshotFetch({
       activeSubscription: state === "CANCELED" ? null : activeSubscription,
-      events: { nodes: [lifecycleEvent(state, eventType)] },
+      events: eventEdges(lifecycleEvent(state, eventType)),
     });
 
     await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
-      activeSubscription: { planHandle: "growth-plan" },
+      activeSubscription: state === "CANCELED" ? null : { planHandle: "growth-plan" },
       latestLifecycleEvent: { eventType, state, occurredAt: new Date("2026-09-12T12:00:00.000Z") },
     });
   });
@@ -157,7 +167,7 @@ describe("ShopifyPartnerBillingApi", () => {
   it("keeps a frozen null subscription distinct from cancellation", async () => {
     const { api } = snapshotFetch({
       activeSubscription: null,
-      events: { nodes: [lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN")] },
+      events: eventEdges(lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN")),
     });
 
     await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
@@ -170,16 +180,16 @@ describe("ShopifyPartnerBillingApi", () => {
     const { api: cancellationApi } = snapshotFetch({
       activeSubscription: null,
       events: {
-        nodes: [lifecycleEvent("CANCELLATION_SCHEDULED", "SUBSCRIPTION_CANCELLATION_SCHEDULED", {
+        edges: [{ node: lifecycleEvent("CANCELLATION_SCHEDULED", "SUBSCRIPTION_CANCELLATION_SCHEDULED", {
           cancelEffectiveOn: "2026-10-01",
-        })],
+        }) }],
       },
     });
     await expect(cancellationApi.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
       latestLifecycleEvent: { state: "CANCELLATION_SCHEDULED", cancelEffectiveOn: "2026-10-01" },
     });
 
-    const { api: emptyApi } = snapshotFetch({ activeSubscription, events: { nodes: [] } });
+    const { api: emptyApi } = snapshotFetch({ activeSubscription, events: { edges: [] } });
     await expect(emptyApi.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
       latestLifecycleEvent: null,
     });
@@ -199,7 +209,7 @@ describe("ShopifyPartnerBillingApi", () => {
   });
 
   it("bounds and scopes the lifecycle query", async () => {
-    const { api, fetchImpl } = snapshotFetch({ activeSubscription, events: { nodes: [] } });
+    const { api, fetchImpl } = snapshotFetch({ activeSubscription, events: { edges: [] } });
     await api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1");
     const request = fetchImpl.mock.calls[0]?.[1] as RequestInit;
     const body = JSON.parse(String(request.body)) as { query: string; variables: Record<string, unknown> };
@@ -207,6 +217,10 @@ describe("ShopifyPartnerBillingApi", () => {
     expect(body.query).toContain("shopId: $shopId");
     expect(body.query).toContain("occurredAtMin: $occurredAtMin");
     expect(body.query).toContain("occurredAtMax: $occurredAtMax");
+    expect(body.query).toContain("edges");
+    expect(body.query).toContain("node {");
+    expect(body.query).toContain("... on SubscriptionStatus");
+    expect(body.query).toContain("... on AppReference { id }");
     expect(body.variables).toMatchObject({
       appId: "app-1",
       shopId: "gid://shopify/Shop/1",
@@ -225,11 +239,42 @@ describe("ShopifyPartnerBillingApi", () => {
 
   it.each([
     { occurredAt: "not-a-date" },
-    { eventType: "SUBSCRIPTION_FROZEN", subject: lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN", { appId: "other-app" }).subject },
-    { eventType: "SUBSCRIPTION_FROZEN", subject: lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN", { state: "UNKNOWN" }).subject },
+    { eventType: "SUBSCRIPTION_FROZEN", subject: { __typename: "AppReference", id: "other-app" } },
+    { eventType: "SUBSCRIPTION_FROZEN", state: "UNKNOWN" },
   ])("rejects malformed lifecycle event: %o", async (event) => {
-    const { api } = snapshotFetch({ activeSubscription: null, events: { nodes: [{ ...lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN"), ...event }] } });
+    const { api } = snapshotFetch({ activeSubscription: null, events: eventEdges({ ...lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN"), ...event }) });
     await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).rejects.toMatchObject({ code: "malformed-lifecycle-event" });
+  });
+
+  it.each([
+    { __typename: "BillingEvent" },
+    { __typename: "SubscriptionStatus", subject: { __typename: "ThemeReference", id: "theme-1" } },
+    { __typename: "SubscriptionStatus", subject: { __typename: "AppReference", id: "app-1" }, shop: { id: "other-shop" } },
+    { __typename: "SubscriptionStatus", plan: { handle: 123, billingPeriod: "EVERY_30_DAYS" } },
+  ])("rejects malformed Partner event shape: %o", async (overrides) => {
+    const { api } = snapshotFetch({
+      activeSubscription: null,
+      events: eventEdges({ ...lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN"), ...overrides }),
+    });
+    await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).rejects.toMatchObject({ code: "malformed-lifecycle-event" });
+  });
+
+  it("maps a null plan to null normalized plan fields", async () => {
+    const { api } = snapshotFetch({
+      activeSubscription: null,
+      events: eventEdges(lifecycleEvent("UPDATED", "SUBSCRIPTION_UPDATED", { plan: null })),
+    });
+    await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
+      latestLifecycleEvent: { planHandle: null, billingPeriod: null },
+    });
+  });
+
+  it("rejects missing event edges and missing requested roots", async () => {
+    const { api: missingEdgesApi } = snapshotFetch({ activeSubscription: null, events: {} });
+    await expect(missingEdgesApi.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).rejects.toMatchObject({ code: "malformed-response" });
+
+    const { api: missingRootApi } = snapshotFetch({ events: { edges: [] } });
+    await expect(missingRootApi.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).rejects.toMatchObject({ code: "malformed-response" });
   });
 
 });
