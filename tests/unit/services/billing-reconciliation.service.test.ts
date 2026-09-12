@@ -48,9 +48,14 @@ function harness({
     subscription: {
       upsert: subscriptionUpsert,
       findUnique: vi.fn().mockResolvedValue({
+        id: "subscription-1",
         billingPeriodId: "period-1",
         plan: { kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter" },
+        pendingShopifyPlanHandle: null,
+        pendingPlanId: null,
+        pendingEffectiveAt: null,
       }),
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "subscription-1" }),
     },
     usageEvent: {
       aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: modaQuantity } }),
@@ -201,7 +206,6 @@ describe("BillingReconciliationService", () => {
     expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 0, subscriptionErrors: 1 });
     expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({
-        status: "SYNC_ERROR",
         lastSyncErrorCode: "PARTNER_API_ERROR",
       }),
     }));

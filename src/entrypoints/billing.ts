@@ -26,12 +26,19 @@ void startReadyWorkerProcess({
       import("../services/subscription-cancellation.service.js"),
       import("../services/recovery-credit-refund.service.js"),
     ]);
+    const [{ billingSubscriptionQueue }, { BillingSubscriptionReconciliationService }, { billingSubscriptionReconciliationWorker }] = await Promise.all([
+      import("./billing-resources.js"),
+      import("../services/billing-subscription-reconciliation.service.js"),
+      import("../workers/billing-subscription-reconciliation.worker.js"),
+    ]);
+    const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
     const runBillingCycle = async () => {
       await billingReconciliationService.reconcileOnce();
       await subscriptionCancellationService.processDue();
       await recoveryCreditRefundService.processDue();
     };
     await runBillingCycle();
+    await subscriptionReconciliation.reconstruct();
     const stopScheduler = startBillingReconciliationScheduler(
       runBillingCycle,
       60_000,
@@ -39,7 +46,7 @@ void startReadyWorkerProcess({
     );
 
     return {
-      workers: [],
+      workers: [billingSubscriptionReconciliationWorker],
       closeResources: [
         async () => stopScheduler(),
         ...closeBillingResources,
