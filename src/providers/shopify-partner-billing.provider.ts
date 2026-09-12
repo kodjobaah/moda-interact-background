@@ -410,7 +410,7 @@ function lifecycleEventType(
   };
   if (typeof state !== "string" || !(state in stateToEventType)) return null;
   const expected = stateToEventType[state];
-  if (rawEventType !== expected) return null;
+  if (!expected || rawEventType !== expected) return null;
   return expected;
 }
 

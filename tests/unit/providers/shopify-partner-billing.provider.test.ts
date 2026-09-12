@@ -160,7 +160,13 @@ describe("ShopifyPartnerBillingApi", () => {
 
     await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).resolves.toMatchObject({
       activeSubscription: state === "CANCELED" ? null : { planHandle: "growth-plan" },
-      latestLifecycleEvent: { eventType, state, occurredAt: new Date("2026-09-12T12:00:00.000Z") },
+      latestLifecycleEvent: {
+        eventType,
+        state,
+        occurredAt: new Date("2026-09-12T12:00:00.000Z"),
+        planHandle: "growth-plan",
+        billingPeriod: "EVERY_30_DAYS",
+      },
     });
   });
 
@@ -221,6 +227,9 @@ describe("ShopifyPartnerBillingApi", () => {
     expect(body.query).toContain("node {");
     expect(body.query).toContain("... on SubscriptionStatus");
     expect(body.query).toContain("... on AppReference { id }");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(body.query).toContain("activeSubscription(");
+    expect(body.query).toContain("events(");
     expect(body.variables).toMatchObject({
       appId: "app-1",
       shopId: "gid://shopify/Shop/1",
@@ -241,6 +250,8 @@ describe("ShopifyPartnerBillingApi", () => {
     { occurredAt: "not-a-date" },
     { eventType: "SUBSCRIPTION_FROZEN", subject: { __typename: "AppReference", id: "other-app" } },
     { eventType: "SUBSCRIPTION_FROZEN", state: "UNKNOWN" },
+    { eventType: "SUBSCRIPTION_CANCELED", state: "FROZEN" },
+    { id: "   " },
   ])("rejects malformed lifecycle event: %o", async (event) => {
     const { api } = snapshotFetch({ activeSubscription: null, events: eventEdges({ ...lifecycleEvent("FROZEN", "SUBSCRIPTION_FROZEN"), ...event }) });
     await expect(api.getSubscriptionReconciliationSnapshot("gid://shopify/Shop/1")).rejects.toMatchObject({ code: "malformed-lifecycle-event" });
@@ -251,6 +262,7 @@ describe("ShopifyPartnerBillingApi", () => {
     { __typename: "SubscriptionStatus", subject: { __typename: "ThemeReference", id: "theme-1" } },
     { __typename: "SubscriptionStatus", subject: { __typename: "AppReference", id: "app-1" }, shop: { id: "other-shop" } },
     { __typename: "SubscriptionStatus", plan: { handle: 123, billingPeriod: "EVERY_30_DAYS" } },
+    { __typename: "SubscriptionStatus", plan: { handle: "growth-plan", billingPeriod: 123 } },
   ])("rejects malformed Partner event shape: %o", async (overrides) => {
     const { api } = snapshotFetch({
       activeSubscription: null,
