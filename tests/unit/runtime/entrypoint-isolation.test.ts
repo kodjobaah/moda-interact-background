@@ -89,6 +89,17 @@ describe("production worker entrypoints", () => {
     expect(source).toContain('import("./billing-resources.js")');
   });
 
+  it("uses one queue-aware reconciliation service for the worker and repair cadence", async () => {
+    const source = await readFile("src/entrypoints/billing.ts", "utf8");
+
+    expect(source).toContain("new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue)");
+    expect(source).toContain("createBillingSubscriptionReconciliationWorker(subscriptionReconciliation)");
+    expect(source).toContain("await subscriptionReconciliation.reconstruct()");
+    expect(source).toContain("startQueuePerformanceTelemetry");
+    expect(source).toContain("stopQueuePerformanceTelemetry");
+    expect(source).toContain("closeResources: [");
+  });
+
   it("wires bounded Shared logging for scheduled billing failures", async () => {
     const source = await readFile("src/entrypoints/billing.ts", "utf8");
     const reporterStart = source.indexOf("function reportBillingReconciliationFailure");
