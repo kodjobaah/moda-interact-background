@@ -44,8 +44,7 @@ function matches(purchase: (typeof candidates)[number] & Record<string, unknown>
     && purchase.usageEvent.metric === usageWhere.metric
     && purchase.usageEvent.quantity === usageWhere.quantity
     && purchase.usageEvent.shopifyReportState === usageWhere.shopifyReportState
-    && purchase.usageEvent.billingPeriodId === usageWhere.billingPeriodId
-    && (!where.refund || (purchase.refund?.status === "COMPLETED" && purchase.refund?.settlementMode === "PARTNER_DASHBOARD_REFUND"));
+    && purchase.usageEvent.billingPeriodId === usageWhere.billingPeriodId;
 }
 
 const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter" };

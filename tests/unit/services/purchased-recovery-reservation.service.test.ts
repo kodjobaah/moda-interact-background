@@ -212,16 +212,24 @@ describe("PurchasedRecoveryReservationService", () => {
   });
 
   it("reactivates a released reservation on the same row and counter", async () => {
-    const { service, state, transaction } = createHarness();
+    const { service, state, transaction } = createHarness(2, [
+      { id: "purchase-old", creditsGranted: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
+      { id: "purchase-new", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+    ]);
     await service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
     const reservationId = state.reservation!.id;
     const counterId = state.reservation!.counterId;
+    const purchaseId = state.reservation!.purchasedCreditPurchaseId;
     await service.release({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
 
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" }))
-      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, purchasedCreditPurchaseId: purchaseId, status: "RESERVED" } });
     expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
     expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
+    expect(state.lots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "purchase-old", reservedQuantity: 1 }),
+      expect.objectContaining({ id: "purchase-new", reservedQuantity: 0 }),
+    ]));
   });
 
   it("keeps ambiguous provider outcomes consuming reserved capacity", async () => {
