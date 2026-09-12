@@ -301,7 +301,17 @@ describe("EffectiveBillingPolicyResolver", () => {
             updatedAt: now,
             features: [],
           },
-          billingPeriod: null,
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
           shop: { status: "ACTIVE" },
         }),
       },
@@ -398,7 +408,17 @@ describe("EffectiveBillingPolicyResolver", () => {
             updatedAt: now,
             features: [],
           },
-          billingPeriod: null,
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
           shop: { status: "ACTIVE" },
         }),
       },
@@ -409,6 +429,8 @@ describe("EffectiveBillingPolicyResolver", () => {
     ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
       reason: "INVALID_CONFIGURATION",
     });
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toThrow("paid plan usage event handle is missing");
   });
 
   it("fails closed for missing contracts and invalid limits", async () => {

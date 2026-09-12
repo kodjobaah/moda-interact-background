@@ -16,6 +16,7 @@ const describeWithDatabase =
 describeWithDatabase("Paid included recovery reservation PostgreSQL concurrency", () => {
   it("admits and commits at most one of two distinct recoveries for the final included credit", async () => {
     const shopId = randomUUID();
+    const fixedNow = new Date("2026-09-12T12:00:00.000Z");
     process.env.DATABASE_URL = testDatabaseUrl;
     const database = new PrismaClient();
     const firstClient = new PrismaClient();
@@ -78,8 +79,8 @@ describeWithDatabase("Paid included recovery reservation PostgreSQL concurrency"
       });
 
       const [first, second] = await Promise.all([
-        new PaidIncludedRecoveryReservationService(firstClient).reserve({ shopId, recoveryId: "recovery-a" }),
-        new PaidIncludedRecoveryReservationService(secondClient).reserve({ shopId, recoveryId: "recovery-b" }),
+        new PaidIncludedRecoveryReservationService(firstClient, 3, () => fixedNow).reserve({ shopId, recoveryId: "recovery-a" }),
+        new PaidIncludedRecoveryReservationService(secondClient, 3, () => fixedNow).reserve({ shopId, recoveryId: "recovery-b" }),
       ]);
       const outcomes = [first, second];
       expect(outcomes.filter((outcome) => outcome.kind === "reserved")).toHaveLength(1);
@@ -87,7 +88,7 @@ describeWithDatabase("Paid included recovery reservation PostgreSQL concurrency"
 
       const admitted = outcomes.find((outcome) => outcome.kind === "reserved");
       if (!admitted || admitted.kind !== "reserved") throw new Error("expected one admitted reservation");
-      const commitClient = new PaidIncludedRecoveryReservationService(database);
+      const commitClient = new PaidIncludedRecoveryReservationService(database, 3, () => fixedNow);
       await expect(commitClient.commit({ shopId, sourceKey: admitted.sourceKey })).resolves.toMatchObject({ kind: "committed" });
 
       const counter = await database.billingPeriodEntitlementCounter.findUnique({

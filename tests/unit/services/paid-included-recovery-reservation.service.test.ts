@@ -277,7 +277,7 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
   });
 
-  it("retries bounded CAS and unique conflicts", async () => {
+  it("retries P2034 conflicts with a bounded attempt count", async () => {
     const harness = createHarness();
     let failures = 0;
     harness.database.$transaction = vi.fn(async (callback: (client: typeof harness.transaction) => Promise<unknown>) => {
@@ -287,6 +287,46 @@ describe("PaidIncludedRecoveryReservationService", () => {
       return callback(harness.transaction);
     }) as never;
     await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.database.$transaction).toHaveBeenCalledTimes(3);
+    expect(harness.state.counter.reservedQuantity).toBe(1);
+  });
+
+  it("retries a P2002 conflict without duplicating the reservation", async () => {
+    const harness = createHarness();
+    let failures = 0;
+    harness.database.$transaction = vi.fn(async (callback: (client: typeof harness.transaction) => Promise<unknown>) => {
+      if (failures++ === 0) {
+        throw new Prisma.PrismaClientKnownRequestError("unique conflict", { code: "P2002", clientVersion: "test" });
+      }
+      return callback(harness.transaction);
+    }) as never;
+
+    await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.database.$transaction).toHaveBeenCalledTimes(2);
+    expect(harness.state.reservations).toHaveLength(1);
+    expect(harness.state.counter.reservedQuantity).toBe(1);
+  });
+
+  it("retries an internal CAS conflict when updateMany affects no rows", async () => {
+    const harness = createHarness();
+    const updateMany = harness.transaction.billingPeriodEntitlementCounter.updateMany;
+    harness.transaction.billingPeriodEntitlementCounter.updateMany = vi.fn()
+      .mockResolvedValueOnce({ count: 0 })
+      .mockImplementation(updateMany);
+
+    await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.database.$transaction).toHaveBeenCalledTimes(2);
+    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledTimes(2);
+    expect(harness.state.counter.reservedQuantity).toBe(1);
+  });
+
+  it("stops after maxRetries when every transaction conflicts", async () => {
+    const harness = createHarness();
+    harness.database.$transaction = vi.fn(async () => {
+      throw new Prisma.PrismaClientKnownRequestError("serialization conflict", { code: "P2034", clientVersion: "test" });
+    }) as never;
+
+    await expect(reserve(harness)).rejects.toMatchObject({ code: "P2034" });
     expect(harness.database.$transaction).toHaveBeenCalledTimes(3);
   });
 });

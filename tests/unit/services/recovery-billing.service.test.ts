@@ -242,7 +242,7 @@ describe("RecoveryBillingService", () => {
       expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
-  it("blocks paid recovery when included capacity is exhausted", async () => {
+  it("blocks paid recovery when all three current capacity sources are exhausted", async () => {
     const database = createDatabase();
     const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
     const paidReservationService = paidIncludedReservationService("allowance-exhausted");
@@ -260,6 +260,160 @@ describe("RecoveryBillingService", () => {
       .resolves.toEqual({ kind: "blocked", reason: "allowance-exhausted" });
     expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(lifetimeReservationService.reserve).toHaveBeenCalledTimes(1);
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("uses purchased capacity after included capacity is exhausted", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const paidReservationService = paidIncludedReservationService("allowance-exhausted");
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const lifetimeReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "recovery-purchased" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledOnce();
+    expect(purchasedReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:recovery-purchased",
+    });
+    expect(lifetimeReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("uses lifetime Free capacity after included and purchased capacity are exhausted", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const paidReservationService = paidIncludedReservationService("allowance-exhausted");
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const lifetimeReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "recovery-lifetime" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "lifetime-free" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledOnce();
+    expect(lifetimeReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:recovery-lifetime",
+    });
+  });
+
+  it.each([
+    { kind: "already-ambiguous" as const },
+    { kind: "already-released" as const },
+  ])("does not switch funding buckets for an included $kind replay", async ({ kind }) => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const paidReservationService = {
+      ...paidIncludedReservationService(),
+      reserve: vi.fn(async () => ({ kind, reservation: {}, counter: "INCLUDED_RECOVERY_CREDITS" as const })),
+    };
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const lifetimeReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: `recovery-${kind}` }))
+      .resolves.toEqual({ kind: "blocked", reason: "reservation-in-flight" });
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+    expect(lifetimeReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("commits a purchased-funded Paid recovery without the paid meter", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const paidReservationService = paidIncludedReservationService("allowance-exhausted");
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-purchased-commit" });
+    if (result.kind !== "admitted") throw new Error("expected purchased admission");
+
+    await service.commitSuccessfulInitiation({
+      admission: result.admission,
+      recoveryId: "recovery-purchased-commit",
+      occurredAt: new Date("2026-09-12T00:00:00.000Z"),
+    });
+    expect(purchasedReservationService.commit).toHaveBeenCalledOnce();
+    expect(paidReservationService.commit).not.toHaveBeenCalled();
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("commits a lifetime-Free-funded Paid recovery without the paid meter", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => paidPolicy()) };
+    const paidReservationService = paidIncludedReservationService("allowance-exhausted");
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const lifetimeReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "recovery-lifetime-commit" });
+    if (result.kind !== "admitted") throw new Error("expected lifetime-Free admission");
+
+    await service.commitSuccessfulInitiation({
+      admission: result.admission,
+      recoveryId: "recovery-lifetime-commit",
+      occurredAt: new Date("2026-09-12T00:00:00.000Z"),
+    });
+    expect(lifetimeReservationService.commit).toHaveBeenCalledOnce();
+    expect(paidReservationService.commit).not.toHaveBeenCalled();
     expect(database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
