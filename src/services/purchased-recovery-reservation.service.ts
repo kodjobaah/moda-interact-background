@@ -1,5 +1,6 @@
 import {
   Prisma,
+  RecoveryCreditPurchaseStatus,
   ShopifyReportState,
   UsageMetric,
   UsageReservationStatus,
@@ -44,7 +45,7 @@ type ReservationTransaction = Prisma.TransactionClient;
 type ReservationDatabase = Pick<
   PrismaClient,
   "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent"
->;
+> & Pick<PrismaClient, "recoveryCreditPurchase">;
 
 class ReservationConcurrencyConflict extends Error {}
 
@@ -122,6 +123,8 @@ export class PurchasedRecoveryReservationService {
           refundingQuantity: purchasedCounter.refundingQuantity ?? 0,
         });
         if (available < quantity) return replayOutcome(existing, counter);
+        const lot = await requirePurchaseLot(transaction, existing.purchasedCreditPurchaseId);
+        if (spendableLotQuantity(lot) < quantity) return replayOutcome(existing, counter);
         const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
           where: { id: purchasedCounter.id, version: purchasedCounter.version },
           data: {
@@ -130,6 +133,16 @@ export class PurchasedRecoveryReservationService {
           },
         });
         if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
+          where: {
+            id: lot.id,
+            version: lot.version,
+            status: RecoveryCreditPurchaseStatus.ACTIVE,
+            reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - quantity },
+          },
+          data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
+        });
+        if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
           data: { status: UsageReservationStatus.RESERVED },
@@ -169,6 +182,9 @@ export class PurchasedRecoveryReservationService {
     });
     if (available < quantity) return { kind: "credits-exhausted", available: Math.max(available, 0) };
 
+    const lot = await selectOldestSpendableLot(transaction, input.shopId, quantity);
+    if (!lot) return { kind: "credits-exhausted", available: Math.max(available, 0) };
+
     const updated = await transaction.shopEntitlementCounter.updateMany({
       where: { id: counter.id, version: counter.version },
       data: {
@@ -178,10 +194,22 @@ export class PurchasedRecoveryReservationService {
     });
     if (updated.count !== 1) throw new ReservationConcurrencyConflict();
 
+    const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
+      where: {
+        id: lot.id,
+        version: lot.version,
+        status: RecoveryCreditPurchaseStatus.ACTIVE,
+        reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - quantity },
+      },
+      data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
+    });
+    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
+
     const reservation = await transaction.usageReservation.create({
       data: {
         shopId: input.shopId,
         counterId: counter.id,
+        purchasedCreditPurchaseId: lot.id,
         sourceKey: input.sourceKey,
         quantity,
       },
@@ -204,11 +232,17 @@ export class PurchasedRecoveryReservationService {
 
     const counterId = reservation.counterId;
     if (!counterId) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+    const lot = await requirePurchaseLot(transaction, reservation.purchasedCreditPurchaseId);
     const counter = await transaction.shopEntitlementCounter.findUnique({
       where: { id: counterId },
       select: { version: true },
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+    const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
+      where: { id: lot.id, version: lot.version, reservedQuantity: { gte: quantity } },
+      data: { reservedQuantity: { decrement: quantity }, committedQuantity: { increment: quantity }, version: { increment: 1 } },
+    });
+    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
@@ -263,11 +297,17 @@ export class PurchasedRecoveryReservationService {
 
     const counterId = reservation.counterId;
     if (!counterId) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+    const lot = await requirePurchaseLot(transaction, reservation.purchasedCreditPurchaseId);
     const counter = await transaction.shopEntitlementCounter.findUnique({
       where: { id: counterId },
       select: { version: true },
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
+    const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
+      where: { id: lot.id, version: lot.version, reservedQuantity: { gte: quantity } },
+      data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
+    });
+    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
@@ -353,6 +393,44 @@ function validateQuantity(quantity: number | undefined): number {
     throw new PurchasedRecoveryReservationError("Reservation quantity must be a positive safe integer");
   }
   return value;
+}
+
+type PurchaseLot = Awaited<ReturnType<PrismaClient["recoveryCreditPurchase"]["findUnique"]>>;
+
+async function requirePurchaseLot(
+  transaction: ReservationTransaction,
+  purchaseId: string | null,
+): Promise<NonNullable<PurchaseLot>> {
+  if (!purchaseId) throw new PurchasedRecoveryReservationError("Purchased reservation lot does not exist");
+  const lot = await transaction.recoveryCreditPurchase.findUnique({ where: { id: purchaseId } });
+  if (!lot || lot.status !== RecoveryCreditPurchaseStatus.ACTIVE) {
+    throw new PurchasedRecoveryReservationError("Purchased reservation lot is not active");
+  }
+  return lot;
+}
+
+async function selectOldestSpendableLot(
+  transaction: ReservationTransaction,
+  shopId: string,
+  quantity: number,
+): Promise<NonNullable<PurchaseLot> | null> {
+  const lots = await transaction.recoveryCreditPurchase.findMany({
+    where: { shopId, status: RecoveryCreditPurchaseStatus.ACTIVE },
+    orderBy: [
+      { activatedAt: { sort: "asc", nulls: "last" } },
+      { createdAt: "asc" },
+      { id: "asc" },
+    ],
+  });
+  return lots.find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+}
+
+function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
+  return lot.creditsGranted -
+    lot.committedQuantity -
+    lot.reservedQuantity -
+    lot.refundingQuantity -
+    lot.refundedQuantity;
 }
 
 function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): PurchasedReservationOutcome {

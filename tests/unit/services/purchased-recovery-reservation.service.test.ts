@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PurchasedRecoveryReservationService } from "../../../src/services/purchased-recovery-reservation.service.js";
 
-function createHarness(grantedQuantity = 1) {
+function createHarness(grantedQuantity = 1, lotInputs = [{ id: "purchase-1", creditsGranted: grantedQuantity, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") }]) {
   const state = {
     counter: {
       id: "counter-1",
@@ -16,6 +16,16 @@ function createHarness(grantedQuantity = 1) {
     },
     reservation: null as Record<string, unknown> | null,
     usageEvent: null as Record<string, unknown> | null,
+    lots: lotInputs.map((lot) => ({
+      shopId: "shop-1",
+      status: "ACTIVE",
+      committedQuantity: 0,
+      reservedQuantity: 0,
+      refundingQuantity: 0,
+      refundedQuantity: 0,
+      version: 0,
+      ...lot,
+    })),
   };
 
   const transaction = {
@@ -35,6 +45,28 @@ function createHarness(grantedQuantity = 1) {
         state.counter.committedQuantity += (data.committedQuantity as { increment?: number } | undefined)?.increment ?? 0;
         state.counter.refundingQuantity += (data.refundingQuantity as { increment?: number } | undefined)?.increment ?? 0;
         state.counter.version += (data.version as { increment: number }).increment;
+        return { count: 1 };
+      }),
+    },
+    recoveryCreditPurchase: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => state.lots.find((lot) => lot.id === where.id) ?? null),
+      findMany: vi.fn(async () => [...state.lots].sort((left, right) => {
+        const activation = (left.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER) - (right.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
+        return activation || left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id);
+      }).filter((lot) => lot.status === "ACTIVE")),
+      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; reservedQuantity?: { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
+        const lot = state.lots.find((candidate) => candidate.id === where.id);
+        if (!lot || lot.version !== where.version || (where.status && lot.status !== where.status)) return { count: 0 };
+        if (where.reservedQuantity?.gte !== undefined && lot.reservedQuantity < where.reservedQuantity.gte) return { count: 0 };
+        if (where.reservedQuantity?.lte !== undefined && lot.reservedQuantity > where.reservedQuantity.lte) return { count: 0 };
+        const reserved = data.reservedQuantity as { increment?: number; decrement?: number } | undefined;
+        const committed = data.committedQuantity as { increment?: number } | undefined;
+        const refunding = data.refundingQuantity as { increment?: number } | undefined;
+        lot.reservedQuantity += reserved?.increment ?? 0;
+        lot.reservedQuantity -= reserved?.decrement ?? 0;
+        lot.committedQuantity += committed?.increment ?? 0;
+        lot.refundingQuantity += refunding?.increment ?? 0;
+        lot.version += (data.version as { increment: number }).increment;
         return { count: 1 };
       }),
     },
@@ -103,6 +135,34 @@ describe("PurchasedRecoveryReservationService", () => {
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-2" }))
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
     expect(state.counter.reservedQuantity).toBe(1);
+    expect(state.lots[0]?.reservedQuantity).toBe(1);
+  });
+
+  it("selects the oldest active spendable lot in FIFO order", async () => {
+    const { service, state } = createHarness(2, [
+      { id: "purchase-new", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+      { id: "purchase-old", creditsGranted: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
+    ]);
+
+    const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:fifo" });
+
+    expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "purchase-old" } });
+    expect(state.lots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "purchase-old", reservedQuantity: 1 }),
+      expect.objectContaining({ id: "purchase-new", reservedQuantity: 0 }),
+    ]));
+  });
+
+  it("skips exhausted, refund-held, and refunded lots", async () => {
+    const { service } = createHarness(3, [
+      { id: "exhausted", creditsGranted: 1, committedQuantity: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
+      { id: "held", creditsGranted: 1, refundingQuantity: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+      { id: "refunded", creditsGranted: 1, refundedQuantity: 1, activatedAt: new Date("2026-09-03T00:00:00.000Z"), createdAt: new Date("2026-09-03T00:00:00.000Z") },
+      { id: "available", creditsGranted: 1, activatedAt: new Date("2026-09-04T00:00:00.000Z"), createdAt: new Date("2026-09-04T00:00:00.000Z") },
+    ]);
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:skip" }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "available" } });
   });
 
   it("does not reserve credits held by an approved refund", async () => {
@@ -122,7 +182,12 @@ describe("PurchasedRecoveryReservationService", () => {
         where: { id: counter.id, version: counter.version },
         data: { refundingQuantity: { increment: 5 }, version: { increment: 1 } },
       });
-      return updated.count === 1;
+      const lot = await transaction.recoveryCreditPurchase.findUnique({ where: { id: "purchase-1" } });
+      const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
+        where: { id: lot.id, version: lot.version, reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - 5 } },
+        data: { refundingQuantity: { increment: 5 }, version: { increment: 1 } },
+      });
+      return updated.count === 1 && updatedLot.count === 1;
     });
 
     const [refundHeld, reservation] = await Promise.all([
@@ -143,19 +208,28 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "released" });
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
+    expect(state.lots[0]).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
   });
 
   it("reactivates a released reservation on the same row and counter", async () => {
-    const { service, state, transaction } = createHarness();
+    const { service, state, transaction } = createHarness(2, [
+      { id: "purchase-old", creditsGranted: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
+      { id: "purchase-new", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+    ]);
     await service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
     const reservationId = state.reservation!.id;
     const counterId = state.reservation!.counterId;
+    const purchaseId = state.reservation!.purchasedCreditPurchaseId;
     await service.release({ shopId: "shop-1", sourceKey: "purchased:reactivate" });
 
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:reactivate" }))
-      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, status: "RESERVED" } });
+      .resolves.toMatchObject({ kind: "reserved", reservation: { id: reservationId, counterId, purchasedCreditPurchaseId: purchaseId, status: "RESERVED" } });
     expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
     expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
+    expect(state.lots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "purchase-old", reservedQuantity: 1 }),
+      expect.objectContaining({ id: "purchase-new", reservedQuantity: 0 }),
+    ]));
   });
 
   it("keeps ambiguous provider outcomes consuming reserved capacity", async () => {
@@ -166,6 +240,7 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "ambiguous" });
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+    expect(state.lots[0]).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-next" }))
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
   });

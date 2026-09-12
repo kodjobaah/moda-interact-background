@@ -44,8 +44,7 @@ function matches(purchase: (typeof candidates)[number] & Record<string, unknown>
     && purchase.usageEvent.metric === usageWhere.metric
     && purchase.usageEvent.quantity === usageWhere.quantity
     && purchase.usageEvent.shopifyReportState === usageWhere.shopifyReportState
-    && purchase.usageEvent.billingPeriodId === usageWhere.billingPeriodId
-    && (!where.refund || (purchase.refund?.status === "COMPLETED" && purchase.refund?.settlementMode === "PARTNER_DASHBOARD_REFUND"));
+    && purchase.usageEvent.billingPeriodId === usageWhere.billingPeriodId;
 }
 
 const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter" };
@@ -87,36 +86,13 @@ describe("RecoveryCreditPurchaseService", () => {
     expect(over.purchases).toHaveLength(2);
   });
 
-  it("explains a completed dashboard refund without regranting a new purchase", async () => {
+  it("does not regrant a locally partially refunded active purchase", async () => {
     const test = harness();
-    test.purchases[0]!.status = "REFUNDED";
-    test.purchases[0]!.refund = { status: "COMPLETED", settlementMode: "PARTNER_DASHBOARD_REFUND" };
+    test.purchases[0]!.status = "ACTIVE";
 
     await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
-      .resolves.toMatchObject({ alreadyMatchedUnits: 1, activatedCount: 0 });
-    expect(test.purchases[1]?.status).toBe("PENDING_BILLING");
+      .resolves.toMatchObject({ alreadyMatchedUnits: 1, eligibleCandidateCount: 1, activatedCount: 0 });
     expect(test.counter.grantedQuantity).toBe(0);
-  });
-
-  it("activates one new purchase after explaining one dashboard refund", async () => {
-    const test = harness();
-    test.purchases[0]!.status = "REFUNDED";
-    test.purchases[0]!.refund = { status: "COMPLETED", settlementMode: "PARTNER_DASHBOARD_REFUND" };
-
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 2 }))
-      .resolves.toMatchObject({ alreadyMatchedUnits: 1, activatedCount: 1 });
-    expect(test.purchases[1]?.status).toBe("ACTIVE");
-    expect(test.counter.grantedQuantity).toBe(5);
-  });
-
-  it("does not reactivate a completed correction refund", async () => {
-    const test = harness();
-    test.purchases[0]!.status = "REFUNDED";
-    test.purchases[0]!.refund = { status: "COMPLETED", settlementMode: "CURRENT_CYCLE_APP_EVENT_CORRECTION" };
-
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
-      .resolves.toMatchObject({ eligibleCandidateCount: 1, activatedCount: 1 });
-    expect(test.purchases[0]?.status).toBe("REFUNDED");
   });
 
   it("fails closed for invalid provider quantities", async () => {
