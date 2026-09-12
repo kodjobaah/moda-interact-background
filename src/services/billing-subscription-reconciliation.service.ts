@@ -8,7 +8,7 @@ import {
   type BillingSubscriptionReconcileJob,
 } from "@modainteract/moda-interact-shared/billing";
 import { BillingPeriodStatus, BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
-import type { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -25,6 +25,18 @@ const RETRY_TIERS = [
 
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
+type InitialActivationExpected = {
+  subscriptionId: string;
+  pendingPlanId: string;
+  pendingShopifyPlanHandle: string;
+  pendingEffectiveAt: Date;
+  nextReconcileAt: Date;
+};
+type FreeCycleExpected = {
+  subscriptionId: string;
+  currentPlanId: string;
+  nextReconcileAt: Date;
+};
 
 export function nextSubscriptionReconcileAt(pendingEffectiveAt: Date, now = new Date()): Date | null {
   const ageMs = Math.max(0, now.getTime() - pendingEffectiveAt.getTime());
@@ -71,21 +83,23 @@ export class BillingSubscriptionReconciliationService {
     const rows = await this.database.shop.findMany({
       where: {
         status: "ACTIVE",
-        subscription: {
-            OR: [
-              { pendingPlanId: { not: null }, nextReconcileAt: { not: null } },
-              { status: "FROZEN", nextReconcileAt: { not: null } },
-              {
-                status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
-                planId: { not: null },
-                billingPeriodId: null,
-                pendingPlanId: null,
-                pendingShopifyPlanHandle: null,
-                nextReconcileAt: { not: null },
-                plan: { is: { active: true, kind: BillingPlanKind.FREE, recoveryCreditPackEnabled: true } },
-              },
-            ],
-        },
+        OR: [
+          { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
+          { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
+          {
+            settings: { is: { onboardingCompleted: true } },
+            subscription: { is: {
+              status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+              planId: { not: null },
+              billingPeriodId: null,
+              pendingPlanId: null,
+              pendingShopifyPlanHandle: null,
+              pendingEffectiveAt: null,
+              nextReconcileAt: { not: null },
+              plan: { is: { active: true, kind: BillingPlanKind.FREE, recoveryCreditPackEnabled: true } },
+            } },
+          },
+        ],
       },
       select: {
         id: true,
@@ -155,13 +169,19 @@ export class BillingSubscriptionReconciliationService {
       || row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
     ) return;
 
-    const expected = {
-      subscriptionId: row.subscription.id,
-      pendingPlanId: row.subscription.pendingPlanId,
-      pendingShopifyPlanHandle: row.subscription.pendingShopifyPlanHandle,
-      pendingEffectiveAt: row.subscription.pendingEffectiveAt,
-      nextReconcileAt: row.subscription.nextReconcileAt,
-    };
+    const expected: InitialActivationExpected | FreeCycleExpected = isCycleDiscovery
+      ? {
+          subscriptionId: row.subscription.id,
+          currentPlanId: row.subscription.planId!,
+          nextReconcileAt: row.subscription.nextReconcileAt,
+        }
+      : {
+          subscriptionId: row.subscription.id,
+          pendingPlanId: row.subscription.pendingPlanId!,
+          pendingShopifyPlanHandle: row.subscription.pendingShopifyPlanHandle!,
+          pendingEffectiveAt: row.subscription.pendingEffectiveAt!,
+          nextReconcileAt: row.subscription.nextReconcileAt,
+        };
     const currentPlan = isCycleDiscovery && row.subscription.planId
       ? await this.database.billingPlan.findUnique({
           where: { id: row.subscription.planId },
@@ -175,24 +195,24 @@ export class BillingSubscriptionReconciliationService {
       provider = await this.partner.getActiveSubscription(row.shopifyShopId);
     } catch (error) {
       if (isCycleDiscovery && currentPlan) {
-        await this.recordCycleDiscoveryFailure(row.id, expected, error);
+        await this.recordCycleDiscoveryFailure(row.id, expected as FreeCycleExpected, error);
       } else {
-        await this.recordProviderFailure(row.id, expected, error);
+        await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
       }
       return;
     }
 
     if (!provider) {
       if (isCycleDiscovery) {
-        await this.recordMissingCycle(row.id, expected);
+        await this.recordMissingCycle(row.id, expected as FreeCycleExpected);
       } else {
-        await this.recordMissingSubscription(row.id, expected);
+        await this.recordMissingSubscription(row.id, expected as InitialActivationExpected);
       }
       return;
     }
 
     if (isCycleDiscovery && currentPlan) {
-      await this.reconcileFreeCycle(row.id, expected, provider, currentPlan);
+      await this.reconcileFreeCycle(row.id, expected as FreeCycleExpected, provider, currentPlan);
       return;
     }
 
@@ -216,10 +236,9 @@ export class BillingSubscriptionReconciliationService {
           provider,
           plan.id,
           plan.recoveryCreditPackEnabled,
-          row.subscription.pendingEffectiveAt,
           job.expectedNextReconcileAt,
           plan.name,
-          expected,
+          expected as InitialActivationExpected,
         );
       return;
     }
@@ -231,17 +250,11 @@ export class BillingSubscriptionReconciliationService {
       plan,
       row.subscription.pendingShopifyPlanHandle!,
       job.expectedNextReconcileAt,
-      expected,
+      expected as InitialActivationExpected,
     );
   }
 
-  private async recordMissingSubscription(shopId: string, expected: {
-    subscriptionId: string;
-    pendingPlanId: string | null;
-    pendingShopifyPlanHandle: string | null;
-    pendingEffectiveAt: Date | null;
-    nextReconcileAt: Date;
-  }): Promise<void> {
+  private async recordMissingSubscription(shopId: string, expected: InitialActivationExpected): Promise<void> {
     const now = this.now();
     const next = expected.pendingEffectiveAt ? nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now) : null;
     const updated = await this.casPendingUpdate(expected, {
@@ -259,13 +272,7 @@ export class BillingSubscriptionReconciliationService {
     if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
-  private async recordProviderFailure(shopId: string, expected: {
-    subscriptionId: string;
-    pendingPlanId: string | null;
-    pendingShopifyPlanHandle: string | null;
-    pendingEffectiveAt: Date | null;
-    nextReconcileAt: Date;
-  }, error: unknown): Promise<void> {
+  private async recordProviderFailure(shopId: string, expected: InitialActivationExpected, error: unknown): Promise<void> {
     const now = this.now();
     const next = expected.pendingEffectiveAt ? nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now) : null;
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
@@ -282,13 +289,7 @@ export class BillingSubscriptionReconciliationService {
   }
 
   private async casPendingUpdate(
-    expected: {
-      subscriptionId: string;
-      pendingPlanId: string | null;
-      pendingShopifyPlanHandle: string | null;
-      pendingEffectiveAt: Date | null;
-      nextReconcileAt: Date;
-    },
+    expected: InitialActivationExpected,
     data: Prisma.SubscriptionUpdateManyMutationInput,
   ): Promise<boolean> {
     const result = await this.database.subscription.updateMany({
@@ -318,19 +319,13 @@ export class BillingSubscriptionReconciliationService {
     }
   }
 
-  private async recordMissingCycle(shopId: string, expected: {
-    subscriptionId: string;
-    pendingPlanId: string | null;
-    pendingShopifyPlanHandle: string | null;
-    pendingEffectiveAt: Date | null;
-    nextReconcileAt: Date;
-  }): Promise<void> {
+  private async recordMissingCycle(shopId: string, expected: FreeCycleExpected): Promise<void> {
     const next = new Date(this.now().getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS);
     const result = await this.database.subscription.updateMany({
       where: {
         id: expected.subscriptionId,
         status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
-        planId: { not: null },
+        planId: expected.currentPlanId,
         billingPeriodId: null,
         pendingPlanId: null,
         pendingShopifyPlanHandle: null,
@@ -342,13 +337,7 @@ export class BillingSubscriptionReconciliationService {
     if (result.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
-  private async recordCycleDiscoveryFailure(shopId: string, expected: {
-    subscriptionId: string;
-    pendingPlanId: string | null;
-    pendingShopifyPlanHandle: string | null;
-    pendingEffectiveAt: Date | null;
-    nextReconcileAt: Date;
-  }, error: unknown): Promise<void> {
+  private async recordCycleDiscoveryFailure(shopId: string, expected: FreeCycleExpected, error: unknown): Promise<void> {
     const next = new Date(this.now().getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS);
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
       shopId,
@@ -359,7 +348,7 @@ export class BillingSubscriptionReconciliationService {
       where: {
         id: expected.subscriptionId,
         status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
-        planId: { not: null },
+        planId: expected.currentPlanId,
         billingPeriodId: null,
         pendingPlanId: null,
         pendingShopifyPlanHandle: null,
@@ -373,7 +362,7 @@ export class BillingSubscriptionReconciliationService {
 
   private async reconcileFreeCycle(
     shopId: string,
-    expected: { subscriptionId: string; pendingPlanId: string | null; pendingShopifyPlanHandle: string | null; pendingEffectiveAt: Date | null; nextReconcileAt: Date },
+    expected: FreeCycleExpected,
     provider: PartnerSubscription,
     plan: { id: string; active: boolean; name: string; kind: BillingPlanKind; shopifyPlanHandle: string; recoveryCreditPackEnabled: boolean; shopifyUsageEventHandle: string | null },
   ): Promise<void> {
@@ -386,11 +375,12 @@ export class BillingSubscriptionReconciliationService {
     const periodEnd = provider.currentPeriodEnd!;
     const next = new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockSubscription(transaction, expected.subscriptionId);
       const current = await transaction.subscription.findUnique({
         where: { id: expected.subscriptionId },
         select: { status: true, planId: true, billingPeriodId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
       });
-      if (!current || (current.status !== SubscriptionProjectionStatus.ACTIVE && current.status !== SubscriptionProjectionStatus.TRIALING) || current.planId !== plan.id || current.billingPeriodId !== null || current.pendingPlanId !== null || current.pendingShopifyPlanHandle !== null || current.pendingEffectiveAt !== null || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()) return false;
+      if (!current || (current.status !== SubscriptionProjectionStatus.ACTIVE && current.status !== SubscriptionProjectionStatus.TRIALING) || current.planId !== expected.currentPlanId || current.billingPeriodId !== null || current.pendingPlanId !== null || current.pendingShopifyPlanHandle !== null || current.pendingEffectiveAt !== null || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()) return false;
       const billingPeriod = await transaction.billingPeriod.upsert({
         where: { shopId_periodStart_periodEnd: { shopId, periodStart, periodEnd } },
         update: {},
@@ -411,32 +401,27 @@ export class BillingSubscriptionReconciliationService {
     provider: PartnerSubscription,
     planId: string,
     recoveryCreditPackEnabled: boolean,
-    pendingEffectiveAt: Date | null,
     expectedNextReconcileAt: string,
     planName: string,
-    expected: {
-      subscriptionId: string;
-      pendingPlanId: string | null;
-      pendingShopifyPlanHandle: string | null;
-      pendingEffectiveAt: Date | null;
-      nextReconcileAt: Date;
-    },
+    expected: InitialActivationExpected,
   ): Promise<void> {
     const now = this.now();
     const nextReconcileAt = recoveryCreditPackEnabled
       ? provider.currentPeriodEnd
         ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS))
-        : pendingEffectiveAt
-          ? nextSubscriptionReconcileAt(pendingEffectiveAt, now)
-          : null
+        : new Date(now.getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS)
       : null;
     await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockShopSettings(transaction, shopId);
+      await this.lockSubscription(transaction, subscriptionId);
+      const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({
         where: { id: subscriptionId },
         select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
       });
       if (
         !current
+        || settings?.onboardingCompleted !== false
         || current.status !== SubscriptionProjectionStatus.NO_CONTRACT
         || current.planId !== null
         || current.pendingPlanId !== expected.pendingPlanId
@@ -507,13 +492,7 @@ export class BillingSubscriptionReconciliationService {
     plan: { id: string; active: boolean; name: string; kind: BillingPlanKind; shopifyUsageEventHandle: string | null } | null,
     pendingShopifyPlanHandle: string,
     expectedNextReconcileAt: string,
-    expected: {
-      subscriptionId: string;
-      pendingPlanId: string | null;
-      pendingShopifyPlanHandle: string | null;
-      pendingEffectiveAt: Date | null;
-      nextReconcileAt: Date;
-    },
+    expected: InitialActivationExpected,
   ): Promise<void> {
     const now = this.now();
     const planUsable = Boolean(plan?.active);
@@ -525,8 +504,11 @@ export class BillingSubscriptionReconciliationService {
         ? SubscriptionProjectionStatus.SYNC_ERROR
         : provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE;
     await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockShopSettings(transaction, shopId);
+      await this.lockSubscription(transaction, subscriptionId);
+      const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({ where: { id: subscriptionId }, select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true } });
-      if (!current || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt?.toISOString() || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()) return;
+      if (!current || settings?.onboardingCompleted !== false || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()) return;
       const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
         ? await transaction.billingPeriod.upsert({
             where: { shopId_periodStart_periodEnd: { shopId, periodStart: provider.currentPeriodStart, periodEnd: provider.currentPeriodEnd } },
@@ -539,6 +521,24 @@ export class BillingSubscriptionReconciliationService {
         : null;
       await transaction.subscription.update({ where: { id: subscriptionId }, data: { planId: planUsable ? plan?.id ?? null : null, observedShopifyPlanHandle: provider.planHandle, status, billingPeriodId: billingPeriod?.id ?? null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd, trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId, pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: status === SubscriptionProjectionStatus.UNMAPPED ? "UNMAPPED_PLAN_HANDLE" : status === SubscriptionProjectionStatus.SYNC_ERROR ? "MISSING_USAGE_METER" : null, lastSyncErrorAt: status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING ? null : now } });
     });
+  }
+
+  private async lockShopSettings(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
+    await transaction.$queryRaw(Prisma.sql`
+      SELECT "shopId"
+      FROM "shopify"."ShopSettings"
+      WHERE "shopId" = ${shopId}
+      FOR UPDATE
+    `);
+  }
+
+  private async lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
+    await transaction.$queryRaw(Prisma.sql`
+      SELECT "id"
+      FROM "billing"."Subscription"
+      WHERE "id" = ${subscriptionId}
+      FOR UPDATE
+    `);
   }
 }
 

@@ -96,6 +96,7 @@ describe("production worker entrypoints", () => {
     expect(source).toContain("createBillingSubscriptionReconciliationWorker(subscriptionReconciliation)");
     expect(source).toContain("await subscriptionReconciliation.reconstruct()");
     expect(source).toContain("startQueuePerformanceTelemetry");
+    expect(source).toContain("queueNames: [billingSubscriptionQueue.name as QueueName]");
     expect(source).toContain("stopQueuePerformanceTelemetry");
     expect(source).toContain("closeResources: [");
   });

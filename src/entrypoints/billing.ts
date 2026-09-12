@@ -4,7 +4,8 @@ import { closeWorkerObservability } from "../runtime/observability.js";
 import { startBillingReconciliationScheduler } from "../runtime/billing-scheduler.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
-import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
+import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
+import { billingSubscriptionQueue } from "./billing-resources.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -37,7 +38,7 @@ void startReadyWorkerProcess({
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
     const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
-      queueNames: ["billing-subscription-reconcile"],
+      queueNames: [billingSubscriptionQueue.name as QueueName],
     });
     const runBillingCycle = async () => {
       await billingReconciliationService.reconcileOnce();
