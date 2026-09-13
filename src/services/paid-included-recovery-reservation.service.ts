@@ -419,6 +419,18 @@ export class PaidIncludedRecoveryReservationService {
     return counter;
   }
 
+  private async requireOpenReservationCounter(
+    transaction: ReservationTransaction,
+    reservation: UsageReservation,
+    shopId: string,
+  ) {
+    const counter = await this.requireReservationCounter(transaction, reservation, shopId);
+    if (counter.billingPeriod.status !== BillingPeriodStatus.OPEN || counter.billingPeriod.periodEnd <= this.now()) {
+      throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer open");
+    }
+    return counter;
+  }
+
   private async readCounter(transaction: ReservationTransaction, reservation: UsageReservation): Promise<ReservationCounter> {
     if (!reservation.billingPeriodEntitlementCounterId || reservation.counterId || reservation.purchasedCreditPurchaseId) {
       throw new PaidIncludedRecoveryReservationError("Reservation is not a paid included reservation");
