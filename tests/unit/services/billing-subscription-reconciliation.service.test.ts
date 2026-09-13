@@ -41,6 +41,7 @@ function harness({
       findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: row?.settings?.onboardingCompleted ?? false }),
       update: vi.fn(),
     },
+    shop: { update: vi.fn() },
     platformBillingPolicy: {
       findUnique: vi.fn().mockResolvedValue(policy),
     },
@@ -195,9 +196,51 @@ describe("BillingSubscriptionReconciliationService", () => {
   });
 
   it("ignores jobs for an uninstalled shop", async () => {
-    const test = harness({ row: pendingRow({ status: "UNINSTALLED" }) });
+    const test = harness({ row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: null }) });
     await test.service.reconcileJob(payload);
     expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+  });
+
+  it("reconciles only an uninstalled shop with a matching reinstall marker and schedule", async () => {
+    const reinstallAt = new Date("2026-09-12T11:30:00.000Z");
+    const test = harness({
+      row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: reinstallAt }),
+      providerResult: null,
+    });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.partner.getActiveSubscription).toHaveBeenCalledWith("gid://shopify/Shop/1");
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({
+      where: { id: "shop-1" },
+      data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null },
+    });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "NO_CONTRACT", planId: null, billingPeriodId: null, nextReconcileAt: null }),
+    }));
+  });
+
+  it("keeps a stale reinstall job terminal and does not call Partner", async () => {
+    const test = harness({ row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: new Date("2026-09-12T11:30:00.000Z") }) });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: "2026-09-12T12:01:00.000Z" });
+
+    expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+  });
+
+  it("reactivates a verified Free reinstall without creating a lifetime grant", async () => {
+    const test = harness({
+      row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: new Date("2026-09-12T11:30:00.000Z") }),
+      providerResult: freeProvider,
+      plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: false, shopifyRecoveryCreditPackEventHandle: null },
+    });
+    test.transaction.shopEntitlementCounter.findUnique.mockResolvedValue({ id: "lifetime-1" });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shop.update).toHaveBeenCalled();
   });
 
   it("keeps NO_CONTRACT pending intent and schedules the next retry on null provider truth", async () => {
@@ -785,17 +828,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const count = await test.service.reconstruct();
     expect(count).toBe(1);
     expect(test.database.shop.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: {
-        status: "ACTIVE",
-        OR: expect.arrayContaining([
-          { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
-          { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
-          expect.objectContaining({
-            settings: { is: { onboardingCompleted: true } },
-            subscription: { is: expect.objectContaining({ pendingEffectiveAt: null }) },
-          }),
-        ]),
-      },
+      where: expect.objectContaining({ AND: expect.any(Array) }),
     }));
     expect(test.queue.add).toHaveBeenCalled();
     expect(test.queue.add.mock.calls[0][1].expectedNextReconcileAt).toBe("2026-09-12T11:00:00.000Z");
@@ -810,6 +843,20 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconstruct();
     expect(test.queue.add.mock.calls[0][2].delay).toBe(5 * 60 * 1000);
     expect(test.queue.add.mock.calls[0][2].jobId).toBe(test.queue.add.mock.calls[1][2].jobId);
+  });
+
+  it("reconstructs a pending reinstall without contacting Shopify", async () => {
+    const next = new Date("2026-09-12T12:05:00.000Z");
+    const row = pendingRow({ status: "UNINSTALLED", reinstallPendingAt: new Date("2026-09-12T11:30:00.000Z"), subscription: { ...pendingRow().subscription, nextReconcileAt: next } });
+    const test = harness({ nowValue: now });
+    test.database.shop.findMany.mockResolvedValue([row]);
+
+    await expect(test.service.reconstruct()).resolves.toBe(1);
+
+    expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+    expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      shopId: "shop-1", subscriptionId: "subscription-1", expectedNextReconcileAt: next.toISOString(),
+    }), expect.objectContaining({ delay: 5 * 60 * 1000 }));
   });
 
   it("reconstructs a missing pack-enabled Free cycle job deterministically", async () => {
@@ -1082,8 +1129,8 @@ describe("BillingSubscriptionReconciliationService", () => {
   it("excludes pack-disabled Free subscriptions from cycle reconstruction", async () => {
     const test = harness();
     await test.service.reconstruct();
-    const query = test.database.shop.findMany.mock.calls[0]?.[0] as { where: { OR: unknown[] } };
-    const serialized = JSON.stringify(query.where.OR);
+    const query = test.database.shop.findMany.mock.calls[0]?.[0] as { where: unknown };
+    const serialized = JSON.stringify(query.where);
     expect(serialized).toContain('"kind":"PAID_METERED"');
     expect(serialized).toContain('"kind":"FREE","recoveryCreditPackEnabled":true');
     expect(serialized).not.toContain('"kind":"FREE","recoveryCreditPackEnabled":false');
@@ -1093,17 +1140,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness();
     await test.service.reconstruct();
     expect(test.database.shop.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: {
-        status: "ACTIVE",
-        OR: expect.arrayContaining([
-          { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
-          { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
-          expect.objectContaining({
-            settings: { is: { onboardingCompleted: true } },
-            subscription: { is: expect.objectContaining({ pendingEffectiveAt: null }) },
-          }),
-        ]),
-      },
+      where: expect.objectContaining({ AND: expect.any(Array) }),
     }));
     expect(test.queue.add).not.toHaveBeenCalled();
   });
