@@ -27,6 +27,10 @@ import {
   paidIncludedRecoveryReservationService,
   type PaidIncludedReservationOutcome,
 } from "./paid-included-recovery-reservation.service.js";
+import {
+  promotionalRecoveryReservationService,
+  type PromotionalReservationOutcome,
+} from "./promotional-recovery-reservation.service.js";
 
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
@@ -46,6 +50,10 @@ type PaidIncludedReservationService = Pick<
   typeof paidIncludedRecoveryReservationService,
   "reserve" | "commit" | "release" | "markAmbiguous"
 >;
+type PromotionalReservationService = Pick<
+  typeof promotionalRecoveryReservationService,
+  "reserve" | "commit" | "release" | "markAmbiguous"
+>;
 
 export type RecoveryBillingAdmission =
   | {
@@ -60,6 +68,11 @@ export type RecoveryBillingAdmission =
     }
   | {
       kind: "purchased";
+      sourceKey: string;
+      policy: EffectiveBillingPolicy;
+    }
+  | {
+      kind: "promotional";
       sourceKey: string;
       policy: EffectiveBillingPolicy;
     }
@@ -85,6 +98,7 @@ export class RecoveryBillingService {
     private readonly reservationService: FreeReservationService = freeRecoveryReservationService,
     private readonly purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
     private readonly paidIncludedReservationService: PaidIncludedReservationService = paidIncludedRecoveryReservationService,
+    private readonly promotionalReservationService: PromotionalReservationService = promotionalRecoveryReservationService,
   ) {}
 
   async admit(input: {
@@ -96,6 +110,23 @@ export class RecoveryBillingService {
 
     if (policy.newRecoveriesPaused) {
       return { kind: "blocked", reason: "paused" };
+    }
+
+    if (policy.planId) {
+      const promotional = await this.promotionalReservationService.reserve({
+        shopId: input.shopId,
+        sourceKey,
+        planId: policy.planId,
+      });
+      if (isPromotionalAdmission(promotional)) {
+        return {
+          kind: "admitted",
+          admission: { kind: "promotional", sourceKey: promotional.sourceKey, policy },
+        };
+      }
+      if (promotional.kind === "already-ambiguous" || promotional.kind === "already-released") {
+        return { kind: "blocked", reason: "reservation-in-flight" };
+      }
     }
 
     if (policy.planKind === "PAID_METERED") {
@@ -132,6 +163,14 @@ export class RecoveryBillingService {
     recoveryId: string;
     occurredAt: Date;
   }): Promise<void> {
+    if (input.admission.kind === "promotional") {
+      await this.promotionalReservationService.commit({
+        shopId: input.admission.policy.shopId,
+        sourceKey: input.admission.sourceKey,
+        planId: input.admission.policy.planId,
+      });
+      return;
+    }
     if (input.admission.kind === "free" || input.admission.kind === "lifetime-free") {
       await this.reservationService.commit({
         shopId: input.admission.policy.shopId,
@@ -162,6 +201,20 @@ export class RecoveryBillingService {
     const disposition = isDefinitiveProviderFailure(input.error)
       ? "definitive"
       : "ambiguous";
+
+    if (input.admission.kind === "promotional") {
+      const reservationInput = {
+        shopId: input.admission.policy.shopId,
+        sourceKey: input.admission.sourceKey,
+        planId: input.admission.policy.planId,
+      };
+      if (disposition === "definitive") {
+        await this.promotionalReservationService.release(reservationInput);
+      } else {
+        await this.promotionalReservationService.markAmbiguous(reservationInput);
+      }
+      return disposition;
+    }
 
     if (input.admission.kind === "purchased") {
       const reservationInput = {
@@ -206,6 +259,14 @@ export class RecoveryBillingService {
   }
 
   async releaseBeforeProvider(admission: RecoveryBillingAdmission): Promise<void> {
+    if (admission.kind === "promotional") {
+      await this.promotionalReservationService.release({
+        shopId: admission.policy.shopId,
+        sourceKey: admission.sourceKey,
+        planId: admission.policy.planId,
+      });
+      return;
+    }
     if (admission.kind === "purchased") {
       await this.purchasedReservationService.release({
         shopId: admission.policy.shopId,
@@ -388,6 +449,17 @@ function isPaidIncludedAdmission(
 ): reservation is Extract<
   PaidIncludedReservationOutcome,
   { sourceKey: string }
+> {
+  return reservation.kind === "reserved" ||
+    reservation.kind === "already-reserved" ||
+    reservation.kind === "already-committed";
+}
+
+function isPromotionalAdmission(
+  reservation: PromotionalReservationOutcome,
+): reservation is Extract<
+  PromotionalReservationOutcome,
+  { kind: "reserved" | "already-reserved" | "already-committed" }
 > {
   return reservation.kind === "reserved" ||
     reservation.kind === "already-reserved" ||

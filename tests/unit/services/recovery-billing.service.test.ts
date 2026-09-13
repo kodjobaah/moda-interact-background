@@ -1013,4 +1013,352 @@ describe("RecoveryBillingService", () => {
     expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(lifetimeReservationService.reserve).not.toHaveBeenCalled();
   });
+
+  it("reserves selected promotion before paid included capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({
+        kind: "reserved" as const,
+        reservation: {},
+        sourceKey,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "promo-first" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "promotional" } });
+    expect(promotionalReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:promo-first",
+      planId: "plan-1",
+    });
+    expect(paidReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("falls back to purchased capacity when the selected promotion is unavailable", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+
+    const result = await service.admit({ shopId: "shop-1", recoveryId: "promo-fallback" });
+
+    expect(result).toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "recovery:shop-1:promo-fallback",
+    });
+  });
+
+  it("uses free-plan promotional capacity before purchased or lifetime capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {}, sourceKey: "recovery:shop-1:free-promo" })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const lifetimeReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "free-promo" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "promotional" } });
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+    expect(lifetimeReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("falls from unavailable promotional capacity to paid included capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "paid-promo-fallback" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
+    expect(paidReservationService.reserve).toHaveBeenCalledOnce();
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("routes promotional lifecycle transitions to the exact-grant service", async () => {
+    const database = createDatabase();
+    const policy = { ...freePolicy(), planId: "plan-1" };
+    const policyResolver = { resolve: vi.fn(async () => policy) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({
+        kind: "reserved" as const,
+        reservation: {},
+        sourceKey,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "promo-lifecycle" });
+
+    if (admitted.kind !== "admitted") throw new Error("expected promotional admission");
+    await service.commitSuccessfulInitiation({ admission: admitted.admission, recoveryId: "promo-lifecycle", occurredAt: new Date() });
+
+    expect(promotionalReservationService.commit).toHaveBeenCalledWith({
+      shopId: policy.shopId,
+      sourceKey: "recovery:shop-1:promo-lifecycle",
+      planId: "plan-1",
+    });
+  });
+
+  it("falls through paid included, purchased, and lifetime Free capacity in order", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService("allowance-exhausted");
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const lifetimeReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "ordered-fallback" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "lifetime-free" } });
+    expect(promotionalReservationService.reserve).toHaveBeenCalledOnce();
+    expect(paidReservationService.reserve).toHaveBeenCalledOnce();
+    expect(purchasedReservationService.reserve).toHaveBeenCalledOnce();
+    expect(lifetimeReservationService.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("falls back from promotional capacity to paid included capacity", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "unavailable" as const })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "promo-to-paid" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "paid" } });
+    expect(promotionalReservationService.reserve).toHaveBeenCalledOnce();
+    expect(paidReservationService.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a promotional replay from switching to another capacity source", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "already-ambiguous" as const, reservation: {}, sourceKey: "recovery:shop-1:promo-replay" })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "promo-replay" }))
+      .resolves.toEqual({ kind: "blocked", reason: "reservation-in-flight" });
+    expect(paidReservationService.reserve).not.toHaveBeenCalled();
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("blocks a released promotional replay without falling back", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...paidPolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "already-released" as const, reservation: {}, sourceKey: "recovery:shop-1:released-promo" })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "released-promo" }))
+      .resolves.toEqual({ kind: "blocked", reason: "reservation-in-flight" });
+    expect(paidReservationService.reserve).not.toHaveBeenCalled();
+    expect(purchasedReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("commits promotional capacity without invoking paid meter accounting", async () => {
+    const database = createDatabase();
+    const policy = { ...paidPolicy(), planId: "plan-1" };
+    const policyResolver = { resolve: vi.fn(async () => policy) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({ kind: "reserved" as const, reservation: {}, sourceKey })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+      promotionalReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "promo-commit" });
+    if (admitted.kind !== "admitted") throw new Error("expected promotional admission");
+
+    await service.commitSuccessfulInitiation({ admission: admitted.admission, recoveryId: "promo-commit", occurredAt: new Date() });
+
+    expect(promotionalReservationService.commit).toHaveBeenCalledOnce();
+    expect(paidReservationService.commit).not.toHaveBeenCalled();
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("keeps promotional capacity owned through release, definitive failure, and ambiguity", async () => {
+    const database = createDatabase();
+    const policy = { ...freePolicy(), planId: "plan-1" };
+    const policyResolver = { resolve: vi.fn(async () => policy) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) => ({ kind: "reserved" as const, reservation: {}, sourceKey })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "promo-failure" });
+    if (admitted.kind !== "admitted") throw new Error("expected promotional admission");
+
+    await service.releaseBeforeProvider(admitted.admission);
+    await service.handleProviderFailure({
+      admission: admitted.admission,
+      error: Object.assign(new Error("rejected"), { name: "WhatsAppServiceError", code: "provider-rejected" }),
+    });
+    await service.handleProviderFailure({
+      admission: admitted.admission,
+      error: Object.assign(new Error("unknown response"), { name: "WhatsAppServiceError", code: "invalid-provider-response" }),
+    });
+    expect(promotionalReservationService.release).toHaveBeenCalledTimes(2);
+    expect(promotionalReservationService.markAmbiguous).toHaveBeenCalledOnce();
+  });
+
+  it("transitions only promotional capacity on provider outcomes", async () => {
+    const database = createDatabase();
+    const policyResolver = { resolve: vi.fn(async () => ({ ...freePolicy(), planId: "plan-1" })) };
+    const promotionalReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {}, sourceKey: "recovery:shop-1:promo-only" })),
+      commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const lifetimeReservationService = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      policyResolver as never,
+      lifetimeReservationService as never,
+      purchasedReservationService as never,
+      undefined as never,
+      promotionalReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "promo-only" });
+    if (admitted.kind !== "admitted") throw new Error("expected promotional admission");
+
+    await service.handleProviderFailure({
+      admission: admitted.admission,
+      error: Object.assign(new Error("rejected"), { name: "WhatsAppServiceError", code: "provider-rejected" }),
+    });
+    await service.releaseBeforeProvider(admitted.admission);
+    await service.handleProviderFailure({
+      admission: admitted.admission,
+      error: Object.assign(new Error("unknown"), { name: "WhatsAppServiceError", code: "invalid-provider-response" }),
+    });
+
+    expect(promotionalReservationService.release).toHaveBeenCalledTimes(2);
+    expect(promotionalReservationService.markAmbiguous).toHaveBeenCalledOnce();
+    expect(purchasedReservationService.release).not.toHaveBeenCalled();
+    expect(lifetimeReservationService.release).not.toHaveBeenCalled();
+  });
 });
