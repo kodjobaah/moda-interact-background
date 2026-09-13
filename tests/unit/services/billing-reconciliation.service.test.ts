@@ -184,6 +184,123 @@ describe("BillingReconciliationService", () => {
     expect(test.database.subscription.upsert).not.toHaveBeenCalled();
   });
 
+  it("uses canonical paid activation for a pending initial target during rotation", async () => {
+    const test = harness({
+      partnerResult: { ...providerSubscription, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
+      plan: {
+        id: "plan-paid",
+        active: true,
+        name: "Paid",
+        kind: "PAID_METERED",
+        shopifyPlanHandle: "paid-2026",
+        shopifyUsageEventHandle: "recovery-meter",
+        shopifyRecoveryCreditPackEventHandle: null,
+        recoveryCreditPackEnabled: false,
+        includedRecoveryConversationAllowance: 100,
+      },
+      queue: { add: vi.fn().mockResolvedValue({}) },
+    });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1",
+      status: "NO_CONTRACT",
+      planId: null,
+      pendingPlanId: "plan-paid",
+      pendingShopifyPlanHandle: "paid-2026",
+      pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"),
+      nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"),
+      billingPeriodId: null,
+    });
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: false }), update: vi.fn() },
+      subscription: { findUnique: vi.fn().mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") }), update: vi.fn() },
+      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
+      billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-paid" }) },
+      billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn() },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), create: vi.fn() },
+      platformBillingPolicy: { findUnique: vi.fn() },
+    };
+    test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
+
+    await test.service.reconcileOnce();
+
+    expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
+    expect(transaction.billingPeriod.create).toHaveBeenCalledOnce();
+    expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ grantedQuantity: 100 }),
+    }));
+    expect(transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+  });
+
+  it("leaves a same-local-plan handle drift pending during rotation", async () => {
+    const test = harness({
+      partnerResult: { ...providerSubscription, planHandle: "paid-new", pendingPlanHandle: null, pendingEffectiveAt: null },
+      plan: {
+        id: "plan-paid",
+        active: true,
+        name: "Paid",
+        kind: "PAID_METERED",
+        shopifyPlanHandle: "paid-new",
+        shopifyUsageEventHandle: "recovery-meter",
+        shopifyRecoveryCreditPackEventHandle: null,
+        recoveryCreditPackEnabled: false,
+        includedRecoveryConversationAllowance: 100,
+      },
+    });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1",
+      status: "NO_CONTRACT",
+      planId: null,
+      pendingPlanId: "plan-paid",
+      pendingShopifyPlanHandle: "paid-old",
+      pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"),
+      nextReconcileAt: null,
+      billingPeriodId: null,
+    });
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
+    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
+    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("re-observes an unsupported paid trial with a null schedule and later activates its exact cycle", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({
+      queue,
+      partnerResult: { ...providerSubscription, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null, status: "TRIALING", trialEndsAt: new Date("2026-09-20T00:00:00.000Z"), currentPeriodStart: null, currentPeriodEnd: null },
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 },
+    });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"), billingPeriodId: null });
+    test.database.billingPlan.findUnique.mockReset().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
+    const current = { status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: null };
+    test.database.subscription.updateMany.mockResolvedValue({ count: 1 });
+    await test.service.reconcileOnce();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null }) }));
+
+    test.partner.getActiveSubscription.mockResolvedValue({ ...providerSubscription, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null });
+    test.database.subscription.findUnique.mockResolvedValue({ ...current, nextReconcileAt: null });
+    test.database.$transaction.mockImplementation(async (callback: (value: typeof activationTransaction) => unknown) => callback(activationTransaction));
+    const activationTransaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: false }), update: vi.fn() },
+      subscription: { findUnique: vi.fn().mockResolvedValue({ ...current, nextReconcileAt: null }), update: vi.fn() },
+      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
+      billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-paid" }) },
+      billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn() },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), create: vi.fn() },
+      platformBillingPolicy: { findUnique: vi.fn() },
+    };
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+    expect(activationTransaction.billingPeriod.create).toHaveBeenCalledOnce();
+    expect(activationTransaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+  });
+
   it("B008-R5 links the latest open billing cycle as current", async () => {
     const test = harness();
     test.partner.getActiveSubscription
