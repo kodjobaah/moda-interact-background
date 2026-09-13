@@ -200,6 +200,33 @@ describe("RecoveryBillingService", () => {
     expect(paidReservationService.reserve).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    "paid",
+    "purchased",
+    "free",
+    "lifetime-free",
+    "promotional",
+  ] as const)("releases a %s admission when new recoveries become paused", async (kind) => {
+    const release = vi.fn();
+    const admission = {
+      kind,
+      sourceKey: `source-${kind}`,
+      policy: { shopId: "shop-1", planId: "plan-1" },
+    };
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      { resolve: vi.fn(async () => ({ newRecoveriesPaused: true })) } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release } as never,
+    );
+
+    await expect(service.revalidateBeforeProvider({ admission, recoveryId: "paused" }))
+      .resolves.toEqual({ kind: "blocked", reason: "paused" });
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it("releases and re-admits included capacity when the period changes before the provider", async () => {
     const paidReservationService = paidIncludedReservationService();
     const policyResolver = {

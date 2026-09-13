@@ -195,6 +195,11 @@ export class RecoveryBillingService {
       return { kind: "blocked", reason: "billing-period-reconciliation" };
     }
 
+    if (current.newRecoveriesPaused) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "paused" };
+    }
+
     if (
       input.admission.kind === "free" ||
       input.admission.kind === "lifetime-free" ||

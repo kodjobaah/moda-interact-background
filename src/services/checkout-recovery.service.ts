@@ -855,12 +855,10 @@ export class CheckoutRecoveryService {
 
     let result;
     try {
-      const revalidated = this.billingService.revalidateBeforeProvider
-        ? await this.billingService.revalidateBeforeProvider({
-            admission: billing.admission,
-            recoveryId: recovery.id,
-          })
-        : billing;
+      const revalidated = await this.billingService.revalidateBeforeProvider({
+        admission: billing.admission,
+        recoveryId: recovery.id,
+      });
       if (revalidated.kind === "blocked") return recovery;
       billing = revalidated;
 
