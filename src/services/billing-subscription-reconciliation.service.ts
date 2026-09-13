@@ -201,6 +201,7 @@ export class BillingSubscriptionReconciliationService {
       select: {
         id: true,
         status: true,
+        reinstallPendingAt: true,
         shopifyShopId: true,
         settings: { select: { onboardingCompleted: true } },
         subscription: {
@@ -219,10 +220,11 @@ export class BillingSubscriptionReconciliationService {
         },
       },
     });
-    const row = rowResult as (typeof rowResult & { reinstallPendingAt: Date | null }) | null;
+    const row = rowResult;
     if (!row || !row.subscription || !row.shopifyShopId) return;
     if (row.status === "UNINSTALLED") {
       if (row.reinstallPendingAt == null || row.subscription.nextReconcileAt === null) return;
+      if (row.subscription.id !== job.subscriptionId) return;
       if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) return;
       await this.reconcileReinstall(row.id, row.subscription.id, row.reinstallPendingAt, row.subscription.nextReconcileAt, row.shopifyShopId);
       return;
@@ -436,8 +438,8 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
     if (plan.kind === BillingPlanKind.FREE) {
-      if (plan.recoveryCreditPackEnabled && plan.shopifyRecoveryCreditPackEventHandle
-        && !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle)) {
+      if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle
+        || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) {
         await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER");
         return;
       }
@@ -458,10 +460,10 @@ export class BillingSubscriptionReconciliationService {
   private async completeReinstallWithoutContract(shopId: string, expected: ReinstallExpected): Promise<void> {
     const now = this.now();
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockShop(transaction, shopId);
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, expected.subscriptionId);
-      const current = await transaction.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { nextReconcileAt: true } });
-      if (!current || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return false;
+      if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return false;
       await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
         planId: null, observedShopifyPlanHandle: null, status: SubscriptionProjectionStatus.NO_CONTRACT,
         billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null, trialEndsAt: null,
@@ -470,9 +472,7 @@ export class BillingSubscriptionReconciliationService {
         lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: false } });
-      if (transaction.shop) {
-        await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
-      }
+      await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
     if (committed) this.logger.warn("billing.subscription_reconciliation.reinstall_no_contract", { shopId });
@@ -489,10 +489,13 @@ export class BillingSubscriptionReconciliationService {
       ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS))
       : null;
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockShop(transaction, shopId);
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, expected.subscriptionId);
-      const current = await transaction.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { nextReconcileAt: true } });
-      if (!current || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return false;
+      if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return false;
+      const pendingPlan = provider.pendingPlanHandle
+        ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+        : null;
       const period = provider.currentPeriodStart && provider.currentPeriodEnd
         ? await transaction.billingPeriod.upsert({
             where: { shopId_periodStart_periodEnd: { shopId, periodStart: provider.currentPeriodStart, periodEnd: provider.currentPeriodEnd } },
@@ -505,7 +508,8 @@ export class BillingSubscriptionReconciliationService {
         status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
         billingPeriodId: period?.id ?? null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd,
         trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId,
-        pendingShopifyPlanHandle: null, pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: next,
+        pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+        pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: next,
         lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
@@ -528,24 +532,29 @@ export class BillingSubscriptionReconciliationService {
     }
     if (provider.currentPeriodStart?.getTime() === current.currentPeriodStart.getTime()
       && provider.currentPeriodEnd?.getTime() === current.currentPeriodEnd.getTime()) {
-      const period = await this.database.billingPeriod.findUnique({ where: { id: current.billingPeriodId }, select: { id: true, shopId: true, periodStart: true, periodEnd: true, status: true } });
-      const counter = await this.database.billingPeriodEntitlementCounter.findUnique({ where: { billingPeriodId_counter: { billingPeriodId: current.billingPeriodId, counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } }, select: { id: true } });
-      if (!period || period.shopId !== shopId || period.status !== BillingPeriodStatus.OPEN || !counter
-        || period.periodStart.getTime() !== current.currentPeriodStart.getTime() || period.periodEnd.getTime() !== current.currentPeriodEnd.getTime()) {
-        await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
-        return;
-      }
-      await this.activateReinstallPaid(shopId, expected, provider, plan);
+      const result = await this.activateReinstallPaid(shopId, expected, provider, plan);
+      if (result === "invalid") await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
       return;
     }
     try {
-      const result = await new SamePlanBillingPeriodRolloverService(this.database).transition({ shopId, subscriptionId: expected.subscriptionId, provider, plan, now: this.now() });
+      const result = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+        await this.lockShop(transaction, shopId);
+        if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return { kind: "stale" as const };
+        const rollover = await new SamePlanBillingPeriodRolloverService(this.database).transitionInTransaction(transaction, { shopId, subscriptionId: expected.subscriptionId, provider, plan, now: this.now() });
+        if (rollover.kind !== "transitioned" && rollover.kind !== "unchanged") return rollover;
+        const pendingPlan = provider.pendingPlanHandle
+          ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+          : null;
+        await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt } });
+        await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
+        await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+        return rollover;
+      });
       if (result.kind === "transitioned" || result.kind === "unchanged") {
-        const activated = await this.activateReinstallAfterRollover(shopId, expected);
-        if (activated && result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
+        if (result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         return;
       }
-      await this.recordReinstallBlocked(shopId, expected, "PROVIDER_CYCLE_LAG");
+      if (result.kind !== "stale") await this.recordReinstallBlocked(shopId, expected, result.kind === "provider-cycle-lag" ? "PROVIDER_CYCLE_LAG" : "PERIOD_ALIGNMENT_REQUIRED");
     } catch {
       await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
     }
@@ -556,24 +565,42 @@ export class BillingSubscriptionReconciliationService {
     expected: ReinstallExpected,
     provider: PartnerSubscription,
     plan: InitialActivationPlan & { recoveryCreditPackEnabled: boolean },
-  ): Promise<boolean> {
+  ): Promise<boolean | "invalid"> {
     const now = this.now();
     const periodEnd = provider.currentPeriodEnd as Date;
     const next = new Date(Math.max(now.getTime(), periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await this.lockShop(transaction, shopId);
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, expected.subscriptionId);
-      const current = await transaction.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { planId: true, observedShopifyPlanHandle: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true, nextReconcileAt: true } });
-      if (!current || current.planId !== plan.id || current.observedShopifyPlanHandle !== provider.planHandle || current.billingPeriodId === null || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return false;
+      if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return false;
+      const current = await transaction.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { id: true, planId: true, observedShopifyPlanHandle: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true, nextReconcileAt: true } });
+      const period = current?.billingPeriodId ? await transaction.billingPeriod.findUnique({ where: { id: current.billingPeriodId } }) : null;
+      const counter = period ? await transaction.billingPeriodEntitlementCounter.findUnique({ where: { billingPeriodId_counter: { billingPeriodId: period.id, counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } } }) : null;
+      const quantities = counter && [counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity].every((value) => Number.isSafeInteger(value) && value >= 0);
+      const valid = Boolean(current && current.planId === plan.id && current.observedShopifyPlanHandle === provider.planHandle && current.billingPeriodId
+        && current.currentPeriodStart && current.currentPeriodEnd && provider.currentPeriodStart && provider.currentPeriodEnd
+        && current.currentPeriodStart.getTime() === provider.currentPeriodStart.getTime() && current.currentPeriodEnd.getTime() === provider.currentPeriodEnd.getTime()
+        && period && period.id === current.billingPeriodId && period.shopId === shopId && period.subscriptionId === expected.subscriptionId && period.planId === plan.id
+        && period.status === BillingPeriodStatus.OPEN && period.periodStart.getTime() === provider.currentPeriodStart.getTime() && period.periodEnd.getTime() === provider.currentPeriodEnd.getTime()
+        && counter && counter.shopId === shopId && counter.billingPeriodId === period.id && quantities
+        && counter.grantedQuantity === period.includedRecoveryCreditsGranted
+        && counter.committedQuantity + counter.reservedQuantity + counter.forfeitedQuantity <= counter.grantedQuantity);
+      if (!valid) return "invalid";
+      const pendingPlan = provider.pendingPlanHandle
+        ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+        : null;
       await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
         status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
         trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId,
+        pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt,
         nextReconcileAt: next, lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
+    if (committed === true) await this.publishNext(shopId, expected.subscriptionId, next);
     return committed;
   }
 
@@ -1264,6 +1291,35 @@ export class BillingSubscriptionReconciliationService {
       WHERE "shopId" = ${shopId}
       FOR UPDATE
     `);
+  }
+
+  private async lockShop(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
+    await transaction.$queryRaw(Prisma.sql`
+      SELECT "id"
+      FROM "shopify"."Shop"
+      WHERE "id" = ${shopId}
+      FOR UPDATE
+    `);
+  }
+
+  private async isReinstallAuthority(
+    transaction: Prisma.TransactionClient,
+    shopId: string,
+    expected: ReinstallExpected,
+  ): Promise<boolean> {
+    const shop = await transaction.shop.findUnique({
+      where: { id: shopId },
+      select: { id: true, status: true, reinstallPendingAt: true },
+    });
+    const subscription = await transaction.subscription.findUnique({
+      where: { id: expected.subscriptionId },
+      select: { id: true, nextReconcileAt: true },
+    });
+    return shop?.id === shopId
+      && shop.status === "UNINSTALLED"
+      && sameDate(shop.reinstallPendingAt, expected.reinstallPendingAt)
+      && subscription?.id === expected.subscriptionId
+      && sameDate(subscription.nextReconcileAt, expected.nextReconcileAt);
   }
 
   private async lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
