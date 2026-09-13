@@ -21,6 +21,7 @@ import { recoveryCapacityResumeService } from "./recovery-capacity-resume.servic
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
+import { BillingSubscriptionReconciliationService } from "./billing-subscription-reconciliation.service.js";
 
 const DEFAULT_SHOP_PAGE_SIZE = 50;
 const MAX_SHOP_PAGE_SIZE = 200;
@@ -270,6 +271,7 @@ export class BillingReconciliationService {
         planId: true,
         pendingPlanId: true,
         pendingShopifyPlanHandle: true,
+        pendingEffectiveAt: true,
         billingPeriodId: true,
         currentPeriodStart: true,
         currentPeriodEnd: true,
@@ -287,6 +289,27 @@ export class BillingReconciliationService {
       && existing.pendingPlanId !== null
       && existing.pendingShopifyPlanHandle === provider.planHandle
     ) {
+      if (plan?.active && plan.id === existing.pendingPlanId && plan.kind === BillingPlanKind.PAID_METERED) {
+        await new BillingSubscriptionReconciliationService(
+          this.database,
+          this.partner,
+          this.subscriptionQueue,
+          this.logger,
+          this.now,
+        ).activateInitialPaid(
+          shopId,
+          existing.id,
+          provider,
+          plan,
+          {
+            subscriptionId: existing.id,
+            pendingPlanId: existing.pendingPlanId,
+            pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle,
+            pendingEffectiveAt: existing.pendingEffectiveAt!,
+            nextReconcileAt: existing.nextReconcileAt!,
+          },
+        );
+      }
       return { billingPeriodId: null, packMeterHandle: null };
     }
     const planUsable = Boolean(plan?.active);
