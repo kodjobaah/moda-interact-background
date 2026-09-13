@@ -12,6 +12,8 @@ import { createLogger, type StructuredLogger } from "@modainteract/moda-interact
 import prisma from "../lib/db.js";
 import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
 import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.service.js";
+import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
+import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 
 const DEFAULT_SHOP_PAGE_SIZE = 50;
@@ -227,14 +229,18 @@ export class BillingReconciliationService {
       select: {
         id: true,
         active: true,
+        name: true,
         kind: true,
+        shopifyPlanHandle: true,
         shopifyUsageEventHandle: true,
         shopifyRecoveryCreditPackEventHandle: true,
+        recoveryCreditPackEnabled: true,
+        includedRecoveryConversationAllowance: true,
       },
     });
     const existing = await this.database.subscription.findUnique({
       where: { shopId },
-      select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
+      select: { id: true, status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
     });
     const settings = await this.database.shopSettings.findUnique({
       where: { shopId },
@@ -264,6 +270,25 @@ export class BillingReconciliationService {
       : status === SubscriptionProjectionStatus.SYNC_ERROR
         ? "MISSING_USAGE_METER"
         : null;
+    if (existing?.id && plan?.active && existing.planId === plan.id) {
+      await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, result) => {
+        if (result.planKind !== BillingPlanKind.PAID_METERED) return;
+        try {
+          await recoveryCapacityResumeService.schedule({ shopId: rolloverInput.shopId, trigger: "billing-period-rollover" });
+        } catch (error) {
+          this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
+            shopId: rolloverInput.shopId,
+            errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          });
+        }
+      }).transition({
+        shopId,
+        subscriptionId: existing.id,
+        provider,
+        plan,
+        now,
+      });
+    }
     const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
       ? await this.database.billingPeriod.upsert({
           where: {
