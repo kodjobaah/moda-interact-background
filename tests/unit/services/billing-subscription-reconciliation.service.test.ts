@@ -6,6 +6,7 @@ import {
   nextSubscriptionReconcileAt,
 } from "../../../src/services/billing-subscription-reconciliation.service.js";
 import { shopifyUsageEventPublisherService } from "../../../src/services/shopify-usage-event-publisher.service.js";
+import { SamePlanBillingPeriodRolloverService } from "../../../src/services/same-plan-billing-period-rollover.service.js";
 
 const now = new Date("2026-09-12T12:00:00.000Z");
 const pendingEffectiveAt = new Date("2026-09-12T11:00:00.000Z");
@@ -438,7 +439,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("reconstructs only active pending rows and preserves overdue work as immediate jobs", async () => {
     const row = pendingRow({ subscription: { ...pendingRow().subscription, nextReconcileAt: new Date("2026-09-12T11:00:00.000Z") } });
-    const test = harness();
+    const test = harness({ nowValue: new Date("2026-09-30T00:00:00.000Z") });
     test.database.shop.findMany.mockResolvedValue([row]);
     const count = await test.service.reconstruct();
     expect(count).toBe(1);
@@ -468,6 +469,79 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconstruct();
     expect(test.queue.add.mock.calls[0][2].delay).toBe(5 * 60 * 1000);
     expect(test.queue.add.mock.calls[0][2].jobId).toBe(test.queue.add.mock.calls[1][2].jobId);
+  });
+
+  it("reconstructs a missing pack-enabled Free cycle job deterministically", async () => {
+    const next = new Date("2026-09-30T23:55:00.000Z");
+    const row = {
+      id: "shop-1",
+      status: "ACTIVE",
+      settings: { onboardingCompleted: true },
+      subscription: {
+        id: "subscription-1",
+        status: "ACTIVE",
+        planId: "plan-free",
+        billingPeriodId: "period-free",
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        nextReconcileAt: next,
+        plan: { active: true, kind: "FREE", recoveryCreditPackEnabled: true },
+      },
+    };
+    const test = harness({ nowValue: new Date("2026-09-30T00:00:00.000Z") });
+    test.database.shop.findMany.mockResolvedValue([row]);
+
+    await expect(test.service.reconstruct()).resolves.toBe(1);
+    await expect(test.service.reconstruct()).resolves.toBe(1);
+
+    expect(test.queue.add).toHaveBeenCalledTimes(2);
+    expect(test.queue.add.mock.calls[0][1]).toEqual(expect.objectContaining({
+      shopId: "shop-1", subscriptionId: "subscription-1", expectedNextReconcileAt: next.toISOString(),
+    }));
+    expect(test.queue.add.mock.calls[0][2]).toEqual(expect.objectContaining({
+      jobId: test.queue.add.mock.calls[1][2].jobId,
+      delay: 23 * 60 * 60 * 1000 + 55 * 60 * 1000,
+    }));
+  });
+
+  it("reschedules an early rollover job to the exact drain start", async () => {
+    const periodStart = new Date("2026-09-01T00:00:00.000Z");
+    const periodEnd = new Date("2026-10-01T00:00:00.000Z");
+    const oldNext = new Date("2026-09-30T22:00:00.000Z");
+    const preCloseAt = new Date("2026-09-30T23:55:00.000Z");
+    const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: oldNext } });
+    const test = harness({
+      row,
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      nowValue: new Date("2026-09-30T22:30:00.000Z"),
+    });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1", status: "ACTIVE", planId: "plan-paid", billingPeriodId: "period-old",
+      currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: oldNext,
+    });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: oldNext.toISOString() });
+
+    expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "subscription-1",
+        status: { in: ["ACTIVE", "TRIALING"] },
+        planId: "plan-paid",
+        billingPeriodId: "period-old",
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        nextReconcileAt: oldNext,
+      },
+      data: { nextReconcileAt: preCloseAt },
+    }));
+    expect(test.queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ expectedNextReconcileAt: preCloseAt.toISOString() }),
+      expect.objectContaining({ delay: 85 * 60 * 1000 }),
+    );
+    expect(test.database.subscription.updateMany).toHaveBeenCalledTimes(1);
   });
 
   it("uses the exact source projection CAS when rescheduling an early rollover job", async () => {
@@ -615,6 +689,33 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ nextReconcileAt: periodEnd, lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED", lastSyncErrorAt: finalMinute }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: periodEnd.toISOString() }), expect.any(Object));
+    publishDue.mockRestore();
+  });
+
+  it("successfully retries a failed pre-close flush and clears its failure metadata", async () => {
+    const periodStart = new Date("2026-09-01T00:00:00.000Z");
+    const periodEnd = new Date("2026-10-01T00:00:00.000Z");
+    const preCloseAt = new Date("2026-09-30T23:55:00.000Z");
+    const retryNow = new Date("2026-09-30T23:57:00.000Z");
+    const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: retryNow } });
+    const test = harness({
+      row,
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      nowValue: retryNow,
+    });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1", status: "ACTIVE", planId: "plan-paid", billingPeriodId: "period-old",
+      currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: retryNow,
+    });
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue({ selected: 1, claimed: 1, reported: 1, retryable: 0, needsAttention: 0 });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: retryNow.toISOString() });
+
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old" });
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: { nextReconcileAt: periodEnd, lastSyncedAt: retryNow, lastSyncErrorCode: null, lastSyncErrorAt: null },
     }));
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: periodEnd.toISOString() }), expect.any(Object));
     publishDue.mockRestore();
@@ -801,6 +902,56 @@ describe("BillingSubscriptionReconciliationService", () => {
     test.database.billingPlan.findUnique.mockResolvedValue(cyclePlan);
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: "2026-09-12T12:00:00.000Z" });
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-12T12:05:00.000Z"), lastSyncErrorCode: "PARTNER_API_ERROR" }) }));
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("planId");
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("billingPeriodId");
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("currentPeriodStart");
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("currentPeriodEnd");
+    expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: "2026-09-12T12:05:00.000Z" }), expect.any(Object));
+  });
+
+  it("repairs a missing delayed job after a committed rollover enqueue failure", async () => {
+    const oldEnd = new Date("2026-09-01T00:00:00.000Z");
+    const successorEnd = new Date("2026-10-01T00:00:00.000Z");
+    const next = new Date("2026-09-30T23:55:00.000Z");
+    const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: new Date("2026-08-01T00:00:00.000Z"), currentPeriodEnd: oldEnd, nextReconcileAt: oldEnd } });
+    const test = harness({
+      row,
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: successorEnd },
+      nowValue: new Date("2026-09-01T00:00:01.000Z"),
+    });
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transition").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-new", nextReconcileAt: next, planKind: "PAID_METERED" });
+    test.queue.add.mockRejectedValueOnce(new Error("redis unavailable")).mockResolvedValue({});
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: oldEnd.toISOString() });
+
+    expect(transition).toHaveBeenCalledOnce();
+    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.enqueue_failed", expect.anything());
+
+    test.database.shop.findMany.mockResolvedValue([{ id: "shop-1", subscription: { id: "subscription-1", nextReconcileAt: next } }]);
+    await expect(test.service.reconstruct()).resolves.toBe(1);
+    expect(test.queue.add).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: next.toISOString() }), expect.objectContaining({ jobId: expect.any(String) }));
+    expect(successorEnd.getTime()).toBeGreaterThan(oldEnd.getTime());
+    transition.mockRestore();
+  });
+
+  it("publishes the next pre-close job after a later same-plan pack-enabled Free rollover", async () => {
+    const oldEnd = new Date("2026-09-01T00:00:00.000Z");
+    const successorEnd = new Date("2026-10-01T00:00:00.000Z");
+    const next = new Date("2026-09-30T23:55:00.000Z");
+    const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-free", billingPeriodId: "period-old", currentPeriodStart: new Date("2026-08-01T00:00:00.000Z"), currentPeriodEnd: oldEnd, nextReconcileAt: oldEnd } });
+    const test = harness({ row, plan: cyclePlan, providerResult: { ...freeProvider, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: successorEnd }, nowValue: new Date("2026-09-01T00:00:01.000Z") });
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transition").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-new", nextReconcileAt: next, planKind: "FREE" });
+
+    await test.service.reconcileJob({
+      ...payload,
+      expectedNextReconcileAt: oldEnd.toISOString(),
+    });
+
+    expect(transition).toHaveBeenCalledWith(expect.objectContaining({ shopId: "shop-1", subscriptionId: "subscription-1", plan: expect.objectContaining({ kind: "FREE", recoveryCreditPackEnabled: true }) }));
+    expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: next.toISOString() }), expect.objectContaining({ jobId: expect.any(String) }));
+    transition.mockRestore();
+    expect(successorEnd.getTime()).toBeGreaterThan(oldEnd.getTime());
   });
 
   it("keeps provider pending truth when another current plan is returned", async () => {
