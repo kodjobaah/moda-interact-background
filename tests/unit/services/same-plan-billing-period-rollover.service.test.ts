@@ -132,4 +132,25 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     })).rejects.toThrow("incompatible successor");
     expect(transaction.subscription.update).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["at", new Date("2026-10-01T00:00:00.000Z")],
+    ["after", new Date("2026-10-01T00:00:01.000Z")],
+  ])("returns provider-cycle-lag when the provider still reports the old cycle %s the boundary", async (_label, now) => {
+    const transaction = transactionHarness();
+    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+
+    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: { ...provider, currentPeriodStart: currentStart, currentPeriodEnd: currentEnd },
+      plan,
+      now,
+    });
+
+    expect(result).toEqual({ kind: "provider-cycle-lag", billingPeriodId: "period-old", nextReconcileAt: null });
+    expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+    expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
+    expect(transaction.subscription.update).not.toHaveBeenCalled();
+  });
 });

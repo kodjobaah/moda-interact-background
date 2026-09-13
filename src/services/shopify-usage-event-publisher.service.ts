@@ -68,7 +68,7 @@ export class ShopifyUsageEventPublisherService {
   async publishDue(options: ShopifyUsageEventPublishOptions = {}): Promise<ShopifyUsageEventPublisherResult> {
     const now = this.now();
     const pageSize = boundedPageSize(this.pageSize);
-    await this.recoverStaleClaims(now);
+    await this.recoverStaleClaims(now, options);
 
     const dueWhere = {
       ...(options.billingPeriodId ? { billingPeriodId: options.billingPeriodId } : {}),
@@ -192,9 +192,10 @@ export class ShopifyUsageEventPublisherService {
     return this.defaultProvider;
   }
 
-  private async recoverStaleClaims(now: Date): Promise<void> {
+  private async recoverStaleClaims(now: Date, options: ShopifyUsageEventPublishOptions = {}): Promise<void> {
     await this.database.usageEvent.updateMany({
       where: {
+        ...(options.billingPeriodId ? { billingPeriodId: options.billingPeriodId } : {}),
         shopifyReportState: ShopifyReportState.IN_FLIGHT,
         lastReportAttemptAt: {
           lte: new Date(now.getTime() - IN_FLIGHT_RECOVERY_MS),

@@ -8,6 +8,7 @@ function usageRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "usage-1",
     shopId: "shop-1",
+    billingPeriodId: "period-1",
     quantity: 1,
     occurredAt: new Date("2026-09-08T08:00:00.000Z"),
     shopifyEventHandle: "recovery-conversation",
@@ -34,6 +35,7 @@ function harness(
         records.filter((row) =>
           ["PENDING", "RETRYABLE"].includes(String(row.shopifyReportState)) &&
           (row.nextReportAt === null || (row.nextReportAt as Date) <= getNow()) &&
+          (!where?.billingPeriodId || where.billingPeriodId === row.billingPeriodId) &&
           (!where?.shop?.status ||
             (typeof where.shop.status === "string"
               ? (row.shop as { status: string }).status === where.shop.status
@@ -45,6 +47,7 @@ function harness(
         const matchingRecords = records.filter((candidate) => {
           const current = states.get(candidate.id as string);
           if (where.id && where.id !== candidate.id) return false;
+          if (where.billingPeriodId && where.billingPeriodId !== candidate.billingPeriodId) return false;
           if (typeof where.shopifyReportState === "string") {
             return where.shopifyReportState === current;
           }
@@ -301,6 +304,23 @@ describe("ShopifyUsageEventPublisherService", () => {
       .toBe("shopify:shop-1:usage-1");
     expect(test.provider.createBillingEvent.mock.calls[1]?.[0].idempotencyKey)
       .toBe("shopify:shop-1:usage-1");
+  });
+
+  it("scopes stale in-flight recovery to the requested BillingPeriod", async () => {
+    const test = harness([
+      usageRow({ id: "stale-period-1", billingPeriodId: "period-1", shopifyReportState: "IN_FLIGHT", lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000) }),
+      usageRow({ id: "stale-period-2", billingPeriodId: "period-2", shopifyReportState: "IN_FLIGHT", lastReportAttemptAt: new Date(now.getTime() - 16 * 60_000) }),
+    ]);
+
+    await test.service.publishDue({ billingPeriodId: "period-1" });
+
+    expect(test.updates.some(({ where }) => (
+      (where as { id?: string; billingPeriodId?: string }).billingPeriodId === "period-1"
+      && (where as { id?: string }).id === undefined
+    ))).toBe(true);
+    expect(test.updates.some(({ where }) => (
+      (where as { billingPeriodId?: string }).billingPeriodId === "period-2"
+    ))).toBe(false);
   });
 
   it("marks permanent provider failures for attention without retrying", async () => {

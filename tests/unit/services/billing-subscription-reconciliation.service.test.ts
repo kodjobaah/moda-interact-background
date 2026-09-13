@@ -16,6 +16,7 @@ function harness({
   plan = null,
   policy = { lifetimeFreeRecoveryAllowance: 7 },
   lifetimeCounter = null,
+  nowValue = now,
 } = {}) {
   const subscriptionUpdate = vi.fn();
   const queue = { add: vi.fn().mockResolvedValue({}) };
@@ -65,7 +66,7 @@ function harness({
     partner,
     queue,
     logger as never,
-    () => now,
+    () => nowValue,
   );
   return { database, partner, queue, logger, transaction, service };
 }
@@ -522,6 +523,86 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: "2026-09-12T12:00:00.000Z" });
     expect(test.transaction.billingPeriod.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {}, create: expect.objectContaining({ includedRecoveryCreditsGranted: null }) }));
     expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+  });
+
+  it("records a provider-cycle lag retry with a new deterministic job after the boundary", async () => {
+    const boundary = new Date("2026-10-01T00:00:00.000Z");
+    const retryNow = new Date("2026-10-01T00:00:01.000Z");
+    const paidPlan = {
+      id: "plan-paid",
+      active: true,
+      name: "Paid",
+      kind: "PAID_METERED" as const,
+      shopifyPlanHandle: "free-2026",
+      recoveryCreditPackEnabled: false,
+      shopifyUsageEventHandle: "recovery-meter",
+      shopifyRecoveryCreditPackEventHandle: null,
+      includedRecoveryConversationAllowance: 100,
+    };
+    const row = cycleRow({
+      subscription: {
+        ...cycleRow().subscription,
+        planId: "plan-paid",
+        billingPeriodId: "period-old",
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: boundary,
+        nextReconcileAt: boundary,
+      },
+    });
+    const test = harness({
+      row,
+      plan: paidPlan,
+      providerResult: {
+        ...freeProvider,
+        planHandle: "free-2026",
+        usageEventHandles: ["recovery-meter"],
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: boundary,
+      },
+      nowValue: retryNow,
+    });
+    test.transaction.subscription.findUnique.mockResolvedValue({
+      shopId: "shop-1",
+      status: "ACTIVE",
+      planId: "plan-paid",
+      billingPeriodId: "period-old",
+      pendingPlanId: null,
+      pendingShopifyPlanHandle: null,
+      pendingEffectiveAt: null,
+      nextReconcileAt: boundary,
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: boundary,
+      billingPeriod: {
+        id: "period-old",
+        periodStart: new Date("2026-09-01T00:00:00.000Z"),
+        periodEnd: boundary,
+        status: "OPEN",
+      },
+    });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: boundary.toISOString() });
+
+    const retryAt = new Date("2026-10-01T00:01:01.000Z");
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "subscription-1",
+        planId: "plan-paid",
+        billingPeriodId: "period-old",
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: boundary,
+        nextReconcileAt: boundary,
+      }),
+      data: expect.objectContaining({
+        nextReconcileAt: retryAt,
+        lastSyncErrorCode: "PROVIDER_CYCLE_LAG",
+        lastSyncErrorAt: retryNow,
+      }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ expectedNextReconcileAt: retryAt.toISOString() }),
+      expect.objectContaining({ jobId: expect.not.stringContaining(boundary.toISOString()) }),
+    );
   });
 
   it("locks Subscription before rereading the exact cycle state", async () => {

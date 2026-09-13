@@ -30,6 +30,7 @@ export type SamePlanRolloverPlan = {
 
 export type SamePlanRolloverResult =
   | { kind: "not-applicable" }
+  | { kind: "provider-cycle-lag"; billingPeriodId: string; nextReconcileAt: Date | null }
   | { kind: "unchanged"; billingPeriodId: string | null; nextReconcileAt: Date | null }
   | { kind: "transitioned"; billingPeriodId: string; nextReconcileAt: Date; planKind: BillingPlanKind };
 
@@ -97,6 +98,13 @@ export class SamePlanBillingPeriodRolloverService {
       return { kind: "not-applicable" };
     }
     if (subscription.currentPeriodStart.getTime() === providerStart.getTime() && subscription.currentPeriodEnd.getTime() === providerEnd.getTime()) {
+      if (input.now.getTime() >= currentPeriod.periodEnd.getTime()) {
+        return {
+          kind: "provider-cycle-lag",
+          billingPeriodId: currentPeriod.id,
+          nextReconcileAt: subscription.nextReconcileAt,
+        };
+      }
       return {
         kind: "unchanged",
         billingPeriodId: subscription.billingPeriodId,

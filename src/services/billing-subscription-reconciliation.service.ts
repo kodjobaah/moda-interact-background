@@ -454,6 +454,10 @@ export class BillingSubscriptionReconciliationService {
         plan,
         now: this.now(),
       });
+      if (result.kind === "provider-cycle-lag") {
+        await this.recordRolloverRetry(shopId, expected, undefined, "PROVIDER_CYCLE_LAG");
+        return;
+      }
       if (result.kind !== "not-applicable") {
         const next = result.nextReconcileAt;
         if (next) await this.publishNext(shopId, expected.subscriptionId, next);
@@ -471,7 +475,12 @@ export class BillingSubscriptionReconciliationService {
     await this.recordRolloverRetry(shopId, expected);
   }
 
-  private async recordRolloverRetry(shopId: string, expected: RolloverExpected, error?: unknown): Promise<void> {
+  private async recordRolloverRetry(
+    shopId: string,
+    expected: RolloverExpected,
+    error?: unknown,
+    errorCode = "PARTNER_API_ERROR",
+  ): Promise<void> {
     const now = this.now();
     const next = new Date(now.getTime() + ROLLOVER_RETRY_MS);
     const updated = await this.database.subscription.updateMany({
@@ -487,7 +496,9 @@ export class BillingSubscriptionReconciliationService {
       data: {
         nextReconcileAt: next,
         lastSyncedAt: now,
-        ...(error ? { lastSyncErrorCode: "PARTNER_API_ERROR", lastSyncErrorAt: now } : {}),
+        ...(error || errorCode === "PROVIDER_CYCLE_LAG"
+          ? { lastSyncErrorCode: errorCode, lastSyncErrorAt: now }
+          : {}),
       },
     });
     if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);
@@ -531,14 +542,38 @@ export class BillingSubscriptionReconciliationService {
       if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);
       return;
     }
+    let flushFailed = false;
     try {
       await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: expected.billingPeriodId });
     } catch (error) {
+      flushFailed = true;
       this.logger.warn("billing.subscription_reconciliation.pre_close_publish_failed", {
         shopId,
         subscriptionId: expected.subscriptionId,
         errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
       });
+    }
+    if (flushFailed) {
+      const retryAt = new Date(Math.min(now.getTime() + ROLLOVER_RETRY_MS, periodEnd.getTime()));
+      const updated = await this.database.subscription.updateMany({
+        where: {
+          id: expected.subscriptionId,
+          status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+          planId: expected.currentPlanId,
+          billingPeriodId: expected.billingPeriodId,
+          currentPeriodStart: expected.currentPeriodStart,
+          currentPeriodEnd: expected.currentPeriodEnd,
+          nextReconcileAt: expected.nextReconcileAt,
+        },
+        data: {
+          nextReconcileAt: retryAt,
+          lastSyncedAt: now,
+          lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED",
+          lastSyncErrorAt: now,
+        },
+      });
+      if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, retryAt);
+      return;
     }
     const updated = await this.database.subscription.updateMany({
       where: {
