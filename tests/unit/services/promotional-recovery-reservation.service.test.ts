@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -114,7 +115,7 @@ function createHarness(options: HarnessOptions = {}) {
     () => now,
     () => ({ resolve: vi.fn(async () => ({ planId, newRecoveriesPaused: options.paused ?? false })) } as never),
   );
-  return { state, transaction, service };
+  return { state, transaction, database, service };
 }
 
 const input = (sourceKey = "recovery-1", overrides: Record<string, unknown> = {}) => ({
@@ -124,6 +125,13 @@ const input = (sourceKey = "recovery-1", overrides: Record<string, unknown> = {}
   now,
   ...overrides,
 });
+
+function prismaConflict(code: "P2002" | "P2034") {
+  return new Prisma.PrismaClientKnownRequestError("injected reservation conflict", {
+    code,
+    clientVersion: "6.19.3",
+  });
+}
 
 describe("PromotionalRecoveryReservationService", () => {
   it.each([
@@ -166,6 +174,49 @@ describe("PromotionalRecoveryReservationService", () => {
       lastSelectedAt: before.lastSelectedAt,
       selectionCount: before.selectionCount,
     });
+  });
+
+  it("retries a CAS conflict and returns the successful reservation", async () => {
+    const harness = createHarness();
+    harness.transaction.promotionalCreditGrant.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockImplementationOnce(async (args: any) => {
+        harness.state.grant.reservedQuantity += args.data.reservedQuantity.increment;
+        harness.state.grant.version += args.data.version.increment;
+        return { count: 1 };
+      });
+
+    await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.transaction.promotionalCreditGrant.updateMany).toHaveBeenCalledTimes(2);
+    expect(harness.state.grant.reservedQuantity).toBe(1);
+  });
+
+  it("retries injected Prisma serialization and unique conflicts", async () => {
+    const serializationHarness = createHarness();
+    serializationHarness.database.$transaction
+      .mockRejectedValueOnce(prismaConflict("P2034"))
+      .mockImplementationOnce(async (callback: (client: typeof serializationHarness.transaction) => Promise<unknown>) =>
+        callback(serializationHarness.transaction));
+    await expect(serializationHarness.service.reserve(input())).resolves.toMatchObject({ kind: "reserved" });
+
+    const uniqueHarness = createHarness();
+    uniqueHarness.transaction.usageReservation.create
+      .mockRejectedValueOnce(prismaConflict("P2002"))
+      .mockImplementationOnce(async ({ data }: any) => {
+        const reservation = { id: `reservation-${uniqueHarness.state.nextReservationId++}`, ...data, status: "RESERVED", committedUsageEventId: null };
+        uniqueHarness.state.reservations.set(data.sourceKey, reservation);
+        return reservation;
+      });
+    await expect(uniqueHarness.service.reserve(input())).resolves.toMatchObject({ kind: "reserved" });
+    expect(uniqueHarness.transaction.usageReservation.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after the configured retry budget is exhausted", async () => {
+    const harness = createHarness();
+    harness.database.$transaction.mockRejectedValue(prismaConflict("P2034"));
+
+    await expect(harness.service.reserve(input())).rejects.toMatchObject({ code: "P2034" });
+    expect(harness.database.$transaction).toHaveBeenCalledTimes(3);
   });
 
   it("keeps selection history unchanged across commit and release", async () => {
@@ -247,5 +298,60 @@ describe("PromotionalRecoveryReservationService", () => {
     harness.state.campaign.expiresAt = new Date("2026-10-01T00:00:00.000Z");
     await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "reserved" });
     expect(harness.state.grant.reservedQuantity).toBe(1);
+  });
+
+  it.each([
+    { name: "closed campaign", campaign: { status: "CLOSED" as const } },
+    { name: "plan mismatch", campaign: { scope: "PLAN" as const, targetPlanId: "other-plan" } },
+    { name: "changed selection", selected: false },
+  ])("keeps a released reservation ineligible after $name", async ({ campaign, selected }) => {
+    const harness = createHarness();
+    await harness.service.reserve(input());
+    await harness.service.release(input());
+    Object.assign(harness.state.campaign, campaign);
+    if (selected === false) {
+      harness.transaction.merchantPromotionSelection.findUnique.mockResolvedValue(null);
+    }
+
+    await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "already-released" });
+    expect(harness.state.grant.reservedQuantity).toBe(0);
+  });
+
+  it.each([
+    { name: "expiry", expiresAt: now },
+    { name: "closed status", status: "CLOSED" as const },
+  ])("commits an existing reservation after $name", async ({ expiresAt, status }) => {
+    const harness = createHarness();
+    await harness.service.reserve(input());
+    Object.assign(harness.state.campaign, { expiresAt, status });
+
+    await expect(harness.service.commit(input())).resolves.toMatchObject({ kind: "committed" });
+    expect(harness.state.grant).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+  });
+
+  it("keeps duplicate reserve and release idempotent and owns the exact grant", async () => {
+    const harness = createHarness();
+    await harness.service.reserve(input());
+    const reservation = harness.state.reservations.get("recovery-1");
+    expect(reservation.promotionalCreditGrantId).toBe(harness.state.grant.id);
+    await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "already-reserved" });
+    await expect(harness.service.release(input())).resolves.toMatchObject({ kind: "released" });
+    await expect(harness.service.release(input())).resolves.toMatchObject({ kind: "already-released" });
+    expect(harness.state.grant.reservedQuantity).toBe(0);
+  });
+
+  it("does not convert a same-source non-promotional reservation", async () => {
+    const harness = createHarness();
+    harness.state.reservations.set("non-promo", {
+      id: "reservation-non-promo",
+      shopId,
+      sourceKey: "non-promo",
+      quantity: 1,
+      promotionalCreditGrantId: null,
+      status: "RELEASED",
+    });
+
+    await expect(harness.service.reserve(input("non-promo"))).resolves.toEqual({ kind: "unavailable" });
+    expect(harness.state.grant.reservedQuantity).toBe(0);
   });
 });
