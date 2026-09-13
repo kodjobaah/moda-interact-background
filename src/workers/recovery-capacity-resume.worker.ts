@@ -28,10 +28,7 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
     const active = await prismaShopIsActive(job.data.shopId);
     if (!active) return { kind: "ignored", reason: "shop-unavailable" };
 
-    const cursor = job.data.trigger.startsWith("continuation-")
-      ? job.data.trigger.slice("continuation-".length)
-      : undefined;
-    const recoveries = await findBlockedRecoveries(job.data.shopId, cursor);
+    const recoveries = await findBlockedRecoveries(job.data.shopId);
     let attempted = 0;
     let capacityExhausted = false;
     for (const recovery of recoveries) {
@@ -69,13 +66,12 @@ async function prismaShopIsActive(shopId: string): Promise<boolean> {
   return shop?.status === "ACTIVE";
 }
 
-async function findBlockedRecoveries(shopId: string, afterId?: string) {
+async function findBlockedRecoveries(shopId: string) {
   return prisma.checkoutRecovery.findMany({
     where: {
       shopId,
       status: "DETECTED",
       admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
-      ...(afterId ? { id: { gt: afterId } } : {}),
     },
     orderBy: [{ detectedAt: "asc" }, { id: "asc" }],
     take: MAX_RECOVERIES_PER_JOB,

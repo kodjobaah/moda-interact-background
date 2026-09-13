@@ -100,8 +100,6 @@ export type RecoveryBillingAdmissionResult =
         | "paused"
         | "capacity-exhausted"
         | "reservation-in-flight"
-        | "allowance-exhausted"
-        | "reservation-in-flight"
         | "billing-period-closing"
         | "billing-period-reconciliation";
     };

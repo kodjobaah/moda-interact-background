@@ -34,7 +34,7 @@ function createDatabase(selectedGrant?: Record<string, unknown> | null) {
   };
 }
 
-function createIdempotentMessageDatabase() {
+function createIdempotentMessageDatabase(selectedGrant?: Record<string, unknown> | null) {
   const thread = { id: "thread-1" };
   const messages = new Map<string, { id: string }>();
   const messageUpsert = vi.fn(async ({ where }: { where: { sourceKey: string } }) => {
@@ -52,6 +52,11 @@ function createIdempotentMessageDatabase() {
       update: vi.fn(async () => thread),
     },
     merchantSupportMessage: { upsert: messageUpsert },
+    merchantPromotionSelection: selectedGrant === undefined
+      ? undefined
+      : {
+          findUnique: vi.fn(async () => selectedGrant ? { promotionalCreditGrant: selectedGrant } : null),
+        },
     $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) =>
       callback({
         merchantSupportThread: {
@@ -480,6 +485,66 @@ describe("RecoveryBillingService", () => {
         },
       }),
     );
+  });
+
+  it("deduplicates identical selected promotional grant snapshots", async () => {
+    const grant = {
+      id: "grant-1",
+      version: 2,
+      quantity: 10,
+      committedQuantity: 10,
+      reservedQuantity: 0,
+    };
+    const database = createIdempotentMessageDatabase(grant);
+    const service = new RecoveryBillingService(
+      database as never,
+      { resolve: vi.fn(async () => freePolicy()) } as never,
+      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      undefined as never,
+      unavailablePromotionalReservationService() as never,
+    );
+    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch-1" });
+    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch-2" });
+
+    expect(database.messages.size).toBe(1);
+  });
+
+  it.each([
+    ["id", "grant-2"],
+    ["version", 3],
+    ["committedQuantity", 9],
+    ["reservedQuantity", 1],
+  ] as const)("changes the selected promotional epoch when %s changes", async (field, value) => {
+    const firstGrant = {
+      id: "grant-1",
+      version: 2,
+      quantity: 10,
+      committedQuantity: 10,
+      reservedQuantity: 0,
+    };
+    const secondGrant = { ...firstGrant, [field]: value };
+    const database = createIdempotentMessageDatabase();
+    let selectedGrant = firstGrant;
+    const service = new RecoveryBillingService(
+      {
+        ...database,
+        merchantPromotionSelection: {
+          findUnique: vi.fn(async () => ({ promotionalCreditGrant: selectedGrant })),
+        },
+      } as never,
+      { resolve: vi.fn(async () => freePolicy()) } as never,
+      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      undefined as never,
+      unavailablePromotionalReservationService() as never,
+    );
+
+    await service.admit({ shopId: "shop-1", recoveryId: "promotion-change-1" });
+    selectedGrant = secondGrant;
+    await service.admit({ shopId: "shop-1", recoveryId: "promotion-change-2" });
+
+    expect(database.messages.size).toBe(2);
   });
 
   it("records paid recovery usage once with the plan meter and successful initiation time", async () => {

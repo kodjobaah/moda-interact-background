@@ -4,6 +4,7 @@ const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { name: string; data: { shopId: string; trigger: string } }) => Promise<unknown>),
   active: true,
   recoveries: [] as Array<{ id: string }>,
+  findMany: vi.fn(async () => hoisted.recoveries),
   resume: vi.fn(async () => ({ kind: "initiated" as const })),
   schedule: vi.fn(async () => "job-id"),
 }));
@@ -26,7 +27,7 @@ vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
     shop: { findUnique: vi.fn(async () => ({ status: hoisted.active ? "ACTIVE" : "INACTIVE" })) },
-    checkoutRecovery: { findMany: vi.fn(async () => hoisted.recoveries) },
+    checkoutRecovery: { findMany: hoisted.findMany },
   },
 }));
 vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
@@ -40,8 +41,32 @@ import { RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB } from "../../../src/domain/reco
 import "../../../src/workers/recovery-capacity-resume.worker.js";
 
 describe("recovery capacity resume worker", () => {
+  it("queries the durable blocked FIFO without an id-range cursor", async () => {
+    hoisted.recoveries = [{ id: "recovery-1" }];
+    hoisted.findMany.mockClear();
+    hoisted.resume.mockReset().mockResolvedValue({ kind: "initiated" });
+
+    await hoisted.processor?.({
+      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+      data: { shopId: "shop-1", trigger: "continuation-recovery-previous" },
+    });
+
+    expect(hoisted.findMany).toHaveBeenCalledWith({
+      where: {
+        shopId: "shop-1",
+        status: "DETECTED",
+        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+      },
+      orderBy: [{ detectedAt: "asc" }, { id: "asc" }],
+      take: 25,
+      select: { id: true },
+    });
+  });
+
   it("processes a bounded FIFO batch and schedules a distinct continuation", async () => {
     hoisted.recoveries = Array.from({ length: 25 }, (_, index) => ({ id: `recovery-${index}` }));
+    hoisted.resume.mockClear();
+    hoisted.schedule.mockClear();
     hoisted.resume.mockResolvedValue({ kind: "initiated" });
 
     await hoisted.processor?.({
