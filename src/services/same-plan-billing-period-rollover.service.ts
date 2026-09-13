@@ -88,6 +88,9 @@ export class SamePlanBillingPeriodRolloverService {
     if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.plan.id) {
       return { kind: "not-applicable" };
     }
+    if (subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") {
+      return { kind: "not-applicable" };
+    }
 
     const currentPeriod = subscription.billingPeriod;
     if (!currentPeriod || !subscription.currentPeriodStart || !subscription.currentPeriodEnd) {
@@ -116,6 +119,22 @@ export class SamePlanBillingPeriodRolloverService {
     if (existingSuccessor?.status === BillingPeriodStatus.CLOSED) {
       throw new Error("Provider billing cycle already has a closed successor period");
     }
+    if (existingSuccessor && (
+      existingSuccessor.subscriptionId !== subscription.id
+      || existingSuccessor.shopId !== input.shopId
+      || existingSuccessor.planId !== input.plan.id
+      || existingSuccessor.shopifyPlanHandleSnapshot !== input.provider.planHandle
+      || existingSuccessor.planNameSnapshot !== input.plan.name
+      || existingSuccessor.planKindSnapshot !== input.plan.kind
+      || existingSuccessor.includedRecoveryCreditsGranted !== (input.plan.kind === BillingPlanKind.PAID_METERED
+        ? input.plan.includedRecoveryConversationAllowance ?? 0
+        : null)
+      || existingSuccessor.periodStart.getTime() !== providerStart.getTime()
+      || existingSuccessor.periodEnd.getTime() !== providerEnd.getTime()
+      || existingSuccessor.status !== BillingPeriodStatus.OPEN
+    )) {
+      throw new Error("Provider billing cycle has an incompatible successor period");
+    }
     if (existingSuccessor && subscription.billingPeriodId === existingSuccessor.id) {
       return {
         kind: "unchanged",
@@ -143,6 +162,18 @@ export class SamePlanBillingPeriodRolloverService {
     });
 
     if (input.plan.kind === BillingPlanKind.PAID_METERED) {
+      const existingCounter = await transaction.billingPeriodEntitlementCounter.findUnique({
+        where: {
+          billingPeriodId_counter: {
+            billingPeriodId: successor.id,
+            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+          },
+        },
+      });
+      const expectedGrant = input.plan.includedRecoveryConversationAllowance ?? 0;
+      if (existingCounter && existingCounter.grantedQuantity !== expectedGrant) {
+        throw new Error("Successor included-credit counter has an incompatible grant");
+      }
       await transaction.billingPeriodEntitlementCounter.upsert({
         where: {
           billingPeriodId_counter: {
@@ -155,7 +186,7 @@ export class SamePlanBillingPeriodRolloverService {
           shopId: input.shopId,
           billingPeriodId: successor.id,
           counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          grantedQuantity: input.plan.includedRecoveryConversationAllowance ?? 0,
+          grantedQuantity: expectedGrant,
           committedQuantity: 0,
           reservedQuantity: 0,
           forfeitedQuantity: 0,
@@ -224,8 +255,8 @@ async function finalizeOldPeriod(
       _sum: { quantity: true },
     });
     const reservedQuantity = Number(reserved._sum.quantity ?? 0);
-    const forfeitable = counter.grantedQuantity - counter.committedQuantity - counter.reservedQuantity - counter.forfeitedQuantity;
-    if (forfeitable < 0 || reservedQuantity !== counter.reservedQuantity) {
+    const forfeitableAfterRelease = counter.grantedQuantity - counter.committedQuantity - counter.forfeitedQuantity;
+    if (forfeitableAfterRelease < 0 || reservedQuantity !== counter.reservedQuantity) {
       throw new Error("Paid billing period included-credit counter is inconsistent");
     }
     await transaction.usageReservation.updateMany({
@@ -239,7 +270,7 @@ async function finalizeOldPeriod(
       where: { id: counter.id, version: counter.version, reservedQuantity: counter.reservedQuantity },
       data: {
         reservedQuantity: { decrement: reservedQuantity },
-        forfeitedQuantity: { increment: forfeitable },
+        forfeitedQuantity: { increment: forfeitableAfterRelease },
         version: { increment: 1 },
       },
     });

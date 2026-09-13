@@ -50,6 +50,10 @@ export type ShopifyUsageEventPublisherResult = {
   needsAttention: number;
 };
 
+export type ShopifyUsageEventPublishOptions = {
+  billingPeriodId?: string;
+};
+
 export class ShopifyUsageEventPublisherService {
   private defaultProvider: BillingEventClient | undefined;
 
@@ -61,12 +65,13 @@ export class ShopifyUsageEventPublisherService {
     private readonly createProvider: () => BillingEventClient = createDefaultClient,
   ) {}
 
-  async publishDue(): Promise<ShopifyUsageEventPublisherResult> {
+  async publishDue(options: ShopifyUsageEventPublishOptions = {}): Promise<ShopifyUsageEventPublisherResult> {
     const now = this.now();
     const pageSize = boundedPageSize(this.pageSize);
     await this.recoverStaleClaims(now);
 
     const dueWhere = {
+      ...(options.billingPeriodId ? { billingPeriodId: options.billingPeriodId } : {}),
       shopifyReportState: {
         in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE],
       },

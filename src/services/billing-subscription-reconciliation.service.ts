@@ -20,6 +20,7 @@ import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
+export const ROLLOVER_RETRY_MS = 60 * 1000;
 const RETRY_TIERS = [
   { ageMs: 10 * 60 * 1000, delayMs: 60 * 1000 },
   { ageMs: 60 * 60 * 1000, delayMs: 5 * 60 * 1000 },
@@ -43,6 +44,9 @@ type FreeCycleExpected = {
 type RolloverExpected = {
   subscriptionId: string;
   currentPlanId: string;
+  billingPeriodId: string;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
   nextReconcileAt: Date;
 };
 
@@ -209,6 +213,9 @@ export class BillingSubscriptionReconciliationService {
       ? {
           subscriptionId: row.subscription.id,
           currentPlanId: row.subscription.planId!,
+          billingPeriodId: row.subscription.billingPeriodId!,
+          currentPeriodStart: row.subscription.currentPeriodStart!,
+          currentPeriodEnd: row.subscription.currentPeriodEnd!,
           nextReconcileAt: row.subscription.nextReconcileAt,
         }
       : {
@@ -230,7 +237,7 @@ export class BillingSubscriptionReconciliationService {
       const now = this.now();
       const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
       if (now < row.subscription.currentPeriodEnd) {
-        await this.reconcilePreClose(row.id, expected as RolloverExpected, row.subscription.currentPeriodEnd, preCloseAt);
+        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
         return;
       }
     }
@@ -241,6 +248,8 @@ export class BillingSubscriptionReconciliationService {
     } catch (error) {
       if (isCycleDiscovery && currentPlan) {
         await this.recordCycleDiscoveryFailure(row.id, expected as FreeCycleExpected, error);
+      } else if (isRollover) {
+        await this.recordRolloverRetry(row.id, expected as RolloverExpected, error);
       } else {
         await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
       }
@@ -250,6 +259,8 @@ export class BillingSubscriptionReconciliationService {
     if (!provider) {
       if (isCycleDiscovery) {
         await this.recordMissingCycle(row.id, expected as FreeCycleExpected);
+      } else if (isRollover) {
+        await this.recordRolloverRetry(row.id, expected as RolloverExpected);
       } else {
         await this.recordMissingSubscription(row.id, expected as InitialActivationExpected);
       }
@@ -454,16 +465,30 @@ export class BillingSubscriptionReconciliationService {
         subscriptionId: expected.subscriptionId,
         errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
       });
+      await this.recordRolloverRetry(shopId, expected, error);
+      return;
     }
-    const next = new Date(this.now().getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS);
+    await this.recordRolloverRetry(shopId, expected);
+  }
+
+  private async recordRolloverRetry(shopId: string, expected: RolloverExpected, error?: unknown): Promise<void> {
+    const now = this.now();
+    const next = new Date(now.getTime() + ROLLOVER_RETRY_MS);
     const updated = await this.database.subscription.updateMany({
       where: {
         id: expected.subscriptionId,
+        status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
         planId: expected.currentPlanId,
-        billingPeriodId: { not: null },
+        billingPeriodId: expected.billingPeriodId,
+        currentPeriodStart: expected.currentPeriodStart,
+        currentPeriodEnd: expected.currentPeriodEnd,
         nextReconcileAt: expected.nextReconcileAt,
       },
-      data: { nextReconcileAt: next, lastSyncedAt: this.now() },
+      data: {
+        nextReconcileAt: next,
+        lastSyncedAt: now,
+        ...(error ? { lastSyncErrorCode: "PARTNER_API_ERROR", lastSyncErrorAt: now } : {}),
+      },
     });
     if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);
   }
@@ -471,10 +496,32 @@ export class BillingSubscriptionReconciliationService {
   private async reconcilePreClose(
     shopId: string,
     expected: RolloverExpected,
-    periodEnd: Date,
     preCloseAt: Date,
   ): Promise<void> {
     const now = this.now();
+    const scheduled = await this.database.subscription.findUnique({
+      where: { id: expected.subscriptionId },
+      select: {
+        id: true,
+        status: true,
+        planId: true,
+        billingPeriodId: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
+        nextReconcileAt: true,
+      },
+    });
+    if (
+      !scheduled
+      || scheduled.id !== expected.subscriptionId
+      || (scheduled.status !== SubscriptionProjectionStatus.ACTIVE && scheduled.status !== SubscriptionProjectionStatus.TRIALING)
+      || scheduled.planId !== expected.currentPlanId
+      || scheduled.billingPeriodId !== expected.billingPeriodId
+      || scheduled.currentPeriodStart?.getTime() !== expected.currentPeriodStart.getTime()
+      || scheduled.currentPeriodEnd?.getTime() !== expected.currentPeriodEnd.getTime()
+      || scheduled.nextReconcileAt?.getTime() !== expected.nextReconcileAt.getTime()
+    ) return;
+    const periodEnd = expected.currentPeriodEnd;
     const next = now < preCloseAt ? preCloseAt : periodEnd;
     if (next.getTime() !== periodEnd.getTime()) {
       const updated = await this.database.subscription.updateMany({
@@ -485,7 +532,7 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
     try {
-      await shopifyUsageEventPublisherService.publishDue();
+      await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: expected.billingPeriodId });
     } catch (error) {
       this.logger.warn("billing.subscription_reconciliation.pre_close_publish_failed", {
         shopId,
@@ -494,7 +541,15 @@ export class BillingSubscriptionReconciliationService {
       });
     }
     const updated = await this.database.subscription.updateMany({
-      where: { id: expected.subscriptionId, nextReconcileAt: expected.nextReconcileAt },
+      where: {
+        id: expected.subscriptionId,
+        status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+        planId: expected.currentPlanId,
+        billingPeriodId: expected.billingPeriodId,
+        currentPeriodStart: expected.currentPeriodStart,
+        currentPeriodEnd: expected.currentPeriodEnd,
+        nextReconcileAt: expected.nextReconcileAt,
+      },
       data: { nextReconcileAt: periodEnd, lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null },
     });
     if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, periodEnd);

@@ -186,9 +186,14 @@ export class BillingReconciliationService {
       const existing = await this.database.subscription.findUnique({
         where: { shopId },
         select: {
+          id: true,
+          status: true,
+          billingPeriodId: true,
+          nextReconcileAt: true,
           pendingShopifyPlanHandle: true,
           pendingPlanId: true,
           pendingEffectiveAt: true,
+          plan: { select: { shopifyRecoveryCreditPackEventHandle: true } },
         },
       });
       const pending = existing?.pendingPlanId && existing.pendingShopifyPlanHandle
@@ -202,6 +207,17 @@ export class BillingReconciliationService {
             pendingPlanId: null,
             pendingEffectiveAt: null,
           };
+      if (existing) {
+        const nextReconcileAt = new Date(now.getTime() + 5 * 60 * 1000);
+        await this.database.subscription.updateMany({
+          where: { id: existing.id, nextReconcileAt: existing.nextReconcileAt },
+          data: { nextReconcileAt, lastSyncedAt: now },
+        });
+        return {
+          billingPeriodId: existing.billingPeriodId,
+          packMeterHandle: existing.plan?.shopifyRecoveryCreditPackEventHandle ?? null,
+        };
+      }
       await this.database.subscription.upsert({
         where: { shopId },
         update: {
@@ -271,8 +287,8 @@ export class BillingReconciliationService {
         ? "MISSING_USAGE_METER"
         : null;
     if (existing?.id && plan?.active && existing.planId === plan.id) {
-      await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, result) => {
-        if (result.planKind !== BillingPlanKind.PAID_METERED) return;
+      const result = await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, rolloverResult) => {
+        if (rolloverResult.planKind !== BillingPlanKind.PAID_METERED) return;
         try {
           await recoveryCapacityResumeService.schedule({ shopId: rolloverInput.shopId, trigger: "billing-period-rollover" });
         } catch (error) {
@@ -288,6 +304,20 @@ export class BillingReconciliationService {
         plan,
         now,
       });
+      if (result.kind === "transitioned" || result.kind === "unchanged") {
+        return {
+          billingPeriodId: result.billingPeriodId,
+          packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
+        };
+      }
+      const current = await this.database.subscription.findUnique({
+        where: { id: existing.id },
+        select: { billingPeriodId: true },
+      });
+      return {
+        billingPeriodId: current?.billingPeriodId ?? null,
+        packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
+      };
     }
     const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
       ? await this.database.billingPeriod.upsert({

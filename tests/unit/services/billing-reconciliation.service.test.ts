@@ -50,6 +50,7 @@ function harness({
     },
     subscription: {
       upsert: subscriptionUpsert,
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       findUnique: vi.fn().mockResolvedValue({
         id: "subscription-1",
         billingPeriodId: "period-1",
@@ -136,9 +137,10 @@ describe("BillingReconciliationService", () => {
 
     await test.service.reconcileOnce();
 
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({ status: "NO_CONTRACT", planId: null }),
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ nextReconcileAt: expect.any(Date) }),
     }));
+    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
   });
 
   it("B008-R4 persists pending plan and effective boundary without changing current entitlement", async () => {
