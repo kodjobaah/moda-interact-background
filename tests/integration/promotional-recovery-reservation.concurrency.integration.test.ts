@@ -78,6 +78,8 @@ describeWithDatabase("Promotional recovery reservation PostgreSQL concurrency", 
       const persistedGrant = await database.promotionalCreditGrant.findUnique({ where: { id: grant.id } });
       expect(persistedGrant).toMatchObject({ reservedQuantity: 1, committedQuantity: 0, selectionCount: 0 });
       expect(await database.usageReservation.count({ where: { shopId } })).toBe(1);
+      expect(await database.shopEntitlementCounter.findMany({ where: { shopId }, select: { counter: true } }))
+        .toEqual([{ counter: "LIFETIME_FREE_RECOVERY_CREDITS" }]);
     } finally {
       await database.merchantPromotionSelection.deleteMany({ where: { shopId } }).catch(() => undefined);
       await database.promotionalCreditGrant.deleteMany({ where: { shopId } }).catch(() => undefined);

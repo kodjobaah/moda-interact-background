@@ -168,6 +168,22 @@ describe("PromotionalRecoveryReservationService", () => {
     });
   });
 
+  it("keeps selection history unchanged across commit and release", async () => {
+    const harness = createHarness();
+    const before = {
+      firstSelectedAt: harness.state.grant.firstSelectedAt,
+      lastSelectedAt: harness.state.grant.lastSelectedAt,
+      selectionCount: harness.state.grant.selectionCount,
+    };
+
+    await harness.service.reserve(input());
+    await harness.service.commit(input());
+    await harness.service.reserve(input("recovery-2"));
+    await harness.service.release(input("recovery-2"));
+
+    expect(harness.state.grant).toMatchObject(before);
+  });
+
   it("owns exact promotional reservation replays and rejects non-promotional ownership", async () => {
     const harness = createHarness();
     await harness.service.reserve(input());
@@ -217,5 +233,19 @@ describe("PromotionalRecoveryReservationService", () => {
     await harness.service.reserve(input("recovery-3"));
     await harness.service.commit(input("recovery-3"));
     await expect(harness.service.release(input("recovery-3"))).rejects.toBeInstanceOf(PromotionalRecoveryReservationError);
+  });
+
+  it("does not reactivate a released reservation while unusable, then reactivates it after reopening", async () => {
+    const harness = createHarness();
+    await harness.service.reserve(input());
+    await harness.service.release(input());
+
+    harness.state.campaign.expiresAt = now;
+    await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "already-released" });
+    expect(harness.state.grant.reservedQuantity).toBe(0);
+
+    harness.state.campaign.expiresAt = new Date("2026-10-01T00:00:00.000Z");
+    await expect(harness.service.reserve(input())).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.state.grant.reservedQuantity).toBe(1);
   });
 });
