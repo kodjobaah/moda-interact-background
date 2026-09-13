@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BillingReconciliationService } from "../../../src/services/billing-reconciliation.service.js";
 import { SamePlanBillingPeriodRolloverService } from "../../../src/services/same-plan-billing-period-rollover.service.js";
+import { ShopifyPlanChangeTransitionService } from "../../../src/services/shopify-plan-change-transition.service.js";
+import { recoveryCapacityResumeService } from "../../../src/services/recovery-capacity-resume.service.js";
 
 const providerSubscription = {
   planHandle: "pro-2026",
@@ -99,6 +101,48 @@ function harness({
 }
 
 describe("BillingReconciliationService", () => {
+  it("fails closed before the boundary and never exposes the stale pack meter", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({ queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") } });
+    test.database.billingPlan.findUnique.mockImplementation(async ({ where }: { where: { id?: string; shopifyPlanHandle?: string } }) => where.id ? { id: "plan-current", active: true, kind: "PAID_METERED", shopifyRecoveryCreditPackEventHandle: "old-pack" } : { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" });
+    test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-current", pendingPlanId: "plan-target", pendingShopifyPlanHandle: "pro-2027", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z"), billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") });
+
+    const result = await test.service.reconcileOnce();
+
+    expect(result.subscriptionErrors).toBe(0);
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }) }));
+    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("schedules plan-change capacity resume after a successful rotating Paid transition", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({ nowValue: () => new Date("2026-10-01T00:00:01.000Z"), queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-11-01T00:00:00.000Z") } });
+    test.database.billingPlan.findUnique.mockImplementation(async ({ where }: { where: { id?: string; shopifyPlanHandle?: string } }) => where.id ? { id: "plan-current", active: true, kind: "PAID_METERED", shopifyRecoveryCreditPackEventHandle: "old-pack" } : { id: "plan-target", active: true, kind: "PAID_METERED", shopifyPlanHandle: "pro-2027", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new", recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
+    test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-current", pendingPlanId: "plan-target", pendingShopifyPlanHandle: "pro-2027", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z"), billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") });
+    const transition = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transition").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-new", nextReconcileAt: null, planKind: "PAID_METERED" });
+    const resume = vi.spyOn(recoveryCapacityResumeService, "schedule").mockResolvedValue(undefined);
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(resume).toHaveBeenCalledWith({ shopId: "shop-1", trigger: "plan-change" });
+    transition.mockRestore();
+    resume.mockRestore();
+  });
+
+  it("swallows rotating capacity-resume enqueue failure after a successful transition", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({ nowValue: () => new Date("2026-10-01T00:00:01.000Z"), queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-11-01T00:00:00.000Z") } });
+    test.database.billingPlan.findUnique.mockImplementation(async ({ where }: { where: { id?: string; shopifyPlanHandle?: string } }) => where.id ? { id: "plan-current", active: true, kind: "PAID_METERED", shopifyRecoveryCreditPackEventHandle: "old-pack" } : { id: "plan-target", active: true, kind: "PAID_METERED", shopifyPlanHandle: "pro-2027", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new", recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
+    test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-current", pendingPlanId: "plan-target", pendingShopifyPlanHandle: "pro-2027", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z"), billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") });
+    const transition = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transition").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-new", nextReconcileAt: null, planKind: "PAID_METERED" });
+    vi.spyOn(recoveryCapacityResumeService, "schedule").mockRejectedValue(new Error("Redis unavailable"));
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.objectContaining({ shopId: "shop-1" }));
+    transition.mockRestore();
+    vi.restoreAllMocks();
+  });
   it("B008-R1 updates the durable projection when Shopify changes plans", async () => {
     const test = harness();
     test.partner.getActiveSubscription

@@ -648,12 +648,12 @@ export class BillingSubscriptionReconciliationService {
       if (!targetPlan) return;
       if (targetPlan.kind === BillingPlanKind.PAID_METERED || (targetPlan.kind === BillingPlanKind.FREE && targetPlan.recoveryCreditPackEnabled)) {
         if (!provider.currentPeriodStart || !provider.currentPeriodEnd || provider.currentPeriodStart >= provider.currentPeriodEnd) {
-          await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_BILLING_CYCLE");
+          await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_BILLING_CYCLE", undefined, true);
           return;
         }
       }
       if (targetPlan.kind === BillingPlanKind.PAID_METERED && (!targetPlan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyUsageEventHandle))) {
-        await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_USAGE_METER");
+        await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
         return;
       }
       const result = await new ShopifyPlanChangeTransitionService(this.database).transition({
@@ -668,7 +668,7 @@ export class BillingSubscriptionReconciliationService {
         if (result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         await this.schedulePlanChangeCapacityResume(shopId, result.planKind);
       } else {
-        await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_BILLING_CYCLE");
+        await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_BILLING_CYCLE", undefined, true);
       }
       return;
     }
@@ -727,6 +727,7 @@ export class BillingSubscriptionReconciliationService {
     expected: EstablishedPlanChangeExpected,
     errorCode: "PARTNER_API_ERROR" | "PROVIDER_STATE_UNRESOLVED" | "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER",
     error?: unknown,
+    failClosed = false,
   ): Promise<void> {
     const now = this.now();
     const next = new Date(now.getTime() + ROLLOVER_RETRY_MS);
@@ -739,7 +740,13 @@ export class BillingSubscriptionReconciliationService {
     }
     const updated = await this.database.subscription.updateMany({
       where: this.establishedPlanChangeWhere(expected),
-      data: { nextReconcileAt: next, lastSyncedAt: now, lastSyncErrorCode: errorCode, lastSyncErrorAt: now },
+      data: {
+        ...(failClosed ? { status: SubscriptionProjectionStatus.SYNC_ERROR } : {}),
+        nextReconcileAt: next,
+        lastSyncedAt: now,
+        lastSyncErrorCode: errorCode,
+        lastSyncErrorAt: now,
+      },
     });
     if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);
   }

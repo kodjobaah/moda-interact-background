@@ -44,7 +44,7 @@ export type ShopifyPlanChangeInput = {
 
 export type ShopifyPlanChangeResult =
   | { kind: "not-applicable" }
-  | { kind: "transitioned"; billingPeriodId: string; nextReconcileAt: Date | null; planKind: BillingPlanKind };
+  | { kind: "transitioned"; billingPeriodId: string | null; nextReconcileAt: Date | null; planKind: BillingPlanKind };
 
 export class ShopifyPlanChangeTransitionService {
   constructor(private readonly database: TransitionDatabase) {}
@@ -115,7 +115,7 @@ export class ShopifyPlanChangeTransitionService {
           lastSyncErrorAt: null,
         },
       });
-      return { kind: "transitioned", billingPeriodId: "", nextReconcileAt: null, planKind: input.plan.kind };
+      return { kind: "transitioned", billingPeriodId: null, nextReconcileAt: null, planKind: input.plan.kind };
     }
 
     const successor = await transaction.billingPeriod.findUnique({

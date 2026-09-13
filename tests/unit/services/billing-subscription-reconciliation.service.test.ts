@@ -164,7 +164,130 @@ const cyclePlan = {
   shopifyUsageEventHandle: null,
 };
 
+const establishedCurrentPlan = {
+  id: "plan-current",
+  active: true,
+  name: "Current",
+  kind: "PAID_METERED",
+  shopifyPlanHandle: "paid-current",
+  shopifyUsageEventHandle: "recovery-current",
+  shopifyRecoveryCreditPackEventHandle: null,
+  recoveryCreditPackEnabled: false,
+  includedRecoveryConversationAllowance: 50,
+};
+
+const establishedTargetPlan = {
+  ...paidPlan,
+  id: "plan-target",
+  name: "Target",
+  shopifyPlanHandle: "paid-2026",
+};
+
+const establishedProvider = {
+  ...paidProvider,
+  planHandle: "paid-2026",
+  currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"),
+  currentPeriodEnd: new Date("2026-11-01T00:00:00.000Z"),
+};
+
+function establishedRow(overrides = {}) {
+  return pendingRow({
+    settings: { onboardingCompleted: true },
+    subscription: {
+      id: "subscription-1",
+      status: "ACTIVE",
+      planId: "plan-current",
+      pendingPlanId: "plan-target",
+      pendingShopifyPlanHandle: "paid-2026",
+      pendingEffectiveAt,
+      nextReconcileAt: now,
+      billingPeriodId: "period-current",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      lastSyncErrorCode: null,
+    },
+    ...overrides,
+  });
+}
+
 describe("BillingSubscriptionReconciliationService", () => {
+  it("enters fail-closed SYNC_ERROR for a provider-current target with a missing cycle", async () => {
+    const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, currentPeriodStart: null, currentPeriodEnd: null }, plan: establishedCurrentPlan });
+    test.database.billingPlan.findUnique
+      .mockResolvedValueOnce(establishedCurrentPlan)
+      .mockResolvedValueOnce(establishedTargetPlan);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "SYNC_ERROR",
+        lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+        nextReconcileAt: new Date("2026-09-12T12:01:00.000Z"),
+      }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
+  it("enters fail-closed SYNC_ERROR for a provider-current target with a missing meter", async () => {
+    const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, usageEventHandles: [] }, plan: establishedCurrentPlan });
+    test.database.billingPlan.findUnique
+      .mockResolvedValueOnce(establishedCurrentPlan)
+      .mockResolvedValueOnce(establishedTargetPlan);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_USAGE_METER" }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
+  it("keeps established entitlement on Partner failure and publishes one bounded retry", async () => {
+    const test = harness({ row: establishedRow(), providerError: new Error("timeout"), plan: establishedCurrentPlan });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ planId: "plan-current", pendingPlanId: "plan-target" }),
+      data: expect.objectContaining({ lastSyncErrorCode: "PARTNER_API_ERROR", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
+  it("keeps established entitlement unresolved when Partner reports no active subscription", async () => {
+    const test = harness({ row: establishedRow(), providerResult: null, plan: establishedCurrentPlan });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ lastSyncErrorCode: "PROVIDER_STATE_UNRESOLVED", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
+    }));
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("status");
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes pending provider state in one guarded update", async () => {
+    const test = harness({
+      row: establishedRow(),
+      providerResult: { ...establishedProvider, planHandle: "paid-current", pendingPlanHandle: "paid-next", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z") },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique
+      .mockResolvedValueOnce(establishedCurrentPlan)
+      .mockResolvedValueOnce(establishedCurrentPlan)
+      .mockResolvedValueOnce({ id: "plan-next", active: true });
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ pendingPlanId: "plan-next", pendingShopifyPlanHandle: "paid-next", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z") }),
+    }));
+    expect(test.database.subscription.update).not.toHaveBeenCalled();
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
   it("uses tiered retry delays from pending activation age", () => {
     expect(nextSubscriptionReconcileAt(pendingEffectiveAt, now)).toEqual(
       new Date("2026-09-12T12:30:00.000Z"),

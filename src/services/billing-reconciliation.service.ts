@@ -373,7 +373,7 @@ export class BillingReconciliationService {
           return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
         }
         if (now < existing.pendingEffectiveAt) {
-          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: currentPlan?.shopifyRecoveryCreditPackEventHandle ?? null };
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
         }
         const requiresExactCycle = plan.kind === BillingPlanKind.PAID_METERED
           || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true);

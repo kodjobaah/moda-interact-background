@@ -18,6 +18,10 @@ function harness(planKind: "PAID_METERED" | "FREE" = "PAID_METERED", successor: 
     usageEvent: { updateMany: vi.fn() },
     usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 10 } }), updateMany: vi.fn() },
     billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "counter-old", grantedQuantity: 100, committedQuantity: 20, reservedQuantity: 10, forfeitedQuantity: 0, version: 1 }), updateMany: vi.fn().mockResolvedValue({ count: 1 }), upsert: vi.fn() },
+    shopEntitlementCounter: { create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
+    recoveryCreditPurchase: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+    promotionalCreditGrant: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+    merchantPromotionSelection: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
   };
   const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
   return { transaction, service: new ShopifyPlanChangeTransitionService(database as never) };
@@ -70,5 +74,60 @@ describe("ShopifyPlanChangeTransitionService", () => {
     expect(test.transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.create).toHaveBeenCalledOnce();
     expect(test.transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledOnce();
+  });
+
+  it("returns a null billing period for a pack-disabled Free transition without a provider cycle", async () => {
+    const test = harness("FREE", null, null);
+    const result = await test.service.transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: { ...provider, planHandle: "free-new", usageEventHandles: [], currentPeriodStart: null, currentPeriodEnd: null },
+      plan: freePlan,
+      expectedCurrentPlanId: "paid-old",
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
+
+    expect(result).toEqual({ kind: "transitioned", billingPeriodId: null, nextReconcileAt: null, planKind: "FREE" });
+    expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
+  });
+
+  it("closes an existing outgoing Free period exactly once before Free -> Paid", async () => {
+    const outgoingFreePeriod = { id: "period-free", periodStart: oldStart, periodEnd: oldEnd, status: "OPEN", planKindSnapshot: "FREE" };
+    const test = harness("FREE", null, outgoingFreePeriod);
+    await test.service.transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan: paidPlan, expectedCurrentPlanId: "paid-old", now: new Date("2026-10-01T00:00:01.000Z") });
+
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledOnce();
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "period-free", status: "OPEN" },
+      data: { status: "CLOSED", closedAt: oldEnd, closeReason: "PLAN_CHANGED" },
+    }));
+  });
+
+  it("does not write lifetime, purchased, or promotional state during plan transitions", async () => {
+    const test = harness();
+    await test.service.transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan: paidPlan, expectedCurrentPlanId: "paid-old", now: new Date("2026-10-01T00:00:01.000Z") });
+
+    expect(test.transaction.shopEntitlementCounter.create).not.toHaveBeenCalled();
+    expect(test.transaction.shopEntitlementCounter.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(test.transaction.recoveryCreditPurchase.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.promotionalCreditGrant.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.merchantPromotionSelection.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not close the old period when a required paid cycle is missing", async () => {
+    const test = harness();
+    const result = await test.service.transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: { ...provider, currentPeriodStart: null, currentPeriodEnd: null },
+      plan: paidPlan,
+      expectedCurrentPlanId: "paid-old",
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
+
+    expect(result).toEqual({ kind: "not-applicable" });
+    expect(test.transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
   });
 });
