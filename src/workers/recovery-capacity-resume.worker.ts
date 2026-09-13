@@ -1,0 +1,68 @@
+import { Worker } from "bullmq";
+import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
+
+import {
+  RECOVERY_CAPACITY_RESUME_QUEUE,
+  RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+  type RecoveryCapacityResumeJob,
+} from "../domain/recovery-capacity-resume.js";
+import { connectionRedis } from "../lib/redis.js";
+import prisma from "../lib/db.js";
+import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
+import { recoveryCapacityResumeService } from "../services/recovery-capacity-resume.service.js";
+
+const MAX_RECOVERIES_PER_JOB = 25;
+const bullMQTelemetry = createBullMQTelemetry({
+  serviceName: "moda-recovery-worker",
+  enableMetrics: false,
+});
+
+export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob>(
+  RECOVERY_CAPACITY_RESUME_QUEUE,
+  async (job) => {
+    if (job.name !== RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB) {
+      throw new Error(`Unknown capacity resume job: ${job.name}`);
+    }
+
+    const active = await prismaShopIsActive(job.data.shopId);
+    if (!active) return { kind: "ignored", reason: "shop-unavailable" };
+
+    const recoveries = await findBlockedRecoveries(job.data.shopId);
+    for (const recovery of recoveries) {
+      const result = await checkoutRecoveryService.resumeCapacityBlockedRecovery(recovery.id);
+      if (result.kind === "capacity-exhausted") break;
+    }
+
+    if (recoveries.length === MAX_RECOVERIES_PER_JOB) {
+      await recoveryCapacityResumeService.schedule(job.data);
+    }
+    return { kind: "processed", count: recoveries.length };
+  },
+  {
+    connection: connectionRedis,
+    concurrency: 10,
+    telemetry: bullMQTelemetry,
+  },
+);
+
+recoveryCapacityResumeWorker.on("failed", (job, error) => {
+  console.error(`Recovery capacity resume job ${job?.id} failed`, error);
+});
+
+async function prismaShopIsActive(shopId: string): Promise<boolean> {
+  const shop = await prisma.shop.findUnique({ where: { id: shopId }, select: { status: true } });
+  return shop?.status === "ACTIVE";
+}
+
+async function findBlockedRecoveries(shopId: string) {
+  return prisma.checkoutRecovery.findMany({
+    where: {
+      shopId,
+      status: "DETECTED",
+      admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+    },
+    orderBy: [{ detectedAt: "asc" }, { id: "asc" }],
+    take: MAX_RECOVERIES_PER_JOB,
+    select: { id: true },
+  });
+}

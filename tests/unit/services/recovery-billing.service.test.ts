@@ -145,19 +145,19 @@ describe("RecoveryBillingService", () => {
     const first = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
     const second = await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
 
-    expect(first).toEqual({ kind: "blocked", reason: "allowance-exhausted" });
-    expect(second).toEqual({ kind: "blocked", reason: "allowance-exhausted" });
+    expect(first).toEqual({ kind: "blocked", reason: "capacity-exhausted" });
+    expect(second).toEqual({ kind: "blocked", reason: "capacity-exhausted" });
     expect(database.merchantSupportMessage.upsert).toHaveBeenCalledTimes(0);
     expect(database.$transaction).toHaveBeenCalledTimes(2);
     expect(database.transactionMessageUpsert).toHaveBeenCalledTimes(2);
     expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:capacity-exhausted:free-allowance:subscription-1:5:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack:1" },
       }),
     );
     expect(database.transactionMessageUpsert.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:capacity-exhausted:free-allowance:subscription-1:5:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack:1" },
       }),
     );
   });
@@ -200,10 +200,10 @@ describe("RecoveryBillingService", () => {
     expect(database.messages.size).toBe(2);
     expect(database.messageUpsert).toHaveBeenCalledTimes(3);
     expect([...database.messages.keys()][0]).toContain(
-      "capacity-exhausted:free-allowance:subscription-1:5",
+      "FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack",
     );
     expect([...database.messages.keys()][1]).toContain(
-      "capacity-exhausted:free-allowance:subscription-2:4",
+      "FREE|subscription-2|no-period|4:5:0|no-included-counter|no-purchased-counter|no-pack",
     );
   });
 
@@ -257,7 +257,7 @@ describe("RecoveryBillingService", () => {
     );
 
     await expect(service.admit({ shopId: "shop-1", recoveryId: "recovery-overage" }))
-      .resolves.toEqual({ kind: "blocked", reason: "allowance-exhausted" });
+      .resolves.toEqual({ kind: "blocked", reason: "capacity-exhausted" });
     expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(lifetimeReservationService.reserve).toHaveBeenCalledTimes(1);
     expect(database.usageEvent.upsert).not.toHaveBeenCalled();
@@ -625,7 +625,7 @@ describe("RecoveryBillingService", () => {
     );
 
     await expect(service.admit({ shopId: "shop-1", recoveryId: "before-pack" }))
-      .resolves.toMatchObject({ kind: "blocked", reason: "allowance-exhausted" });
+      .resolves.toMatchObject({ kind: "blocked", reason: "capacity-exhausted" });
     await expect(service.admit({ shopId: "shop-1", recoveryId: "after-pack" }))
       .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
   });

@@ -35,7 +35,7 @@ import {
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
   "$transaction" | "merchantSupportThread" | "merchantSupportMessage"
->;
+> & Partial<Pick<PrismaClient, "shopEntitlementCounter" | "billingPeriodEntitlementCounter">>;
 
 type RecoveryPolicyResolver = Pick<typeof effectiveBillingPolicyResolver, "resolve">;
 type FreeReservationService = Pick<
@@ -86,7 +86,7 @@ export type RecoveryBillingAdmissionResult =
   | { kind: "admitted"; admission: RecoveryBillingAdmission }
   | {
       kind: "blocked";
-      reason: "paused" | "allowance-exhausted" | "reservation-in-flight";
+      reason: "paused" | "capacity-exhausted" | "reservation-in-flight";
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
@@ -145,7 +145,8 @@ export class RecoveryBillingService {
         if (purchased) return purchased;
         const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
         if (lifetimeFree) return lifetimeFree;
-        return { kind: "blocked", reason: "allowance-exhausted" };
+        await this.createCapacityExhaustedMessage(input.shopId, policy);
+        return { kind: "blocked", reason: "capacity-exhausted" };
       }
       return { kind: "blocked", reason: "reservation-in-flight" };
     }
@@ -155,7 +156,7 @@ export class RecoveryBillingService {
     const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
     if (lifetimeFree) return lifetimeFree;
     await this.createCapacityExhaustedMessage(input.shopId, policy);
-    return { kind: "blocked", reason: "allowance-exhausted" };
+    return { kind: "blocked", reason: "capacity-exhausted" };
   }
 
   async commitSuccessfulInitiation(input: {
@@ -369,7 +370,39 @@ export class RecoveryBillingService {
     policy: EffectiveBillingPolicy,
   ): Promise<void> {
     const systemCode = BILLING_SYSTEM_MESSAGE_CODES.RECOVERY_CAPACITY_EXHAUSTED;
-    const exhaustionLifecycle = `capacity-exhausted:free-allowance:${policy.subscriptionId}:${policy.freeAllowance!.effective}`;
+    const purchasedCounter = this.database.shopEntitlementCounter
+      ? await this.database.shopEntitlementCounter.findUnique({
+          where: { shopId_counter: { shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
+          select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true, refundingQuantity: true },
+        })
+      : null;
+    const includedCounter =
+      policy.billingPeriod && this.database.billingPeriodEntitlementCounter
+        ? await this.database.billingPeriodEntitlementCounter.findUnique({
+            where: {
+              billingPeriodId_counter: {
+                billingPeriodId: policy.billingPeriod.id,
+                counter: "INCLUDED_RECOVERY_CREDITS",
+              },
+            },
+            select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true, forfeitedQuantity: true },
+          })
+        : null;
+    const exhaustionLifecycle = [
+      policy.planKind,
+      policy.subscriptionId,
+      policy.billingPeriod?.id ?? "no-period",
+      policy.freeAllowance
+        ? `${policy.freeAllowance.grant}:${policy.freeAllowance.committed}:${policy.freeAllowance.reserved}`
+        : "no-free-allowance",
+      includedCounter
+        ? `${includedCounter.grantedQuantity}:${includedCounter.committedQuantity}:${includedCounter.reservedQuantity}:${includedCounter.forfeitedQuantity}`
+        : "no-included-counter",
+      purchasedCounter
+        ? `${purchasedCounter.grantedQuantity}:${purchasedCounter.committedQuantity}:${purchasedCounter.reservedQuantity}:${purchasedCounter.refundingQuantity}`
+        : "no-purchased-counter",
+      policy.recoveryCreditPack?.shopifyEventHandle ?? "no-pack",
+    ].join("|");
     const sourceKey = createMerchantBillingSystemSourceKey(
       shopId,
       systemCode,
@@ -392,7 +425,9 @@ export class RecoveryBillingService {
           kind: MerchantSupportMessageKind.SYSTEM,
           state: MerchantSupportMessageState.AVAILABLE,
           originalBody:
-            "Your recovery capacity has been used. Choose a paid plan to start new recovery conversations.",
+            policy.planKind === "FREE"
+              ? "Every applicable Free-plan recovery-capacity source is exhausted: promotional credits, purchased credits and shop-lifetime Free. New abandoned-checkout recoveries are paused. Existing conversations continue. You can manage recovery capacity or change plan."
+              : "Every applicable recovery-capacity source is exhausted: Paid monthly included where applicable, promotional credits, purchased credits and shop-lifetime Free. New abandoned-checkout recoveries are paused. Existing conversations continue. Capacity returns when any canonical source becomes available again.",
           sourceLanguageTag: "en-GB",
           systemCode,
           systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
