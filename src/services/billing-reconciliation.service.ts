@@ -287,6 +287,21 @@ export class BillingReconciliationService {
       && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
       && existing.planId === null
       && existing.pendingPlanId !== null
+      && plan?.active
+      && plan.kind === BillingPlanKind.PAID_METERED
+      && plan.id === existing.pendingPlanId
+      && (
+        provider.planHandle !== existing.pendingShopifyPlanHandle
+        || plan.shopifyPlanHandle !== existing.pendingShopifyPlanHandle
+      )
+    ) {
+      return { billingPeriodId: null, packMeterHandle: null };
+    }
+    if (
+      settings?.onboardingCompleted === false
+      && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
+      && existing.planId === null
+      && existing.pendingPlanId !== null
       && existing.pendingShopifyPlanHandle === provider.planHandle
     ) {
       if (plan?.active && plan.id === existing.pendingPlanId && plan.kind === BillingPlanKind.PAID_METERED) {

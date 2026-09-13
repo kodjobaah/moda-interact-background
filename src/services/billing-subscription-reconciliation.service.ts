@@ -345,6 +345,23 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
 
+    if (
+      plan?.active
+      && plan.kind === BillingPlanKind.PAID_METERED
+      && plan.id === row.subscription.pendingPlanId
+      && (
+        provider.planHandle !== row.subscription.pendingShopifyPlanHandle
+        || plan.shopifyPlanHandle !== row.subscription.pendingShopifyPlanHandle
+      )
+    ) {
+      await this.recordPaidActivationFailure(
+        row.id,
+        expected as InitialActivationExpected,
+        "PENDING_PLAN_HANDLE_MISMATCH",
+      );
+      return;
+    }
+
     await this.applyOtherCurrentPlan(
       row.id,
       row.subscription.id,
@@ -949,7 +966,7 @@ export class BillingSubscriptionReconciliationService {
   private async recordPaidActivationFailure(
     shopId: string,
     expected: InitialActivationExpected,
-    errorCode: "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE",
+    errorCode: "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE" | "PENDING_PLAN_HANDLE_MISMATCH",
   ): Promise<void> {
     const now = this.now();
     const next = nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now);
