@@ -352,7 +352,7 @@ describe("BillingSubscriptionReconciliationService", () => {
   it("does not activate when the provider handle differs from the durable pending handle", async () => {
     const test = harness({
       row: pendingRow({ subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-old" } }),
-      providerResult: paidProvider,
+      providerResult: { ...paidProvider, planHandle: "paid-new" },
       plan: { ...paidPlan, shopifyPlanHandle: "paid-new" },
     });
     test.transaction.subscription.findUnique.mockResolvedValue({
@@ -367,17 +367,29 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
 
     expect(test.partner.getActiveSubscription).toHaveBeenCalledOnce();
+    expect(test.database.billingPlan.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { shopifyPlanHandle: "paid-new" },
+    }));
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         lastSyncErrorCode: "PENDING_PLAN_HANDLE_MISMATCH",
         nextReconcileAt: new Date("2026-09-12T12:30:00.000Z"),
       }),
     }));
+    expect(test.database.$transaction).not.toHaveBeenCalled();
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriodEntitlementCounter).toBeUndefined();
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingPlanId");
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingShopifyPlanHandle");
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingEffectiveAt");
     expect(test.queue.add).toHaveBeenCalledTimes(1);
+    expect(test.queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ expectedNextReconcileAt: "2026-09-12T12:30:00.000Z" }),
+      expect.any(Object),
+    );
   });
 
   it.each([
