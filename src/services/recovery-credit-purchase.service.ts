@@ -8,6 +8,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createShopifyUsageIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
+import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
 
@@ -129,7 +130,7 @@ export class RecoveryCreditPurchaseService {
       };
     }
 
-    return this.withRetry(() =>
+    const result = await this.withRetry(() =>
       this.database.$transaction(async (transaction) => {
         const scope = {
           shopId: input.shopId,
@@ -242,6 +243,20 @@ export class RecoveryCreditPurchaseService {
         };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
     );
+    if (result.activatedCount > 0) {
+      try {
+        await recoveryCapacityResumeService.schedule({
+          shopId: input.shopId,
+          trigger: `purchase-activation-${input.billingPeriodId}`,
+        });
+      } catch (error) {
+        console.error(
+          `Failed to schedule capacity resume after purchase activation for shop ${input.shopId}`,
+          error,
+        );
+      }
+    }
+    return result;
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {

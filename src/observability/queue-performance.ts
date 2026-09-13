@@ -12,6 +12,7 @@ export type QueueName =
   | "checkout-events"
   | "order-events"
   | "pending-recovery-candidates"
+  | "recovery-capacity-resume"
   | "whatsapp-events"
   | "merchant-communications"
   | "billing-subscription-reconcile";

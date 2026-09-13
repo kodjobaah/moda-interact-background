@@ -325,6 +325,7 @@ export class CheckoutRecoveryService {
       );
     const timeZone =
       currentContext.timeZone ??
+
       eventContext?.timeZone ??
       safelyNormalize(merchantContext?.defaultTimeZone, normalizeTimeZone);
 
@@ -626,6 +627,8 @@ export class CheckoutRecoveryService {
       data: {
         status: "MESSAGE_SENT",
         messageSentAt: new Date(),
+        admissionBlockedAt: null,
+        admissionBlockReason: null,
       },
     });
   }
@@ -752,6 +755,8 @@ export class CheckoutRecoveryService {
             data: {
               status: "COMPLETED",
               completedAt,
+              admissionBlockedAt: null,
+              admissionBlockReason: null,
             },
           });
 
@@ -833,7 +838,12 @@ export class CheckoutRecoveryService {
       shopId: recovery.shopId,
       recoveryId: recovery.id,
     });
-    if (billing.kind === "blocked") return recovery;
+    if (billing.kind === "blocked") {
+      if (billing.reason === "capacity-exhausted") {
+        await this.markRecoveryCapacityBlocked(recovery.id);
+      }
+      return recovery;
+    }
 
     const content = conversationMessageService.buildRecoveryTemplateDescriptor({
       purpose: "checkout-recovery",
@@ -906,6 +916,154 @@ export class CheckoutRecoveryService {
     await this.markRecoveryMessageSent(recovery.id);
 
     return recovery;
+  }
+
+  async markRecoveryCapacityBlocked(recoveryId: string, blockedAt = new Date()) {
+    return prisma.checkoutRecovery.updateMany({
+      where: {
+        id: recoveryId,
+        status: "DETECTED",
+        admissionBlockReason: null,
+      },
+      data: {
+        admissionBlockedAt: blockedAt,
+        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+      },
+    });
+  }
+
+  async resumeCapacityBlockedRecovery(recoveryId: string) {
+    const recovery = await prisma.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: {
+        id: true,
+        shopId: true,
+        checkoutToken: true,
+        cartToken: true,
+        checkoutUrl: true,
+        detectedAt: true,
+        status: true,
+        admissionBlockReason: true,
+        shop: { select: { domain: true, status: true } },
+      },
+    });
+    if (
+      !recovery ||
+      recovery.status !== "DETECTED" ||
+      recovery.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
+    ) {
+      return { kind: "ignored", reason: "not-capacity-blocked" } as const;
+    }
+    if (recovery.shop.status !== "ACTIVE") {
+      return { kind: "ignored", reason: "shop-unavailable" } as const;
+    }
+
+    return pendingRecoveryCandidateService.withCheckoutLock(
+      recovery.shopId,
+      recovery.checkoutToken,
+      async () => {
+        const current = await prisma.checkoutRecovery.findUnique({
+          where: { id: recovery.id },
+          select: {
+            id: true,
+            status: true,
+            admissionBlockReason: true,
+            checkoutToken: true,
+            cartToken: true,
+            checkoutUrl: true,
+            detectedAt: true,
+          },
+        });
+        if (
+          !current ||
+          current.status !== "DETECTED" ||
+          current.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
+        ) {
+          return { kind: "ignored", reason: "already-transitioned" } as const;
+        }
+
+        const outcome = await abandonedCheckoutLookupService.lookup({
+          shopId: recovery.shopId,
+          shopDomain: recovery.shop.domain,
+          checkoutToken: current.checkoutToken,
+          cartToken: current.cartToken,
+          abandonedCheckoutUrl: current.checkoutUrl,
+          checkoutCreatedAt: current.detectedAt.toISOString(),
+        });
+        if (outcome.kind === "provider-error") {
+          throw new Error(
+            `Abandoned checkout provider error while resuming recovery ${recovery.id}: ${outcome.message}`,
+          );
+        }
+        if (
+          outcome.kind === "ambiguous" ||
+          outcome.kind === "bounded-limit-exceeded"
+        ) {
+          throw new Error(
+            `Abandoned checkout lookup ${outcome.kind} while resuming recovery ${recovery.id}`,
+          );
+        }
+        if (outcome.kind === "not-found" || outcome.checkout.completedAt !== null) {
+          await this.terminalizeUnrecoverableBlockedRecovery(
+            recovery.id,
+            outcome.kind === "found" ? "Checkout completed" : "Checkout lookup not-found",
+          );
+          return { kind: "terminal", reason: outcome.kind } as const;
+        }
+
+        const candidate: PendingRecoveryCandidate = {
+          shopId: recovery.shopId,
+          shopDomain: recovery.shop.domain,
+          checkoutToken: current.checkoutToken,
+          cartToken: current.cartToken,
+          abandonedCheckoutUrl: current.checkoutUrl,
+          checkoutCreatedAt: current.detectedAt.toISOString(),
+        };
+        const context = await this.resolveInternationalContext(candidate, outcome.checkout);
+        await this.handleCheckoutCreated(
+          this.toRecoverySeed(candidate, recovery.shop.domain, outcome.checkout, context),
+        );
+        const after = await prisma.checkoutRecovery.findUnique({
+          where: { id: recovery.id },
+          select: { status: true, admissionBlockReason: true },
+        });
+        return after?.admissionBlockReason === "RECOVERY_CAPACITY_EXHAUSTED"
+          ? { kind: "capacity-exhausted" as const }
+          : { kind: "initiated" as const, status: after?.status ?? "DETECTED" };
+      },
+    );
+  }
+
+  private async terminalizeUnrecoverableBlockedRecovery(
+    recoveryId: string,
+    reason: string,
+  ): Promise<void> {
+    await prisma.$transaction(async (transaction) => {
+      const updated = await transaction.checkoutRecovery.updateMany({
+        where: {
+          id: recoveryId,
+          status: "DETECTED",
+          admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+        },
+        data: {
+          status: "CANCELLED",
+          expiredAt: new Date(),
+          admissionBlockedAt: null,
+          admissionBlockReason: null,
+        },
+      });
+      if (updated.count === 1) {
+        await transaction.checkoutRecoveryStatusHistory.create({
+          data: {
+            checkoutRecoveryId: recoveryId,
+            fromStatus: "DETECTED",
+            toStatus: "CANCELLED",
+            reason,
+            source: "recovery-capacity-resume",
+          },
+        });
+      }
+    });
   }
 
   async getAgentContext({
