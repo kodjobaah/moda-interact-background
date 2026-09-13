@@ -755,6 +755,8 @@ export class CheckoutRecoveryService {
             data: {
               status: "COMPLETED",
               completedAt,
+              admissionBlockedAt: null,
+              admissionBlockReason: null,
             },
           });
 
@@ -993,10 +995,18 @@ export class CheckoutRecoveryService {
             `Abandoned checkout provider error while resuming recovery ${recovery.id}: ${outcome.message}`,
           );
         }
-        if (outcome.kind !== "found" || outcome.checkout.completedAt !== null) {
+        if (
+          outcome.kind === "ambiguous" ||
+          outcome.kind === "bounded-limit-exceeded"
+        ) {
+          throw new Error(
+            `Abandoned checkout lookup ${outcome.kind} while resuming recovery ${recovery.id}`,
+          );
+        }
+        if (outcome.kind === "not-found" || outcome.checkout.completedAt !== null) {
           await this.terminalizeUnrecoverableBlockedRecovery(
             recovery.id,
-            outcome.kind === "found" ? "Checkout completed" : `Checkout lookup ${outcome.kind}`,
+            outcome.kind === "found" ? "Checkout completed" : "Checkout lookup not-found",
           );
           return { kind: "terminal", reason: outcome.kind } as const;
         }

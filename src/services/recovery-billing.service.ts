@@ -41,7 +41,8 @@ type RecoveryBillingDatabase = Pick<
       PrismaClient,
       "shopEntitlementCounter" | "billingPeriodEntitlementCounter"
     >
-  >;
+  > &
+  Partial<Pick<PrismaClient, "merchantPromotionSelection">>;
 
 type RecoveryPolicyResolver = Pick<
   typeof effectiveBillingPolicyResolver,
@@ -540,6 +541,23 @@ export class RecoveryBillingService {
             },
           })
         : null;
+      const selectedPromotion = this.database.merchantPromotionSelection
+        ? await this.database.merchantPromotionSelection.findUnique({
+            where: { shopId },
+            select: {
+              promotionalCreditGrant: {
+                select: {
+                  id: true,
+                  version: true,
+                  quantity: true,
+                  committedQuantity: true,
+                  reservedQuantity: true,
+                },
+              },
+            },
+          })
+        : null;
+      const selectedGrant = selectedPromotion?.promotionalCreditGrant;
     const exhaustionLifecycle = [
       policy.planKind,
       policy.subscriptionId,
@@ -553,6 +571,9 @@ export class RecoveryBillingService {
       purchasedCounter
         ? `${purchasedCounter.grantedQuantity}:${purchasedCounter.committedQuantity}:${purchasedCounter.reservedQuantity}:${purchasedCounter.refundingQuantity}`
         : "no-purchased-counter",
+      selectedGrant
+        ? `${selectedGrant.id}:${selectedGrant.version}:${selectedGrant.quantity}:${selectedGrant.committedQuantity}:${selectedGrant.reservedQuantity}`
+        : "no-selected-promotion",
       policy.recoveryCreditPack?.shopifyEventHandle ?? "no-pack",
     ].join("|");
     const sourceKey = createMerchantBillingSystemSourceKey(

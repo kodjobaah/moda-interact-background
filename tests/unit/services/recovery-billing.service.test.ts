@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RecoveryBillingService } from "../../../src/services/recovery-billing.service.js";
 
-function createDatabase() {
+function createDatabase(selectedGrant?: Record<string, unknown> | null) {
   const thread = { id: "thread-1" };
   const transactionMessageUpsert = vi.fn(async () => ({ id: "message-1" }));
   return {
@@ -14,6 +14,11 @@ function createDatabase() {
     merchantSupportMessage: {
       upsert: vi.fn(async () => ({ id: "message-1" })),
     },
+    merchantPromotionSelection: selectedGrant === undefined
+      ? undefined
+      : {
+          findUnique: vi.fn(async () => selectedGrant ? { promotionalCreditGrant: selectedGrant } : null),
+        },
     $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) =>
       callback({
         merchantSupportThread: {
@@ -393,12 +398,12 @@ describe("RecoveryBillingService", () => {
     expect(database.transactionMessageUpsert).toHaveBeenCalledTimes(2);
     expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack:1" },
       }),
     );
     expect(database.transactionMessageUpsert.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack:1" },
+        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack:1" },
       }),
     );
   });
@@ -441,10 +446,39 @@ describe("RecoveryBillingService", () => {
     expect(database.messages.size).toBe(2);
     expect(database.messageUpsert).toHaveBeenCalledTimes(3);
     expect([...database.messages.keys()][0]).toContain(
-      "FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-pack",
+      "FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack",
     );
     expect([...database.messages.keys()][1]).toContain(
-      "FREE|subscription-2|no-period|4:5:0|no-included-counter|no-purchased-counter|no-pack",
+      "FREE|subscription-2|no-period|4:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack",
+    );
+  });
+
+  it("starts a new exhaustion epoch when the selected promotional grant changes", async () => {
+    const grant = {
+      id: "grant-1",
+      version: 2,
+      quantity: 10,
+      committedQuantity: 10,
+      reservedQuantity: 0,
+    };
+    const database = createDatabase(grant);
+    const service = new RecoveryBillingService(
+      database as never,
+      { resolve: vi.fn(async () => freePolicy()) } as never,
+      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      undefined as never,
+      unavailablePromotionalReservationService() as never,
+    );
+
+    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch" });
+
+    expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        where: {
+          sourceKey: expect.stringContaining("grant-1:2:10:10:0"),
+        },
+      }),
     );
   });
 

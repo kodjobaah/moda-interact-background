@@ -4,6 +4,7 @@ import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observ
 import {
   RECOVERY_CAPACITY_RESUME_QUEUE,
   RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+  createRecoveryCapacityResumeContinuation,
   type RecoveryCapacityResumeJob,
 } from "../domain/recovery-capacity-resume.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -27,16 +28,30 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
     const active = await prismaShopIsActive(job.data.shopId);
     if (!active) return { kind: "ignored", reason: "shop-unavailable" };
 
-    const recoveries = await findBlockedRecoveries(job.data.shopId);
+    const cursor = job.data.trigger.startsWith("continuation-")
+      ? job.data.trigger.slice("continuation-".length)
+      : undefined;
+    const recoveries = await findBlockedRecoveries(job.data.shopId, cursor);
+    let attempted = 0;
+    let capacityExhausted = false;
     for (const recovery of recoveries) {
+      attempted += 1;
       const result = await checkoutRecoveryService.resumeCapacityBlockedRecovery(recovery.id);
-      if (result.kind === "capacity-exhausted") break;
+      if (result.kind === "capacity-exhausted") {
+        capacityExhausted = true;
+        break;
+      }
     }
 
-    if (recoveries.length === MAX_RECOVERIES_PER_JOB) {
-      await recoveryCapacityResumeService.schedule(job.data);
+    if (!capacityExhausted && attempted === MAX_RECOVERIES_PER_JOB) {
+      const lastRecovery = recoveries[attempted - 1];
+      if (lastRecovery) {
+        await recoveryCapacityResumeService.schedule(
+          createRecoveryCapacityResumeContinuation(job.data, lastRecovery.id),
+        );
+      }
     }
-    return { kind: "processed", count: recoveries.length };
+    return { kind: "processed", count: attempted };
   },
   {
     connection: connectionRedis,
@@ -54,12 +69,13 @@ async function prismaShopIsActive(shopId: string): Promise<boolean> {
   return shop?.status === "ACTIVE";
 }
 
-async function findBlockedRecoveries(shopId: string) {
+async function findBlockedRecoveries(shopId: string, afterId?: string) {
   return prisma.checkoutRecovery.findMany({
     where: {
       shopId,
       status: "DETECTED",
       admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+      ...(afterId ? { id: { gt: afterId } } : {}),
     },
     orderBy: [{ detectedAt: "asc" }, { id: "asc" }],
     take: MAX_RECOVERIES_PER_JOB,

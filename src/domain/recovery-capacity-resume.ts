@@ -10,3 +10,13 @@ export type RecoveryCapacityResumeJob = {
 export function createRecoveryCapacityResumeJobId(input: RecoveryCapacityResumeJob): string {
   return `recovery-capacity-resume--${input.shopId}--${input.trigger}`;
 }
+
+export function createRecoveryCapacityResumeContinuation(
+  input: RecoveryCapacityResumeJob,
+  lastRecoveryId: string,
+): RecoveryCapacityResumeJob {
+  return {
+    shopId: input.shopId,
+    trigger: `continuation-${lastRecoveryId}`,
+  };
+}
