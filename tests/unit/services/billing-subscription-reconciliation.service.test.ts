@@ -7,6 +7,7 @@ import {
 } from "../../../src/services/billing-subscription-reconciliation.service.js";
 import { shopifyUsageEventPublisherService } from "../../../src/services/shopify-usage-event-publisher.service.js";
 import { SamePlanBillingPeriodRolloverService } from "../../../src/services/same-plan-billing-period-rollover.service.js";
+import { ShopifyPlanChangeTransitionService } from "../../../src/services/shopify-plan-change-transition.service.js";
 
 const now = new Date("2026-09-12T12:00:00.000Z");
 const pendingEffectiveAt = new Date("2026-09-12T11:00:00.000Z");
@@ -1322,5 +1323,42 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({ row: pendingRow(), providerResult: null });
     await test.service.reconcileJob(payload);
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.any(Object), expect.objectContaining({ jobId: expect.any(String), removeOnFail: true, removeOnComplete: 100 }));
+  });
+
+  it("fails closed before the pending boundary when the provider target uses the current cycle", async () => {
+    const transition = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transition");
+    const currentStart = new Date("2026-09-01T00:00:00.000Z");
+    const currentEnd = new Date("2026-10-01T00:00:00.000Z");
+    const test = harness({
+      row: pendingRow({
+        settings: { onboardingCompleted: true },
+        subscription: {
+          id: "subscription-1",
+          status: "ACTIVE",
+          planId: "plan-old",
+          pendingPlanId: "plan-paid",
+          pendingShopifyPlanHandle: "paid-2026",
+          pendingEffectiveAt: new Date("2026-09-20T00:00:00.000Z"),
+          nextReconcileAt: now,
+          billingPeriodId: "period-old",
+          currentPeriodStart: currentStart,
+          currentPeriodEnd: currentEnd,
+        },
+      }),
+      providerResult: { ...paidProvider, planHandle: "paid-2026", currentPeriodStart: currentStart, currentPeriodEnd: currentEnd },
+      plan: { ...paidPlan, id: "plan-old", shopifyPlanHandle: "old-2026" },
+    });
+    test.database.billingPlan.findUnique
+      .mockResolvedValueOnce({ id: "plan-old", active: true, name: "Old", kind: "PAID_METERED", shopifyPlanHandle: "old-2026", shopifyUsageEventHandle: "old-meter", recoveryCreditPackEnabled: false, shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 50 })
+      .mockResolvedValueOnce(paidPlan);
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
+
+    expect(transition).not.toHaveBeenCalled();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+    transition.mockRestore();
   });
 });

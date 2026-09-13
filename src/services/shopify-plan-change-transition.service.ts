@@ -15,6 +15,11 @@ import type { PartnerSubscription } from "../providers/shopify-partner-billing.p
 
 type TransitionDatabase = Pick<PrismaClient, "$transaction">;
 type Transition = Prisma.TransactionClient;
+const RETRYABLE_PLAN_CHANGE_SYNC_ERRORS = [
+  "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
+  "MISSING_BILLING_CYCLE",
+  "MISSING_USAGE_METER",
+] as const;
 
 export type ShopifyPlanChangePlan = {
   id: string;
@@ -52,9 +57,12 @@ export class ShopifyPlanChangeTransitionService {
     const start = input.provider.currentPeriodStart;
     const end = input.provider.currentPeriodEnd;
     const allowance = input.plan.includedRecoveryConversationAllowance;
-    if (!input.plan.active || input.provider.planHandle !== input.plan.shopifyPlanHandle || !start || !end || start >= end) {
+    if (!input.plan.active || input.provider.planHandle !== input.plan.shopifyPlanHandle) {
       return { kind: "not-applicable" };
     }
+    const requiresExactCycle = input.plan.kind === BillingPlanKind.PAID_METERED
+      || (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled);
+    if (requiresExactCycle && (!start || !end || start >= end)) return { kind: "not-applicable" };
     if (input.plan.kind === BillingPlanKind.PAID_METERED) {
       if (!Number.isSafeInteger(allowance) || (allowance ?? -1) < 0 || !input.plan.shopifyUsageEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyUsageEventHandle)) {
         throw new Error("Provider-confirmed paid plan is missing a valid recovery meter or allowance");
@@ -72,10 +80,43 @@ export class ShopifyPlanChangeTransitionService {
       where: { id: input.subscriptionId },
       include: { billingPeriod: true, plan: true },
     });
-    if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.expectedCurrentPlanId || (subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") || !subscription.billingPeriod || !subscription.currentPeriodEnd) {
+    const retryableSyncError = RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(subscription?.lastSyncErrorCode as typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS[number]);
+    if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.expectedCurrentPlanId || ((subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") && !(subscription.status === "SYNC_ERROR" && retryableSyncError))) {
       return { kind: "not-applicable" };
     }
-    if (start < subscription.currentPeriodEnd) throw new Error("Provider plan change cycle overlaps the current billing period");
+    const outgoingPlanKind = subscription.billingPeriod?.planKindSnapshot ?? subscription.plan?.kind;
+    if (outgoingPlanKind === BillingPlanKind.PAID_METERED && (!subscription.billingPeriod || !subscription.currentPeriodEnd)) {
+      return { kind: "not-applicable" };
+    }
+    if (start && subscription.currentPeriodEnd && start < subscription.currentPeriodEnd) throw new Error("Provider plan change cycle overlaps the current billing period");
+
+    if (!start || !end) {
+      if (subscription.billingPeriod) {
+        await closePeriod(transaction, subscription.billingPeriod.id, subscription.billingPeriod.periodEnd, subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE);
+      }
+      await transaction.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          planId: input.plan.id,
+          observedShopifyPlanHandle: input.provider.planHandle,
+          status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
+          billingPeriodId: null,
+          currentPeriodStart: start,
+          currentPeriodEnd: end,
+          trialEndsAt: input.provider.trialEndsAt,
+          cancelAtPeriodEnd: input.provider.cancelAtPeriodEnd,
+          providerSubscriptionId: input.provider.providerSubscriptionId,
+          pendingPlanId: null,
+          pendingShopifyPlanHandle: null,
+          pendingEffectiveAt: null,
+          nextReconcileAt: null,
+          lastSyncedAt: input.now,
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+        },
+      });
+      return { kind: "transitioned", billingPeriodId: "", nextReconcileAt: null, planKind: input.plan.kind };
+    }
 
     const successor = await transaction.billingPeriod.findUnique({
       where: { shopId_periodStart_periodEnd: { shopId: input.shopId, periodStart: start, periodEnd: end } },
@@ -86,7 +127,9 @@ export class ShopifyPlanChangeTransitionService {
       throw new Error("Provider plan change has an incompatible successor period");
     }
 
-    await closePeriod(transaction, subscription.billingPeriod.id, subscription.billingPeriod.periodEnd, subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE);
+    if (subscription.billingPeriod) {
+      await closePeriod(transaction, subscription.billingPeriod.id, subscription.billingPeriod.periodEnd, subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE);
+    }
     const period = successor ?? await transaction.billingPeriod.create({
       data: {
         shopId: input.shopId,

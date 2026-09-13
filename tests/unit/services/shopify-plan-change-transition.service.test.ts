@@ -10,10 +10,10 @@ const paidPlan = { id: "paid-new", active: true, name: "Paid New", kind: "PAID_M
 const freePlan = { id: "free-new", active: true, name: "Free New", kind: "FREE" as const, shopifyPlanHandle: "free-new", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null };
 const provider = { planHandle: "paid-new", usageEventHandles: ["recovery-new"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE" as const, currentPeriodStart: newStart, currentPeriodEnd: newEnd, trialEndsAt: null, cancelAtPeriodEnd: false, providerSubscriptionId: "provider-new", providerUsageSnapshot: [] };
 
-function harness(planKind: "PAID_METERED" | "FREE" = "PAID_METERED", successor: unknown = null) {
+function harness(planKind: "PAID_METERED" | "FREE" = "PAID_METERED", successor: unknown = null, outgoingPeriod: unknown = undefined) {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
-    subscription: { findUnique: vi.fn().mockResolvedValue({ id: "subscription-1", shopId: "shop-1", planId: "paid-old", status: "ACTIVE", billingPeriodId: "period-old", currentPeriodStart: oldStart, currentPeriodEnd: oldEnd, plan: { kind: planKind }, billingPeriod: { id: "period-old", periodStart: oldStart, periodEnd: oldEnd, status: "OPEN", planKindSnapshot: planKind } }), update: vi.fn() },
+    subscription: { findUnique: vi.fn().mockResolvedValue({ id: "subscription-1", shopId: "shop-1", planId: "paid-old", status: "ACTIVE", billingPeriodId: outgoingPeriod === null ? null : "period-old", currentPeriodStart: outgoingPeriod === null ? null : oldStart, currentPeriodEnd: outgoingPeriod === null ? null : oldEnd, plan: { kind: planKind }, billingPeriod: outgoingPeriod === undefined ? { id: "period-old", periodStart: oldStart, periodEnd: oldEnd, status: "OPEN", planKindSnapshot: planKind } : outgoingPeriod }), update: vi.fn() },
     billingPeriod: { findUnique: vi.fn().mockResolvedValue(successor), create: vi.fn().mockResolvedValue({ id: "period-new" }), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     usageEvent: { updateMany: vi.fn() },
     usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 10 } }), updateMany: vi.fn() },
@@ -53,5 +53,22 @@ describe("ShopifyPlanChangeTransitionService", () => {
     await test.service.transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan: paidPlan, expectedCurrentPlanId: "paid-old", now: new Date("2026-10-01T00:00:01.000Z") });
     expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+  });
+
+  it("supports Free -> Paid without an outgoing Free billing period", async () => {
+    const test = harness("FREE", null, null);
+    const result = await test.service.transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider,
+      plan: paidPlan,
+      expectedCurrentPlanId: "paid-old",
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
+
+    expect(result).toMatchObject({ kind: "transitioned", billingPeriodId: "period-new", planKind: "PAID_METERED" });
+    expect(test.transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriod.create).toHaveBeenCalledOnce();
+    expect(test.transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledOnce();
   });
 });
