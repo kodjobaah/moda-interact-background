@@ -333,7 +333,10 @@ export class BillingReconciliationService {
         && existing.billingPeriodId
         && existing.currentPeriodStart
         && existing.currentPeriodEnd
-        && existing.nextReconcileAt
+        && (
+          plan.kind === BillingPlanKind.PAID_METERED
+          || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true)
+        )
       ) {
         const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
         const updated = await this.database.subscription.updateMany({
@@ -504,9 +507,21 @@ export class BillingReconciliationService {
   }
 }
 
+export function createBillingReconciliationService(subscriptionQueue?: SubscriptionQueue): BillingReconciliationService {
+  return new BillingReconciliationService(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    subscriptionQueue,
+  );
+}
+
 function boundedLimit(value: number): number {
   if (!Number.isInteger(value) || value < 1) return DEFAULT_SHOP_PAGE_SIZE;
   return Math.min(value, MAX_SHOP_PAGE_SIZE);
 }
 
-export const billingReconciliationService = new BillingReconciliationService();
+export const billingReconciliationService = createBillingReconciliationService();
