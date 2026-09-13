@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { BillingReconciliationService } from "../../../src/services/billing-reconciliation.service.js";
+import { SamePlanBillingPeriodRolloverService } from "../../../src/services/same-plan-billing-period-rollover.service.js";
 
 const providerSubscription = {
   planHandle: "pro-2026",
@@ -531,6 +532,68 @@ describe("BillingReconciliationService", () => {
       expect.objectContaining({ expectedNextReconcileAt: "2026-10-01T00:01:01.000Z" }),
       expect.objectContaining({ jobId: expect.any(String), delay: 60_000 }),
     );
+  });
+
+  it("lets the canonical rollover return its successor without using the legacy period upsert", async () => {
+    const test = harness();
+    const existing = {
+      id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null,
+    };
+    test.database.subscription.findUnique.mockResolvedValue(existing);
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transition").mockResolvedValue({
+      kind: "transitioned", billingPeriodId: "period-successor", nextReconcileAt: null, planKind: "PAID_METERED",
+    });
+
+    const result = await test.service.reconcileOnce();
+
+    expect(transition).toHaveBeenCalledOnce();
+    expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
+    expect(result.discrepancies).toEqual([]);
+    transition.mockRestore();
+  });
+
+  it("keeps a canonical fail-closed rollover result from creating a later period", async () => {
+    const test = harness();
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null,
+    });
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transition").mockResolvedValue({ kind: "not-applicable" });
+
+    await test.service.reconcileOnce();
+
+    expect(transition).toHaveBeenCalledOnce();
+    expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
+    transition.mockRestore();
+  });
+
+  it("does not queue a pack-disabled Free retry when the provider cycle lags", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({
+      queue,
+      plan: {
+        id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "pro-2026",
+        recoveryCreditPackEnabled: false, shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null,
+        includedRecoveryConversationAllowance: null,
+      },
+    });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1", status: "ACTIVE", planId: "plan-free", billingPeriodId: "period-old",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null,
+    });
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transition").mockResolvedValue({
+      kind: "provider-cycle-lag", billingPeriodId: "period-old", nextReconcileAt: new Date("2026-10-01T00:00:00.000Z"),
+    });
+
+    await test.service.reconcileOnce();
+
+    expect(transition).toHaveBeenCalledOnce();
+    expect(queue.add).not.toHaveBeenCalled();
+    transition.mockRestore();
   });
 
   it("rotates active shops with a keyset cursor and continues after a Partner failure", async () => {

@@ -239,6 +239,33 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     }));
   });
 
+  it("aborts before releasing or closing when reservation aggregate mismatches the counter", async () => {
+    const transaction = transactionHarness();
+    transaction.billingPeriodEntitlementCounter.findUnique.mockResolvedValue({
+      id: "counter-old",
+      grantedQuantity: 100,
+      committedQuantity: 20,
+      reservedQuantity: 10,
+      forfeitedQuantity: 0,
+      version: 1,
+    });
+    transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 9 } });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+
+    await expect(new SamePlanBillingPeriodRolloverService(database as never).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider,
+      plan,
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    })).rejects.toThrow("counter is inconsistent");
+
+    expect(transaction.usageReservation.updateMany).not.toHaveBeenCalled();
+    expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
+    expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
+    expect(transaction.subscription.update).not.toHaveBeenCalled();
+  });
+
   it("moves only old PENDING and RETRYABLE events to bounded attention", async () => {
     const transaction = transactionHarness();
     transaction.subscription.findUnique.mockResolvedValue({
@@ -393,8 +420,13 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {}, create: expect.objectContaining({ committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0 }) }));
   });
 
-  it("calls the Paid post-commit hook once and not for replay or Free rollover", async () => {
+  it("emits one Paid capacity hint while allowing the generic hook for Free rollover", async () => {
     const afterTransitionCommitted = vi.fn();
+    const capacityResumeHint = vi.fn();
+    afterTransitionCommitted.mockImplementation(async (_input, result) => {
+      if (result.planKind !== "PAID_METERED") return;
+      await capacityResumeHint();
+    });
     const transaction = transactionHarness();
     transaction.billingPeriodEntitlementCounter.findUnique
       .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
@@ -404,6 +436,7 @@ describe("SamePlanBillingPeriodRolloverService", () => {
 
     await service.transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider, plan, now: new Date("2026-10-01T00:00:01.000Z") });
     expect(afterTransitionCommitted).toHaveBeenCalledOnce();
+    expect(capacityResumeHint).toHaveBeenCalledOnce();
 
     const replayTransaction = transactionHarness({
       subscription: {
@@ -429,9 +462,65 @@ describe("SamePlanBillingPeriodRolloverService", () => {
       },
     });
     const freeDatabase = { $transaction: vi.fn(async (callback: (value: typeof freeTransaction) => unknown) => callback(freeTransaction)) };
-    await new SamePlanBillingPeriodRolloverService(freeDatabase as never, afterTransitionCommitted).transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider: { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart }, plan: freePlan, now: new Date("2026-10-01T00:00:01.000Z") });
+    const freeResult = await new SamePlanBillingPeriodRolloverService(freeDatabase as never, afterTransitionCommitted).transition({ shopId: "shop-1", subscriptionId: "subscription-1", provider: { ...provider, planHandle: "free-2026", usageEventHandles: [], currentPeriodStart: successorStart }, plan: freePlan, now: new Date("2026-10-01T00:00:01.000Z") });
 
-    expect(afterTransitionCommitted).toHaveBeenCalledOnce();
+    expect(afterTransitionCommitted).toHaveBeenCalledTimes(2);
+    expect(freeResult).toMatchObject({ kind: "transitioned", planKind: "FREE" });
+    expect(afterTransitionCommitted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ planKind: "FREE" }));
+    expect(capacityResumeHint).toHaveBeenCalledOnce();
+  });
+
+  it("rotates an existing pack-enabled Free period without counters or lifetime-state mutation", async () => {
+    const lifetimeCounter = { grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 };
+    const purchase = { status: "REQUESTED", currentAmount: 0, activatedAt: null };
+    const transaction = transactionHarness({
+      subscription: {
+        ...transactionHarness().subscription,
+        findUnique: vi.fn().mockResolvedValue({
+          id: "subscription-1", shopId: "shop-1", planId: "plan-free", status: "ACTIVE", billingPeriodId: "period-old",
+          currentPeriodStart: currentStart, currentPeriodEnd: currentEnd, nextReconcileAt: null,
+          billingPeriod: { id: "period-old", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+        }),
+      },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(lifetimeCounter), update: vi.fn() },
+      recoveryCreditPurchase: { findUnique: vi.fn().mockResolvedValue(purchase), update: vi.fn() },
+    });
+    const packEnabledFreePlan = { ...freePlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack-meter" };
+    const freeProvider = { ...provider, planHandle: "free-2026", usageEventHandles: ["pack-meter"], currentPeriodStart: successorStart };
+    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+
+    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: freeProvider,
+      plan: packEnabledFreePlan,
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
+
+    expect(result).toEqual({
+      kind: "transitioned",
+      billingPeriodId: "period-new",
+      nextReconcileAt: new Date("2026-10-31T23:55:00.000Z"),
+      planKind: "FREE",
+    });
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "CLOSED", closeReason: "RENEWED_SAME_PLAN" }),
+    }));
+    expect(transaction.billingPeriod.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ planKindSnapshot: "FREE", includedRecoveryCreditsGranted: null }),
+    }));
+    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(transaction.shopEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(transaction.shopEntitlementCounter.update).not.toHaveBeenCalled();
+    expect(transaction.recoveryCreditPurchase.findUnique).not.toHaveBeenCalled();
+    expect(transaction.recoveryCreditPurchase.update).not.toHaveBeenCalled();
+    expect(transaction.usageEvent.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { billingPeriodId: "period-old", shopifyReportState: { in: ["PENDING", "RETRYABLE"] } },
+      data: expect.objectContaining({ shopifyReportState: "NEEDS_ATTENTION", providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT" }),
+    }));
+    expect(lifetimeCounter).toEqual({ grantedQuantity: 5, committedQuantity: 2, reservedQuantity: 1 });
+    expect(purchase).toEqual({ status: "REQUESTED", currentAmount: 0, activatedAt: null });
   });
 
   it.each([
