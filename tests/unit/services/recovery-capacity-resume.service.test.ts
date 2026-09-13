@@ -35,6 +35,14 @@ describe("RecoveryCapacityResumeService", () => {
       select: { shopId: true },
     });
     expect(schedule).toHaveBeenCalledTimes(100);
+    expect(schedule).toHaveBeenCalledWith({
+      shopId: "shop-0",
+      trigger: "repair",
+    });
+    expect(schedule).toHaveBeenCalledWith({
+      shopId: "shop-99",
+      trigger: "repair",
+    });
   });
 
   it("continues repairing after one deterministic schedule failure", async () => {
@@ -47,5 +55,13 @@ describe("RecoveryCapacityResumeService", () => {
 
     await expect(service.repair()).resolves.toBe(1);
     expect(schedule).toHaveBeenCalledTimes(2);
+    expect(schedule).toHaveBeenNthCalledWith(1, {
+      shopId: "shop-1",
+      trigger: "repair",
+    });
+    expect(schedule).toHaveBeenNthCalledWith(2, {
+      shopId: "shop-2",
+      trigger: "repair",
+    });
   });
 });

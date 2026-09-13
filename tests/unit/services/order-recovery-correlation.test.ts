@@ -175,7 +175,11 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
 });
     expect(txFake.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: "COMPLETED" }),
+        data: expect.objectContaining({
+          status: "COMPLETED",
+          admissionBlockedAt: null,
+          admissionBlockReason: null,
+        }),
       }),
     );
     expect(txFake.statusHistoryCreate).toHaveBeenCalledWith(
