@@ -77,13 +77,17 @@ function freePolicy() {
   };
 }
 
-function paidPolicy() {
+function paidPolicy(
+  phase: "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING" = "ACTIVE",
+  periodId = "period-1",
+) {
   return {
     shopId: "shop-1",
     planKind: "PAID_METERED" as const,
+    planId: "plan-1",
     newRecoveriesPaused: false,
     shopifyUsageEventHandle: "basic-recovery-conversation",
-    billingPeriod: { id: "period-1" },
+    billingPeriod: { id: periodId, phase },
   };
 }
 
@@ -97,7 +101,7 @@ function paidIncludedReservationService(
             kind: "reserved" as const,
             reservation: {},
             counter: "INCLUDED_RECOVERY_CREDITS" as const,
-            sourceKey: `paid-included:period-1:${recoveryId}`,
+            sourceKey: `paid-included:${paidPolicy().billingPeriod?.id}:${recoveryId}`,
             policy: paidPolicy(),
           }
         : { kind: "allowance-exhausted" as const, remaining: 0, policy: paidPolicy() },
@@ -120,6 +124,113 @@ function purchasedPack(overrides: Record<string, unknown> = {}) {
 }
 
 describe("RecoveryBillingService", () => {
+  it("does not reserve paid included capacity while the billing period is draining", async () => {
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      { resolve: vi.fn(async () => paidPolicy("DRAINING")) } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      purchasedReservationService as never,
+      paidReservationService as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "draining" }))
+      .resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(paidReservationService.reserve).not.toHaveBeenCalled();
+  });
+
+  it("blocks an expired paid period with the reconciliation reason", async () => {
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      { resolve: vi.fn(async () => paidPolicy("EXPIRED_RECONCILING")) } as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "expired" }))
+      .resolves.toEqual({ kind: "blocked", reason: "billing-period-reconciliation" });
+  });
+
+  it("uses the closing reason only after all DRAINING fallbacks are exhausted", async () => {
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      { resolve: vi.fn(async () => paidPolicy("DRAINING")) } as never,
+      {
+        reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
+      {
+        reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
+      paidIncludedReservationService("allowance-exhausted") as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "draining-blocked" }))
+      .resolves.toEqual({ kind: "blocked", reason: "billing-period-closing" });
+  });
+
+  it("preserves an included admission when the same period remains ACTIVE", async () => {
+    const paidReservationService = paidIncludedReservationService();
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      { resolve: vi.fn(async () => paidPolicy("ACTIVE")) } as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "active" });
+    if (admitted.kind !== "admitted") throw new Error("expected admission");
+
+    const revalidated = await service.revalidateBeforeProvider({
+      admission: admitted.admission,
+      recoveryId: "active",
+    });
+
+    expect(revalidated).toEqual(admitted);
+    expect(paidReservationService.release).not.toHaveBeenCalled();
+    expect(paidReservationService.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("releases and re-admits included capacity when the period changes before the provider", async () => {
+    const paidReservationService = paidIncludedReservationService();
+    const policyResolver = {
+      resolve: vi.fn()
+        .mockResolvedValueOnce(paidPolicy("ACTIVE", "period-1"))
+        .mockResolvedValueOnce(paidPolicy("ACTIVE", "period-2"))
+        .mockResolvedValueOnce(paidPolicy("ACTIVE", "period-2")),
+    };
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      policyResolver as never,
+      undefined as never,
+      undefined as never,
+      paidReservationService as never,
+    );
+    const admitted = await service.admit({ shopId: "shop-1", recoveryId: "rollover" });
+    if (admitted.kind !== "admitted") throw new Error("expected admission");
+
+    const revalidated = await service.revalidateBeforeProvider({
+      admission: admitted.admission,
+      recoveryId: "rollover",
+    });
+
+    expect(revalidated.kind).toBe("admitted");
+    expect(paidReservationService.release).toHaveBeenCalledWith({
+      shopId: "shop-1",
+      sourceKey: "paid-included:period-1:rollover",
+    });
+    expect(paidReservationService.reserve).toHaveBeenCalledTimes(2);
+  });
+
   it("blocks exhausted Free admission and upserts one deterministic SYSTEM notification", async () => {
     const database = createDatabase();
     const policyResolver = { resolve: vi.fn(async () => freePolicy()) };
