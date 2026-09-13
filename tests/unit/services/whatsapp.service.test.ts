@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_WHATSAPP_API_BASE_URL,
+  WHATSAPP_SEND_TIMEOUT_MS,
   WhatsAppService,
 } from "../../../src/services/whatsapp.service.js";
 
@@ -38,6 +39,7 @@ describe("WhatsAppService API base URL", () => {
         `${DEFAULT_WHATSAPP_API_BASE_URL}/${phoneNumberId}/messages`,
         expect.objectContaining({
           method: "POST",
+          signal: expect.any(AbortSignal),
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
@@ -101,6 +103,12 @@ describe("WhatsAppService API base URL", () => {
       templateName,
       languageCode: providerLanguageCode,
     });
+
+    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(
+      (fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal).aborted,
+    ).toBe(false);
+    expect(WHATSAPP_SEND_TIMEOUT_MS).toBe(30_000);
 
     const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
     expect(body).toMatchObject({

@@ -256,6 +256,20 @@ describe("PaidIncludedRecoveryReservationService", () => {
     expect(harness.state.counter.reservedQuantity).toBe(0);
   });
 
+  it("BACKGROUND-008: releases a still-reserved reservation after the period closes", async () => {
+    const harness = createHarness();
+    await reserve(harness);
+    harness.state.period.status = "CLOSED" as never;
+
+    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
+      .resolves.toMatchObject({ kind: "released" });
+    await expect(harness.service.release({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
+      .resolves.toMatchObject({ kind: "already-released" });
+    expect(harness.state.counter.reservedQuantity).toBe(0);
+    await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" }))
+      .resolves.toMatchObject({ kind: "already-released" });
+  });
+
   it("keeps ambiguous capacity protected", async () => {
     const harness = createHarness();
     await reserve(harness);

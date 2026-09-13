@@ -106,6 +106,10 @@ const hoisted = vi.hoisted(() => {
           policy: { shopId: "shop_1" },
         },
       })),
+      revalidateBeforeProvider: vi.fn(async (input: { admission: unknown }) => ({
+        kind: "admitted" as const,
+        admission: input.admission,
+      })),
       commitSuccessfulInitiation: vi.fn(async () => undefined),
       handleProviderFailure: vi.fn(async () => "definitive" as const),
       releaseBeforeProvider: vi.fn(async () => undefined),
@@ -520,6 +524,20 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppText).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
+  });
+
+  it("does not send or commit when billing revalidation blocks the admission", async () => {
+    recoveryBillingServiceMock.revalidateBeforeProvider.mockResolvedValueOnce({
+      kind: "blocked",
+      reason: "paused",
+    });
+
+    const result = await service.materializeMaturedCandidate(candidate);
+
+    expect(result.outcome).toBe("recovery-created");
+    expect(recoveryBillingServiceMock.revalidateBeforeProvider).toHaveBeenCalledOnce();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
   });
 

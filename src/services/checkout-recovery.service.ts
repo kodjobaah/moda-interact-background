@@ -829,7 +829,7 @@ export class CheckoutRecoveryService {
       return recovery;
     }
 
-    const billing = await this.billingService.admit({
+    let billing = await this.billingService.admit({
       shopId: recovery.shopId,
       recoveryId: recovery.id,
     });
@@ -855,6 +855,13 @@ export class CheckoutRecoveryService {
 
     let result;
     try {
+      const revalidated = await this.billingService.revalidateBeforeProvider({
+        admission: billing.admission,
+        recoveryId: recovery.id,
+      });
+      if (revalidated.kind === "blocked") return recovery;
+      billing = revalidated;
+
       // 5b
       result = await outboundWhatsAppAdmissionService.sendTemplate({
         shopId: recovery.shopId,

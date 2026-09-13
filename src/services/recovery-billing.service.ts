@@ -86,7 +86,12 @@ export type RecoveryBillingAdmissionResult =
   | { kind: "admitted"; admission: RecoveryBillingAdmission }
   | {
       kind: "blocked";
-      reason: "paused" | "allowance-exhausted" | "reservation-in-flight";
+      reason:
+        | "paused"
+        | "allowance-exhausted"
+        | "reservation-in-flight"
+        | "billing-period-closing"
+        | "billing-period-reconciliation";
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
@@ -112,6 +117,13 @@ export class RecoveryBillingService {
       return { kind: "blocked", reason: "paused" };
     }
 
+    if (
+      policy.planKind === "PAID_METERED" &&
+      policy.billingPeriod?.phase === "EXPIRED_RECONCILING"
+    ) {
+      return { kind: "blocked", reason: "billing-period-reconciliation" };
+    }
+
     if (policy.planId) {
       const promotional = await this.promotionalReservationService.reserve({
         shopId: input.shopId,
@@ -129,7 +141,10 @@ export class RecoveryBillingService {
       }
     }
 
-    if (policy.planKind === "PAID_METERED") {
+    if (
+      policy.planKind === "PAID_METERED" &&
+      policy.billingPeriod?.phase === "ACTIVE"
+    ) {
       const paid = await this.paidIncludedReservationService.reserve({
         shopId: input.shopId,
         recoveryId: input.recoveryId,
@@ -154,8 +169,59 @@ export class RecoveryBillingService {
     if (purchased) return purchased;
     const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
     if (lifetimeFree) return lifetimeFree;
-    await this.createCapacityExhaustedMessage(input.shopId, policy);
-    return { kind: "blocked", reason: "allowance-exhausted" };
+    if (policy.billingPeriod?.phase !== "DRAINING") {
+      await this.createCapacityExhaustedMessage(input.shopId, policy);
+    }
+    return {
+      kind: "blocked",
+      reason:
+        policy.planKind === "PAID_METERED" && policy.billingPeriod?.phase === "DRAINING"
+          ? "billing-period-closing"
+          : "allowance-exhausted",
+    };
+  }
+
+  async revalidateBeforeProvider(input: {
+    admission: RecoveryBillingAdmission;
+    recoveryId: string;
+  }): Promise<RecoveryBillingAdmissionResult> {
+    const current = await this.policyResolver.resolve(input.admission.policy.shopId);
+
+    if (
+      current.planKind === "PAID_METERED" &&
+      current.billingPeriod?.phase === "EXPIRED_RECONCILING"
+    ) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "billing-period-reconciliation" };
+    }
+
+    if (current.newRecoveriesPaused) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "paused" };
+    }
+
+    if (
+      input.admission.kind === "free" ||
+      input.admission.kind === "lifetime-free" ||
+      input.admission.kind === "purchased"
+    ) {
+      return { kind: "admitted", admission: input.admission };
+    }
+
+    if (
+      input.admission.kind === "paid" &&
+      current.planKind === "PAID_METERED" &&
+      current.billingPeriod?.phase === "ACTIVE" &&
+      current.billingPeriod.id === input.admission.policy.billingPeriod?.id
+    ) {
+      return { kind: "admitted", admission: input.admission };
+    }
+
+    await this.releaseBeforeProvider(input.admission);
+    return this.admit({
+      shopId: input.admission.policy.shopId,
+      recoveryId: input.recoveryId,
+    });
   }
 
   async commitSuccessfulInitiation(input: {

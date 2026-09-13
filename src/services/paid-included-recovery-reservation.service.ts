@@ -318,7 +318,7 @@ export class PaidIncludedRecoveryReservationService {
     if (reservation.quantity !== quantity) {
       throw new PaidIncludedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
-    const counter = await this.requireOpenReservationCounter(transaction, reservation, input.shopId);
+    const counter = await this.requireReservationCounter(transaction, reservation, input.shopId);
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
       where: { id: counter.id, version: counter.version, reservedQuantity: { gte: quantity } },
       data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
@@ -400,7 +400,7 @@ export class PaidIncludedRecoveryReservationService {
     return counter;
   }
 
-  private async requireOpenReservationCounter(
+  private async requireReservationCounter(
     transaction: ReservationTransaction,
     reservation: UsageReservation,
     shopId: string,
@@ -412,10 +412,22 @@ export class PaidIncludedRecoveryReservationService {
       where: { id: reservation.billingPeriodEntitlementCounterId },
       include: { billingPeriod: true },
     });
-    if (!counter || counter.shopId !== shopId || counter.billingPeriod.status !== BillingPeriodStatus.OPEN || counter.billingPeriod.periodEnd <= this.now()) {
-      throw new PaidIncludedRecoveryReservationError("Reservation billing period is closed or expired");
+    if (!counter || counter.shopId !== shopId) {
+      throw new PaidIncludedRecoveryReservationError("Reservation billing period counter does not exist");
     }
     validateCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity);
+    return counter;
+  }
+
+  private async requireOpenReservationCounter(
+    transaction: ReservationTransaction,
+    reservation: UsageReservation,
+    shopId: string,
+  ) {
+    const counter = await this.requireReservationCounter(transaction, reservation, shopId);
+    if (counter.billingPeriod.status !== BillingPeriodStatus.OPEN || counter.billingPeriod.periodEnd <= this.now()) {
+      throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer open");
+    }
     return counter;
   }
 

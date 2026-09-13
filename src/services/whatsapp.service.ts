@@ -6,6 +6,7 @@ import type {
 
 export const DEFAULT_WHATSAPP_API_BASE_URL =
   "https://graph.facebook.com/v25.0";
+export const WHATSAPP_SEND_TIMEOUT_MS = 30_000;
 
 type FetchImplementation = typeof fetch;
 
@@ -79,6 +80,7 @@ export class WhatsAppService {
             body: text,
           },
         }),
+        signal: AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
       },
     );
 
@@ -154,6 +156,7 @@ export class WhatsAppService {
           type: "template",
           template,
         }),
+        signal: AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
       },
     );
 
