@@ -186,6 +186,14 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
   });
 
+  it("ignores a queued job when unsupported-trial recovery cleared the durable schedule", async () => {
+    const test = harness({ row: pendingRow({ subscription: { ...pendingRow().subscription, nextReconcileAt: null } }) });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+  });
+
   it("ignores jobs for an uninstalled shop", async () => {
     const test = harness({ row: pendingRow({ status: "UNINSTALLED" }) });
     await test.service.reconcileJob(payload);
