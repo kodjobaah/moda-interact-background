@@ -6,6 +6,7 @@ import {
   SubscriptionProjectionStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import prisma from "../lib/db.js";
 
 export type BillingPolicyFailureReason =
@@ -40,6 +41,7 @@ export type PaidBillingPeriodProjection = {
   start: Date;
   end: Date;
   status: BillingPeriodStatus;
+  phase: "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING";
   includedCounter: {
     id: string;
     shopId: string;
@@ -278,6 +280,7 @@ export class EffectiveBillingPolicyResolver {
               start: subscription.billingPeriod.periodStart,
               end: subscription.billingPeriod.periodEnd,
               status: subscription.billingPeriod.status,
+              phase: getBillingPeriodPhase(subscription.billingPeriod.periodEnd, now),
               includedCounter: {
                 id: billingPeriodCounter!.id,
                 shopId: billingPeriodCounter!.shopId,
@@ -401,7 +404,6 @@ function validatePaidBillingPeriod(
     period.shopId !== shopId ||
     period.subscriptionId !== subscription.id ||
     period.status !== BillingPeriodStatus.OPEN ||
-    period.periodEnd <= now ||
     period.periodStart.getTime() !== subscription.currentPeriodStart.getTime() ||
     period.periodEnd.getTime() !== subscription.currentPeriodEnd.getTime()
   ) {
@@ -427,6 +429,20 @@ function validatePaidBillingPeriod(
   ) {
     throw invalidConfiguration(shopId, "paid included recovery counter quantities exceed the grant");
   }
+}
+
+function getBillingPeriodPhase(
+  periodEnd: Date,
+  now: Date,
+): "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING" {
+  if (now.getTime() >= periodEnd.getTime()) return "EXPIRED_RECONCILING";
+  if (
+    now.getTime() >=
+    periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS
+  ) {
+    return "DRAINING";
+  }
+  return "ACTIVE";
 }
 
 function resolveOutboundLimits(

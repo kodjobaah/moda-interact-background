@@ -35,9 +35,18 @@ import {
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
   "$transaction" | "merchantSupportThread" | "merchantSupportMessage"
-> & Partial<Pick<PrismaClient, "shopEntitlementCounter" | "billingPeriodEntitlementCounter">>;
+> &
+  Partial<
+    Pick<
+      PrismaClient,
+      "shopEntitlementCounter" | "billingPeriodEntitlementCounter"
+    >
+  >;
 
-type RecoveryPolicyResolver = Pick<typeof effectiveBillingPolicyResolver, "resolve">;
+type RecoveryPolicyResolver = Pick<
+  typeof effectiveBillingPolicyResolver,
+  "resolve"
+>;
 type FreeReservationService = Pick<
   typeof freeRecoveryReservationService,
   "reserve" | "commit" | "release" | "markAmbiguous"
@@ -86,7 +95,14 @@ export type RecoveryBillingAdmissionResult =
   | { kind: "admitted"; admission: RecoveryBillingAdmission }
   | {
       kind: "blocked";
-      reason: "paused" | "capacity-exhausted" | "reservation-in-flight";
+      reason:
+        | "paused"
+        | "capacity-exhausted"
+        | "reservation-in-flight"
+        | "allowance-exhausted"
+        | "reservation-in-flight"
+        | "billing-period-closing"
+        | "billing-period-reconciliation";
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
@@ -106,10 +122,20 @@ export class RecoveryBillingService {
     recoveryId: string;
   }): Promise<RecoveryBillingAdmissionResult> {
     const policy = await this.policyResolver.resolve(input.shopId);
-    const sourceKey = createRecoveryIdempotencyKey(input.shopId, input.recoveryId);
+    const sourceKey = createRecoveryIdempotencyKey(
+      input.shopId,
+      input.recoveryId,
+    );
 
     if (policy.newRecoveriesPaused) {
       return { kind: "blocked", reason: "paused" };
+    }
+
+    if (
+      policy.planKind === "PAID_METERED" &&
+      policy.billingPeriod?.phase === "EXPIRED_RECONCILING"
+    ) {
+      return { kind: "blocked", reason: "billing-period-reconciliation" };
     }
 
     if (policy.planId) {
@@ -121,15 +147,25 @@ export class RecoveryBillingService {
       if (isPromotionalAdmission(promotional)) {
         return {
           kind: "admitted",
-          admission: { kind: "promotional", sourceKey: promotional.sourceKey, policy },
+          admission: {
+            kind: "promotional",
+            sourceKey: promotional.sourceKey,
+            policy,
+          },
         };
       }
-      if (promotional.kind === "already-ambiguous" || promotional.kind === "already-released") {
+      if (
+        promotional.kind === "already-ambiguous" ||
+        promotional.kind === "already-released"
+      ) {
         return { kind: "blocked", reason: "reservation-in-flight" };
       }
     }
 
-    if (policy.planKind === "PAID_METERED") {
+    if (
+      policy.planKind === "PAID_METERED" &&
+      policy.billingPeriod?.phase === "ACTIVE"
+    ) {
       const paid = await this.paidIncludedReservationService.reserve({
         shopId: input.shopId,
         recoveryId: input.recoveryId,
@@ -141,9 +177,17 @@ export class RecoveryBillingService {
         };
       }
       if (paid.kind === "allowance-exhausted") {
-        const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
+        const purchased = await this.tryPurchasedAdmission(
+          input.shopId,
+          sourceKey,
+          policy,
+        );
         if (purchased) return purchased;
-        const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
+        const lifetimeFree = await this.tryLifetimeFreeAdmission(
+          input.shopId,
+          sourceKey,
+          policy,
+        );
         if (lifetimeFree) return lifetimeFree;
         await this.createCapacityExhaustedMessage(input.shopId, policy);
         return { kind: "blocked", reason: "capacity-exhausted" };
@@ -151,12 +195,79 @@ export class RecoveryBillingService {
       return { kind: "blocked", reason: "reservation-in-flight" };
     }
 
-    const purchased = await this.tryPurchasedAdmission(input.shopId, sourceKey, policy);
+    const purchased = await this.tryPurchasedAdmission(
+      input.shopId,
+      sourceKey,
+      policy,
+    );
     if (purchased) return purchased;
-    const lifetimeFree = await this.tryLifetimeFreeAdmission(input.shopId, sourceKey, policy);
+    const lifetimeFree = await this.tryLifetimeFreeAdmission(
+      input.shopId,
+      sourceKey,
+      policy,
+    );
     if (lifetimeFree) return lifetimeFree;
+    if (
+      policy.planKind === "PAID_METERED" &&
+      policy.billingPeriod?.phase === "DRAINING"
+    ) {
+      return {
+        kind: "blocked",
+        reason: "billing-period-closing",
+      };
+    }
+
     await this.createCapacityExhaustedMessage(input.shopId, policy);
-    return { kind: "blocked", reason: "capacity-exhausted" };
+
+    return {
+      kind: "blocked",
+      reason: "capacity-exhausted",
+    };
+  }
+
+  async revalidateBeforeProvider(input: {
+    admission: RecoveryBillingAdmission;
+    recoveryId: string;
+  }): Promise<RecoveryBillingAdmissionResult> {
+    const current = await this.policyResolver.resolve(
+      input.admission.policy.shopId,
+    );
+
+    if (
+      current.planKind === "PAID_METERED" &&
+      current.billingPeriod?.phase === "EXPIRED_RECONCILING"
+    ) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "billing-period-reconciliation" };
+    }
+
+    if (current.newRecoveriesPaused) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "paused" };
+    }
+
+    if (
+      input.admission.kind === "free" ||
+      input.admission.kind === "lifetime-free" ||
+      input.admission.kind === "purchased"
+    ) {
+      return { kind: "admitted", admission: input.admission };
+    }
+
+    if (
+      input.admission.kind === "paid" &&
+      current.planKind === "PAID_METERED" &&
+      current.billingPeriod?.phase === "ACTIVE" &&
+      current.billingPeriod.id === input.admission.policy.billingPeriod?.id
+    ) {
+      return { kind: "admitted", admission: input.admission };
+    }
+
+    await this.releaseBeforeProvider(input.admission);
+    return this.admit({
+      shopId: input.admission.policy.shopId,
+      recoveryId: input.recoveryId,
+    });
   }
 
   async commitSuccessfulInitiation(input: {
@@ -172,7 +283,10 @@ export class RecoveryBillingService {
       });
       return;
     }
-    if (input.admission.kind === "free" || input.admission.kind === "lifetime-free") {
+    if (
+      input.admission.kind === "free" ||
+      input.admission.kind === "lifetime-free"
+    ) {
       await this.reservationService.commit({
         shopId: input.admission.policy.shopId,
         sourceKey: input.admission.sourceKey,
@@ -212,7 +326,9 @@ export class RecoveryBillingService {
       if (disposition === "definitive") {
         await this.promotionalReservationService.release(reservationInput);
       } else {
-        await this.promotionalReservationService.markAmbiguous(reservationInput);
+        await this.promotionalReservationService.markAmbiguous(
+          reservationInput,
+        );
       }
       return disposition;
     }
@@ -238,12 +354,18 @@ export class RecoveryBillingService {
       if (disposition === "definitive") {
         await this.paidIncludedReservationService.release(reservationInput);
       } else {
-        await this.paidIncludedReservationService.markAmbiguous(reservationInput);
+        await this.paidIncludedReservationService.markAmbiguous(
+          reservationInput,
+        );
       }
       return disposition;
     }
 
-    if (input.admission.kind !== "free" && input.admission.kind !== "lifetime-free") return disposition;
+    if (
+      input.admission.kind !== "free" &&
+      input.admission.kind !== "lifetime-free"
+    )
+      return disposition;
 
     const reservationInput = {
       shopId: input.admission.policy.shopId,
@@ -259,7 +381,9 @@ export class RecoveryBillingService {
     return disposition;
   }
 
-  async releaseBeforeProvider(admission: RecoveryBillingAdmission): Promise<void> {
+  async releaseBeforeProvider(
+    admission: RecoveryBillingAdmission,
+  ): Promise<void> {
     if (admission.kind === "promotional") {
       await this.promotionalReservationService.release({
         shopId: admission.policy.shopId,
@@ -298,8 +422,12 @@ export class RecoveryBillingService {
       shopId,
       sourceKey,
     };
-    const reservation = await this.purchasedReservationService.reserve(reservationInput);
-    if (reservation.kind === "reserved" || isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
+    const reservation =
+      await this.purchasedReservationService.reserve(reservationInput);
+    if (
+      reservation.kind === "reserved" ||
+      isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")
+    ) {
       if (isAmbiguous(reservation) || isReleased(reservation)) {
         return { kind: "blocked", reason: "reservation-in-flight" };
       }
@@ -314,9 +442,13 @@ export class RecoveryBillingService {
     }
     if (reservation.kind === "credits-exhausted") return null;
     if (isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
-      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isAmbiguous(reservation))
+        return { kind: "blocked", reason: "reservation-in-flight" };
       if (isReleased(reservation)) {
-        const reactivated = await this.reservationService.reserve({ shopId, sourceKey });
+        const reactivated = await this.reservationService.reserve({
+          shopId,
+          sourceKey,
+        });
         if (!isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")) {
           return { kind: "blocked", reason: "reservation-in-flight" };
         }
@@ -338,7 +470,10 @@ export class RecoveryBillingService {
       shopId,
       sourceKey,
     });
-    if (reservation.kind === "reserved" || isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")) {
+    if (
+      reservation.kind === "reserved" ||
+      isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")
+    ) {
       if (isAmbiguous(reservation) || isReleased(reservation)) {
         return { kind: "blocked", reason: "reservation-in-flight" };
       }
@@ -348,11 +483,16 @@ export class RecoveryBillingService {
       };
     }
     if (reservation.kind === "allowance-exhausted") return null;
-    if (reservation.kind === "paused") return { kind: "blocked", reason: "paused" };
+    if (reservation.kind === "paused")
+      return { kind: "blocked", reason: "paused" };
     if (isOwnedBy(reservation, "PURCHASED_RECOVERY_CREDITS")) {
-      if (isAmbiguous(reservation)) return { kind: "blocked", reason: "reservation-in-flight" };
+      if (isAmbiguous(reservation))
+        return { kind: "blocked", reason: "reservation-in-flight" };
       if (isReleased(reservation)) {
-        const reactivated = await this.purchasedReservationService.reserve({ shopId, sourceKey });
+        const reactivated = await this.purchasedReservationService.reserve({
+          shopId,
+          sourceKey,
+        });
         if (!isAdmittedReplay(reactivated, "PURCHASED_RECOVERY_CREDITS")) {
           return { kind: "blocked", reason: "reservation-in-flight" };
         }
@@ -372,8 +512,15 @@ export class RecoveryBillingService {
     const systemCode = BILLING_SYSTEM_MESSAGE_CODES.RECOVERY_CAPACITY_EXHAUSTED;
     const purchasedCounter = this.database.shopEntitlementCounter
       ? await this.database.shopEntitlementCounter.findUnique({
-          where: { shopId_counter: { shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
-          select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true, refundingQuantity: true },
+          where: {
+            shopId_counter: { shopId, counter: "PURCHASED_RECOVERY_CREDITS" },
+          },
+          select: {
+            grantedQuantity: true,
+            committedQuantity: true,
+            reservedQuantity: true,
+            refundingQuantity: true,
+          },
         })
       : null;
     const includedCounter =
@@ -385,7 +532,12 @@ export class RecoveryBillingService {
                 counter: "INCLUDED_RECOVERY_CREDITS",
               },
             },
-            select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true, forfeitedQuantity: true },
+            select: {
+              grantedQuantity: true,
+              committedQuantity: true,
+              reservedQuantity: true,
+              forfeitedQuantity: true,
+            },
           })
         : null;
     const exhaustionLifecycle = [
@@ -452,7 +604,8 @@ function isDefinitiveProviderFailure(error: unknown): boolean {
     "name" in error &&
     error.name === "WhatsAppServiceError" &&
     "code" in error &&
-    (error.code === "configuration-missing" || error.code === "provider-rejected")
+    (error.code === "configuration-missing" ||
+      error.code === "provider-rejected")
   );
 }
 
@@ -464,19 +617,27 @@ function isOwnedBy(
 }
 
 function isAmbiguous(reservation: { kind: string }): boolean {
-  return reservation.kind === "ambiguous" || reservation.kind === "already-ambiguous";
+  return (
+    reservation.kind === "ambiguous" || reservation.kind === "already-ambiguous"
+  );
 }
 
 function isReleased(reservation: { kind: string }): boolean {
-  return reservation.kind === "released" || reservation.kind === "already-released";
+  return (
+    reservation.kind === "released" || reservation.kind === "already-released"
+  );
 }
 
 function isAdmittedReplay(
   reservation: { kind: string; counter?: string },
   counter: "PURCHASED_RECOVERY_CREDITS" | "LIFETIME_FREE_RECOVERY_CREDITS",
 ): boolean {
-  return isOwnedBy(reservation, counter) &&
-    (reservation.kind === "reserved" || reservation.kind === "already-reserved" || reservation.kind === "already-committed");
+  return (
+    isOwnedBy(reservation, counter) &&
+    (reservation.kind === "reserved" ||
+      reservation.kind === "already-reserved" ||
+      reservation.kind === "already-committed")
+  );
 }
 
 function isPaidIncludedAdmission(
@@ -485,9 +646,11 @@ function isPaidIncludedAdmission(
   PaidIncludedReservationOutcome,
   { sourceKey: string }
 > {
-  return reservation.kind === "reserved" ||
+  return (
+    reservation.kind === "reserved" ||
     reservation.kind === "already-reserved" ||
-    reservation.kind === "already-committed";
+    reservation.kind === "already-committed"
+  );
 }
 
 function isPromotionalAdmission(
@@ -496,9 +659,11 @@ function isPromotionalAdmission(
   PromotionalReservationOutcome,
   { kind: "reserved" | "already-reserved" | "already-committed" }
 > {
-  return reservation.kind === "reserved" ||
+  return (
+    reservation.kind === "reserved" ||
     reservation.kind === "already-reserved" ||
-    reservation.kind === "already-committed";
+    reservation.kind === "already-committed"
+  );
 }
 
 export const recoveryBillingService = new RecoveryBillingService();
