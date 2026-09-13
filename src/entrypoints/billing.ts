@@ -5,7 +5,6 @@ import { startBillingReconciliationScheduler } from "../runtime/billing-schedule
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
-import { billingSubscriptionQueue } from "./billing-resources.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -23,15 +22,16 @@ function reportBillingReconciliationFailure(error: unknown): void {
 void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
-    const [{ closeBillingResources }, { billingReconciliationService }] = await Promise.all([
+    const [{ closeBillingResources, billingSubscriptionQueue }, { createBillingReconciliationService }] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
     ]);
-    const [{ billingSubscriptionQueue }, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
+    const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-subscription-reconciliation.service.js"),
       import("../workers/billing-subscription-reconciliation.worker.js"),
     ]);
+    const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue);
     const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
     const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({

@@ -7,12 +7,20 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import type { Queue } from "bullmq";
+import {
+  BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
+  createBillingSubscriptionReconcileJobId,
+} from "@modainteract/moda-interact-shared/billing";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
 import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
 import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.service.js";
+import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
+import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
+import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 
 const DEFAULT_SHOP_PAGE_SIZE = 50;
 const MAX_SHOP_PAGE_SIZE = 200;
@@ -20,6 +28,7 @@ const MAX_SHOP_PAGE_SIZE = 200;
 type BillingReconciliationDatabase = PrismaClient;
 type UsagePublisher = Pick<typeof shopifyUsageEventPublisherService, "publishDue">;
 type PurchaseReconciler = Pick<typeof recoveryCreditPurchaseService, "reconcileProviderConfirmed">;
+type SubscriptionQueue = Pick<Queue, "add">;
 
 export type BillingReconciliationResult = {
   published: Awaited<ReturnType<UsagePublisher["publishDue"]>>;
@@ -53,6 +62,7 @@ export class BillingReconciliationService {
       environment: process.env.NODE_ENV ?? "development",
     }),
     private readonly now: () => Date = () => new Date(),
+    private readonly subscriptionQueue?: SubscriptionQueue,
   ) {}
 
   async reconcileOnce(limit = DEFAULT_SHOP_PAGE_SIZE): Promise<BillingReconciliationResult> {
@@ -184,9 +194,14 @@ export class BillingReconciliationService {
       const existing = await this.database.subscription.findUnique({
         where: { shopId },
         select: {
+          id: true,
+          status: true,
+          billingPeriodId: true,
+          nextReconcileAt: true,
           pendingShopifyPlanHandle: true,
           pendingPlanId: true,
           pendingEffectiveAt: true,
+          plan: { select: { shopifyRecoveryCreditPackEventHandle: true } },
         },
       });
       const pending = existing?.pendingPlanId && existing.pendingShopifyPlanHandle
@@ -200,6 +215,17 @@ export class BillingReconciliationService {
             pendingPlanId: null,
             pendingEffectiveAt: null,
           };
+      if (existing) {
+        const nextReconcileAt = new Date(now.getTime() + 5 * 60 * 1000);
+        await this.database.subscription.updateMany({
+          where: { id: existing.id, nextReconcileAt: existing.nextReconcileAt },
+          data: { nextReconcileAt, lastSyncedAt: now },
+        });
+        return {
+          billingPeriodId: existing.billingPeriodId,
+          packMeterHandle: existing.plan?.shopifyRecoveryCreditPackEventHandle ?? null,
+        };
+      }
       await this.database.subscription.upsert({
         where: { shopId },
         update: {
@@ -227,14 +253,28 @@ export class BillingReconciliationService {
       select: {
         id: true,
         active: true,
+        name: true,
         kind: true,
+        shopifyPlanHandle: true,
         shopifyUsageEventHandle: true,
         shopifyRecoveryCreditPackEventHandle: true,
+        recoveryCreditPackEnabled: true,
+        includedRecoveryConversationAllowance: true,
       },
     });
     const existing = await this.database.subscription.findUnique({
       where: { shopId },
-      select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
+      select: {
+        id: true,
+        status: true,
+        planId: true,
+        pendingPlanId: true,
+        pendingShopifyPlanHandle: true,
+        billingPeriodId: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
+        nextReconcileAt: true,
+      },
     });
     const settings = await this.database.shopSettings.findUnique({
       where: { shopId },
@@ -264,6 +304,87 @@ export class BillingReconciliationService {
       : status === SubscriptionProjectionStatus.SYNC_ERROR
         ? "MISSING_USAGE_METER"
         : null;
+    if (existing?.id && plan?.active && existing.planId === plan.id) {
+      const result = await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, rolloverResult) => {
+        if (rolloverResult.planKind !== BillingPlanKind.PAID_METERED) return;
+        try {
+          await recoveryCapacityResumeService.schedule({ shopId: rolloverInput.shopId, trigger: "billing-period-rollover" });
+        } catch (error) {
+          this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
+            shopId: rolloverInput.shopId,
+            errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          });
+        }
+      }).transition({
+        shopId,
+        subscriptionId: existing.id,
+        provider,
+        plan,
+        now,
+      });
+      if (result.kind === "transitioned" || result.kind === "unchanged") {
+        return {
+          billingPeriodId: result.billingPeriodId,
+          packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
+        };
+      }
+      if (
+        result.kind === "provider-cycle-lag"
+        && existing.billingPeriodId
+        && existing.currentPeriodStart
+        && existing.currentPeriodEnd
+        && (
+          plan.kind === BillingPlanKind.PAID_METERED
+          || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true)
+        )
+      ) {
+        const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+        const updated = await this.database.subscription.updateMany({
+          where: {
+            id: existing.id,
+            status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+            planId: existing.planId,
+            billingPeriodId: existing.billingPeriodId,
+            currentPeriodStart: existing.currentPeriodStart,
+            currentPeriodEnd: existing.currentPeriodEnd,
+            nextReconcileAt: existing.nextReconcileAt,
+          },
+          data: {
+            nextReconcileAt,
+            lastSyncedAt: now,
+            lastSyncErrorCode: "PROVIDER_CYCLE_LAG",
+            lastSyncErrorAt: now,
+          },
+        });
+        if (updated.count > 0) {
+          try {
+            if (this.subscriptionQueue) {
+              const job = createSubscriptionReconcilePayload(shopId, existing.id, nextReconcileAt);
+              await this.subscriptionQueue.add(BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME, job, {
+                jobId: createBillingSubscriptionReconcileJobId(existing.id, nextReconcileAt.toISOString()),
+                delay: 60 * 1000,
+                removeOnComplete: 100,
+                removeOnFail: true,
+              });
+            }
+          } catch (error) {
+            this.logger.warn("billing.subscription_reconciliation.enqueue_failed", {
+              shopId,
+              subscriptionId: existing.id,
+              errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+            });
+          }
+        }
+      }
+      const current = await this.database.subscription.findUnique({
+        where: { id: existing.id },
+        select: { billingPeriodId: true },
+      });
+      return {
+        billingPeriodId: current?.billingPeriodId ?? null,
+        packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
+      };
+    }
     const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
       ? await this.database.billingPeriod.upsert({
           where: {
@@ -386,9 +507,21 @@ export class BillingReconciliationService {
   }
 }
 
+export function createBillingReconciliationService(subscriptionQueue?: SubscriptionQueue): BillingReconciliationService {
+  return new BillingReconciliationService(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    subscriptionQueue,
+  );
+}
+
 function boundedLimit(value: number): number {
   if (!Number.isInteger(value) || value < 1) return DEFAULT_SHOP_PAGE_SIZE;
   return Math.min(value, MAX_SHOP_PAGE_SIZE);
 }
 
-export const billingReconciliationService = new BillingReconciliationService();
+export const billingReconciliationService = createBillingReconciliationService();
