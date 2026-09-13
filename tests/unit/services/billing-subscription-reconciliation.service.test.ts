@@ -66,10 +66,10 @@ function harness({
       upsert: vi.fn(),
       update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
     },
-    recoveryCreditPurchase: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    recoveryCreditRefund: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    promotionalCreditGrant: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
-    merchantPromotionSelection: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    recoveryCreditPurchase: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    recoveryCreditRefund: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    promotionalCreditGrant: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    merchantPromotionSelection: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
   };
   const database = {
     shop: {
@@ -223,6 +223,21 @@ function configureReinstallPaidPeriod(test: ReturnType<typeof harness>, period: 
   test.transaction.subscription.findUnique.mockResolvedValue(current);
   test.transaction.billingPeriod = { findUnique: vi.fn().mockResolvedValue(period), create: vi.fn(), upsert: vi.fn() };
   test.transaction.billingPeriodEntitlementCounter = { findUnique: vi.fn().mockResolvedValue(counter), create: vi.fn(), upsert: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() };
+}
+
+function expectNoModelMutations(model: any) {
+  for (const method of [
+    "create",
+    "update",
+    "updateMany",
+    "upsert",
+    "delete",
+    "deleteMany",
+  ]) {
+    if (model?.[method]) {
+      expect(model[method]).not.toHaveBeenCalled();
+    }
+  }
 }
 
 describe("BillingSubscriptionReconciliationService", () => {
@@ -1566,6 +1581,14 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("provider null preserves all detached history and credit state", async () => {
     const test = harness({ row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: new Date("2026-09-12T11:30:00.000Z") }), providerResult: null });
+    test.transaction.billingPeriodEntitlementCounter = {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    };
 
     await test.service.reconcileJob(payload);
 
@@ -1574,18 +1597,13 @@ describe("BillingSubscriptionReconciliationService", () => {
     }));
     expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: false } });
     expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
-    expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriod.update).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriod.delete).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriod.deleteMany).not.toHaveBeenCalled();
-    expect(test.transaction.shopEntitlementCounter.create).not.toHaveBeenCalled();
-    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
-    expect(test.transaction.shopEntitlementCounter.update).not.toHaveBeenCalled();
-    expect(test.transaction.recoveryCreditPurchase.create).not.toHaveBeenCalled();
-    expect(test.transaction.recoveryCreditRefund.create).not.toHaveBeenCalled();
-    expect(test.transaction.promotionalCreditGrant.create).not.toHaveBeenCalled();
-    expect(test.transaction.merchantPromotionSelection.create).not.toHaveBeenCalled();
+    expectNoModelMutations(test.transaction.billingPeriod);
+    expectNoModelMutations(test.transaction.billingPeriodEntitlementCounter);
+    expectNoModelMutations(test.transaction.shopEntitlementCounter);
+    expectNoModelMutations(test.transaction.recoveryCreditPurchase);
+    expectNoModelMutations(test.transaction.recoveryCreditRefund);
+    expectNoModelMutations(test.transaction.promotionalCreditGrant);
+    expectNoModelMutations(test.transaction.merchantPromotionSelection);
   });
 
   it("verified Free preserves every existing lifetime quantity", async () => {
@@ -1661,8 +1679,8 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter.update).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expectNoModelMutations(test.transaction.billingPeriod);
+    expectNoModelMutations(test.transaction.billingPeriodEntitlementCounter);
     expect(test.queue.add).not.toHaveBeenCalled();
   });
 
@@ -1723,12 +1741,11 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(test.transaction.shop.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "ACTIVE", reinstallPendingAt: null }) }));
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: next.toISOString() }), expect.any(Object));
-    expect(test.transaction.shopEntitlementCounter.create).not.toHaveBeenCalled();
-    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
-    expect(test.transaction.recoveryCreditPurchase.create).not.toHaveBeenCalled();
-    expect(test.transaction.recoveryCreditRefund.create).not.toHaveBeenCalled();
-    expect(test.transaction.promotionalCreditGrant.create).not.toHaveBeenCalled();
-    expect(test.transaction.merchantPromotionSelection.create).not.toHaveBeenCalled();
+    expectNoModelMutations(test.transaction.shopEntitlementCounter);
+    expectNoModelMutations(test.transaction.recoveryCreditPurchase);
+    expectNoModelMutations(test.transaction.recoveryCreditRefund);
+    expectNoModelMutations(test.transaction.promotionalCreditGrant);
+    expectNoModelMutations(test.transaction.merchantPromotionSelection);
     transition.mockRestore();
   });
 
@@ -1748,11 +1765,51 @@ describe("BillingSubscriptionReconciliationService", () => {
     transition.mockRestore();
   });
 
+  it("reinstall provider transport failure preserves entitlement truth", async () => {
+    const reinstallPendingAt = new Date("2026-09-12T11:30:00.000Z");
+    const row = reinstallPaidRow({ reinstallPendingAt });
+    const test = harness({ row, providerError: new Error("timeout") });
+
+    await test.service.reconcileJob(payload);
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledOnce();
+    const update = test.database.subscription.updateMany.mock.calls[0][0];
+    expect(update.where).toEqual({
+      id: "subscription-1",
+      nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"),
+    });
+    expect(Object.keys(update.data).sort()).toEqual([
+      "lastSyncErrorAt",
+      "lastSyncErrorCode",
+      "nextReconcileAt",
+    ].sort());
+    expect(update.data.lastSyncErrorCode).toBe("PARTNER_API_ERROR");
+    expect(update.data.nextReconcileAt).toEqual(new Date("2026-09-12T12:05:00.000Z"));
+    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.database.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shop.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
+    expectNoModelMutations(test.transaction.billingPeriod);
+    expectNoModelMutations(test.transaction.shopEntitlementCounter);
+    expectNoModelMutations(test.transaction.recoveryCreditPurchase);
+    expectNoModelMutations(test.transaction.recoveryCreditRefund);
+    expectNoModelMutations(test.transaction.promotionalCreditGrant);
+    expectNoModelMutations(test.transaction.merchantPromotionSelection);
+    expect(row.status).toBe("UNINSTALLED");
+    expect(row.reinstallPendingAt).toEqual(reinstallPendingAt);
+    expect(test.queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ expectedNextReconcileAt: "2026-09-12T12:05:00.000Z" }),
+      expect.any(Object),
+    );
+  });
+
   it.each([
     ["before 24 hours", new Date("2026-09-12T11:30:00.000Z"), new Date("2026-09-12T12:00:00.000Z"), new Date("2026-09-12T12:05:00.000Z")],
     ["at 24 hours", new Date("2026-09-11T12:00:00.000Z"), new Date("2026-09-12T12:00:00.000Z"), null],
   ] as const)("uses reinstallPendingAt for the reinstall retry boundary: %s", async (_label, reinstallAt, nowValue, expectedNext) => {
-    const test = harness({ row: pendingRow({ status: "UNINSTALLED", reinstallPendingAt: reinstallAt }), providerError: new Error("timeout"), nowValue });
+    const row = pendingRow({ status: "UNINSTALLED", reinstallPendingAt: reinstallAt });
+    const test = harness({ row, providerError: new Error("timeout"), nowValue });
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: nowValue.toISOString() });
 
     const update = test.database.subscription.updateMany.mock.calls[0][0];
@@ -1763,5 +1820,16 @@ describe("BillingSubscriptionReconciliationService", () => {
     } else {
       expect(test.queue.add).not.toHaveBeenCalled();
     }
+    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.transaction.shop.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
+    expectNoModelMutations(test.transaction.billingPeriod);
+    expectNoModelMutations(test.transaction.shopEntitlementCounter);
+    expectNoModelMutations(test.transaction.recoveryCreditPurchase);
+    expectNoModelMutations(test.transaction.recoveryCreditRefund);
+    expectNoModelMutations(test.transaction.promotionalCreditGrant);
+    expectNoModelMutations(test.transaction.merchantPromotionSelection);
+    expect(row.status).toBe("UNINSTALLED");
+    expect(row.reinstallPendingAt).toEqual(reinstallAt);
   });
 });
