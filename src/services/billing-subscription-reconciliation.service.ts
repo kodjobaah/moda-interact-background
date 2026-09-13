@@ -27,6 +27,11 @@ const RETRY_TIERS = [
   { ageMs: RETRY_WINDOW_MS, delayMs: 30 * 60 * 1000 },
 ] as const;
 
+function sameDate(left: Date | null, right: Date | null): boolean {
+  return left === null && right === null
+    || left !== null && right !== null && left.getTime() === right.getTime();
+}
+
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
 type InitialActivationExpected = {
@@ -34,7 +39,7 @@ type InitialActivationExpected = {
   pendingPlanId: string;
   pendingShopifyPlanHandle: string;
   pendingEffectiveAt: Date;
-  nextReconcileAt: Date;
+  nextReconcileAt: Date | null;
 };
 export type InitialActivationPlan = {
   id: string;
@@ -323,7 +328,13 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
 
-    if (plan?.active && plan.id === row.subscription.pendingPlanId && plan.kind === BillingPlanKind.PAID_METERED) {
+    if (
+      plan?.active
+      && plan.id === row.subscription.pendingPlanId
+      && plan.shopifyPlanHandle === row.subscription.pendingShopifyPlanHandle
+      && provider.planHandle === row.subscription.pendingShopifyPlanHandle
+      && plan.kind === BillingPlanKind.PAID_METERED
+    ) {
       await this.completeVerifiedPaid(
         row.id,
         row.subscription.id,
@@ -696,8 +707,9 @@ export class BillingSubscriptionReconciliationService {
         || current.pendingPlanId !== expected.pendingPlanId
         || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle
         || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt?.toISOString()
-        || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()
+        || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)
       ) return false;
+
       const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } }, select: { id: true } });
       const policy = lifetimeCounter
         ? null
@@ -799,8 +811,25 @@ export class BillingSubscriptionReconciliationService {
         || current.pendingPlanId !== expected.pendingPlanId
         || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle
         || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString()
-        || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()
+        || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)
       ) return false;
+
+      const currentPlan = await transaction.billingPlan.findUnique({
+        where: { id: current.pendingPlanId },
+        select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, shopifyUsageEventHandle: true, includedRecoveryConversationAllowance: true },
+      });
+      const currentAllowance = currentPlan?.includedRecoveryConversationAllowance;
+      const currentPlanValid = currentPlan?.id === expected.pendingPlanId
+        && currentPlan.shopifyPlanHandle === expected.pendingShopifyPlanHandle
+        && currentPlan.shopifyPlanHandle === provider.planHandle
+        && currentPlan.active
+        && currentPlan.kind === BillingPlanKind.PAID_METERED
+        && currentPlan.shopifyUsageEventHandle !== null
+        && provider.usageEventHandles.includes(currentPlan.shopifyUsageEventHandle)
+        && currentAllowance === allowance
+        && Number.isSafeInteger(currentAllowance)
+        && (currentAllowance ?? -1) >= 0;
+      if (!currentPlanValid) throw new Error("Initial paid activation found an incompatible pending plan");
 
       const existingPeriod = await transaction.billingPeriod.findUnique({
         where: { shopId_periodStart_periodEnd: { shopId, periodStart, periodEnd } },
@@ -810,11 +839,11 @@ export class BillingSubscriptionReconciliationService {
       }
       if (existingPeriod && (
         existingPeriod.subscriptionId !== subscriptionId
-        || existingPeriod.planId !== plan.id
+        || existingPeriod.planId !== currentPlan.id
         || existingPeriod.shopifyPlanHandleSnapshot !== provider.planHandle
-        || existingPeriod.planNameSnapshot !== plan.name
+        || existingPeriod.planNameSnapshot !== currentPlan.name
         || existingPeriod.planKindSnapshot !== BillingPlanKind.PAID_METERED
-        || existingPeriod.includedRecoveryCreditsGranted !== expectedGrant
+        || existingPeriod.includedRecoveryCreditsGranted !== currentAllowance
       )) {
         throw new Error("Initial paid activation found an incompatible billing period");
       }
@@ -822,11 +851,11 @@ export class BillingSubscriptionReconciliationService {
         data: {
           shopId,
           subscriptionId,
-          planId: plan.id,
+          planId: currentPlan.id,
           shopifyPlanHandleSnapshot: provider.planHandle,
-          planNameSnapshot: plan.name,
+          planNameSnapshot: currentPlan.name,
           planKindSnapshot: BillingPlanKind.PAID_METERED,
-          includedRecoveryCreditsGranted: expectedGrant,
+          includedRecoveryCreditsGranted: currentAllowance as number,
           periodStart,
           periodEnd,
           status: BillingPeriodStatus.OPEN,
@@ -841,7 +870,7 @@ export class BillingSubscriptionReconciliationService {
         },
       });
       if (existingCounter && (
-        existingCounter.grantedQuantity !== expectedGrant
+        existingCounter.grantedQuantity !== currentAllowance
         || existingCounter.shopId !== shopId
       )) {
         throw new Error("Initial paid activation found an incompatible included-credit counter");
@@ -858,7 +887,7 @@ export class BillingSubscriptionReconciliationService {
           shopId,
           billingPeriodId: billingPeriod.id,
           counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          grantedQuantity: expectedGrant,
+          grantedQuantity: currentAllowance as number,
           committedQuantity: 0,
           reservedQuantity: 0,
           forfeitedQuantity: 0,
@@ -877,7 +906,7 @@ export class BillingSubscriptionReconciliationService {
       await transaction.subscription.update({
         where: { id: subscriptionId },
         data: {
-          planId: plan.id,
+          planId: currentPlan.id,
           observedShopifyPlanHandle: provider.planHandle,
           status: SubscriptionProjectionStatus.ACTIVE,
           billingPeriodId: billingPeriod.id,
@@ -956,7 +985,7 @@ export class BillingSubscriptionReconciliationService {
       await this.lockSubscription(transaction, subscriptionId);
       const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({ where: { id: subscriptionId }, select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true } });
-      if (!current || settings?.onboardingCompleted !== false || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || current.nextReconcileAt?.toISOString() !== expected.nextReconcileAt.toISOString()) return;
+      if (!current || settings?.onboardingCompleted !== false || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return;
       const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
         ? await transaction.billingPeriod.upsert({
             where: { shopId_periodStart_periodEnd: { shopId, periodStart: provider.currentPeriodStart, periodEnd: provider.currentPeriodEnd } },

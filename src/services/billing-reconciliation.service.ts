@@ -306,7 +306,7 @@ export class BillingReconciliationService {
             pendingPlanId: existing.pendingPlanId,
             pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle,
             pendingEffectiveAt: existing.pendingEffectiveAt!,
-            nextReconcileAt: existing.nextReconcileAt!,
+            nextReconcileAt: existing.nextReconcileAt,
           },
         );
       }

@@ -25,7 +25,7 @@ function harness({
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
     billingPeriod: { upsert: vi.fn().mockResolvedValue({ id: "period-1" }) },
-    billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
+    billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         status: "NO_CONTRACT",
@@ -341,6 +341,42 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: "2026-09-30T23:55:00.000Z" }), expect.any(Object));
   });
 
+  it("does not activate when the provider handle differs from the durable pending handle", async () => {
+    const test = harness({
+      row: pendingRow({ subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-old" } }),
+      providerResult: paidProvider,
+      plan: { ...paidPlan, shopifyPlanHandle: "paid-new" },
+    });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
+
+    expect(test.partner.getActiveSubscription).toHaveBeenCalledOnce();
+    expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["inactive", { active: false }],
+    ["changed handle", { shopifyPlanHandle: "paid-new" }],
+    ["missing meter", { shopifyUsageEventHandle: null }],
+    ["changed allowance", { includedRecoveryConversationAllowance: 101 }],
+  ] as const)("revalidates the pending plan transactionally: %s", async (_label, mutation) => {
+    const test = harness({
+      row: pendingRow({ subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
+      providerResult: paidProvider,
+      plan: paidPlan,
+    });
+    test.transaction.subscription.findUnique.mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt, nextReconcileAt: now });
+    test.transaction.billingPlan.findUnique.mockResolvedValue({ ...paidPlan, ...mutation });
+
+    await expect(test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() })).rejects.toThrow(
+      "Initial paid activation found an incompatible pending plan",
+    );
+    expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
+  });
+
   it("replays a paid period and counter without resetting committed usage or the lifetime grant", async () => {
     const existingPeriod = {
       id: "period-paid",
@@ -369,6 +405,9 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+    expect(test.transaction.billingPeriodEntitlementCounter.upsert.mock.calls[0][0].update).not.toHaveProperty("committedQuantity");
+    expect(test.transaction.billingPeriodEntitlementCounter.upsert.mock.calls[0][0].update).not.toHaveProperty("reservedQuantity");
+    expect(test.transaction.billingPeriodEntitlementCounter.upsert.mock.calls[0][0].update).not.toHaveProperty("forfeitedQuantity");
     expect(test.transaction.shopEntitlementCounter.create).not.toHaveBeenCalled();
     expect(existingCounter).toMatchObject({ committedQuantity: 12, reservedQuantity: 3, forfeitedQuantity: 1 });
     expect(lifetimeCounter).toMatchObject({ grantedQuantity: 7, committedQuantity: 2, reservedQuantity: 1 });
@@ -393,12 +432,16 @@ describe("BillingSubscriptionReconciliationService", () => {
     ["missing cycle", { currentPeriodStart: null, currentPeriodEnd: null }, "MISSING_BILLING_CYCLE"],
     ["invalid cycle", { currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-09-01T00:00:00.000Z") }, "MISSING_BILLING_CYCLE"],
     ["missing meter", { usageEventHandles: [] }, "MISSING_USAGE_METER"],
-    ["unsafe allowance", {}, "INVALID_INCLUDED_ALLOWANCE"],
+    ["null allowance", { includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
+    ["negative allowance", { includedRecoveryConversationAllowance: -1 }, "INVALID_INCLUDED_ALLOWANCE"],
+    ["non-integer allowance", { includedRecoveryConversationAllowance: 1.5 }, "INVALID_INCLUDED_ALLOWANCE"],
   ] as const)("fails closed for paid activation: %s", async (_label, providerOverrides, errorCode) => {
     const test = harness({
       row: pendingRow({ subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
       providerResult: { ...paidProvider, ...providerOverrides },
-      plan: errorCode === "INVALID_INCLUDED_ALLOWANCE" ? { ...paidPlan, includedRecoveryConversationAllowance: -1 } : paidPlan,
+      plan: errorCode === "INVALID_INCLUDED_ALLOWANCE"
+        ? { ...paidPlan, includedRecoveryConversationAllowance: providerOverrides.includedRecoveryConversationAllowance }
+        : paidPlan,
     });
     test.transaction.subscription.findUnique.mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt, nextReconcileAt: now });
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
