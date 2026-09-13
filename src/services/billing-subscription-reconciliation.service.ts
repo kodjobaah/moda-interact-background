@@ -536,7 +536,15 @@ export class BillingSubscriptionReconciliationService {
     const next = now < preCloseAt ? preCloseAt : periodEnd;
     if (next.getTime() !== periodEnd.getTime()) {
       const updated = await this.database.subscription.updateMany({
-        where: { id: expected.subscriptionId, nextReconcileAt: expected.nextReconcileAt },
+        where: {
+          id: expected.subscriptionId,
+          status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+          planId: expected.currentPlanId,
+          billingPeriodId: expected.billingPeriodId,
+          currentPeriodStart: expected.currentPeriodStart,
+          currentPeriodEnd: expected.currentPeriodEnd,
+          nextReconcileAt: expected.nextReconcileAt,
+        },
         data: { nextReconcileAt: next },
       });
       if (updated.count > 0) await this.publishNext(shopId, expected.subscriptionId, next);

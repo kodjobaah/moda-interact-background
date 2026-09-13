@@ -7,6 +7,11 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import type { Queue } from "bullmq";
+import {
+  BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
+  createBillingSubscriptionReconcileJobId,
+} from "@modainteract/moda-interact-shared/billing";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
@@ -15,6 +20,7 @@ import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.servic
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
+import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 
 const DEFAULT_SHOP_PAGE_SIZE = 50;
 const MAX_SHOP_PAGE_SIZE = 200;
@@ -22,6 +28,7 @@ const MAX_SHOP_PAGE_SIZE = 200;
 type BillingReconciliationDatabase = PrismaClient;
 type UsagePublisher = Pick<typeof shopifyUsageEventPublisherService, "publishDue">;
 type PurchaseReconciler = Pick<typeof recoveryCreditPurchaseService, "reconcileProviderConfirmed">;
+type SubscriptionQueue = Pick<Queue, "add">;
 
 export type BillingReconciliationResult = {
   published: Awaited<ReturnType<UsagePublisher["publishDue"]>>;
@@ -55,6 +62,7 @@ export class BillingReconciliationService {
       environment: process.env.NODE_ENV ?? "development",
     }),
     private readonly now: () => Date = () => new Date(),
+    private readonly subscriptionQueue?: SubscriptionQueue,
   ) {}
 
   async reconcileOnce(limit = DEFAULT_SHOP_PAGE_SIZE): Promise<BillingReconciliationResult> {
@@ -256,7 +264,17 @@ export class BillingReconciliationService {
     });
     const existing = await this.database.subscription.findUnique({
       where: { shopId },
-      select: { id: true, status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true },
+      select: {
+        id: true,
+        status: true,
+        planId: true,
+        pendingPlanId: true,
+        pendingShopifyPlanHandle: true,
+        billingPeriodId: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
+        nextReconcileAt: true,
+      },
     });
     const settings = await this.database.shopSettings.findUnique({
       where: { shopId },
@@ -309,6 +327,51 @@ export class BillingReconciliationService {
           billingPeriodId: result.billingPeriodId,
           packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
         };
+      }
+      if (
+        result.kind === "provider-cycle-lag"
+        && existing.billingPeriodId
+        && existing.currentPeriodStart
+        && existing.currentPeriodEnd
+        && existing.nextReconcileAt
+      ) {
+        const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+        const updated = await this.database.subscription.updateMany({
+          where: {
+            id: existing.id,
+            status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
+            planId: existing.planId,
+            billingPeriodId: existing.billingPeriodId,
+            currentPeriodStart: existing.currentPeriodStart,
+            currentPeriodEnd: existing.currentPeriodEnd,
+            nextReconcileAt: existing.nextReconcileAt,
+          },
+          data: {
+            nextReconcileAt,
+            lastSyncedAt: now,
+            lastSyncErrorCode: "PROVIDER_CYCLE_LAG",
+            lastSyncErrorAt: now,
+          },
+        });
+        if (updated.count > 0) {
+          try {
+            if (this.subscriptionQueue) {
+              const job = createSubscriptionReconcilePayload(shopId, existing.id, nextReconcileAt);
+              await this.subscriptionQueue.add(BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME, job, {
+                jobId: createBillingSubscriptionReconcileJobId(existing.id, nextReconcileAt.toISOString()),
+                delay: 60 * 1000,
+                removeOnComplete: 100,
+                removeOnFail: true,
+              });
+            }
+          } catch (error) {
+            this.logger.warn("billing.subscription_reconciliation.enqueue_failed", {
+              shopId,
+              subscriptionId: existing.id,
+              errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+            });
+          }
+        }
       }
       const current = await this.database.subscription.findUnique({
         where: { id: existing.id },

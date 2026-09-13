@@ -5,6 +5,7 @@ import {
   createSubscriptionReconcilePayload,
   nextSubscriptionReconcileAt,
 } from "../../../src/services/billing-subscription-reconciliation.service.js";
+import { shopifyUsageEventPublisherService } from "../../../src/services/shopify-usage-event-publisher.service.js";
 
 const now = new Date("2026-09-12T12:00:00.000Z");
 const pendingEffectiveAt = new Date("2026-09-12T11:00:00.000Z");
@@ -51,7 +52,11 @@ function harness({
   const database = {
     shop: { findUnique: vi.fn().mockResolvedValue(row), findMany: vi.fn().mockResolvedValue([]) },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
-    subscription: { update: subscriptionUpdate, updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    subscription: {
+      findUnique: vi.fn(),
+      update: subscriptionUpdate,
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     $transaction: vi.fn(async (callback) => callback(transaction)),
   };
   const partner = {
@@ -463,6 +468,80 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconstruct();
     expect(test.queue.add.mock.calls[0][2].delay).toBe(5 * 60 * 1000);
     expect(test.queue.add.mock.calls[0][2].jobId).toBe(test.queue.add.mock.calls[1][2].jobId);
+  });
+
+  it("uses the exact source projection CAS when rescheduling an early rollover job", async () => {
+    const periodStart = new Date("2026-09-01T00:00:00.000Z");
+    const periodEnd = new Date("2026-10-01T00:00:00.000Z");
+    const expectedNext = new Date("2026-09-30T23:00:00.000Z");
+    const row = cycleRow({
+      subscription: {
+        ...cycleRow().subscription,
+        planId: "plan-paid",
+        billingPeriodId: "period-old",
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        nextReconcileAt: expectedNext,
+      },
+    });
+    const test = harness({
+      row,
+      plan: {
+        id: "plan-paid",
+        active: true,
+        name: "Paid",
+        kind: "PAID_METERED",
+        shopifyPlanHandle: "paid-2026",
+        recoveryCreditPackEnabled: true,
+        shopifyUsageEventHandle: "recovery-meter",
+        shopifyRecoveryCreditPackEventHandle: null,
+        includedRecoveryConversationAllowance: 100,
+      },
+      nowValue: new Date("2026-09-30T23:01:00.000Z"),
+    });
+    test.database.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1",
+      status: "ACTIVE",
+      planId: "plan-paid",
+      billingPeriodId: "period-old",
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      nextReconcileAt: expectedNext,
+    });
+    test.database.subscription.updateMany.mockResolvedValue({ count: 0 });
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue({
+      selected: 0,
+      claimed: 0,
+      reported: 0,
+      retryable: 0,
+      needsAttention: 0,
+    });
+
+    await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: expectedNext.toISOString() });
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "subscription-1",
+        status: { in: ["ACTIVE", "TRIALING"] },
+        planId: "plan-paid",
+        billingPeriodId: "period-old",
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        nextReconcileAt: expectedNext,
+      },
+    }));
+    expect(test.queue.add).not.toHaveBeenCalled();
+    publishDue.mockRestore();
+  });
+
+  it("excludes pack-disabled Free subscriptions from cycle reconstruction", async () => {
+    const test = harness();
+    await test.service.reconstruct();
+    const query = test.database.shop.findMany.mock.calls[0]?.[0] as { where: { OR: unknown[] } };
+    const serialized = JSON.stringify(query.where.OR);
+    expect(serialized).toContain('"kind":"PAID_METERED"');
+    expect(serialized).toContain('"kind":"FREE","recoveryCreditPackEnabled":true');
+    expect(serialized).not.toContain('"kind":"FREE","recoveryCreditPackEnabled":false');
   });
 
   it("excludes rows without a pending target or durable schedule", async () => {

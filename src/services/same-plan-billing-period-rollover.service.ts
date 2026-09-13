@@ -32,7 +32,7 @@ export type SamePlanRolloverResult =
   | { kind: "not-applicable" }
   | { kind: "provider-cycle-lag"; billingPeriodId: string; nextReconcileAt: Date | null }
   | { kind: "unchanged"; billingPeriodId: string | null; nextReconcileAt: Date | null }
-  | { kind: "transitioned"; billingPeriodId: string; nextReconcileAt: Date; planKind: BillingPlanKind };
+  | { kind: "transitioned"; billingPeriodId: string; nextReconcileAt: Date | null; planKind: BillingPlanKind };
 
 export type SamePlanRolloverInput = {
   shopId: string;
@@ -202,9 +202,11 @@ export class SamePlanBillingPeriodRolloverService {
       });
     }
 
-    const nextReconcileAt = new Date(
-      Math.max(input.now.getTime(), providerEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS),
-    );
+    const nextReconcileAt = input.plan.kind === BillingPlanKind.FREE && !input.plan.recoveryCreditPackEnabled
+      ? null
+      : new Date(
+          Math.max(input.now.getTime(), providerEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS),
+        );
     await transaction.subscription.update({
       where: { id: subscription.id },
       data: {
