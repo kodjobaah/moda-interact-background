@@ -31,6 +31,7 @@ const RETRYABLE_PLAN_CHANGE_SYNC_ERRORS = [
   "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
   "MISSING_BILLING_CYCLE",
   "MISSING_USAGE_METER",
+  "INVALID_INCLUDED_ALLOWANCE",
 ] as const;
 
 function sameDate(left: Date | null, right: Date | null): boolean {
@@ -652,7 +653,17 @@ export class BillingSubscriptionReconciliationService {
           return;
         }
       }
-      if (targetPlan.kind === BillingPlanKind.PAID_METERED && (!targetPlan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyUsageEventHandle))) {
+      if (targetPlan.kind === BillingPlanKind.PAID_METERED) {
+        if (!Number.isSafeInteger(targetPlan.includedRecoveryConversationAllowance) || (targetPlan.includedRecoveryConversationAllowance ?? -1) < 0) {
+          await this.recordEstablishedPlanChangeRetry(shopId, expected, "INVALID_INCLUDED_ALLOWANCE", undefined, true);
+          return;
+        }
+        if (!targetPlan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyUsageEventHandle)) {
+          await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
+          return;
+        }
+      }
+      if (targetPlan.recoveryCreditPackEnabled && (!targetPlan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyRecoveryCreditPackEventHandle))) {
         await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
         return;
       }
@@ -668,7 +679,7 @@ export class BillingSubscriptionReconciliationService {
         if (result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         await this.schedulePlanChangeCapacityResume(shopId, result.planKind);
       } else {
-        await this.recordEstablishedPlanChangeRetry(shopId, expected, "MISSING_BILLING_CYCLE", undefined, true);
+        await this.recordEstablishedPlanChangeFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle);
       }
       return;
     }
@@ -725,7 +736,7 @@ export class BillingSubscriptionReconciliationService {
   private async recordEstablishedPlanChangeRetry(
     shopId: string,
     expected: EstablishedPlanChangeExpected,
-    errorCode: "PARTNER_API_ERROR" | "PROVIDER_STATE_UNRESOLVED" | "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER",
+    errorCode: "PARTNER_API_ERROR" | "PROVIDER_STATE_UNRESOLVED" | "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE",
     error?: unknown,
     failClosed = false,
   ): Promise<void> {
