@@ -13,6 +13,7 @@ import type { PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
 import {
   effectiveBillingPolicyResolver,
+  EffectiveBillingPolicyError,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
 import {
@@ -101,7 +102,9 @@ export type RecoveryBillingAdmissionResult =
         | "capacity-exhausted"
         | "reservation-in-flight"
         | "billing-period-closing"
-        | "billing-period-reconciliation";
+        | "billing-period-reconciliation"
+        | "contract-required"
+        | "subscription-frozen";
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
@@ -120,7 +123,20 @@ export class RecoveryBillingService {
     shopId: string;
     recoveryId: string;
   }): Promise<RecoveryBillingAdmissionResult> {
-    const policy = await this.policyResolver.resolve(input.shopId);
+    let policy: EffectiveBillingPolicy;
+    try {
+      policy = await this.policyResolver.resolve(input.shopId);
+    } catch (error) {
+      if (error instanceof EffectiveBillingPolicyError) {
+        if (error.reason === "NO_CONTRACT") {
+          return { kind: "blocked", reason: "contract-required" };
+        }
+        if (error.reason === "SUBSCRIPTION_FROZEN") {
+          return { kind: "blocked", reason: "subscription-frozen" };
+        }
+      }
+      throw error;
+    }
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,
       input.recoveryId,
@@ -228,9 +244,21 @@ export class RecoveryBillingService {
     admission: RecoveryBillingAdmission;
     recoveryId: string;
   }): Promise<RecoveryBillingAdmissionResult> {
-    const current = await this.policyResolver.resolve(
-      input.admission.policy.shopId,
-    );
+    let current: EffectiveBillingPolicy;
+    try {
+      current = await this.policyResolver.resolve(input.admission.policy.shopId);
+    } catch (error) {
+      if (error instanceof EffectiveBillingPolicyError) {
+        if (error.reason === "NO_CONTRACT" || error.reason === "SUBSCRIPTION_FROZEN") {
+          await this.releaseBeforeProvider(input.admission);
+          return {
+            kind: "blocked",
+            reason: error.reason === "NO_CONTRACT" ? "contract-required" : "subscription-frozen",
+          };
+        }
+      }
+      throw error;
+    }
 
     if (
       current.planKind === "PAID_METERED" &&

@@ -9,6 +9,7 @@ import type { PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
 import {
   EffectiveBillingPolicyResolver,
+  EffectiveBillingPolicyError,
   effectiveBillingPolicyResolver,
 } from "./effective-billing-policy.service.js";
 import type {
@@ -176,7 +177,18 @@ export class OutboundWhatsAppAdmissionService {
     });
     if (existing) return { kind: "suppressed", reason: "duplicate" };
 
-    const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
+    let policy: EffectiveBillingPolicy;
+    try {
+      policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
+    } catch (error) {
+      if (
+        error instanceof EffectiveBillingPolicyError &&
+        (error.reason === "NO_CONTRACT" || error.reason === "SUBSCRIPTION_FROZEN")
+      ) {
+        return { kind: "suppressed", reason: "shop-unavailable" };
+      }
+      throw error;
+    }
     if (policy.automatedWhatsappPaused) return { kind: "suppressed", reason: "paused" };
 
     const conversation = await transaction.conversation.findUnique({

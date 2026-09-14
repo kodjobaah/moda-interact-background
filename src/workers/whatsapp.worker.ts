@@ -15,6 +15,7 @@ import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsa
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
+import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
 import {
   ConversationTurnProcessor,
   type ConversationTurnJob,
@@ -202,7 +203,11 @@ export async function loadConversationTurn(
     conversation.customer?.phone;
   const shopStatus =
     conversation.checkoutRecovery?.shop?.status ?? conversation.shop?.status;
-  if (shopId && shopStatus !== "ACTIVE") {
+  if (
+    shopId &&
+    (shopStatus !== "ACTIVE" ||
+      !(await shopExecutionEligibilityService.isShopExecutionActive(shopId)))
+  ) {
     return {
       shopId,
       to: to ?? "",

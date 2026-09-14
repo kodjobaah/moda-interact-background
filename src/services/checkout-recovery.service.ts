@@ -54,7 +54,11 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
   | { outcome: "discarded-order-completed"; checkoutToken: string }
-  | { outcome: "discarded-shop-unavailable"; checkoutToken: string };
+  | {
+      outcome: "discarded-shop-unavailable";
+      checkoutToken: string;
+      reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
+    };
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -103,10 +107,14 @@ export class CheckoutRecoveryService {
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
-    if (!await shopExecutionEligibilityService.isShopExecutionActive(candidate.shopId)) {
+    const execution = await shopExecutionEligibilityService.evaluate(candidate.shopId);
+    if (!execution.allowed) {
       return {
         outcome: "discarded-shop-unavailable",
         checkoutToken: candidate.checkoutToken,
+        ...(execution.reason !== "SHOP_UNAVAILABLE"
+          ? { reason: execution.reason }
+          : {}),
       } as const;
     }
     const shopDomain = await abandonedCheckoutLookupService.resolveShopDomain(

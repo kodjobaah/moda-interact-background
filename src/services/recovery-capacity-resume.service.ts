@@ -9,6 +9,7 @@ import {
   RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
   type RecoveryCapacityResumeJob,
 } from "../domain/recovery-capacity-resume.js";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 
 const MAX_REPAIR_SHOPS = 100;
 const bullMQTelemetry = createBullMQTelemetry({ serviceName: "moda-recovery-worker" });
@@ -56,6 +57,9 @@ export class RecoveryCapacityResumeService {
     let scheduled = 0;
     for (const shop of shops) {
       try {
+        if (!(await shopExecutionEligibilityService.isShopExecutionActive(shop.shopId))) {
+          continue;
+        }
         await this.schedule({ shopId: shop.shopId, trigger: "repair" });
         scheduled += 1;
       } catch (error) {

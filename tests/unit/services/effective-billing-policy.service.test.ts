@@ -321,6 +321,26 @@ describe("EffectiveBillingPolicyResolver", () => {
     ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "UNMAPPED_PLAN" });
   });
 
+  it("returns a distinct frozen denial before plan resolution", async () => {
+    const fake = client({
+      subscription: {
+        findUnique: async () => ({
+          id: "subscription-1",
+          status: "FROZEN",
+          plan: null,
+          billingPeriod: null,
+          shop: { status: "ACTIVE" },
+        }),
+      },
+    });
+
+    await expect(
+      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
+    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+      reason: "SUBSCRIPTION_FROZEN",
+    });
+  });
+
   it.each([0, -1, 15, 16, 1.5])(
     "rejects invalid terminal reserved slots: %s",
     async (terminalMessageReservedSlots) => {
