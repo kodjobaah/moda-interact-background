@@ -415,6 +415,9 @@ export class BillingSubscriptionReconciliationService {
           currentPeriodEnd: provider.currentPeriodEnd,
           nextReconcileAt: next,
           lastSyncedAt: this.now(),
+          ...(this.now() >= preCloseAt && row.subscription.lastSyncErrorCode === "PRE_CLOSE_USAGE_FLUSH_FAILED"
+            ? { lastSyncErrorCode: null, lastSyncErrorAt: null }
+            : {}),
         },
       });
       if (updated.count > 0 && next) await this.publishNext(row.id, row.subscription.id, next);

@@ -506,6 +506,82 @@ describe("BillingSubscriptionReconciliationService", () => {
     publishDue.mockRestore();
   });
 
+  it("clears only PRE_CLOSE_USAGE_FLUSH_FAILED after a successful exact-cycle drain retry", async () => {
+    const insideDrain = new Date("2026-09-30T23:57:00.000Z");
+    const test = harness({
+      nowValue: insideDrain,
+      row: establishedRow({ subscription: {
+        ...establishedRow().subscription,
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        cancelAtPeriodEnd: false,
+        nextReconcileAt: insideDrain,
+        lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED",
+      } }),
+      providerResult: {
+        ...establishedProvider,
+        planHandle: "paid-current",
+        pendingPlanHandle: null,
+        pendingEffectiveAt: null,
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+        cancelAtEndOfCycle: true,
+        cancelAtPeriodEnd: true,
+      },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue(undefined);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", insideDrain));
+
+    expect(publishDue).toHaveBeenCalledOnce();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        cancelAtPeriodEnd: true,
+        nextReconcileAt: new Date("2026-10-01T00:00:00.000Z"),
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+      }),
+    }));
+    publishDue.mockRestore();
+  });
+
+  it("preserves unrelated sync errors after a successful exact-cycle drain retry", async () => {
+    const insideDrain = new Date("2026-09-30T23:57:00.000Z");
+    const test = harness({
+      nowValue: insideDrain,
+      row: establishedRow({ subscription: {
+        ...establishedRow().subscription,
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        cancelAtPeriodEnd: false,
+        nextReconcileAt: insideDrain,
+        lastSyncErrorCode: "MISSING_USAGE_METER",
+      } }),
+      providerResult: {
+        ...establishedProvider,
+        planHandle: "paid-current",
+        pendingPlanHandle: null,
+        pendingEffectiveAt: null,
+        currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+        cancelAtEndOfCycle: true,
+        cancelAtPeriodEnd: true,
+      },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue(undefined);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", insideDrain));
+
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("lastSyncErrorCode");
+    publishDue.mockRestore();
+  });
+
   it("persists pending provider truth when pre-close drain fails", async () => {
     const insideDrain = new Date("2026-09-30T23:57:00.000Z");
     const test = harness({
