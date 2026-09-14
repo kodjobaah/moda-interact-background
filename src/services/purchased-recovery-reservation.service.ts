@@ -141,7 +141,8 @@ export class PurchasedRecoveryReservationService {
             id: lot.id,
             version: lot.version,
             status: RecoveryCreditPurchaseStatus.ACTIVE,
-            reservedAmount: { lte: lot.currentAmount - lot.reservedAmount - quantity },
+            currentAmount: lot.currentAmount,
+            reservedAmount: lot.reservedAmount,
           },
           data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
         });
@@ -202,7 +203,8 @@ export class PurchasedRecoveryReservationService {
         id: lot.id,
         version: lot.version,
         status: RecoveryCreditPurchaseStatus.ACTIVE,
-        reservedAmount: { lte: lot.currentAmount - lot.reservedAmount - quantity },
+        currentAmount: lot.currentAmount,
+        reservedAmount: lot.reservedAmount,
       },
       data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
     });

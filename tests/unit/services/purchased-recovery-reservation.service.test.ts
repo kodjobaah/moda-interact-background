@@ -53,10 +53,12 @@ function createHarness(grantedQuantity = 1, lotInputs = [{ id: "purchase-1", cre
         const activation = (left.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER) - (right.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
         return activation || left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id);
       }).filter((lot) => where.status === undefined || lot.status === where.status)),
-      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; reservedAmount?: { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
+      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; currentAmount?: number; reservedAmount?: number | { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
         const lot = state.lots.find((candidate) => candidate.id === where.id);
         if (!lot || lot.version !== where.version || (where.status && typeof where.status === "string" && lot.status !== where.status)) return { count: 0 };
         if (where.status && typeof where.status === "object" && "in" in where.status && !(where.status.in as string[]).includes(lot.status)) return { count: 0 };
+        if (where.currentAmount !== undefined && lot.currentAmount !== where.currentAmount) return { count: 0 };
+        if (typeof where.reservedAmount === "number" && lot.reservedAmount !== where.reservedAmount) return { count: 0 };
         if (where.reservedAmount?.gte !== undefined && lot.reservedAmount < where.reservedAmount.gte) return { count: 0 };
         if (where.reservedAmount?.lte !== undefined && lot.reservedAmount > where.reservedAmount.lte) return { count: 0 };
         const current = data.currentAmount as { decrement?: number } | undefined;
@@ -142,6 +144,29 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
     expect(state.counter.reservedQuantity).toBe(1);
     expect(state.lots[0]?.reservedAmount).toBe(1);
+  });
+
+  it("allows multiple live reservations from one ACTIVE multi-credit purchase lot", async () => {
+    const { service, state } = createHarness(2, [
+      { id: "purchase-multi", creditsGranted: 2, currentAmount: 2 },
+    ]);
+
+    const first = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:multi-a" });
+    const second = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:multi-b" });
+
+    expect(first).toMatchObject({
+      kind: "reserved",
+      reservation: { status: "RESERVED", purchasedCreditPurchaseId: "purchase-multi" },
+    });
+    expect(second).toMatchObject({
+      kind: "reserved",
+      reservation: { status: "RESERVED", purchasedCreditPurchaseId: "purchase-multi" },
+    });
+    expect(state.lots[0]).toMatchObject({ currentAmount: 2, reservedAmount: 2 });
+    expect(state.counter).toMatchObject({ reservedQuantity: 2 });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:multi-c" }))
+      .resolves.toEqual({ kind: "credits-exhausted", available: 0 });
   });
 
   it("does not provide capacity from a REQUESTED purchase", async () => {
