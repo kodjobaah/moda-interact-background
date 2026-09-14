@@ -29,7 +29,7 @@ function transaction(subscription: Record<string, unknown>) {
         shopifyPlanHandle: "growth",
         includedRecoveryConversationAllowance: 100,
         recoveryCreditPackEnabled: false,
-        shopifyUsageEventHandle: null,
+        shopifyUsageEventHandle: "recovery-meter",
         shopifyRecoveryCreditPackEventHandle: null,
       }),
     },
@@ -45,7 +45,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const tx = transaction({ lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
-      activeSubscription: { planHandle: "growth", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
+      activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: frozen,
     }, now);
 
@@ -72,7 +72,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), nextReconcileAt: now });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
-      activeSubscription: { planHandle: "growth", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
+      activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
 

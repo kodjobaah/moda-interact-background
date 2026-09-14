@@ -216,7 +216,12 @@ export class BillingReconciliationService {
           snapshot,
           now,
         );
-        if (lifecycleResult === "handled") {
+        if (lifecycleResult === "handled" || lifecycleResult === "restored") {
+          await this.publishCommittedLifecycleSchedule(shopId, existing.id);
+          if (lifecycleResult === "restored") {
+            const restored = await this.database.subscription.findUnique({ where: { id: existing.id }, select: { billingPeriodId: true } });
+            return { billingPeriodId: restored?.billingPeriodId ?? null, packMeterHandle: null };
+          }
           return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
         }
       }
@@ -290,6 +295,7 @@ export class BillingReconciliationService {
         billingPeriodId: true,
         currentPeriodStart: true,
         currentPeriodEnd: true,
+        cancelAtPeriodEnd: true,
         nextReconcileAt: true,
       },
     });
@@ -301,7 +307,12 @@ export class BillingReconciliationService {
         snapshot,
         now,
       );
-      if (lifecycleResult === "handled") {
+      if (lifecycleResult === "handled" || lifecycleResult === "restored") {
+        await this.publishCommittedLifecycleSchedule(shopId, existing.id);
+        if (lifecycleResult === "restored") {
+          const restored = await this.database.subscription.findUnique({ where: { id: existing.id }, select: { billingPeriodId: true } });
+          return { billingPeriodId: restored?.billingPeriodId ?? null, packMeterHandle: null };
+        }
         return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
       }
     }
@@ -470,6 +481,34 @@ export class BillingReconciliationService {
       return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
     }
     if (existing?.id && plan?.active && existing.planId === plan.id) {
+      if ((provider.cancelAtPeriodEnd || existing.cancelAtPeriodEnd)
+        && provider.currentPeriodEnd
+        && provider.currentPeriodEnd > now
+        && provider.currentPeriodStart?.getTime() === existing.currentPeriodStart?.getTime()
+        && provider.currentPeriodEnd?.getTime() === existing.currentPeriodEnd?.getTime()) {
+        const pendingPlan = provider.pendingPlanHandle
+          ? await this.database.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+          : null;
+        const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
+          ? provider.pendingEffectiveAt
+          : provider.currentPeriodEnd
+            ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - 5 * 60 * 1000))
+            : null;
+        const updated = await this.database.subscription.updateMany({
+          where: { id: existing.id, planId: existing.planId, billingPeriodId: existing.billingPeriodId, nextReconcileAt: existing.nextReconcileAt },
+          data: {
+            pendingShopifyPlanHandle: provider.pendingPlanHandle,
+            pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+            pendingEffectiveAt: provider.pendingEffectiveAt,
+            cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+            currentPeriodEnd: provider.currentPeriodEnd,
+            nextReconcileAt: next,
+            lastSyncedAt: now,
+          },
+        });
+        if (updated.count > 0 && next) await this.enqueueSubscriptionReconcile(shopId, existing.id, next, now);
+        return { billingPeriodId: existing.billingPeriodId, packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null };
+      }
       const result = await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, rolloverResult) => {
         if (rolloverResult.planKind !== BillingPlanKind.PAID_METERED) return;
         try {
@@ -700,6 +739,11 @@ export class BillingReconciliationService {
         errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
       });
     }
+  }
+
+  private async publishCommittedLifecycleSchedule(shopId: string, subscriptionId: string): Promise<void> {
+    const current = await this.database.subscription.findUnique({ where: { id: subscriptionId }, select: { nextReconcileAt: true } });
+    if (current?.nextReconcileAt) await this.enqueueSubscriptionReconcile(shopId, subscriptionId, current.nextReconcileAt, this.now());
   }
 }
 

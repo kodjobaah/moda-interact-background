@@ -171,17 +171,38 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         shopifyUsageEventHandle: plan.shopifyUsageEventHandle,
         shopifyRecoveryCreditPackEventHandle: plan.shopifyRecoveryCreditPackEventHandle,
       };
+      const configurationError = validateProviderPlan(planInput, provider);
+      if (configurationError) {
+        await transaction.subscription.update({ where: { id: subscriptionId }, data: {
+          status: configurationError === "UNMAPPED_PLAN_HANDLE" ? SubscriptionProjectionStatus.UNMAPPED : SubscriptionProjectionStatus.SYNC_ERROR,
+          observedShopifyPlanHandle: provider.planHandle,
+          lastSyncedAt: now,
+          lastSyncErrorCode: configurationError,
+          lastSyncErrorAt: now,
+          nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+          lastProviderLifecycleState: lifecycle.state,
+          lastProviderLifecycleEventId: lifecycle.id,
+          lastProviderLifecycleEventAt: lifecycle.occurredAt,
+        } });
+        return false;
+      }
       const samePlan = subscription.planId === plan.id;
       const sameCycle = samePlan
         && subscription.currentPeriodStart?.getTime() === provider.currentPeriodStart?.getTime()
         && subscription.currentPeriodEnd?.getTime() === provider.currentPeriodEnd?.getTime();
       if (sameCycle) {
+        const pendingPlan = provider.pendingPlanHandle
+          ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+          : null;
         await transaction.subscription.update({ where: { id: subscriptionId }, data: {
           status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
           observedShopifyPlanHandle: provider.planHandle,
           providerSubscriptionId: provider.providerSubscriptionId,
           trialEndsAt: provider.trialEndsAt,
           cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
           lastSyncedAt: now,
           ...(lifecycleErrorCleared(subscription.lastSyncErrorCode) ? { lastSyncErrorCode: null, lastSyncErrorAt: null } : {}),
           lastProviderLifecycleState: lifecycle.state,
@@ -193,8 +214,8 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       }
       await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.ACTIVE } });
       const transition = samePlan
-        ? await new SamePlanBillingPeriodRolloverService({ $transaction: async (callback) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, now })
-        : await new ShopifyPlanChangeTransitionService({ $transaction: async (callback) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, expectedCurrentPlanId: subscription.planId ?? "", now });
+        ? await new SamePlanBillingPeriodRolloverService({ $transaction: async (callback: (client: typeof transaction) => unknown) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, now })
+        : await new ShopifyPlanChangeTransitionService({ $transaction: async (callback: (client: typeof transaction) => unknown) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, expectedCurrentPlanId: subscription.planId ?? "", now });
       if (transition.kind !== "transitioned" && transition.kind !== "unchanged") {
         await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncedAt: now, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", lastSyncErrorAt: now, nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS), lastProviderLifecycleState: lifecycle.state, lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt } });
         return false;
@@ -241,8 +262,33 @@ export class ShopifySubscriptionLifecycleReconciliationService {
           lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt,
         },
       });
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
+}
+
+function validateProviderPlan(
+  plan: {
+    active: boolean;
+    kind: BillingPlanKind;
+    includedRecoveryConversationAllowance: number | null;
+    recoveryCreditPackEnabled: boolean;
+    shopifyUsageEventHandle: string | null;
+    shopifyRecoveryCreditPackEventHandle: string | null;
+  },
+  provider: PartnerSubscription,
+): "UNMAPPED_PLAN_HANDLE" | "MISSING_BILLING_CYCLE" | "INVALID_INCLUDED_ALLOWANCE" | "MISSING_USAGE_METER" | null {
+  if (!plan.active) return "UNMAPPED_PLAN_HANDLE";
+  const needsCycle = plan.kind === BillingPlanKind.PAID_METERED
+    || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled);
+  if (needsCycle && (!provider.currentPeriodStart || !provider.currentPeriodEnd || provider.currentPeriodStart >= provider.currentPeriodEnd)) {
+    return "MISSING_BILLING_CYCLE";
+  }
+  if (plan.kind === BillingPlanKind.PAID_METERED) {
+    if (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance) || (plan.includedRecoveryConversationAllowance ?? -1) < 0) return "INVALID_INCLUDED_ALLOWANCE";
+    if (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle)) return "MISSING_USAGE_METER";
+  }
+  if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) return "MISSING_USAGE_METER";
+  return null;
 }
 
 function isStrictlyOlder(
