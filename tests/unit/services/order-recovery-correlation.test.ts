@@ -148,6 +148,36 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
     // The order must not complete an existing recovery.
   });
 
+  it("keeps frozen order completion terminal safety bookkeeping enabled", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status: "FROZEN" },
+    });
+    pendingCandidateServiceMock.resolveCandidate.mockResolvedValue({
+      jobId: "job-1",
+      candidate: {
+        shopId: "shop_1",
+        checkoutToken: "checkout_1",
+        cartToken: "cart_1",
+        abandonedCheckoutUrl: null,
+        checkoutCreatedAt: null,
+      },
+    });
+
+    const result = await service.handleOrderCompleted(buildInput());
+
+    expect(result).toEqual({
+      kind: "cancelled-candidate",
+      checkoutToken: "checkout_1",
+    });
+    expect(pendingCandidateServiceMock.cancelCandidate).toHaveBeenCalledTimes(1);
+    expect(pendingCandidateServiceMock.markOrderProcessed).toHaveBeenCalledWith(
+      "shop_1",
+      "checkout_1",
+    );
+  });
+
   it("stops an inactive order before candidate or recovery work", async () => {
     prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
 

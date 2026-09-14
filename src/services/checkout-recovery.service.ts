@@ -80,6 +80,15 @@ export class CheckoutRecoveryService {
         source: "v2",
       } as const;
     }
+    if (scheduled.outcome === "discarded-subscription-frozen") {
+      return {
+        kind: "ignored",
+        reason: "subscription-frozen",
+        shopDomain: scheduled.shopDomain,
+        checkoutToken: event.checkoutToken,
+        source: "v2",
+      } as const;
+    }
 
     return {
       kind: "scheduled",
@@ -381,13 +390,20 @@ export class CheckoutRecoveryService {
   ): Promise<CheckoutRefreshResult> {
     const shop = await prisma.shop.findUnique({
       where: { domain: event.shopDomain },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        subscription: { select: { status: true } },
+      },
     });
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
     }
     if (shop.status !== "ACTIVE") {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
+    }
+    if (shop.subscription?.status === "FROZEN") {
+      return { kind: "ignored", reason: "subscription-frozen" } as const;
     }
 
     const pending =
@@ -502,8 +518,12 @@ export class CheckoutRecoveryService {
   }
 
   async handleCartActivityContract(event: CartActivityContractInput) {
-    if (!await shopExecutionEligibilityService.isShopExecutionActive(event.shopId)) {
+    const shop = await shopExecutionEligibilityService.resolveShopById(event.shopId);
+    if (!shop || shop.status !== "ACTIVE") {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
+    }
+    if (shop.subscription?.status === "FROZEN") {
+      return { kind: "ignored", reason: "subscription-frozen" } as const;
     }
     const result =
       await pendingRecoveryCandidateService.refreshCandidateActivity({
