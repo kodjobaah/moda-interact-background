@@ -53,6 +53,31 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       return "continue";
     }
 
+    const ordering = await this.database.$transaction(async (transaction) => {
+      await lockSubscription(transaction, subscriptionId);
+      return transaction.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: { status: true, lastProviderLifecycleEventAt: true, lastProviderLifecycleEventId: true },
+      });
+    });
+    if (isStrictlyOlder(ordering?.lastProviderLifecycleEventAt ?? null, ordering?.lastProviderLifecycleEventId ?? null, lifecycle)) {
+      if (ordering?.status === SubscriptionProjectionStatus.FROZEN) {
+        await this.database.$transaction(async (transaction) => {
+          await lockSubscription(transaction, subscriptionId);
+          await transaction.subscription.update({
+            where: { id: subscriptionId },
+            data: {
+              nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
+              lastSyncedAt: now,
+            },
+          });
+        });
+      } else if (!active) {
+        await this.recordUnresolved(shopId, subscriptionId, now, lifecycle);
+      }
+      return ordering?.status === SubscriptionProjectionStatus.FROZEN || !active ? "handled" : "continue";
+    }
+
     if (active === null && lifecycle.state === "CANCELED") {
       await this.cancel(shopId, subscriptionId, lifecycle, now);
       return "handled";

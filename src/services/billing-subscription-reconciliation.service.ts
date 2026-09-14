@@ -369,14 +369,6 @@ export class BillingSubscriptionReconciliationService {
         return;
       }
     }
-    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
-      const now = this.now();
-      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
-      if (now < row.subscription.currentPeriodEnd) {
-        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
-        return;
-      }
-    }
     const provider = snapshot.activeSubscription;
     if (provider && currentPlan && isRollover
       && (provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || row.subscription.cancelAtPeriodEnd)
@@ -388,13 +380,23 @@ export class BillingSubscriptionReconciliationService {
       const pendingPlan = provider.pendingPlanHandle
         ? await this.database.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
         : null;
-      const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
+      const preCloseAt = new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+      let next = provider.pendingPlanHandle && provider.pendingEffectiveAt
         ? provider.pendingEffectiveAt
-        : provider.currentPeriodEnd
-          ? this.now() < new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
-            ? new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
-            : provider.currentPeriodEnd
-          : null;
+        : this.now() < preCloseAt ? preCloseAt : provider.currentPeriodEnd;
+      if (this.now() >= preCloseAt && this.now() < provider.currentPeriodEnd) {
+        try {
+          await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: row.subscription.billingPeriodId! });
+        } catch (error) {
+          next = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, provider.currentPeriodEnd.getTime()));
+          const failed = await this.database.subscription.updateMany({
+            where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
+            data: { currentPeriodEnd: provider.currentPeriodEnd, nextReconcileAt: next, lastSyncedAt: this.now(), lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED", lastSyncErrorAt: this.now() },
+          });
+          if (failed.count > 0) await this.publishNext(row.id, row.subscription.id, next);
+          return;
+        }
+      }
       const updated = await this.database.subscription.updateMany({
         where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
         data: {
@@ -409,6 +411,14 @@ export class BillingSubscriptionReconciliationService {
       });
       if (updated.count > 0 && next) await this.publishNext(row.id, row.subscription.id, next);
       return;
+    }
+    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
+      const now = this.now();
+      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+      if (now < row.subscription.currentPeriodEnd) {
+        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
+        return;
+      }
     }
 
     if (!provider) {

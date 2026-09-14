@@ -299,7 +299,6 @@ describe("BillingSubscriptionReconciliationService", () => {
       .mockResolvedValueOnce(establishedTargetPlan);
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
-
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "SYNC_ERROR",
@@ -317,7 +316,6 @@ describe("BillingSubscriptionReconciliationService", () => {
       .mockResolvedValueOnce(establishedTargetPlan);
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
-
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_USAGE_METER" }),
     }));
@@ -399,6 +397,79 @@ describe("BillingSubscriptionReconciliationService", () => {
       expect.objectContaining({ expectedNextReconcileAt: "2026-09-30T23:55:00.000Z" }),
       expect.objectContaining({ jobId: expect.any(String) }),
     );
+  });
+
+  it("projects pending update even when outgoing cancelAtEndOfCycle is false", async () => {
+    const test = harness({
+      row: establishedRow({ subscription: {
+        ...establishedRow().subscription,
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        cancelAtPeriodEnd: false,
+      } }),
+      providerResult: { ...establishedProvider, planHandle: "paid-current", pendingPlanHandle: "paid-next", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z"), currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), cancelAtEndOfCycle: false, cancelAtPeriodEnd: false },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique
+      .mockResolvedValueOnce(establishedCurrentPlan)
+      .mockResolvedValueOnce({ id: "plan-next", active: true });
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ pendingShopifyPlanHandle: "paid-next", pendingPlanId: "plan-next", cancelAtPeriodEnd: false }),
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
+  it("uses the exact drain boundary for scheduled cancellation before the drain window", async () => {
+    const test = harness({
+      row: establishedRow({ subscription: {
+        ...establishedRow().subscription,
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        cancelAtPeriodEnd: false,
+      } }),
+      providerResult: { ...establishedProvider, planHandle: "paid-current", pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), cancelAtEndOfCycle: true, cancelAtPeriodEnd: true },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue(undefined);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(publishDue).not.toHaveBeenCalled();
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-09-30T23:55:00.000Z"));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+    publishDue.mockRestore();
+  });
+
+  it("uses the exact period boundary for scheduled cancellation inside the drain window", async () => {
+    const insideDrain = new Date("2026-09-30T23:57:00.000Z");
+    const test = harness({
+      nowValue: insideDrain,
+      row: establishedRow({ subscription: {
+        ...establishedRow().subscription,
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+        cancelAtPeriodEnd: false,
+        nextReconcileAt: insideDrain,
+      } }),
+      providerResult: { ...establishedProvider, planHandle: "paid-current", pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), cancelAtEndOfCycle: true, cancelAtPeriodEnd: true },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue(undefined);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", insideDrain));
+
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-current" });
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-10-01T00:00:00.000Z"));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+    publishDue.mockRestore();
   });
 
   it.each([

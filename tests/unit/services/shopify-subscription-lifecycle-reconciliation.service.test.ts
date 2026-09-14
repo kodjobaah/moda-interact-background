@@ -56,7 +56,11 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const tx = transaction({ status: "ACTIVE", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
-    expect(tx.subscription.update).not.toHaveBeenCalled();
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        nextReconcileAt: new Date("2026-09-14T12:05:00.000Z"),
+      }),
+    }));
   });
 
   it("replays the same FROZEN event and advances one hourly retry", async () => {
