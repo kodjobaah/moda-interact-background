@@ -7,6 +7,7 @@ const hoisted = vi.hoisted(() => ({
   findMany: vi.fn(async () => hoisted.recoveries),
   resume: vi.fn(async () => ({ kind: "initiated" as const })),
   schedule: vi.fn(async () => "job-id"),
+  evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })),
 }));
 
 vi.mock("bullmq", () => ({
@@ -36,11 +37,33 @@ vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
 vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
   recoveryCapacityResumeService: { schedule: hoisted.schedule },
 }));
+vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
+  shopExecutionEligibilityService: { evaluate: hoisted.evaluate },
+}));
 
 import { RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB } from "../../../src/domain/recovery-capacity-resume.js";
 import "../../../src/workers/recovery-capacity-resume.worker.js";
 
 describe("recovery capacity resume worker", () => {
+  it.each([
+    ["NO_CONTRACT", "CONTRACT_REQUIRED"],
+    ["FROZEN", "SUBSCRIPTION_FROZEN"],
+  ])("terminates a queued capacity-resume job before recovery lookup when execution is %s", async (_status, reason) => {
+    hoisted.evaluate.mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason });
+    hoisted.findMany.mockClear();
+    hoisted.resume.mockClear();
+    hoisted.schedule.mockClear();
+
+    await expect(hoisted.processor?.({
+      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+      data: { shopId: "shop-1", trigger: "repair" },
+    })).resolves.toEqual({ kind: "ignored", reason });
+
+    expect(hoisted.findMany).not.toHaveBeenCalled();
+    expect(hoisted.resume).not.toHaveBeenCalled();
+    expect(hoisted.schedule).not.toHaveBeenCalled();
+  });
+
   it("queries the durable blocked FIFO without an id-range cursor", async () => {
     hoisted.recoveries = [{ id: "recovery-1" }];
     hoisted.findMany.mockClear();

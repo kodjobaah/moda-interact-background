@@ -16,6 +16,11 @@ import type {
   BillingPolicyClient,
   EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
+import type {
+  ShopExecutionDenialReason,
+  ShopExecutionEligibilityService,
+} from "./shop-execution-eligibility.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
 import type {
   SendMessageResult,
@@ -47,6 +52,7 @@ export type OutboundAdmissionInput = {
 export type OutboundAdmissionResult =
   | {
       kind: "admitted";
+      shopId: string;
       messageId: string;
       conversationId: string;
       terminal: boolean;
@@ -59,7 +65,9 @@ export type OutboundSuppressionReason =
   | "terminal-already-used"
   | "duplicate"
   | "conversation-invalid"
-  | "shop-unavailable";
+  | "shop-unavailable"
+  | "contract-required"
+  | "subscription-frozen";
 
 export class OutboundWhatsAppAdmissionService {
   constructor(
@@ -68,6 +76,8 @@ export class OutboundWhatsAppAdmissionService {
       new EffectiveBillingPolicyResolver(client),
     private readonly provider = whatsAppService,
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
+    private readonly executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate"> =
+      shopExecutionEligibilityService,
   ) {}
 
   getProviderAccountId(): string {
@@ -107,6 +117,11 @@ export class OutboundWhatsAppAdmissionService {
     if (admission.kind !== "admitted") return admission;
 
     try {
+      const execution = await this.executionEligibility.evaluate(admission.shopId);
+      if (!execution.allowed) {
+        await this.failPrepared(admission.messageId);
+        return { kind: "suppressed", reason: suppressionReason(execution.reason) };
+      }
       const result = admission.terminal
         ? await this.provider.sendWhatsAppText({
             to: input.to,
@@ -130,6 +145,7 @@ export class OutboundWhatsAppAdmissionService {
 
   async sendPreparedText({
     messageId,
+    shopId,
     conversationId,
     terminal,
     to,
@@ -139,6 +155,11 @@ export class OutboundWhatsAppAdmissionService {
     text: string;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
+    const execution = await this.executionEligibility.evaluate(shopId);
+    if (!execution.allowed) {
+      await this.failPrepared(messageId);
+      return { kind: "suppressed", reason: suppressionReason(execution.reason) };
+    }
     await this.database.conversationMessage.update({
       where: { id: messageId },
       data: { content: outboundText },
@@ -150,7 +171,7 @@ export class OutboundWhatsAppAdmissionService {
         text: outboundText,
       });
       await this.markSent(messageId, result.providerMessageId);
-      return { kind: "admitted", messageId, conversationId, terminal };
+      return { kind: "admitted", shopId, messageId, conversationId, terminal };
     } catch (error) {
       await this.markProviderFailure(messageId, error);
       throw error;
@@ -185,7 +206,10 @@ export class OutboundWhatsAppAdmissionService {
         error instanceof EffectiveBillingPolicyError &&
         (error.reason === "NO_CONTRACT" || error.reason === "SUBSCRIPTION_FROZEN")
       ) {
-        return { kind: "suppressed", reason: "shop-unavailable" };
+        return {
+          kind: "suppressed",
+          reason: error.reason === "NO_CONTRACT" ? "contract-required" : "subscription-frozen",
+        };
       }
       throw error;
     }
@@ -258,6 +282,7 @@ export class OutboundWhatsAppAdmissionService {
 
     return {
       kind: "admitted",
+      shopId: input.shopId,
       messageId: message.id,
       conversationId: input.conversationId,
       terminal: isTerminal,
@@ -305,6 +330,12 @@ export class OutboundWhatsAppAdmissionService {
     }
     throw lastError;
   }
+}
+
+function suppressionReason(reason: ShopExecutionDenialReason): OutboundSuppressionReason {
+  if (reason === "CONTRACT_REQUIRED") return "contract-required";
+  if (reason === "SUBSCRIPTION_FROZEN") return "subscription-frozen";
+  return "shop-unavailable";
 }
 
 function quantityFor(

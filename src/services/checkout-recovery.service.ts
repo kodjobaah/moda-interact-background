@@ -135,6 +135,19 @@ export class CheckoutRecoveryService {
       candidate.shopId,
       candidate.checkoutToken,
       async () => {
+        const lockedExecution = await shopExecutionEligibilityService.evaluate(
+          candidate.shopId,
+        );
+        if (!lockedExecution.allowed) {
+          return {
+            outcome: "discarded-shop-unavailable",
+            checkoutToken: candidate.checkoutToken,
+            ...(lockedExecution.reason !== "SHOP_UNAVAILABLE"
+              ? { reason: lockedExecution.reason }
+              : {}),
+          } as const;
+        }
+
         // If an order already processed this checkout, the checkout completed
         // before recovery action was committed: do not create a recovery or
         // send a recovery message for it.
@@ -985,6 +998,10 @@ export class CheckoutRecoveryService {
     if (recovery.shop.status !== "ACTIVE") {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
+    const execution = await shopExecutionEligibilityService.evaluate(recovery.shopId);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: execution.reason } as const;
+    }
 
     return pendingRecoveryCandidateService.withCheckoutLock(
       recovery.shopId,
@@ -1008,6 +1025,12 @@ export class CheckoutRecoveryService {
           current.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
         ) {
           return { kind: "ignored", reason: "already-transitioned" } as const;
+        }
+        const lockedExecution = await shopExecutionEligibilityService.evaluate(
+          recovery.shopId,
+        );
+        if (!lockedExecution.allowed) {
+          return { kind: "ignored", reason: lockedExecution.reason } as const;
         }
 
         const outcome = await abandonedCheckoutLookupService.lookup({
