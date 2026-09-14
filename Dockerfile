@@ -12,7 +12,7 @@ COPY database ./database
 COPY observability ./observability
 COPY src ./src
 
-RUN npx prisma generate --schema=./database/schema.prisma
+RUN npx prisma generate --schema=./database/prisma/schema.prisma
 
 RUN npm run build
 
