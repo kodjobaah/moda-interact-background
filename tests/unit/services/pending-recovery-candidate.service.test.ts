@@ -225,6 +225,31 @@ describe("pending recovery candidate service", () => {
     },
   );
 
+  it("discards a frozen checkout before queue or Redis candidate work", async () => {
+    prismaMock.shop.findUnique.mockResolvedValueOnce({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status: "FROZEN" },
+      settings: { recoveryDelayMinutes: 45 },
+    });
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_frozen",
+      cartToken: "cart_frozen",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+    });
+
+    expect(result).toEqual({
+      outcome: "discarded-subscription-frozen",
+      shopDomain: "shop.myshopify.com",
+    });
+    expect(queueInstance.addCalls).toHaveLength(0);
+    expect(redisMock.set).not.toHaveBeenCalled();
+    expect(redisMock.zadd).not.toHaveBeenCalled();
+  });
+
   it("preserves known context when a checkout update supplies only nulls", async () => {
     const initialContext: InternationalContext = {
       languageTag: "en-GB",

@@ -8,6 +8,7 @@ type ShopExecutionClient = Partial<Pick<PrismaClient, "shop">> &
 export type ShopExecutionRecord = {
   id: string;
   status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED";
+  subscription: { status: string } | null;
   settings: { recoveryDelayMinutes: number | null } | null;
 };
 
@@ -33,7 +34,21 @@ export class ShopExecutionEligibilityService {
       select: {
         id: true,
         status: true,
+        subscription: { select: { status: true } },
         settings: { select: { recoveryDelayMinutes: true } },
+      },
+    });
+  }
+
+  async resolveShopById(
+    shopId: string,
+  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "subscription"> | null> {
+    return prisma.shop.findUnique({
+      where: { id: shopId },
+      select: {
+        id: true,
+        status: true,
+        subscription: { select: { status: true } },
       },
     });
   }

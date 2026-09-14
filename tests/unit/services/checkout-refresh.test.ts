@@ -260,6 +260,22 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
+  it("stops a frozen checkout update before candidate, recovery, or Shopify work", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status: "FROZEN" },
+    });
+
+    const result = await service.handleCheckoutUpdatedContract(event);
+
+    expect(result).toEqual({ kind: "ignored", reason: "subscription-frozen" });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
   it("reschedules a matching pending candidate before checking durable recovery", async () => {
     hoisted.pendingCandidateServiceMock.refreshCandidateActivity.mockResolvedValue(
       {
@@ -337,6 +353,27 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
 
     expect(result).toEqual({ kind: "ignored", reason: "shop-unavailable" });
     expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+  });
+
+  it("stops frozen cart activity after one lifecycle lookup", async () => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status: "FROZEN" },
+    });
+
+    const result = await service.handleCartActivityContract({
+      shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
+      cartToken: "cart_1",
+      isEmpty: false,
+      activityAt: "2026-08-28T00:04:00.000Z",
+    });
+
+    expect(result).toEqual({ kind: "ignored", reason: "subscription-frozen" });
+    expect(prismaMock.shop.findUnique).toHaveBeenCalledTimes(1);
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
   });
 
   it("does not use webhook basket data (only the Shopify lookup result)", async () => {

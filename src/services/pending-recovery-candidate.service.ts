@@ -36,7 +36,11 @@ const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
 });
 
-type CandidateEnqueueOutcome = "enqueued" | "refreshed" | "discarded-shop-unavailable";
+type CandidateEnqueueOutcome =
+  | "enqueued"
+  | "refreshed"
+  | "discarded-shop-unavailable"
+  | "discarded-subscription-frozen";
 
 export type CandidateActivityResult =
   | { outcome: "rescheduled"; jobId: string; candidate: PendingRecoveryCandidate }
@@ -86,6 +90,7 @@ export class PendingRecoveryCandidateService {
         shopDomain: string;
         reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
       }
+    | { outcome: "discarded-subscription-frozen"; shopDomain: string }
   > {
     const shopDomain = input.shopDomain.trim().toLowerCase();
     const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
@@ -100,7 +105,13 @@ export class PendingRecoveryCandidateService {
       shop.id,
       shop.status,
     );
+    if (shop.subscription?.status === "FROZEN") {
+      return { outcome: "discarded-subscription-frozen", shopDomain };
+    }
     if (!execution.allowed) {
+      if (execution.reason === "SUBSCRIPTION_FROZEN") {
+        return { outcome: "discarded-subscription-frozen", shopDomain };
+      }
       return {
         outcome: "discarded-shop-unavailable",
         shopDomain,
