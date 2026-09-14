@@ -18,7 +18,10 @@ import {
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
-import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
+import {
+  shopExecutionEligibilityService,
+  type ShopExecutionDenialReason,
+} from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import {
   toLookupInput,
@@ -420,11 +423,9 @@ export class CheckoutRecoveryService {
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
     }
-    if (shop.status !== "ACTIVE") {
-      return { kind: "ignored", reason: "shop-unavailable" } as const;
-    }
-    if (shop.subscription?.status === "FROZEN") {
-      return { kind: "ignored", reason: "subscription-frozen" } as const;
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }
 
     const pending =
@@ -540,11 +541,12 @@ export class CheckoutRecoveryService {
 
   async handleCartActivityContract(event: CartActivityContractInput) {
     const shop = await shopExecutionEligibilityService.resolveShopById(event.shopId);
-    if (!shop || shop.status !== "ACTIVE") {
+    if (!shop) {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
-    if (shop.subscription?.status === "FROZEN") {
-      return { kind: "ignored", reason: "subscription-frozen" } as const;
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }
     const result =
       await pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -1318,6 +1320,16 @@ export class CheckoutRecoveryService {
 }
 
 export const checkoutRecoveryService = new CheckoutRecoveryService();
+
+function lifecycleReason(
+  reason: ShopExecutionDenialReason,
+) {
+  return reason === "CONTRACT_REQUIRED"
+    ? "contract-required"
+    : reason === "SUBSCRIPTION_FROZEN"
+      ? "subscription-frozen"
+      : "shop-unavailable";
+}
 
 function safelyNormalize(
   value: string | null | undefined,

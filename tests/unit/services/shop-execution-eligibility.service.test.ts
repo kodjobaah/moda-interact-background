@@ -16,6 +16,37 @@ describe("ShopExecutionEligibilityService", () => {
   it.each([
     ["ACTIVE", { allowed: true, shopId: "shop-1" }],
     ["TRIALING", { allowed: true, shopId: "shop-1" }],
+    ["NO_CONTRACT", { allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" }],
+    ["FROZEN", { allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" }],
+    ["UNMAPPED", { allowed: false, shopId: "shop-1", reason: "UNMAPPED_PLAN" }],
+    ["SYNC_ERROR", { allowed: false, shopId: "shop-1", reason: "SYNC_ERROR" }],
+  ])("maps a resolved shop projection for %s", (status, expected) => {
+    const eligibility = new ShopExecutionEligibilityService();
+
+    expect(
+      eligibility.evaluateResolvedShop({
+        id: "shop-1",
+        status: "ACTIVE",
+        subscription: { status },
+      }),
+    ).toEqual(expected);
+  });
+
+  it("denies an inactive resolved shop before interpreting subscription state", () => {
+    const eligibility = new ShopExecutionEligibilityService();
+
+    expect(
+      eligibility.evaluateResolvedShop({
+        id: "shop-1",
+        status: "UNINSTALLED",
+        subscription: { status: "ACTIVE" },
+      }),
+    ).toEqual({ allowed: false, shopId: "shop-1", reason: "SHOP_UNAVAILABLE" });
+  });
+
+  it.each([
+    ["ACTIVE", { allowed: true, shopId: "shop-1" }],
+    ["TRIALING", { allowed: true, shopId: "shop-1" }],
   ])("allows executable subscription state %s", async (status, expected) => {
     await expect(service(status).evaluate("shop-1")).resolves.toEqual(expected);
   });

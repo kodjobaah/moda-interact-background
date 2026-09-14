@@ -39,11 +39,18 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
         capacityExhausted = true;
         break;
       }
+      if (result.kind === "ignored" && isLifecycleDenialReason(result.reason)) {
+        return { kind: "ignored", reason: result.reason };
+      }
     }
 
     if (!capacityExhausted && attempted === MAX_RECOVERIES_PER_JOB) {
       const lastRecovery = recoveries[attempted - 1];
       if (lastRecovery) {
+        const finalExecution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
+        if (!finalExecution.allowed) {
+          return { kind: "ignored", reason: finalExecution.reason };
+        }
         await recoveryCapacityResumeService.schedule(
           createRecoveryCapacityResumeContinuation(job.data, lastRecovery.id),
         );
@@ -73,4 +80,15 @@ async function findBlockedRecoveries(shopId: string) {
     take: MAX_RECOVERIES_PER_JOB,
     select: { id: true },
   });
+}
+
+function isLifecycleDenialReason(reason: string) {
+  return [
+    "CONTRACT_REQUIRED",
+    "SUBSCRIPTION_FROZEN",
+    "UNMAPPED_PLAN",
+    "SYNC_ERROR",
+    "SHOP_UNAVAILABLE",
+    "shop-unavailable",
+  ].includes(reason);
 }

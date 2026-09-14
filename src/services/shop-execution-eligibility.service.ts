@@ -43,7 +43,8 @@ export class ShopExecutionEligibilityService {
   async resolveShopById(
     shopId: string,
   ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "subscription"> | null> {
-    return prisma.shop.findUnique({
+    if (!this.client.shop) return null;
+    return this.client.shop.findUnique({
       where: { id: shopId },
       select: {
         id: true,
@@ -87,20 +88,32 @@ export class ShopExecutionEligibilityService {
     if (!subscription || subscription.shop.status !== "ACTIVE") {
       return { allowed: false, shopId, reason: "SHOP_UNAVAILABLE" };
     }
-    const status = subscription.status;
-    if (status === SubscriptionProjectionStatus.NO_CONTRACT) {
-      return { allowed: false, shopId, reason: "CONTRACT_REQUIRED" };
+    return this.evaluateResolvedShop({
+      id: shopId,
+      status: subscription.shop.status,
+      subscription: { status: subscription.status },
+    });
+  }
+
+  evaluateResolvedShop(
+    shop: Pick<ShopExecutionRecord, "id" | "status" | "subscription">,
+  ): ShopExecutionDecision {
+    if (shop.status !== "ACTIVE" || !shop.subscription) {
+      return { allowed: false, shopId: shop.id, reason: "SHOP_UNAVAILABLE" };
     }
-    if (status === SubscriptionProjectionStatus.FROZEN) {
-      return { allowed: false, shopId, reason: "SUBSCRIPTION_FROZEN" };
+    if (shop.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT) {
+      return { allowed: false, shopId: shop.id, reason: "CONTRACT_REQUIRED" };
     }
-    if (status === SubscriptionProjectionStatus.SYNC_ERROR) {
-      return { allowed: false, shopId, reason: "SYNC_ERROR" };
+    if (shop.subscription.status === SubscriptionProjectionStatus.FROZEN) {
+      return { allowed: false, shopId: shop.id, reason: "SUBSCRIPTION_FROZEN" };
     }
-    if (status === SubscriptionProjectionStatus.UNMAPPED) {
-      return { allowed: false, shopId, reason: "UNMAPPED_PLAN" };
+    if (shop.subscription.status === SubscriptionProjectionStatus.SYNC_ERROR) {
+      return { allowed: false, shopId: shop.id, reason: "SYNC_ERROR" };
     }
-    return { allowed: true, shopId };
+    if (shop.subscription.status === SubscriptionProjectionStatus.UNMAPPED) {
+      return { allowed: false, shopId: shop.id, reason: "UNMAPPED_PLAN" };
+    }
+    return { allowed: true, shopId: shop.id };
   }
 }
 
