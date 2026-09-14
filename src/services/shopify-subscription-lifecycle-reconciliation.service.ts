@@ -55,27 +55,42 @@ export class ShopifySubscriptionLifecycleReconciliationService {
 
     const ordering = await this.database.$transaction(async (transaction) => {
       await lockSubscription(transaction, subscriptionId);
-      return transaction.subscription.findUnique({
+      const current = await transaction.subscription.findUnique({
         where: { id: subscriptionId },
         select: { status: true, lastProviderLifecycleEventAt: true, lastProviderLifecycleEventId: true },
       });
-    });
-    if (isStrictlyOlder(ordering?.lastProviderLifecycleEventAt ?? null, ordering?.lastProviderLifecycleEventId ?? null, lifecycle)) {
-      if (ordering?.status === SubscriptionProjectionStatus.FROZEN) {
-        await this.database.$transaction(async (transaction) => {
-          await lockSubscription(transaction, subscriptionId);
-          await transaction.subscription.update({
-            where: { id: subscriptionId },
-            data: {
-              nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
-              lastSyncedAt: now,
-            },
-          });
-        });
-      } else if (!active) {
-        await this.recordUnresolved(shopId, subscriptionId, now, lifecycle);
+      if (!isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle)) {
+        return { kind: "continue" as const };
       }
-      return ordering?.status === SubscriptionProjectionStatus.FROZEN || !active ? "handled" : "continue";
+      if (current?.status === SubscriptionProjectionStatus.FROZEN) {
+        await transaction.subscription.update({
+          where: { id: subscriptionId },
+          data: {
+            nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
+            lastSyncedAt: now,
+          },
+        });
+        return { kind: "handled" as const };
+      }
+      if (!active) {
+        await transaction.subscription.update({
+          where: { id: subscriptionId },
+          data: {
+            nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+            lastSyncedAt: now,
+            lastSyncErrorCode: "PROVIDER_STATE_UNRESOLVED",
+            lastSyncErrorAt: now,
+          },
+        });
+        return { kind: "handled" as const };
+      }
+      return { kind: "stale-continue" as const };
+    });
+    if (ordering.kind === "handled") {
+      return "handled";
+    }
+    if (ordering.kind === "stale-continue") {
+      return "continue";
     }
 
     if (active === null && lifecycle.state === "CANCELED") {

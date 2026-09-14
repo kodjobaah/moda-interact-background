@@ -381,19 +381,27 @@ export class BillingSubscriptionReconciliationService {
         ? await this.database.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
         : null;
       const preCloseAt = new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
-      let next = provider.pendingPlanHandle && provider.pendingEffectiveAt
-        ? provider.pendingEffectiveAt
-        : this.now() < preCloseAt ? preCloseAt : provider.currentPeriodEnd;
+      const next = this.now() < preCloseAt ? preCloseAt : provider.currentPeriodEnd;
       if (this.now() >= preCloseAt && this.now() < provider.currentPeriodEnd) {
         try {
           await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: row.subscription.billingPeriodId! });
         } catch (error) {
-          next = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, provider.currentPeriodEnd.getTime()));
+          const retryAt = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, provider.currentPeriodEnd.getTime()));
           const failed = await this.database.subscription.updateMany({
             where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
-            data: { currentPeriodEnd: provider.currentPeriodEnd, nextReconcileAt: next, lastSyncedAt: this.now(), lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED", lastSyncErrorAt: this.now() },
+            data: {
+              pendingShopifyPlanHandle: provider.pendingPlanHandle,
+              pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+              pendingEffectiveAt: provider.pendingEffectiveAt,
+              cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+              currentPeriodEnd: provider.currentPeriodEnd,
+              nextReconcileAt: retryAt,
+              lastSyncedAt: this.now(),
+              lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED",
+              lastSyncErrorAt: this.now(),
+            },
           });
-          if (failed.count > 0) await this.publishNext(row.id, row.subscription.id, next);
+          if (failed.count > 0) await this.publishNext(row.id, row.subscription.id, retryAt);
           return;
         }
       }

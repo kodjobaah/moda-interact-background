@@ -78,6 +78,32 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     expect(tx.subscription.update.mock.calls[0][0].data.lastProviderLifecycleEventId).toBeUndefined();
   });
 
+  it("ignores stale FROZEN evidence and continues with live provider truth", async () => {
+    const tx = transaction({ status: "ACTIVE", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+      activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
+      latestLifecycleEvent: frozen,
+    }, now);
+    expect(result).toBe("continue");
+    expect(tx.subscription.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps FROZEN and advances one hourly retry for stale UNFROZEN evidence", async () => {
+    const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-old", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
+  });
+
+  it("does not overwrite a newer unfreeze schedule after stale FROZEN classification", async () => {
+    const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer", nextReconcileAt: new Date("2026-09-14T12:30:00.000Z") });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    expect(tx.subscription.update).toHaveBeenCalledOnce();
+    expect(tx.subscription.update.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-09-14T13:00:00.000Z"));
+  });
+
   it("preserves unrelated sync error while projecting FROZEN", async () => {
     const tx = transaction({ status: "ACTIVE", lastSyncErrorCode: "MISSING_USAGE_METER", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
