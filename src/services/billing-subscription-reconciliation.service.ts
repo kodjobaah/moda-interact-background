@@ -351,6 +351,14 @@ export class BillingSubscriptionReconciliationService {
         await this.recordRolloverRetry(row.id, expected as RolloverExpected, error);
       } else if (isEstablishedPlanChange) {
         await this.recordEstablishedPlanChangeRetry(row.id, expected as EstablishedPlanChangeExpected, "PARTNER_API_ERROR", error);
+      } else if (isFrozenReconciliation) {
+        await this.recordFrozenProviderFailure(
+          row.id,
+          row.subscription.id,
+          row.subscription.nextReconcileAt,
+          row.subscription.planId,
+          error,
+        );
       } else {
         await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
       }
@@ -746,6 +754,37 @@ export class BillingSubscriptionReconciliationService {
         ...(next ? { nextReconcileAt: next } : { pendingShopifyPlanHandle: null, pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: null }),
     });
     if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
+  }
+
+  private async recordFrozenProviderFailure(
+    shopId: string,
+    subscriptionId: string,
+    consumedAt: Date,
+    planId: string,
+    error: unknown,
+  ): Promise<void> {
+    const now = this.now();
+    const next = new Date(now.getTime() + 60 * 60 * 1000);
+    this.logger.error("billing.subscription_reconciliation.provider_failed", {
+      shopId,
+      subscriptionId,
+      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+    });
+    const updated = await this.database.subscription.updateMany({
+      where: {
+        id: subscriptionId,
+        status: SubscriptionProjectionStatus.FROZEN,
+        planId,
+        nextReconcileAt: consumedAt,
+      },
+      data: {
+        lastSyncErrorCode: "PARTNER_API_ERROR",
+        lastSyncErrorAt: now,
+        lastSyncedAt: now,
+        nextReconcileAt: next,
+      },
+    });
+    if (updated.count > 0) await this.publishNext(shopId, subscriptionId, next);
   }
 
   private async casPendingUpdate(

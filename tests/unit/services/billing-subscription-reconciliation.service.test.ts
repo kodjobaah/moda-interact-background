@@ -91,6 +91,9 @@ function harness({
       if (providerError) throw providerError;
       return providerResult;
     }),
+    getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async () => {
+      return { activeSubscription: await partner.getActiveSubscription("gid://shopify/Shop/1"), latestLifecycleEvent: null };
+    }),
   };
   const logger = { error: vi.fn(), warn: vi.fn() };
   const service = new BillingSubscriptionReconciliationService(

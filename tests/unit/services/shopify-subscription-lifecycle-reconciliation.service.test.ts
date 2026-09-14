@@ -20,9 +20,22 @@ function transaction(subscription: Record<string, unknown>) {
       findUnique: vi.fn().mockResolvedValue(subscription),
       update: vi.fn().mockResolvedValue(subscription),
     },
-    billingPeriod: { update: vi.fn() },
+    billingPlan: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "plan-1",
+        active: true,
+        name: "Growth",
+        kind: "PAID_METERED",
+        shopifyPlanHandle: "growth",
+        includedRecoveryConversationAllowance: 100,
+        recoveryCreditPackEnabled: false,
+        shopifyUsageEventHandle: null,
+        shopifyRecoveryCreditPackEventHandle: null,
+      }),
+    },
+    billingPeriod: { update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     usageEvent: { updateMany: vi.fn() },
-    billingPeriodEntitlementCounter: { findUnique: vi.fn(), update: vi.fn() },
+    billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(null), update: vi.fn(), updateMany: vi.fn() },
     usageReservation: { aggregate: vi.fn(), updateMany: vi.fn() },
   };
 }
@@ -51,7 +64,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
 
-    expect(tx.billingPeriod.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "CLOSED", closeReason: "CONTRACT_ENDED" }) }));
+    expect(tx.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "CLOSED", closeReason: "CONTRACT_ENDED" }) }));
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NO_CONTRACT", planId: null, billingPeriodId: null }) }));
   });
 
@@ -63,6 +76,6 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
 
-    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "ACTIVE", lastSyncErrorCode: null }) }));
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "ACTIVE", observedShopifyPlanHandle: "growth" }) }));
   });
 });

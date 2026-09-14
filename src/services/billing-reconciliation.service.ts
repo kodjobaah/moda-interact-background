@@ -656,19 +656,31 @@ export class BillingReconciliationService {
   private async markSyncError(shopId: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     this.logger.error("billing.subscription_reconciliation.error", { shopId, error: message });
-    await this.database.subscription.upsert({
+    const now = this.now();
+    const subscription = await this.database.subscription.findUnique({
       where: { shopId },
-      update: {
-        lastSyncErrorCode: "PARTNER_API_ERROR",
-        lastSyncErrorAt: this.now(),
+      select: { id: true, status: true, planId: true, billingPeriodId: true, nextReconcileAt: true },
+    });
+    if (!subscription) return;
+    const nextReconcileAt = subscription.status === SubscriptionProjectionStatus.FROZEN
+      ? new Date(now.getTime() + 60 * 60 * 1000)
+      : new Date(now.getTime() + 5 * 60 * 1000);
+    const updated = await this.database.subscription.updateMany({
+      where: {
+        id: subscription.id,
+        status: subscription.status,
+        planId: subscription.planId,
+        billingPeriodId: subscription.billingPeriodId,
+        nextReconcileAt: subscription.nextReconcileAt,
       },
-      create: {
-        shopId,
-        status: SubscriptionProjectionStatus.NO_CONTRACT,
+      data: {
         lastSyncErrorCode: "PARTNER_API_ERROR",
-        lastSyncErrorAt: this.now(),
+        lastSyncErrorAt: now,
+        lastSyncedAt: now,
+        nextReconcileAt,
       },
     });
+    if (updated.count > 0) await this.enqueueSubscriptionReconcile(shopId, subscription.id, nextReconcileAt, now);
   }
 
   private async enqueueSubscriptionReconcile(shopId: string, subscriptionId: string, nextReconcileAt: Date, now: Date): Promise<void> {

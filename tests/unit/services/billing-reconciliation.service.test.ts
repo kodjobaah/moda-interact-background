@@ -76,6 +76,9 @@ function harness({
       if (partnerError) throw partnerError;
       return partnerResult;
     }),
+    getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async () => {
+      return { activeSubscription: await partner.getActiveSubscription("gid://shopify/Shop/1"), latestLifecycleEvent: null };
+    }),
   };
   const publisher = { publishDue: vi.fn().mockResolvedValue({ selected: 0, claimed: 0, reported: 0, retryable: 0, needsAttention: 0 }) };
   const purchases = {
@@ -503,12 +506,12 @@ describe("BillingReconciliationService", () => {
     const result = await test.service.reconcileOnce();
 
     expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 0, subscriptionErrors: 1 });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
         lastSyncErrorCode: "PARTNER_API_ERROR",
       }),
     }));
-    expect(test.database.subscription.upsert.mock.calls[0]?.[0].update).not.toHaveProperty("planId");
+    expect(test.database.subscription.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("planId");
   });
 
   it("B008-R7 reports a current-cycle usage discrepancy without creating a correction", async () => {
@@ -888,6 +891,10 @@ describe("BillingReconciliationService", () => {
         if (shopifyShopId.endsWith("/A")) throw new Error("temporary Partner failure");
         return null;
       }),
+      getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async (shopifyShopId: string) => ({
+        activeSubscription: await partner.getActiveSubscription(shopifyShopId),
+        latestLifecycleEvent: null,
+      })),
     };
     const publisher = { publishDue: vi.fn().mockResolvedValue({}) };
     const purchases = { reconcileProviderConfirmed: vi.fn().mockResolvedValue({ activatedCount: 0, discrepancy: null }) };
@@ -904,7 +911,7 @@ describe("BillingReconciliationService", () => {
     await service.reconcileOnce(2);
     await service.reconcileOnce(2);
 
-    expect(partner.getActiveSubscription.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
+    expect(partner.getSubscriptionReconciliationSnapshot.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
       "gid://shopify/Shop/A",
       "gid://shopify/Shop/B",
       "gid://shopify/Shop/C",
