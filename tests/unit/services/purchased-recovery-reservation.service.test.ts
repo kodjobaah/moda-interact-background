@@ -19,10 +19,8 @@ function createHarness(grantedQuantity = 1, lotInputs = [{ id: "purchase-1", cre
     lots: lotInputs.map((lot) => ({
       shopId: "shop-1",
       status: "ACTIVE",
-      committedQuantity: 0,
-      reservedQuantity: 0,
-      refundingQuantity: 0,
-      refundedQuantity: 0,
+      currentAmount: lot.currentAmount ?? lot.creditsGranted,
+      reservedAmount: lot.reservedAmount ?? 0,
       version: 0,
       ...lot,
     })),
@@ -54,18 +52,16 @@ function createHarness(grantedQuantity = 1, lotInputs = [{ id: "purchase-1", cre
         const activation = (left.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER) - (right.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
         return activation || left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id);
       }).filter((lot) => lot.status === "ACTIVE")),
-      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; reservedQuantity?: { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
+      updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; reservedAmount?: { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
         const lot = state.lots.find((candidate) => candidate.id === where.id);
         if (!lot || lot.version !== where.version || (where.status && lot.status !== where.status)) return { count: 0 };
-        if (where.reservedQuantity?.gte !== undefined && lot.reservedQuantity < where.reservedQuantity.gte) return { count: 0 };
-        if (where.reservedQuantity?.lte !== undefined && lot.reservedQuantity > where.reservedQuantity.lte) return { count: 0 };
-        const reserved = data.reservedQuantity as { increment?: number; decrement?: number } | undefined;
-        const committed = data.committedQuantity as { increment?: number } | undefined;
-        const refunding = data.refundingQuantity as { increment?: number } | undefined;
-        lot.reservedQuantity += reserved?.increment ?? 0;
-        lot.reservedQuantity -= reserved?.decrement ?? 0;
-        lot.committedQuantity += committed?.increment ?? 0;
-        lot.refundingQuantity += refunding?.increment ?? 0;
+        if (where.reservedAmount?.gte !== undefined && lot.reservedAmount < where.reservedAmount.gte) return { count: 0 };
+        if (where.reservedAmount?.lte !== undefined && lot.reservedAmount > where.reservedAmount.lte) return { count: 0 };
+        const current = data.currentAmount as { decrement?: number } | undefined;
+        const reserved = data.reservedAmount as { increment?: number; decrement?: number } | undefined;
+        lot.currentAmount -= current?.decrement ?? 0;
+        lot.reservedAmount += reserved?.increment ?? 0;
+        lot.reservedAmount -= reserved?.decrement ?? 0;
         lot.version += (data.version as { increment: number }).increment;
         return { count: 1 };
       }),
@@ -119,6 +115,7 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "already-committed" });
 
     expect(state.counter).toMatchObject({ grantedQuantity: 1, committedQuantity: 1, reservedQuantity: 0 });
+    expect(state.lots[0]).toMatchObject({ currentAmount: 0, reservedAmount: 0 });
     expect(state.usageEvent).toMatchObject({
       metric: "RECOVERY_CONVERSATION",
       shopifyReportState: "NOT_APPLICABLE",
@@ -135,7 +132,7 @@ describe("PurchasedRecoveryReservationService", () => {
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-2" }))
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
     expect(state.counter.reservedQuantity).toBe(1);
-    expect(state.lots[0]?.reservedQuantity).toBe(1);
+    expect(state.lots[0]?.reservedAmount).toBe(1);
   });
 
   it("selects the oldest active spendable lot in FIFO order", async () => {
@@ -148,16 +145,16 @@ describe("PurchasedRecoveryReservationService", () => {
 
     expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "purchase-old" } });
     expect(state.lots).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "purchase-old", reservedQuantity: 1 }),
-      expect.objectContaining({ id: "purchase-new", reservedQuantity: 0 }),
+      expect.objectContaining({ id: "purchase-old", reservedAmount: 1 }),
+      expect.objectContaining({ id: "purchase-new", reservedAmount: 0 }),
     ]));
   });
 
   it("skips exhausted, refund-held, and refunded lots", async () => {
     const { service } = createHarness(3, [
-      { id: "exhausted", creditsGranted: 1, committedQuantity: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
-      { id: "held", creditsGranted: 1, refundingQuantity: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
-      { id: "refunded", creditsGranted: 1, refundedQuantity: 1, activatedAt: new Date("2026-09-03T00:00:00.000Z"), createdAt: new Date("2026-09-03T00:00:00.000Z") },
+      { id: "exhausted", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
+      { id: "held", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+      { id: "refunded", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-03T00:00:00.000Z"), createdAt: new Date("2026-09-03T00:00:00.000Z") },
       { id: "available", creditsGranted: 1, activatedAt: new Date("2026-09-04T00:00:00.000Z"), createdAt: new Date("2026-09-04T00:00:00.000Z") },
     ]);
 
@@ -184,8 +181,8 @@ describe("PurchasedRecoveryReservationService", () => {
       });
       const lot = await transaction.recoveryCreditPurchase.findUnique({ where: { id: "purchase-1" } });
       const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
-        where: { id: lot.id, version: lot.version, reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - 5 } },
-        data: { refundingQuantity: { increment: 5 }, version: { increment: 1 } },
+        where: { id: lot.id, version: lot.version, reservedAmount: { lte: lot.currentAmount - lot.reservedAmount - 5 } },
+        data: { currentAmount: { decrement: 5 }, version: { increment: 1 } },
       });
       return updated.count === 1 && updatedLot.count === 1;
     });
@@ -208,7 +205,7 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "released" });
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
-    expect(state.lots[0]).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
+    expect(state.lots[0]).toMatchObject({ currentAmount: 1, reservedAmount: 0 });
   });
 
   it("reactivates a released reservation on the same row and counter", async () => {
@@ -227,8 +224,8 @@ describe("PurchasedRecoveryReservationService", () => {
     expect(state.counter).toMatchObject({ reservedQuantity: 1, version: 3 });
     expect(transaction.usageReservation.create).toHaveBeenCalledTimes(1);
     expect(state.lots).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "purchase-old", reservedQuantity: 1 }),
-      expect.objectContaining({ id: "purchase-new", reservedQuantity: 0 }),
+      expect.objectContaining({ id: "purchase-old", reservedAmount: 1 }),
+      expect.objectContaining({ id: "purchase-new", reservedAmount: 0 }),
     ]));
   });
 
@@ -240,7 +237,7 @@ describe("PurchasedRecoveryReservationService", () => {
       .resolves.toMatchObject({ kind: "ambiguous" });
 
     expect(state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
-    expect(state.lots[0]).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+    expect(state.lots[0]).toMatchObject({ currentAmount: 1, reservedAmount: 1 });
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-next" }))
       .resolves.toMatchObject({ kind: "credits-exhausted", available: 0 });
   });
