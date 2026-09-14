@@ -52,11 +52,47 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
   });
 
-  it("does not let older lifecycle evidence overwrite newer persisted evidence", async () => {
-    const tx = transaction({ lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
+  it("ignores strictly older lifecycle evidence without overwriting newer identity", async () => {
+    const tx = transaction({ status: "ACTIVE", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update).not.toHaveBeenCalled();
+  });
+
+  it("replays the same FROZEN event and advances one hourly retry", async () => {
+    const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: frozen.occurredAt, lastProviderLifecycleEventId: frozen.id });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
+  });
+
+  it("keeps newer lifecycle identity when older unresolved evidence arrives", async () => {
+    const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, state: "UPDATED", eventType: "SUBSCRIPTION_UPDATED", id: "event-old" } }, now);
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
+    expect(tx.subscription.update.mock.calls[0][0].data.lastProviderLifecycleEventId).toBeUndefined();
+  });
+
+  it("preserves unrelated sync error while projecting FROZEN", async () => {
+    const tx = transaction({ status: "ACTIVE", lastSyncErrorCode: "MISSING_USAGE_METER", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    expect(tx.subscription.update.mock.calls[0][0].data.lastSyncErrorCode).toBeUndefined();
+  });
+
+  it("uses live cancelAtEndOfCycle while preserving FROZEN entitlement", async () => {
+    const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtPeriodEnd: true, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: frozen }, now);
+    expect(tx.subscription.update.mock.calls[0][0].data).toMatchObject({ status: "FROZEN", cancelAtPeriodEnd: true });
+  });
+
+  it("keeps FROZEN for UNFROZEN with no live contract and retries in one hour", async () => {
+    const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", lastSyncErrorCode: "UNFROZEN_LIVE_CONTRACT_PENDING", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
   });
 
   it("closes the current period and writes NO_CONTRACT for effective cancellation", async () => {

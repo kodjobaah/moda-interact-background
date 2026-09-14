@@ -1377,7 +1377,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: oldNext.toISOString() });
 
-    expect(test.partner.getActiveSubscription).not.toHaveBeenCalled();
+    expect(test.partner.getActiveSubscription).toHaveBeenCalledOnce();
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         id: "subscription-1",

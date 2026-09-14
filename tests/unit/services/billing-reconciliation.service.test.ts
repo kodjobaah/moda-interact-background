@@ -806,7 +806,7 @@ describe("BillingReconciliationService", () => {
   });
 
   it("lets the canonical rollover return its successor without using the legacy period upsert", async () => {
-    const test = harness();
+    const test = harness({ partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null } });
     const existing = {
       id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
@@ -826,7 +826,7 @@ describe("BillingReconciliationService", () => {
   });
 
   it("keeps a canonical fail-closed rollover result from creating a later period", async () => {
-    const test = harness();
+    const test = harness({ partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null } });
     test.database.subscription.findUnique.mockResolvedValue({
       id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
@@ -845,6 +845,7 @@ describe("BillingReconciliationService", () => {
     const queue = { add: vi.fn().mockResolvedValue({}) };
     const test = harness({
       queue,
+      partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null },
       plan: {
         id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "pro-2026",
         recoveryCreditPackEnabled: false, shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null,

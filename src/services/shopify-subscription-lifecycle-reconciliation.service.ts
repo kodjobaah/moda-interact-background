@@ -10,6 +10,7 @@ import {
   UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 
 import type {
   PartnerSubscription,
@@ -91,9 +92,14 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       await lockSubscription(transaction, subscriptionId);
       const current = await transaction.subscription.findUnique({
         where: { id: subscriptionId },
-        select: { lastProviderLifecycleEventAt: true, lastProviderLifecycleEventId: true, lastSyncErrorCode: true },
+        select: { status: true, lastProviderLifecycleEventAt: true, lastProviderLifecycleEventId: true, lastSyncErrorCode: true },
       });
-      if (isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle)) return;
+      if (isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle)) {
+        if (current?.status === SubscriptionProjectionStatus.FROZEN) {
+          await transaction.subscription.update({ where: { id: subscriptionId }, data: { nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS), lastSyncedAt: now } });
+        }
+        return;
+      }
       const replay = isSameEvent(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle);
       const clearError = current?.lastSyncErrorCode === "UNFROZEN_LIVE_CONTRACT_PENDING"
         || current?.lastSyncErrorCode === "PROVIDER_STATE_UNRESOLVED"
@@ -115,14 +121,20 @@ export class ShopifySubscriptionLifecycleReconciliationService {
   private async recordUnresolved(_shopId: string, subscriptionId: string, now: Date, lifecycle?: PartnerSubscriptionLifecycleEvent): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       await lockSubscription(transaction, subscriptionId);
+      const current = await transaction.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: { status: true, lastProviderLifecycleEventAt: true, lastProviderLifecycleEventId: true },
+      });
+      const frozen = current?.status === SubscriptionProjectionStatus.FROZEN;
+      const older = lifecycle && isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle);
       await transaction.subscription.update({
         where: { id: subscriptionId },
         data: {
-          nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+          nextReconcileAt: new Date(now.getTime() + (frozen ? FROZEN_RECONCILE_INTERVAL_MS : PROVIDER_RETRY_INTERVAL_MS)),
           lastSyncedAt: now,
-          lastSyncErrorCode: lifecycle?.state === "UNFROZEN" ? "UNFROZEN_LIVE_CONTRACT_PENDING" : "PROVIDER_STATE_UNRESOLVED",
+          lastSyncErrorCode: lifecycle?.state === "UNFROZEN" && !older ? "UNFROZEN_LIVE_CONTRACT_PENDING" : "PROVIDER_STATE_UNRESOLVED",
           lastSyncErrorAt: now,
-          ...(lifecycle ? {
+          ...(lifecycle && !older ? {
             lastProviderLifecycleState: lifecycle.state,
             lastProviderLifecycleEventId: lifecycle.id,
             lastProviderLifecycleEventAt: lifecycle.occurredAt,
@@ -157,7 +169,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       if (!subscription || subscription.status !== SubscriptionProjectionStatus.FROZEN || isStrictlyOlder(subscription.lastProviderLifecycleEventAt, subscription.lastProviderLifecycleEventId, lifecycle)) return false;
       const plan = await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.planHandle } });
       if (!plan?.active) {
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.UNMAPPED, observedShopifyPlanHandle: provider.planHandle, lastSyncedAt: now, lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE", lastSyncErrorAt: now, nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS), lastProviderLifecycleState: lifecycle.state, lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt } });
+        await this.updateUnfreezeFailure(transaction, subscriptionId, subscription, provider, lifecycle, now, "UNMAPPED_PLAN_HANDLE", SubscriptionProjectionStatus.UNMAPPED);
         return false;
       }
       const planInput = {
@@ -173,17 +185,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       };
       const configurationError = validateProviderPlan(planInput, provider);
       if (configurationError) {
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: {
-          status: configurationError === "UNMAPPED_PLAN_HANDLE" ? SubscriptionProjectionStatus.UNMAPPED : SubscriptionProjectionStatus.SYNC_ERROR,
-          observedShopifyPlanHandle: provider.planHandle,
-          lastSyncedAt: now,
-          lastSyncErrorCode: configurationError,
-          lastSyncErrorAt: now,
-          nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
-          lastProviderLifecycleState: lifecycle.state,
-          lastProviderLifecycleEventId: lifecycle.id,
-          lastProviderLifecycleEventAt: lifecycle.occurredAt,
-        } });
+        await this.updateUnfreezeFailure(transaction, subscriptionId, subscription, provider, lifecycle, now, configurationError, configurationError === "UNMAPPED_PLAN_HANDLE" ? SubscriptionProjectionStatus.UNMAPPED : SubscriptionProjectionStatus.SYNC_ERROR);
         return false;
       }
       const samePlan = subscription.planId === plan.id;
@@ -208,7 +210,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
           lastProviderLifecycleState: lifecycle.state,
           lastProviderLifecycleEventId: lifecycle.id,
           lastProviderLifecycleEventAt: lifecycle.occurredAt,
-          nextReconcileAt: provider.currentPeriodEnd ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - 5 * 60 * 1000)) : new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+          nextReconcileAt: provider.currentPeriodEnd ? nextCycleReconcileAt(provider.currentPeriodEnd, now) : new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
         } });
         return true;
       }
@@ -229,6 +231,27 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       } });
       return true;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  private async updateUnfreezeFailure(transaction: Prisma.TransactionClient, subscriptionId: string, subscription: { pendingShopifyPlanHandle: string | null; pendingPlanId: string | null; pendingEffectiveAt: Date | null }, provider: PartnerSubscription, lifecycle: PartnerSubscriptionLifecycleEvent, now: Date, errorCode: string, status: SubscriptionProjectionStatus): Promise<void> {
+    const pendingPlan = provider.pendingPlanHandle
+      ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+      : null;
+    await transaction.subscription.update({ where: { id: subscriptionId }, data: {
+      status,
+      observedShopifyPlanHandle: provider.planHandle,
+      pendingShopifyPlanHandle: provider.pendingPlanHandle,
+      pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+      pendingEffectiveAt: provider.pendingEffectiveAt,
+      cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+      lastSyncedAt: now,
+      lastSyncErrorCode: errorCode,
+      lastSyncErrorAt: now,
+      nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+      lastProviderLifecycleState: lifecycle.state,
+      lastProviderLifecycleEventId: lifecycle.id,
+      lastProviderLifecycleEventAt: lifecycle.occurredAt,
+    } });
   }
 
   private async cancel(shopId: string, subscriptionId: string, lifecycle: PartnerSubscriptionLifecycleEvent, now: Date): Promise<void> {
@@ -289,6 +312,11 @@ function validateProviderPlan(
   }
   if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) return "MISSING_USAGE_METER";
   return null;
+}
+
+function nextCycleReconcileAt(periodEnd: Date, now: Date): Date {
+  const preCloseAt = new Date(periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+  return now < preCloseAt ? preCloseAt : periodEnd;
 }
 
 function isStrictlyOlder(

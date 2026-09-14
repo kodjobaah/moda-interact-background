@@ -9,6 +9,7 @@ import {
 import type { PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import {
+  APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
   BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
   createBillingSubscriptionReconcileJobId,
 } from "@modainteract/moda-interact-shared/billing";
@@ -481,7 +482,7 @@ export class BillingReconciliationService {
       return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
     }
     if (existing?.id && plan?.active && existing.planId === plan.id) {
-      if ((provider.cancelAtPeriodEnd || existing.cancelAtPeriodEnd)
+      if ((provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || existing.cancelAtPeriodEnd)
         && provider.currentPeriodEnd
         && provider.currentPeriodEnd > now
         && provider.currentPeriodStart?.getTime() === existing.currentPeriodStart?.getTime()
@@ -492,7 +493,9 @@ export class BillingReconciliationService {
         const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
           ? provider.pendingEffectiveAt
           : provider.currentPeriodEnd
-            ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - 5 * 60 * 1000))
+            ? now < new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
+              ? new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
+              : provider.currentPeriodEnd
             : null;
         const updated = await this.database.subscription.updateMany({
           where: { id: existing.id, planId: existing.planId, billingPeriodId: existing.billingPeriodId, nextReconcileAt: existing.nextReconcileAt },

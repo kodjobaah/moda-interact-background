@@ -333,15 +333,6 @@ export class BillingSubscriptionReconciliationService {
       : null;
     if (isCycleDiscovery && (!currentPlan || !currentPlan.active || currentPlan.kind !== BillingPlanKind.FREE || !currentPlan.recoveryCreditPackEnabled)) return;
     if (isRollover && (!currentPlan || !currentPlan.active || (currentPlan.kind === BillingPlanKind.FREE && !currentPlan.recoveryCreditPackEnabled))) return;
-    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
-      const now = this.now();
-      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
-      if (now < row.subscription.currentPeriodEnd) {
-        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
-        return;
-      }
-    }
-
     let snapshot: PartnerSubscriptionReconciliationSnapshot;
     try {
       snapshot = await getSubscriptionReconciliationSnapshot(this.partner, row.shopifyShopId);
@@ -378,8 +369,17 @@ export class BillingSubscriptionReconciliationService {
         return;
       }
     }
+    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
+      const now = this.now();
+      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+      if (now < row.subscription.currentPeriodEnd) {
+        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
+        return;
+      }
+    }
     const provider = snapshot.activeSubscription;
     if (provider && currentPlan && isRollover
+      && (provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || row.subscription.cancelAtPeriodEnd)
       && provider.planHandle === currentPlan.shopifyPlanHandle
       && provider.currentPeriodStart?.getTime() === row.subscription.currentPeriodStart?.getTime()
       && provider.currentPeriodEnd?.getTime() === row.subscription.currentPeriodEnd?.getTime()
@@ -391,7 +391,9 @@ export class BillingSubscriptionReconciliationService {
       const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
         ? provider.pendingEffectiveAt
         : provider.currentPeriodEnd
-          ? new Date(Math.max(this.now().getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS))
+          ? this.now() < new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
+            ? new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
+            : provider.currentPeriodEnd
           : null;
       const updated = await this.database.subscription.updateMany({
         where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
