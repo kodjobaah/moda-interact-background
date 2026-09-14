@@ -63,6 +63,10 @@ function snapshotFetch(data: Record<string, unknown>, now = new Date("2026-09-12
 }
 
 describe("ShopifyPartnerBillingApi", () => {
+  it("requires the combined subscription reconciliation snapshot contract", () => {
+    const provider: ShopifyPartnerBillingApi = new ShopifyPartnerBillingApi(environment, vi.fn() as never);
+    expect(provider.getSubscriptionReconciliationSnapshot).toBeTypeOf("function");
+  });
   it("mirrors the accepted Partner contract and classifies flat/tiered items independent of order", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,

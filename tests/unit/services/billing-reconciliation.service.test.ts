@@ -76,6 +76,9 @@ function harness({
       if (partnerError) throw partnerError;
       return partnerResult;
     }),
+    getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async () => {
+      return { activeSubscription: await partner.getActiveSubscription("gid://shopify/Shop/1"), latestLifecycleEvent: null };
+    }),
   };
   const publisher = { publishDue: vi.fn().mockResolvedValue({ selected: 0, claimed: 0, reported: 0, retryable: 0, needsAttention: 0 }) };
   const purchases = {
@@ -503,12 +506,12 @@ describe("BillingReconciliationService", () => {
     const result = await test.service.reconcileOnce();
 
     expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 0, subscriptionErrors: 1 });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
         lastSyncErrorCode: "PARTNER_API_ERROR",
       }),
     }));
-    expect(test.database.subscription.upsert.mock.calls[0]?.[0].update).not.toHaveProperty("planId");
+    expect(test.database.subscription.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("planId");
   });
 
   it("B008-R7 reports a current-cycle usage discrepancy without creating a correction", async () => {
@@ -803,7 +806,7 @@ describe("BillingReconciliationService", () => {
   });
 
   it("lets the canonical rollover return its successor without using the legacy period upsert", async () => {
-    const test = harness();
+    const test = harness({ partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null } });
     const existing = {
       id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
@@ -823,7 +826,7 @@ describe("BillingReconciliationService", () => {
   });
 
   it("keeps a canonical fail-closed rollover result from creating a later period", async () => {
-    const test = harness();
+    const test = harness({ partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null } });
     test.database.subscription.findUnique.mockResolvedValue({
       id: "subscription-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old",
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
@@ -842,6 +845,7 @@ describe("BillingReconciliationService", () => {
     const queue = { add: vi.fn().mockResolvedValue({}) };
     const test = harness({
       queue,
+      partnerResult: { ...providerSubscription, pendingPlanHandle: null, pendingEffectiveAt: null },
       plan: {
         id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "pro-2026",
         recoveryCreditPackEnabled: false, shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null,
@@ -888,6 +892,10 @@ describe("BillingReconciliationService", () => {
         if (shopifyShopId.endsWith("/A")) throw new Error("temporary Partner failure");
         return null;
       }),
+      getSubscriptionReconciliationSnapshot: vi.fn().mockImplementation(async (shopifyShopId: string) => ({
+        activeSubscription: await partner.getActiveSubscription(shopifyShopId),
+        latestLifecycleEvent: null,
+      })),
     };
     const publisher = { publishDue: vi.fn().mockResolvedValue({}) };
     const purchases = { reconcileProviderConfirmed: vi.fn().mockResolvedValue({ activatedCount: 0, discrepancy: null }) };
@@ -904,7 +912,7 @@ describe("BillingReconciliationService", () => {
     await service.reconcileOnce(2);
     await service.reconcileOnce(2);
 
-    expect(partner.getActiveSubscription.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
+    expect(partner.getSubscriptionReconciliationSnapshot.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
       "gid://shopify/Shop/A",
       "gid://shopify/Shop/B",
       "gid://shopify/Shop/C",

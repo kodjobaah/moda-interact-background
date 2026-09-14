@@ -13,11 +13,12 @@ import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
-import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
+import { getSubscriptionReconciliationSnapshot, shopifyPartnerBillingApi, type PartnerSubscription, type PartnerSubscriptionReconciliationSnapshot, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
+import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -235,6 +236,7 @@ export class BillingSubscriptionReconciliationService {
             billingPeriodId: true,
             currentPeriodStart: true,
             currentPeriodEnd: true,
+            cancelAtPeriodEnd: true,
             lastSyncErrorCode: true,
           },
         },
@@ -272,6 +274,10 @@ export class BillingSubscriptionReconciliationService {
       && row.subscription.pendingShopifyPlanHandle === null
       && row.subscription.pendingEffectiveAt === null
       && row.subscription.nextReconcileAt !== null;
+    const isFrozenReconciliation = row.settings?.onboardingCompleted === true
+      && row.subscription.status === SubscriptionProjectionStatus.FROZEN
+      && row.subscription.planId !== null
+      && row.subscription.nextReconcileAt !== null;
     const isEstablishedPlanChange = row.settings?.onboardingCompleted === true
       && (
         row.subscription.status === SubscriptionProjectionStatus.ACTIVE
@@ -286,12 +292,12 @@ export class BillingSubscriptionReconciliationService {
       && row.subscription.nextReconcileAt !== null;
     if (
       row.subscription.id !== job.subscriptionId
-      || (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange)
+      || (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation)
       || !row.subscription.nextReconcileAt
       || row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
     ) return;
 
-    const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover
+    const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover || isFrozenReconciliation
       ? {
           subscriptionId: row.subscription.id,
           currentPlanId: row.subscription.planId!,
@@ -319,7 +325,7 @@ export class BillingSubscriptionReconciliationService {
           pendingEffectiveAt: row.subscription.pendingEffectiveAt!,
           nextReconcileAt: row.subscription.nextReconcileAt,
         };
-    const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange) && row.subscription.planId
+    const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange || isFrozenReconciliation) && row.subscription.planId
       ? await this.database.billingPlan.findUnique({
           where: { id: row.subscription.planId },
           select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, recoveryCreditPackEnabled: true, shopifyUsageEventHandle: true, shopifyRecoveryCreditPackEventHandle: true, includedRecoveryConversationAllowance: true },
@@ -327,18 +333,9 @@ export class BillingSubscriptionReconciliationService {
       : null;
     if (isCycleDiscovery && (!currentPlan || !currentPlan.active || currentPlan.kind !== BillingPlanKind.FREE || !currentPlan.recoveryCreditPackEnabled)) return;
     if (isRollover && (!currentPlan || !currentPlan.active || (currentPlan.kind === BillingPlanKind.FREE && !currentPlan.recoveryCreditPackEnabled))) return;
-    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
-      const now = this.now();
-      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
-      if (now < row.subscription.currentPeriodEnd) {
-        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
-        return;
-      }
-    }
-
-    let provider: PartnerSubscription | null;
+    let snapshot: PartnerSubscriptionReconciliationSnapshot;
     try {
-      provider = await this.partner.getActiveSubscription(row.shopifyShopId);
+      snapshot = await getSubscriptionReconciliationSnapshot(this.partner, row.shopifyShopId);
     } catch (error) {
       if (isCycleDiscovery && currentPlan) {
         await this.recordCycleDiscoveryFailure(row.id, expected as FreeCycleExpected, error);
@@ -346,10 +343,93 @@ export class BillingSubscriptionReconciliationService {
         await this.recordRolloverRetry(row.id, expected as RolloverExpected, error);
       } else if (isEstablishedPlanChange) {
         await this.recordEstablishedPlanChangeRetry(row.id, expected as EstablishedPlanChangeExpected, "PARTNER_API_ERROR", error);
+      } else if (isFrozenReconciliation) {
+        await this.recordFrozenProviderFailure(
+          row.id,
+          row.subscription.id,
+          row.subscription.nextReconcileAt,
+          row.subscription.planId!,
+          error,
+        );
       } else {
         await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
       }
       return;
+    }
+
+    if (!isInitialActivation && (snapshot.latestLifecycleEvent || isFrozenReconciliation)) {
+      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+        row.id,
+        row.subscription.id,
+        snapshot,
+        this.now(),
+      );
+      if (lifecycleResult === "handled" || lifecycleResult === "restored") {
+        await this.publishCommittedLifecycleSchedule(row.id, row.subscription.id);
+        return;
+      }
+    }
+    const provider = snapshot.activeSubscription;
+    if (provider && currentPlan && isRollover
+      && (provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || row.subscription.cancelAtPeriodEnd)
+      && provider.planHandle === currentPlan.shopifyPlanHandle
+      && provider.currentPeriodStart?.getTime() === row.subscription.currentPeriodStart?.getTime()
+      && provider.currentPeriodEnd?.getTime() === row.subscription.currentPeriodEnd?.getTime()
+      && provider.currentPeriodEnd !== null
+      && provider.currentPeriodEnd > this.now()) {
+      const pendingPlan = provider.pendingPlanHandle
+        ? await this.database.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+        : null;
+      const preCloseAt = new Date(provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+      const next = this.now() < preCloseAt ? preCloseAt : provider.currentPeriodEnd;
+      if (this.now() >= preCloseAt && this.now() < provider.currentPeriodEnd) {
+        try {
+          await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: row.subscription.billingPeriodId! });
+        } catch (error) {
+          const retryAt = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, provider.currentPeriodEnd.getTime()));
+          const failed = await this.database.subscription.updateMany({
+            where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
+            data: {
+              pendingShopifyPlanHandle: provider.pendingPlanHandle,
+              pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+              pendingEffectiveAt: provider.pendingEffectiveAt,
+              cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+              currentPeriodEnd: provider.currentPeriodEnd,
+              nextReconcileAt: retryAt,
+              lastSyncedAt: this.now(),
+              lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED",
+              lastSyncErrorAt: this.now(),
+            },
+          });
+          if (failed.count > 0) await this.publishNext(row.id, row.subscription.id, retryAt);
+          return;
+        }
+      }
+      const updated = await this.database.subscription.updateMany({
+        where: { id: row.subscription.id, planId: row.subscription.planId, billingPeriodId: row.subscription.billingPeriodId, nextReconcileAt: row.subscription.nextReconcileAt },
+        data: {
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
+          cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+          currentPeriodEnd: provider.currentPeriodEnd,
+          nextReconcileAt: next,
+          lastSyncedAt: this.now(),
+          ...(this.now() >= preCloseAt && row.subscription.lastSyncErrorCode === "PRE_CLOSE_USAGE_FLUSH_FAILED"
+            ? { lastSyncErrorCode: null, lastSyncErrorAt: null }
+            : {}),
+        },
+      });
+      if (updated.count > 0 && next) await this.publishNext(row.id, row.subscription.id, next);
+      return;
+    }
+    if (isRollover && currentPlan && row.subscription.currentPeriodEnd) {
+      const now = this.now();
+      const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
+      if (now < row.subscription.currentPeriodEnd) {
+        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
+        return;
+      }
     }
 
     if (!provider) {
@@ -732,6 +812,37 @@ export class BillingSubscriptionReconciliationService {
     if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
+  private async recordFrozenProviderFailure(
+    shopId: string,
+    subscriptionId: string,
+    consumedAt: Date,
+    planId: string,
+    error: unknown,
+  ): Promise<void> {
+    const now = this.now();
+    const next = new Date(now.getTime() + 60 * 60 * 1000);
+    this.logger.error("billing.subscription_reconciliation.provider_failed", {
+      shopId,
+      subscriptionId,
+      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+    });
+    const updated = await this.database.subscription.updateMany({
+      where: {
+        id: subscriptionId,
+        status: SubscriptionProjectionStatus.FROZEN,
+        planId,
+        nextReconcileAt: consumedAt,
+      },
+      data: {
+        lastSyncErrorCode: "PARTNER_API_ERROR",
+        lastSyncErrorAt: now,
+        lastSyncedAt: now,
+        nextReconcileAt: next,
+      },
+    });
+    if (updated.count > 0) await this.publishNext(shopId, subscriptionId, next);
+  }
+
   private async casPendingUpdate(
     expected: InitialActivationExpected,
     data: Prisma.SubscriptionUpdateManyMutationInput,
@@ -761,6 +872,14 @@ export class BillingSubscriptionReconciliationService {
         errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
       });
     }
+  }
+
+  private async publishCommittedLifecycleSchedule(shopId: string, subscriptionId: string): Promise<void> {
+    const current = await this.database.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { nextReconcileAt: true },
+    });
+    if (current?.nextReconcileAt) await this.publishNext(shopId, subscriptionId, current.nextReconcileAt);
   }
 
   private async recordMissingCycle(shopId: string, expected: FreeCycleExpected): Promise<void> {

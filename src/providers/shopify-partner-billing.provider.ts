@@ -45,6 +45,13 @@ export interface ShopifyPartnerBillingProvider {
   getSubscriptionReconciliationSnapshot(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot>;
 }
 
+export async function getSubscriptionReconciliationSnapshot(
+  provider: ShopifyPartnerBillingProvider,
+  shopifyShopId: string,
+): Promise<PartnerSubscriptionReconciliationSnapshot> {
+  return provider.getSubscriptionReconciliationSnapshot(shopifyShopId);
+}
+
 export class ShopifyPartnerBillingError extends Error {
   constructor(
     message: string,
