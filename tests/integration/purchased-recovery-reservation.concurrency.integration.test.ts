@@ -30,10 +30,41 @@ describeWithDatabase("Purchased recovery reservation PostgreSQL concurrency", ()
     const refundClient = new PrismaClient();
 
     try {
+      const plan = await database.billingPlan.create({
+        data: {
+          shopifyPlanHandle: `purchased-${shopId}`,
+          name: "Purchased integration plan",
+          kind: "PAID_METERED",
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+        },
+      });
       await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
+      const subscription = await database.subscription.create({
+        data: {
+          shopId,
+          planId: plan.id,
+          status: "ACTIVE",
+          observedShopifyPlanHandle: plan.shopifyPlanHandle,
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+        },
+      });
+      const billingPeriod = await database.billingPeriod.create({
+        data: {
+          shopId,
+          subscriptionId: subscription.id,
+          planId: plan.id,
+          planKindSnapshot: "PAID_METERED",
+          periodStart: new Date("2026-09-01T00:00:00.000Z"),
+          periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+          status: "OPEN",
+        },
+      });
       const usageEvent = await database.usageEvent.create({
         data: {
           shopId,
+          billingPeriodId: billingPeriod.id,
           metric: "RECOVERY_CREDIT_PACK_PURCHASE",
           quantity: 1,
           idempotencyKey: `purchase-event:${shopId}`,
@@ -54,9 +85,23 @@ describeWithDatabase("Purchased recovery reservation PostgreSQL concurrency", ()
         data: {
           id: purchaseId,
           shopId,
+          planId: plan.id,
+          billingPeriodId: billingPeriod.id,
           shopifyPlanHandleSnapshot: "top-up-plan",
           shopifyEventHandleSnapshot: "pack-meter",
+          providerSubscriptionIdSnapshot: "provider-subscription",
+          providerUsageQuantityBeforeSnapshot: 0,
+          providerUsageCostBeforeSnapshot: new Prisma.Decimal("10.00"),
+          providerUsageCostCurrencyBeforeSnapshot: "USD",
+          providerUsageQuantityAfterSnapshot: 1,
+          providerUsageCostAfterSnapshot: new Prisma.Decimal("11.00"),
+          providerUsageCostCurrencyAfterSnapshot: "USD",
+          providerPurchaseAmount: new Prisma.Decimal("1.00"),
+          providerPurchaseCurrency: "USD",
+          providerValuationConfirmedAt: new Date("2026-09-01T00:00:00.000Z"),
+          providerPriceSnapshot: { amount: "1.00", currency: "USD" },
           creditsGranted: 1,
+          currentAmount: 1,
           status: "ACTIVE",
           activatedAt: new Date("2026-09-01T00:00:00.000Z"),
           usageEventId: usageEvent.id,
@@ -75,12 +120,9 @@ describeWithDatabase("Purchased recovery reservation PostgreSQL concurrency", ()
       });
       const lot = await database.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: purchaseId } });
       expect(aggregate.reservedQuantity + aggregate.refundingQuantity).toBe(1);
-      expect(lot.reservedQuantity + lot.refundingQuantity).toBe(1);
+      expect(lot.currentAmount - lot.reservedAmount).toBe(refundHold === "held" ? 1 : 0);
       expect(aggregate.committedQuantity).toBe(0);
-      expect(lot.committedQuantity).toBe(0);
-      expect(lot.refundedQuantity).toBe(0);
       expect(aggregate.grantedQuantity - aggregate.committedQuantity - aggregate.reservedQuantity - aggregate.refundingQuantity).toBeGreaterThanOrEqual(0);
-      expect(lot.creditsGranted - lot.committedQuantity - lot.reservedQuantity - lot.refundingQuantity - lot.refundedQuantity).toBeGreaterThanOrEqual(0);
 
       const reservations = await database.usageReservation.findMany({ where: { sourceKey } });
       if (reservation.kind === "reserved") {
@@ -115,18 +157,22 @@ async function holdRefundCapacity(
         if (!aggregate || !lot) throw new Error("Refund-hold fixtures are missing");
 
         const aggregateSpendable = aggregate.grantedQuantity - aggregate.committedQuantity - aggregate.reservedQuantity - aggregate.refundingQuantity;
-        const lotSpendable = lot.creditsGranted - lot.committedQuantity - lot.reservedQuantity - lot.refundingQuantity - lot.refundedQuantity;
+        const lotSpendable = lot.currentAmount - lot.reservedAmount;
         if (aggregateSpendable < 1 || lotSpendable < 1 || lot.status !== "ACTIVE") return "unavailable";
 
         const aggregateUpdated = await transaction.shopEntitlementCounter.updateMany({
-          where: { id: aggregate.id, version: aggregate.version, refundingQuantity: { lte: aggregate.grantedQuantity - aggregate.committedQuantity - aggregate.reservedQuantity - 1 } },
+          where: {
+            id: aggregate.id,
+            version: aggregate.version,
+            refundingQuantity: { lte: aggregate.grantedQuantity - aggregate.committedQuantity - aggregate.reservedQuantity - 1 },
+          },
           data: { refundingQuantity: { increment: 1 }, version: { increment: 1 } },
         });
         if (aggregateUpdated.count !== 1) throw new RefundHoldConflict();
 
         const lotUpdated = await transaction.recoveryCreditPurchase.updateMany({
-          where: { id: lot.id, version: lot.version, status: "ACTIVE", refundingQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.reservedQuantity - lot.refundedQuantity - 1 } },
-          data: { refundingQuantity: { increment: 1 }, version: { increment: 1 } },
+          where: { id: lot.id, version: lot.version, status: "ACTIVE", currentAmount: { gte: lot.reservedAmount + 1 } },
+          data: { status: "WITHDRAWN", version: { increment: 1 } },
         });
         if (lotUpdated.count !== 1) throw new RefundHoldConflict();
         return "held";
