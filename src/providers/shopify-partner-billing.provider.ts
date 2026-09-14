@@ -42,7 +42,17 @@ export type PartnerSubscriptionReconciliationSnapshot = {
 
 export interface ShopifyPartnerBillingProvider {
   getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null>;
-  getSubscriptionReconciliationSnapshot(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot>;
+  getSubscriptionReconciliationSnapshot?(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot>;
+}
+
+export async function getSubscriptionReconciliationSnapshot(
+  provider: ShopifyPartnerBillingProvider,
+  shopifyShopId: string,
+): Promise<PartnerSubscriptionReconciliationSnapshot> {
+  if (provider.getSubscriptionReconciliationSnapshot) {
+    return provider.getSubscriptionReconciliationSnapshot(shopifyShopId);
+  }
+  return { activeSubscription: await provider.getActiveSubscription(shopifyShopId), latestLifecycleEvent: null };
 }
 
 export class ShopifyPartnerBillingError extends Error {

@@ -13,11 +13,12 @@ import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
-import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
+import { getSubscriptionReconciliationSnapshot, shopifyPartnerBillingApi, type PartnerSubscription, type PartnerSubscriptionReconciliationSnapshot, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
+import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -272,6 +273,10 @@ export class BillingSubscriptionReconciliationService {
       && row.subscription.pendingShopifyPlanHandle === null
       && row.subscription.pendingEffectiveAt === null
       && row.subscription.nextReconcileAt !== null;
+    const isFrozenReconciliation = row.settings?.onboardingCompleted === true
+      && row.subscription.status === SubscriptionProjectionStatus.FROZEN
+      && row.subscription.planId !== null
+      && row.subscription.nextReconcileAt !== null;
     const isEstablishedPlanChange = row.settings?.onboardingCompleted === true
       && (
         row.subscription.status === SubscriptionProjectionStatus.ACTIVE
@@ -286,12 +291,12 @@ export class BillingSubscriptionReconciliationService {
       && row.subscription.nextReconcileAt !== null;
     if (
       row.subscription.id !== job.subscriptionId
-      || (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange)
+      || (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation)
       || !row.subscription.nextReconcileAt
       || row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
     ) return;
 
-    const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover
+    const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover || isFrozenReconciliation
       ? {
           subscriptionId: row.subscription.id,
           currentPlanId: row.subscription.planId!,
@@ -319,7 +324,7 @@ export class BillingSubscriptionReconciliationService {
           pendingEffectiveAt: row.subscription.pendingEffectiveAt!,
           nextReconcileAt: row.subscription.nextReconcileAt,
         };
-    const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange) && row.subscription.planId
+    const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange || isFrozenReconciliation) && row.subscription.planId
       ? await this.database.billingPlan.findUnique({
           where: { id: row.subscription.planId },
           select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, recoveryCreditPackEnabled: true, shopifyUsageEventHandle: true, shopifyRecoveryCreditPackEventHandle: true, includedRecoveryConversationAllowance: true },
@@ -336,9 +341,9 @@ export class BillingSubscriptionReconciliationService {
       }
     }
 
-    let provider: PartnerSubscription | null;
+    let snapshot: PartnerSubscriptionReconciliationSnapshot;
     try {
-      provider = await this.partner.getActiveSubscription(row.shopifyShopId);
+      snapshot = await getSubscriptionReconciliationSnapshot(this.partner, row.shopifyShopId);
     } catch (error) {
       if (isCycleDiscovery && currentPlan) {
         await this.recordCycleDiscoveryFailure(row.id, expected as FreeCycleExpected, error);
@@ -351,6 +356,17 @@ export class BillingSubscriptionReconciliationService {
       }
       return;
     }
+
+    if (!isInitialActivation && (snapshot.latestLifecycleEvent || isFrozenReconciliation)) {
+      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+        row.id,
+        row.subscription.id,
+        snapshot,
+        this.now(),
+      );
+      if (lifecycleResult === "handled") return;
+    }
+    const provider = snapshot.activeSubscription;
 
     if (!provider) {
       if (isCycleDiscovery) {

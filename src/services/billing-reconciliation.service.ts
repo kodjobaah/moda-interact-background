@@ -15,7 +15,7 @@ import {
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
-import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
+import { getSubscriptionReconciliationSnapshot, shopifyPartnerBillingApi, type PartnerSubscription, type PartnerSubscriptionReconciliationSnapshot, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
 import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.service.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
@@ -23,6 +23,7 @@ import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transi
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 import { BillingSubscriptionReconciliationService } from "./billing-subscription-reconciliation.service.js";
+import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 
 const DEFAULT_SHOP_PAGE_SIZE = 50;
 const MAX_SHOP_PAGE_SIZE = 200;
@@ -81,10 +82,10 @@ export class BillingReconciliationService {
     };
     for (const shop of shops) {
       try {
-        const subscription = await this.partner.getActiveSubscription(shop.shopifyShopId!);
-        const projection = await this.applySubscription(shop.id, subscription);
+        const snapshot = await getSubscriptionReconciliationSnapshot(this.partner, shop.shopifyShopId!);
+        const projection = await this.applySubscription(shop.id, snapshot);
         result.subscriptionsSynced += 1;
-        const purchaseReconciliation = await this.reconcilePackPurchases(shop.id, subscription, projection);
+        const purchaseReconciliation = await this.reconcilePackPurchases(shop.id, snapshot.activeSubscription, projection);
         result.purchasesActivated += purchaseReconciliation.activatedCount;
         if (purchaseReconciliation.discrepancy) {
           result.discrepancies.push({
@@ -101,7 +102,7 @@ export class BillingReconciliationService {
           });
           this.logger.warn("billing.recovery_credit_reconciliation.discrepancy", purchaseReconciliation.discrepancy);
         }
-        const discrepancy = await this.compareUsage(shop.id, subscription);
+        const discrepancy = await this.compareUsage(shop.id, snapshot.activeSubscription);
         if (discrepancy) result.discrepancies.push(discrepancy);
       } catch (error) {
         result.subscriptionErrors += 1;
@@ -190,7 +191,8 @@ export class BillingReconciliationService {
     return shops;
   }
 
-  private async applySubscription(shopId: string, provider: PartnerSubscription | null): Promise<{ billingPeriodId: string | null; packMeterHandle: string | null }> {
+  private async applySubscription(shopId: string, snapshot: PartnerSubscriptionReconciliationSnapshot): Promise<{ billingPeriodId: string | null; packMeterHandle: string | null }> {
+    const provider = snapshot.activeSubscription;
     const now = this.now();
     if (!provider) {
       const existing = await this.database.subscription.findUnique({
@@ -206,6 +208,18 @@ export class BillingReconciliationService {
           plan: { select: { shopifyRecoveryCreditPackEventHandle: true } },
         },
       });
+      if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
+        && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
+        const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+          shopId,
+          existing.id,
+          snapshot,
+          now,
+        );
+        if (lifecycleResult === "handled") {
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+      }
       const pending = existing?.pendingPlanId && existing.pendingShopifyPlanHandle
         ? {
             pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle,
@@ -279,6 +293,18 @@ export class BillingReconciliationService {
         nextReconcileAt: true,
       },
     });
+    if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
+      && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
+      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+        shopId,
+        existing.id,
+        snapshot,
+        now,
+      );
+      if (lifecycleResult === "handled") {
+        return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      }
+    }
     const settings = await this.database.shopSettings.findUnique({
       where: { shopId },
       select: { onboardingCompleted: true },
