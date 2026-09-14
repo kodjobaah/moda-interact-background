@@ -19,6 +19,7 @@ import { shopifyPartnerBillingApi, type PartnerSubscription, type ShopifyPartner
 import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.service.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
+import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transition.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 import { BillingSubscriptionReconciliationService } from "./billing-subscription-reconciliation.service.js";
@@ -342,6 +343,106 @@ export class BillingReconciliationService {
       : status === SubscriptionProjectionStatus.SYNC_ERROR
         ? "MISSING_USAGE_METER"
         : null;
+    if (
+      existing?.id
+      && existing.planId
+      && existing.pendingPlanId
+      && existing.pendingShopifyPlanHandle
+      && existing.pendingEffectiveAt
+      && existing.planId !== plan?.id
+    ) {
+      const currentPlan = await this.database.billingPlan.findUnique({
+        where: { id: existing.planId },
+        select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, shopifyUsageEventHandle: true, shopifyRecoveryCreditPackEventHandle: true, recoveryCreditPackEnabled: true, includedRecoveryConversationAllowance: true },
+      });
+      if (currentPlan && provider.planHandle === currentPlan.shopifyPlanHandle) {
+        return { billingPeriodId: existing.billingPeriodId, packMeterHandle: currentPlan.shopifyRecoveryCreditPackEventHandle ?? null };
+      }
+      if (plan?.active && provider.planHandle === existing.pendingShopifyPlanHandle && plan.id === existing.pendingPlanId) {
+        const sameCycle = existing.currentPeriodStart !== null
+          && existing.currentPeriodEnd !== null
+          && provider.currentPeriodStart?.getTime() === existing.currentPeriodStart.getTime()
+          && provider.currentPeriodEnd?.getTime() === existing.currentPeriodEnd.getTime();
+        if (sameCycle) {
+          const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+          const updated = await this.database.subscription.updateMany({
+            where: { id: existing.id, planId: existing.planId, pendingPlanId: existing.pendingPlanId, pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle, pendingEffectiveAt: existing.pendingEffectiveAt },
+            data: { status: SubscriptionProjectionStatus.SYNC_ERROR, nextReconcileAt, lastSyncedAt: now, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", lastSyncErrorAt: now },
+          });
+          if (updated.count > 0) await this.enqueueSubscriptionReconcile(shopId, existing.id, nextReconcileAt, now);
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (now < existing.pendingEffectiveAt) {
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        const recordPlanChangeFailure = async (errorCode: "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE" | "UNEXPECTED_IMMEDIATE_PLAN_CHANGE") => {
+          const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+          const updated = await this.database.subscription.updateMany({
+            where: { id: existing.id, planId: existing.planId, pendingPlanId: existing.pendingPlanId, pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle, pendingEffectiveAt: existing.pendingEffectiveAt },
+            data: { status: SubscriptionProjectionStatus.SYNC_ERROR, nextReconcileAt, lastSyncedAt: now, lastSyncErrorCode: errorCode, lastSyncErrorAt: now },
+          });
+          if (updated.count > 0) await this.enqueueSubscriptionReconcile(shopId, existing.id, nextReconcileAt, now);
+        };
+        const requiresExactCycle = plan.kind === BillingPlanKind.PAID_METERED
+          || (plan.kind === BillingPlanKind.FREE && plan.recoveryCreditPackEnabled === true);
+        if (requiresExactCycle && (!provider.currentPeriodStart || !provider.currentPeriodEnd || provider.currentPeriodStart >= provider.currentPeriodEnd)) {
+          await recordPlanChangeFailure("MISSING_BILLING_CYCLE");
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (plan.kind === BillingPlanKind.PAID_METERED && (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance) || (plan.includedRecoveryConversationAllowance ?? -1) < 0)) {
+          await recordPlanChangeFailure("INVALID_INCLUDED_ALLOWANCE");
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (plan.kind === BillingPlanKind.PAID_METERED && (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle))) {
+          await recordPlanChangeFailure("MISSING_USAGE_METER");
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) {
+          await recordPlanChangeFailure("MISSING_USAGE_METER");
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        const transition = await new ShopifyPlanChangeTransitionService(this.database).transition({
+          shopId,
+          subscriptionId: existing.id,
+          provider,
+          plan,
+          expectedCurrentPlanId: existing.planId,
+          now,
+        });
+        if (transition.kind === "transitioned") {
+          if (transition.nextReconcileAt) await this.enqueueSubscriptionReconcile(shopId, existing.id, transition.nextReconcileAt, now);
+          if (transition.planKind === BillingPlanKind.PAID_METERED) {
+            try {
+              await recoveryCapacityResumeService.schedule({ shopId, trigger: "plan-change" });
+            } catch (error) {
+              this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
+                shopId,
+                errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+              });
+            }
+          }
+        }
+        if (transition.kind === "not-applicable") {
+          await recordPlanChangeFailure("UNEXPECTED_IMMEDIATE_PLAN_CHANGE");
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        return { billingPeriodId: transition.billingPeriodId, packMeterHandle: transition.kind === "transitioned" ? plan.shopifyRecoveryCreditPackEventHandle ?? null : null };
+      }
+      if (!plan?.active) {
+        await this.database.subscription.updateMany({
+          where: { id: existing.id, planId: existing.planId, pendingPlanId: existing.pendingPlanId, pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle, pendingEffectiveAt: existing.pendingEffectiveAt },
+          data: { planId: null, status: SubscriptionProjectionStatus.UNMAPPED, observedShopifyPlanHandle: provider.planHandle, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE", lastSyncErrorAt: now },
+        });
+        return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      }
+      const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+      const updated = await this.database.subscription.updateMany({
+        where: { id: existing.id, planId: existing.planId, pendingPlanId: existing.pendingPlanId, pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle, pendingEffectiveAt: existing.pendingEffectiveAt },
+        data: { status: SubscriptionProjectionStatus.SYNC_ERROR, observedShopifyPlanHandle: provider.planHandle, nextReconcileAt, lastSyncedAt: now, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", lastSyncErrorAt: now },
+      });
+      if (updated.count > 0) await this.enqueueSubscriptionReconcile(shopId, existing.id, nextReconcileAt, now);
+      return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+    }
     if (existing?.id && plan?.active && existing.planId === plan.id) {
       const result = await new SamePlanBillingPeriodRolloverService(this.database, async (rolloverInput, rolloverResult) => {
         if (rolloverResult.planKind !== BillingPlanKind.PAID_METERED) return;
@@ -542,6 +643,25 @@ export class BillingReconciliationService {
         lastSyncErrorAt: this.now(),
       },
     });
+  }
+
+  private async enqueueSubscriptionReconcile(shopId: string, subscriptionId: string, nextReconcileAt: Date, now: Date): Promise<void> {
+    if (!this.subscriptionQueue) return;
+    try {
+      const job = createSubscriptionReconcilePayload(shopId, subscriptionId, nextReconcileAt);
+      await this.subscriptionQueue.add(BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME, job, {
+        jobId: createBillingSubscriptionReconcileJobId(subscriptionId, nextReconcileAt.toISOString()),
+        delay: Math.max(0, nextReconcileAt.getTime() - now.getTime()),
+        removeOnComplete: 100,
+        removeOnFail: true,
+      });
+    } catch (error) {
+      this.logger.warn("billing.subscription_reconciliation.enqueue_failed", {
+        shopId,
+        subscriptionId,
+        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      });
+    }
   }
 }
 
