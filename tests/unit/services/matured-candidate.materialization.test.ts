@@ -114,6 +114,9 @@ const hoisted = vi.hoisted(() => {
       handleProviderFailure: vi.fn(async () => "definitive" as const),
       releaseBeforeProvider: vi.fn(async () => undefined),
     },
+    executionEligibilityMock: {
+      evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop_1" })),
+    },
   };
 });
 
@@ -127,6 +130,7 @@ const { whatsAppServiceMock } = hoisted;
 const { outboundWhatsAppAdmissionServiceMock } = hoisted;
 const { whatsappTemplateSelectorMock } = hoisted;
 const { recoveryBillingServiceMock } = hoisted;
+const { executionEligibilityMock } = hoisted;
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: hoisted.prismaMock,
@@ -162,6 +166,9 @@ vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
 }));
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
+}));
+vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
+  shopExecutionEligibilityService: hoisted.executionEligibilityMock,
 }));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
@@ -221,6 +228,7 @@ const recoverableCheckout = {
 describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    executionEligibilityMock.evaluate.mockResolvedValue({ allowed: true, shopId: "shop_1" });
     whatsappTemplateSelectorMock.select.mockResolvedValue({
       outcome: "selected",
       canonicalLanguageTag: "en-GB",
@@ -293,6 +301,11 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
   it("discards an inactive matured candidate before resolving Shopify data", async () => {
     prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "UNINSTALLED" });
+    executionEligibilityMock.evaluate.mockResolvedValueOnce({
+      allowed: false,
+      shopId: "shop_1",
+      reason: "SHOP_UNAVAILABLE",
+    });
 
     const result = await service.materializeMaturedCandidate(candidate);
 
@@ -306,6 +319,27 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
     expect(conversationServiceMock.getOrCreateRecoveryConversation).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks matured candidate after checkout-lock acquisition", async () => {
+    executionEligibilityMock.evaluate
+      .mockResolvedValueOnce({ allowed: true, shopId: "shop_1" })
+      .mockResolvedValueOnce({
+        allowed: false,
+        shopId: "shop_1",
+        reason: "CONTRACT_REQUIRED",
+      });
+
+    const result = await service.materializeMaturedCandidate(candidate);
+
+    expect(result).toEqual({
+      outcome: "discarded-shop-unavailable",
+      checkoutToken: "checkout_1",
+      reason: "CONTRACT_REQUIRED",
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.upsert).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 

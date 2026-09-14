@@ -181,7 +181,11 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
   beforeEach(() => {
     vi.clearAllMocks();
 
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status: "ACTIVE" },
+    });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(activeRecovery);
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
     lookupServiceMock.lookup.mockResolvedValue({
@@ -270,6 +274,26 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result).toEqual({ kind: "ignored", reason: "subscription-frozen" });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["NO_CONTRACT", "contract-required"],
+    ["UNMAPPED", "shop-unavailable"],
+    ["SYNC_ERROR", "shop-unavailable"],
+  ])("stops a %s checkout update before candidate or Shopify work", async (status, reason) => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status },
+    });
+
+    const result = await service.handleCheckoutUpdatedContract(event);
+
+    expect(result).toEqual({ kind: "ignored", reason });
     expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.findUnique).not.toHaveBeenCalled();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
@@ -374,6 +398,31 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     expect(prismaMock.shop.findUnique).toHaveBeenCalledTimes(1);
     expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["NO_CONTRACT", "contract-required"],
+    ["UNMAPPED", "shop-unavailable"],
+    ["SYNC_ERROR", "shop-unavailable"],
+  ])("stops a %s cart activity before refreshing a candidate", async (status, reason) => {
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      subscription: { status },
+    });
+
+    const result = await service.handleCartActivityContract({
+      shopId: "shop_1",
+      shopDomain: "shop.myshopify.com",
+      cartToken: "cart_1",
+      isEmpty: false,
+      activityAt: "2026-08-28T00:04:00.000Z",
+    });
+
+    expect(result).toEqual({ kind: "ignored", reason });
+    expect(hoisted.pendingCandidateServiceMock.refreshCandidateActivity).not.toHaveBeenCalled();
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not use webhook basket data (only the Shopify lookup result)", async () => {

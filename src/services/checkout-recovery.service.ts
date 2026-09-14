@@ -18,7 +18,10 @@ import {
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
-import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
+import {
+  shopExecutionEligibilityService,
+  type ShopExecutionDenialReason,
+} from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import {
   toLookupInput,
@@ -54,7 +57,11 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
   | { outcome: "discarded-order-completed"; checkoutToken: string }
-  | { outcome: "discarded-shop-unavailable"; checkoutToken: string };
+  | {
+      outcome: "discarded-shop-unavailable";
+      checkoutToken: string;
+      reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
+    };
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -112,10 +119,14 @@ export class CheckoutRecoveryService {
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
-    if (!await shopExecutionEligibilityService.isShopExecutionActive(candidate.shopId)) {
+    const execution = await shopExecutionEligibilityService.evaluate(candidate.shopId);
+    if (!execution.allowed) {
       return {
         outcome: "discarded-shop-unavailable",
         checkoutToken: candidate.checkoutToken,
+        ...(execution.reason !== "SHOP_UNAVAILABLE"
+          ? { reason: execution.reason }
+          : {}),
       } as const;
     }
     const shopDomain = await abandonedCheckoutLookupService.resolveShopDomain(
@@ -127,6 +138,19 @@ export class CheckoutRecoveryService {
       candidate.shopId,
       candidate.checkoutToken,
       async () => {
+        const lockedExecution = await shopExecutionEligibilityService.evaluate(
+          candidate.shopId,
+        );
+        if (!lockedExecution.allowed) {
+          return {
+            outcome: "discarded-shop-unavailable",
+            checkoutToken: candidate.checkoutToken,
+            ...(lockedExecution.reason !== "SHOP_UNAVAILABLE"
+              ? { reason: lockedExecution.reason }
+              : {}),
+          } as const;
+        }
+
         // If an order already processed this checkout, the checkout completed
         // before recovery action was committed: do not create a recovery or
         // send a recovery message for it.
@@ -399,11 +423,9 @@ export class CheckoutRecoveryService {
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
     }
-    if (shop.status !== "ACTIVE") {
-      return { kind: "ignored", reason: "shop-unavailable" } as const;
-    }
-    if (shop.subscription?.status === "FROZEN") {
-      return { kind: "ignored", reason: "subscription-frozen" } as const;
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }
 
     const pending =
@@ -519,11 +541,12 @@ export class CheckoutRecoveryService {
 
   async handleCartActivityContract(event: CartActivityContractInput) {
     const shop = await shopExecutionEligibilityService.resolveShopById(event.shopId);
-    if (!shop || shop.status !== "ACTIVE") {
+    if (!shop) {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
-    if (shop.subscription?.status === "FROZEN") {
-      return { kind: "ignored", reason: "subscription-frozen" } as const;
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }
     const result =
       await pendingRecoveryCandidateService.refreshCandidateActivity({
@@ -977,6 +1000,10 @@ export class CheckoutRecoveryService {
     if (recovery.shop.status !== "ACTIVE") {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
+    const execution = await shopExecutionEligibilityService.evaluate(recovery.shopId);
+    if (!execution.allowed) {
+      return { kind: "ignored", reason: execution.reason } as const;
+    }
 
     return pendingRecoveryCandidateService.withCheckoutLock(
       recovery.shopId,
@@ -1000,6 +1027,12 @@ export class CheckoutRecoveryService {
           current.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
         ) {
           return { kind: "ignored", reason: "already-transitioned" } as const;
+        }
+        const lockedExecution = await shopExecutionEligibilityService.evaluate(
+          recovery.shopId,
+        );
+        if (!lockedExecution.allowed) {
+          return { kind: "ignored", reason: lockedExecution.reason } as const;
         }
 
         const outcome = await abandonedCheckoutLookupService.lookup({
@@ -1287,6 +1320,16 @@ export class CheckoutRecoveryService {
 }
 
 export const checkoutRecoveryService = new CheckoutRecoveryService();
+
+function lifecycleReason(
+  reason: ShopExecutionDenialReason,
+) {
+  return reason === "CONTRACT_REQUIRED"
+    ? "contract-required"
+    : reason === "SUBSCRIPTION_FROZEN"
+      ? "subscription-frozen"
+      : "shop-unavailable";
+}
 
 function safelyNormalize(
   value: string | null | undefined,

@@ -28,7 +28,9 @@ import { connectionRedis } from "../lib/redis.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
-import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
+import {
+  shopExecutionEligibilityService,
+} from "./shop-execution-eligibility.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
@@ -83,7 +85,11 @@ export class PendingRecoveryCandidateService {
         delayMinutes: number;
         candidate: PendingRecoveryCandidate;
       }
-    | { outcome: "discarded-shop-unavailable"; shopDomain: string }
+    | {
+        outcome: "discarded-shop-unavailable";
+        shopDomain: string;
+        reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
+      }
     | { outcome: "discarded-subscription-frozen"; shopDomain: string }
   > {
     const shopDomain = input.shopDomain.trim().toLowerCase();
@@ -95,8 +101,22 @@ export class PendingRecoveryCandidateService {
     if (shop.status !== "ACTIVE") {
       return { outcome: "discarded-shop-unavailable", shopDomain };
     }
+    const execution = await shopExecutionEligibilityService.evaluate(
+      shop.id,
+      shop.status,
+    );
     if (shop.subscription?.status === "FROZEN") {
       return { outcome: "discarded-subscription-frozen", shopDomain };
+    }
+    if (!execution.allowed) {
+      if (execution.reason === "SUBSCRIPTION_FROZEN") {
+        return { outcome: "discarded-subscription-frozen", shopDomain };
+      }
+      return {
+        outcome: "discarded-shop-unavailable",
+        shopDomain,
+        reason: execution.reason,
+      };
     }
 
     const delayMinutes =

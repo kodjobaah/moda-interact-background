@@ -16,12 +16,14 @@ function harness({
   ],
   existing = null,
   provider = {},
+  executionEligibility = { evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })) },
 }: {
   policy?: Record<string, unknown>;
   usageRows?: Array<{ sourceType: string; quantity: number; sourceId?: string }>;
   conversationMessages?: Array<{ id: string; conversationId: string }>;
   existing?: { sourceId: string } | null;
   provider?: Record<string, unknown>;
+  executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
 } = {}) {
   const messages = new Map<string, { id: string; content: string; status: string }>();
   const usage = [...usageRows];
@@ -110,6 +112,8 @@ function harness({
       database as never,
       () => resolver,
       providerMock as never,
+      3,
+      executionEligibility as never,
     ),
   };
 }
@@ -227,6 +231,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
     });
     const admission = {
       kind: "admitted" as const,
+      shopId: "shop-1",
       messageId: "message-1",
       conversationId: "conversation-1",
       terminal: true,
@@ -336,6 +341,51 @@ describe("OutboundWhatsAppAdmissionService", () => {
     });
     expect(rejected).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses a prepared WhatsApp send when subscription freezes after admission", async () => {
+    const executionEligibility = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" }),
+    };
+    const test = harness({ executionEligibility });
+
+    const result = await test.service.sendPreparedText({
+      kind: "admitted",
+      shopId: "shop-1",
+      messageId: "message-existing-1",
+      conversationId: "conversation-1",
+      terminal: false,
+      to: baseInput.to,
+      text: baseInput.text,
+    });
+
+    expect(result).toEqual({ kind: "suppressed", reason: "subscription-frozen" });
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
+      where: { id: "message-existing-1" },
+      data: { status: "FAILED" },
+    });
+    expect(test.transaction.usageEvent.deleteMany).toHaveBeenCalled();
+  });
+
+  it("suppresses a template send when contract is missing after admission", async () => {
+    const executionEligibility = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" }),
+    };
+    const test = harness({ executionEligibility });
+
+    const result = await test.service.sendTemplate({
+      ...baseInput,
+      templateName: "recovery",
+      languageCode: "en",
+      executionEligibility,
+    } as never);
+
+    expect(result).toEqual({ kind: "suppressed", reason: "contract-required" });
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 
   it("removes definitive failures but preserves ambiguous pending intent", async () => {

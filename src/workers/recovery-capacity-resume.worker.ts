@@ -11,6 +11,7 @@ import { connectionRedis } from "../lib/redis.js";
 import prisma from "../lib/db.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { recoveryCapacityResumeService } from "../services/recovery-capacity-resume.service.js";
+import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
 
 const MAX_RECOVERIES_PER_JOB = 25;
 const bullMQTelemetry = createBullMQTelemetry({
@@ -25,8 +26,8 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
       throw new Error(`Unknown capacity resume job: ${job.name}`);
     }
 
-    const active = await prismaShopIsActive(job.data.shopId);
-    if (!active) return { kind: "ignored", reason: "shop-unavailable" };
+    const execution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
+    if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
 
     const recoveries = await findBlockedRecoveries(job.data.shopId);
     let attempted = 0;
@@ -38,11 +39,18 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
         capacityExhausted = true;
         break;
       }
+      if (result.kind === "ignored" && isLifecycleDenialReason(result.reason)) {
+        return { kind: "ignored", reason: result.reason };
+      }
     }
 
     if (!capacityExhausted && attempted === MAX_RECOVERIES_PER_JOB) {
       const lastRecovery = recoveries[attempted - 1];
       if (lastRecovery) {
+        const finalExecution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
+        if (!finalExecution.allowed) {
+          return { kind: "ignored", reason: finalExecution.reason };
+        }
         await recoveryCapacityResumeService.schedule(
           createRecoveryCapacityResumeContinuation(job.data, lastRecovery.id),
         );
@@ -61,11 +69,6 @@ recoveryCapacityResumeWorker.on("failed", (job, error) => {
   console.error(`Recovery capacity resume job ${job?.id} failed`, error);
 });
 
-async function prismaShopIsActive(shopId: string): Promise<boolean> {
-  const shop = await prisma.shop.findUnique({ where: { id: shopId }, select: { status: true } });
-  return shop?.status === "ACTIVE";
-}
-
 async function findBlockedRecoveries(shopId: string) {
   return prisma.checkoutRecovery.findMany({
     where: {
@@ -77,4 +80,15 @@ async function findBlockedRecoveries(shopId: string) {
     take: MAX_RECOVERIES_PER_JOB,
     select: { id: true },
   });
+}
+
+function isLifecycleDenialReason(reason: string) {
+  return [
+    "CONTRACT_REQUIRED",
+    "SUBSCRIPTION_FROZEN",
+    "UNMAPPED_PLAN",
+    "SYNC_ERROR",
+    "SHOP_UNAVAILABLE",
+    "shop-unavailable",
+  ].includes(reason);
 }

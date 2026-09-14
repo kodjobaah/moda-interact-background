@@ -11,6 +11,7 @@ import prisma from "../lib/db.js";
 
 export type BillingPolicyFailureReason =
   | "NO_CONTRACT"
+  | "SUBSCRIPTION_FROZEN"
   | "UNMAPPED_PLAN"
   | "SYNC_ERROR"
   | "SHOP_UNAVAILABLE"
@@ -128,6 +129,13 @@ export class EffectiveBillingPolicyResolver {
       throw new EffectiveBillingPolicyError(
         "NO_CONTRACT",
         `Shop ${shopId} has no active Shopify billing contract`,
+      );
+    }
+
+    if (subscription.status === SubscriptionProjectionStatus.FROZEN) {
+      throw new EffectiveBillingPolicyError(
+        "SUBSCRIPTION_FROZEN",
+        `Shop ${shopId} subscription is frozen`,
       );
     }
 

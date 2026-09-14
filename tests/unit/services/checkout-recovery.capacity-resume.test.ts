@@ -26,6 +26,7 @@ const hoisted = vi.hoisted(() => ({
       callback: () => Promise<unknown>,
     ) => callback(),
   ),
+  evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })),
 }));
 
 vi.mock("../../../src/lib/db.js", () => ({
@@ -65,7 +66,7 @@ vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   },
 }));
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
-  shopExecutionEligibilityService: {},
+  shopExecutionEligibilityService: { evaluate: hoisted.evaluate },
 }));
 vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
   abandonedCheckoutLookupService: { lookup: hoisted.lookup },
@@ -105,6 +106,7 @@ function foundCheckout(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  hoisted.evaluate.mockResolvedValue({ allowed: true, shopId: "shop-1" });
   hoisted.txUpdateMany.mockResolvedValue({ count: 1 });
   hoisted.historyCreate.mockResolvedValue({ id: "history-1" });
   hoisted.transaction.mockImplementation(
@@ -122,6 +124,41 @@ beforeEach(() => {
 });
 
 describe("CheckoutRecoveryService capacity resume", () => {
+  it("stops capacity resume before provider lookup when subscription is frozen", async () => {
+    hoisted.findUnique.mockResolvedValueOnce(hoisted.recovery);
+    hoisted.evaluate.mockResolvedValueOnce({
+      allowed: false,
+      shopId: "shop-1",
+      reason: "SUBSCRIPTION_FROZEN",
+    });
+
+    await expect(
+      new CheckoutRecoveryService().resumeCapacityBlockedRecovery("recovery-1"),
+    ).resolves.toEqual({ kind: "ignored", reason: "SUBSCRIPTION_FROZEN" });
+
+    expect(hoisted.withCheckoutLock).not.toHaveBeenCalled();
+    expect(hoisted.lookup).not.toHaveBeenCalled();
+  });
+
+  it("rechecks capacity resume after checkout-lock acquisition", async () => {
+    hoisted.findUnique
+      .mockResolvedValueOnce(hoisted.recovery)
+      .mockResolvedValueOnce(currentBlockedRecovery);
+    hoisted.evaluate
+      .mockResolvedValueOnce({ allowed: true, shopId: "shop-1" })
+      .mockResolvedValueOnce({
+        allowed: false,
+        shopId: "shop-1",
+        reason: "SUBSCRIPTION_FROZEN",
+      });
+
+    await expect(
+      new CheckoutRecoveryService().resumeCapacityBlockedRecovery("recovery-1"),
+    ).resolves.toEqual({ kind: "ignored", reason: "SUBSCRIPTION_FROZEN" });
+
+    expect(hoisted.lookup).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["missing recovery", null],
     ["non-DETECTED recovery", { ...hoisted.recovery, status: "MESSAGE_SENT" }],
