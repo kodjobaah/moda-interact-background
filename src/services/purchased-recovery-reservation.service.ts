@@ -237,7 +237,6 @@ export class PurchasedRecoveryReservationService {
     if (!counterId) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
     const lot = await requirePurchaseLot(transaction, reservation.purchasedCreditPurchaseId);
     const wasWithdrawn = lot.status === RecoveryCreditPurchaseStatus.WITHDRAWN;
-    const lotVersion = lot.version;
     const completesPurchase = lot.currentAmount === quantity && lot.reservedAmount === quantity;
     const counter = await transaction.shopEntitlementCounter.findUnique({
       where: { id: counterId },
@@ -254,23 +253,13 @@ export class PurchasedRecoveryReservationService {
       data: {
         currentAmount: { decrement: quantity },
         reservedAmount: { decrement: quantity },
+        ...(completesPurchase ? { status: RecoveryCreditPurchaseStatus.COMPLETED } : {}),
         version: { increment: 1 },
       },
     });
     if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
     if (completesPurchase) {
-      const completedLot = await transaction.recoveryCreditPurchase.updateMany({
-        where: {
-          id: lot.id,
-          version: lotVersion + 1,
-          currentAmount: 0,
-          reservedAmount: 0,
-          status: { in: [RecoveryCreditPurchaseStatus.ACTIVE, RecoveryCreditPurchaseStatus.WITHDRAWN] },
-        },
-        data: { status: RecoveryCreditPurchaseStatus.COMPLETED, version: { increment: 1 } },
-      });
-      if (completedLot.count !== 1) throw new ReservationConcurrencyConflict();
       if (wasWithdrawn) {
         await transaction.recoveryCreditRefund.updateMany({
           where: {
