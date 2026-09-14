@@ -55,6 +55,34 @@ describe("RecoveryCreditPurchaseService", () => {
     expect(test.counter.grantedQuantity).toBe(5);
   });
 
+  it("does not derive the stored purchase amount from a plan price", async () => {
+    const test = harness();
+    test.purchases[0]!.providerPriceSnapshot = { amount: "999.00", currency: "USD" };
+
+    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({ activatedCount: 1 });
+
+    expect(test.purchases[0]).toMatchObject({ providerPurchaseAmount: "2.5" });
+  });
+
+  it("does not alter an activated purchase when a later plan handle is observed", async () => {
+    const test = harness();
+    await test.service.reconcileProviderConfirmed(input);
+    const storedAmount = test.purchases[0]?.providerPurchaseAmount;
+    const storedCurrency = test.purchases[0]?.providerPurchaseCurrency;
+
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerPlanHandle: "pro-2027",
+      providerCostAmount: "30.00",
+    })).resolves.toMatchObject({ activatedCount: 0 });
+
+    expect(test.purchases[0]).toMatchObject({
+      providerPurchaseAmount: storedAmount,
+      providerPurchaseCurrency: storedCurrency,
+      status: "ACTIVE",
+    });
+  });
+
   it("does not grant twice when the provider quantity is replayed", async () => {
     const test = harness();
     await test.service.reconcileProviderConfirmed(input);

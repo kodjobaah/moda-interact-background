@@ -135,6 +135,15 @@ describe("PurchasedRecoveryReservationService", () => {
     expect(state.lots[0]?.reservedAmount).toBe(1);
   });
 
+  it("does not provide capacity from a REQUESTED purchase", async () => {
+    const { service, state } = createHarness(1);
+    state.lots[0]!.status = "REQUESTED";
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:requested" }))
+      .resolves.toMatchObject({ kind: "credits-exhausted" });
+    expect(state.lots[0]).toMatchObject({ status: "REQUESTED", currentAmount: 1, reservedAmount: 0 });
+  });
+
   it("selects the oldest active spendable lot in FIFO order", async () => {
     const { service, state } = createHarness(2, [
       { id: "purchase-new", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
