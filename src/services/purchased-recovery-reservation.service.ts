@@ -138,9 +138,9 @@ export class PurchasedRecoveryReservationService {
             id: lot.id,
             version: lot.version,
             status: RecoveryCreditPurchaseStatus.ACTIVE,
-            reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - quantity },
+            reservedAmount: { lte: lot.currentAmount - lot.reservedAmount - quantity },
           },
-          data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
+          data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
         });
         if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
         const reactivated = await transaction.usageReservation.update({
@@ -199,9 +199,9 @@ export class PurchasedRecoveryReservationService {
         id: lot.id,
         version: lot.version,
         status: RecoveryCreditPurchaseStatus.ACTIVE,
-        reservedQuantity: { lte: lot.creditsGranted - lot.committedQuantity - lot.refundingQuantity - lot.refundedQuantity - quantity },
+        reservedAmount: { lte: lot.currentAmount - lot.reservedAmount - quantity },
       },
-      data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
+      data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
     });
     if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
@@ -239,8 +239,12 @@ export class PurchasedRecoveryReservationService {
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
     const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
-      where: { id: lot.id, version: lot.version, reservedQuantity: { gte: quantity } },
-      data: { reservedQuantity: { decrement: quantity }, committedQuantity: { increment: quantity }, version: { increment: 1 } },
+      where: { id: lot.id, version: lot.version, reservedAmount: { gte: quantity } },
+      data: {
+        currentAmount: { decrement: quantity },
+        reservedAmount: { decrement: quantity },
+        version: { increment: 1 },
+      },
     });
     if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
@@ -304,8 +308,8 @@ export class PurchasedRecoveryReservationService {
     });
     if (!counter) throw new PurchasedRecoveryReservationError("Reservation counter does not exist");
     const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
-      where: { id: lot.id, version: lot.version, reservedQuantity: { gte: quantity } },
-      data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
+      where: { id: lot.id, version: lot.version, reservedAmount: { gte: quantity } },
+      data: { reservedAmount: { decrement: quantity }, version: { increment: 1 } },
     });
     if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
 
@@ -426,11 +430,7 @@ async function selectOldestSpendableLot(
 }
 
 function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
-  return lot.creditsGranted -
-    lot.committedQuantity -
-    lot.reservedQuantity -
-    lot.refundingQuantity -
-    lot.refundedQuantity;
+  return lot.currentAmount - lot.reservedAmount;
 }
 
 function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): PurchasedReservationOutcome {
