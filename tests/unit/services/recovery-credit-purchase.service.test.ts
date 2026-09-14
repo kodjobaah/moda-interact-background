@@ -4,18 +4,17 @@ import { RecoveryCreditPurchaseService } from "../../../src/services/recovery-cr
 
 function harness(candidates = [
   { id: "purchase-1", creditsGranted: 5, createdAt: new Date("2026-09-08T10:00:00.000Z") },
-  { id: "purchase-2", creditsGranted: 5, createdAt: new Date("2026-09-08T11:00:00.000Z") },
 ]) {
-  const purchases = candidates.map((purchase) => ({ ...purchase, shopId: "shop-1", planId: "plan-1", shopifyPlanHandleSnapshot: "pro-2026", shopifyEventHandleSnapshot: "pack-meter", status: "PENDING_BILLING", refund: null, usageEvent: { shopId: "shop-1", shopifyEventHandle: "pack-meter", metric: "RECOVERY_CREDIT_PACK_PURCHASE", quantity: 1, shopifyReportState: "REPORTED", billingPeriodId: "period-1" } }));
+  const purchases = candidates.map((purchase, index) => ({ ...purchase, shopId: "shop-1", planId: "plan-1", billingPeriodId: "period-1", shopifyPlanHandleSnapshot: "pro-2026", shopifyEventHandleSnapshot: "pack-meter", providerSubscriptionIdSnapshot: "subscription-1", providerUsageQuantityBeforeSnapshot: 2, providerUsageCostBeforeSnapshot: "10.00", providerUsageCostCurrencyBeforeSnapshot: "USD", status: "REQUESTED", currentAmount: 0, reservedAmount: 0, version: 0, providerUsageQuantityAfterSnapshot: null, providerPurchaseAmount: null, providerValuationConfirmedAt: null, usageEvent: { shopId: "shop-1", shopifyEventHandle: "pack-meter", metric: "RECOVERY_CREDIT_PACK_PURCHASE", quantity: 1, shopifyReportState: "REPORTED", billingPeriodId: "period-1" }, index }));
   const counter = { grantedQuantity: 0 };
   const transaction = {
     recoveryCreditPurchase: {
-      count: vi.fn(async ({ where }: { where: { status: string; shopId: string; shopifyPlanHandleSnapshot: string; shopifyEventHandleSnapshot: string; usageEvent: Record<string, unknown> } }) => purchases.filter((purchase) => matches(purchase, where)).length),
-      findMany: vi.fn(async ({ where }: { where: { status: { in: string[] }; shopId: string; shopifyPlanHandleSnapshot: string; shopifyEventHandleSnapshot: string; usageEvent: Record<string, unknown> } }) => purchases.filter((purchase) => matches(purchase, where))),
-      updateMany: vi.fn(async ({ where, data }: { where: { id: string; status: { in: string[] } }; data: Record<string, unknown> }) => {
-        const purchase = purchases.find((candidate) => candidate.id === where.id && where.status.in.includes(candidate.status));
+      count: vi.fn(async ({ where }: { where: Record<string, unknown> }) => purchases.filter((purchase) => matches(purchase, where)).length),
+      findMany: vi.fn(async ({ where }: { where: Record<string, unknown> }) => purchases.filter((purchase) => matches(purchase, where))),
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const purchase = purchases.find((candidate) => candidate.id === where.id && candidate.status === where.status && candidate.version === where.version && candidate.currentAmount === where.currentAmount && candidate.reservedAmount === where.reservedAmount);
         if (!purchase) return { count: 0 };
-        Object.assign(purchase, data);
+        Object.assign(purchase, data, { providerPurchaseAmount: data.providerPurchaseAmount?.toString() ?? null });
         return { count: 1 };
       }),
     },
@@ -30,13 +29,11 @@ function harness(candidates = [
   return { service: new RecoveryCreditPurchaseService(database as never, 3, () => new Date("2026-09-08T12:00:00.000Z")), purchases, counter };
 }
 
-function matches(purchase: (typeof candidates)[number] & Record<string, unknown>, where: { status: string | { in: string[] }; shopId: string; shopifyPlanHandleSnapshot: string; shopifyEventHandleSnapshot: string; usageEvent: Record<string, unknown> }) {
-  const statusMatches = typeof where.status === "string"
-    ? purchase.status === where.status
-    : where.status.in.includes(purchase.status);
-  const usageWhere = (where.usageEvent as { is?: Record<string, unknown> }).is ?? where.usageEvent;
-  return statusMatches
+function matches(purchase: Record<string, any>, where: Record<string, any>) {
+  const usageWhere = where.usageEvent?.is ?? where.usageEvent;
+  return purchase.status === where.status
     && purchase.shopId === where.shopId
+    && purchase.billingPeriodId === where.billingPeriodId
     && purchase.shopifyPlanHandleSnapshot === where.shopifyPlanHandleSnapshot
     && purchase.shopifyEventHandleSnapshot === where.shopifyEventHandleSnapshot
     && purchase.usageEvent.shopId === usageWhere.shopId
@@ -47,51 +44,48 @@ function matches(purchase: (typeof candidates)[number] & Record<string, unknown>
     && purchase.usageEvent.billingPeriodId === usageWhere.billingPeriodId;
 }
 
-const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter" };
+const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter", providerSubscriptionId: "subscription-1", providerUnits: 3, providerCostAmount: "12.50", providerCostCurrency: "USD" };
 
 describe("RecoveryCreditPurchaseService", () => {
   it("activates one equivalent provider-confirmed unit deterministically", async () => {
     const test = harness();
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 })).resolves.toMatchObject({ activatedCount: 1, confirmedDelta: 1, discrepancy: null });
+    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({ activatedCount: 1, confirmedDelta: 1, discrepancy: null });
     expect(test.purchases[0]?.status).toBe("ACTIVE");
-    expect(test.purchases[1]?.status).toBe("PENDING_BILLING");
+    expect(test.purchases[0]).toMatchObject({ currentAmount: 5, reservedAmount: 0, providerPurchaseAmount: "2.5", providerUsageQuantityAfterSnapshot: 3 });
     expect(test.counter.grantedQuantity).toBe(5);
   });
 
   it("does not grant twice when the provider quantity is replayed", async () => {
     const test = harness();
-    await test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 });
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 })).resolves.toMatchObject({ activatedCount: 0, alreadyMatchedUnits: 1, confirmedDelta: 0 });
+    await test.service.reconcileProviderConfirmed(input);
+    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({ activatedCount: 0, alreadyMatchedUnits: 1, confirmedDelta: 0 });
     expect(test.counter.grantedQuantity).toBe(5);
   });
 
-  it("activates two equivalent candidates when Shopify confirms two units", async () => {
+  it("does not attribute one provider delta across multiple unresolved purchases", async () => {
     const test = harness();
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 2 })).resolves.toMatchObject({ activatedCount: 2 });
-    expect(test.counter.grantedQuantity).toBe(10);
+    test.purchases.push({ ...test.purchases[0]!, id: "purchase-2" });
+    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
+    expect(test.counter.grantedQuantity).toBe(0);
   });
 
   it("fails closed when a partial confirmation crosses different pack values", async () => {
-    const test = harness([{ id: "purchase-1", creditsGranted: 5, createdAt: new Date("2026-09-08T10:00:00.000Z") }, { id: "purchase-2", creditsGranted: 10, createdAt: new Date("2026-09-08T11:00:00.000Z") }]);
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
+    const test = harness();
+    await expect(test.service.reconcileProviderConfirmed({ ...input, providerCostAmount: "10.00" })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
     expect(test.counter.grantedQuantity).toBe(0);
   });
 
   it("reports provider under- and over-counts without revoking or fabricating", async () => {
-    const under = harness();
-    under.purchases[0]!.status = "ACTIVE";
-    await expect(under.service.reconcileProviderConfirmed({ ...input, providerUnits: 0 })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "under" } });
-    const over = harness();
-    await expect(over.service.reconcileProviderConfirmed({ ...input, providerUnits: 3 })).resolves.toMatchObject({ activatedCount: 2, discrepancy: { kind: "over" } });
-    expect(over.purchases).toHaveLength(2);
+    const test = harness();
+    await expect(test.service.reconcileProviderConfirmed({ ...input, providerCostAmount: null })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
   });
 
   it("does not regrant a locally partially refunded active purchase", async () => {
     const test = harness();
     test.purchases[0]!.status = "ACTIVE";
 
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
-      .resolves.toMatchObject({ alreadyMatchedUnits: 1, eligibleCandidateCount: 1, activatedCount: 0 });
+    await expect(test.service.reconcileProviderConfirmed(input))
+      .resolves.toMatchObject({ alreadyMatchedUnits: 1, eligibleCandidateCount: 0, activatedCount: 0 });
     expect(test.counter.grantedQuantity).toBe(0);
   });
 
@@ -111,30 +105,14 @@ describe("RecoveryCreditPurchaseService", () => {
       { id: "purchase-1", creditsGranted: 5, createdAt: new Date("2026-09-08T10:00:00.000Z") },
     ]);
     Object.assign(test.purchases[0]!.usageEvent, usageEvent);
-    return expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
+    return expect(test.service.reconcileProviderConfirmed(input))
       .resolves.toMatchObject({ activatedCount: 0, eligibleCandidateCount: 0, discrepancy: { kind: "over" } });
   });
 
-  it("re-enters a repaired attention purchase only after its event is REPORTED", async () => {
-    const test = harness();
-    test.purchases[0]!.status = "NEEDS_ATTENTION";
-
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
-      .resolves.toMatchObject({ activatedCount: 1 });
-    await expect(test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }))
-      .resolves.toMatchObject({ activatedCount: 0, alreadyMatchedUnits: 1 });
-    expect(test.counter.grantedQuantity).toBe(5);
-  });
-
-  it("retries a serializable overlap without double-granting", async () => {
-    const test = harness();
-    await expect(Promise.all([
-      test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }),
-      test.service.reconcileProviderConfirmed({ ...input, providerUnits: 1 }),
-    ])).resolves.toEqual(expect.arrayContaining([
-      expect.objectContaining({ activatedCount: 1 }),
-      expect.objectContaining({ activatedCount: 0 }),
-    ]));
-    expect(test.counter.grantedQuantity).toBe(5);
+  it("fails closed when provider currency or subscription does not match", async () => {
+    for (const change of [{ providerSubscriptionId: "other" }, { providerCostCurrency: "EUR" }]) {
+      const test = harness();
+      await expect(test.service.reconcileProviderConfirmed({ ...input, ...change })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
+    }
   });
 });

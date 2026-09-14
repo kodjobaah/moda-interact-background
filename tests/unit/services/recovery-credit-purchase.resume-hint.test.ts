@@ -21,6 +21,10 @@ const input = {
   billingPeriodId: "period-1",
   providerPlanHandle: "pro-2026",
   packMeterHandle: "pack-meter",
+  providerSubscriptionId: "subscription-1",
+  providerUnits: 3,
+  providerCostAmount: "12.50",
+  providerCostCurrency: "USD",
 };
 
 function activatedHarness(events: string[]) {
@@ -31,6 +35,13 @@ function activatedHarness(events: string[]) {
         {
           id: "purchase-1",
           creditsGranted: 5,
+          version: 0,
+          currentAmount: 0,
+          reservedAmount: 0,
+          providerSubscriptionIdSnapshot: "subscription-1",
+          providerUsageQuantityBeforeSnapshot: 2,
+          providerUsageCostBeforeSnapshot: "10.00",
+          providerUsageCostCurrencyBeforeSnapshot: "USD",
         },
       ]),
       updateMany: vi.fn(async () => ({ count: 1 })),
@@ -119,10 +130,7 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       return "job-id";
     });
 
-    const result = await test.service.reconcileProviderConfirmed({
-      ...input,
-      providerUnits: 1,
-    });
+    const result = await test.service.reconcileProviderConfirmed(input);
     events.push("method-return");
 
     expect(result).toMatchObject({
@@ -186,12 +194,7 @@ describe("RecoveryCreditPurchaseService capacity-resume hint", () => {
       throw error;
     });
 
-    await expect(
-      test.service.reconcileProviderConfirmed({
-        ...input,
-        providerUnits: 1,
-      }),
-    ).resolves.toMatchObject({
+    await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({
       activatedCount: 1,
       confirmedDelta: 1,
     });

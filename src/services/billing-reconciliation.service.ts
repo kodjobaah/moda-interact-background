@@ -156,13 +156,16 @@ export class BillingReconciliationService {
         },
       };
     }
-    const providerUnits = provider.providerUsageSnapshot.find((usage) => usage.handle === packMeterHandle)?.quantity;
+    const providerUsage = provider.providerUsageSnapshot.find((usage) => usage.handle === packMeterHandle);
     const reconciliation = await this.purchases.reconcileProviderConfirmed({
       shopId,
       billingPeriodId: projection.billingPeriodId,
       providerPlanHandle: provider.planHandle,
       packMeterHandle,
-      providerUnits: providerUnits ?? Number.NaN,
+      providerSubscriptionId: provider.providerSubscriptionId,
+      providerUnits: providerUsage?.quantity ?? Number.NaN,
+      providerCostAmount: providerUsage?.costAmount ?? null,
+      providerCostCurrency: providerUsage?.costCurrency ?? null,
     });
     return reconciliation;
   }
