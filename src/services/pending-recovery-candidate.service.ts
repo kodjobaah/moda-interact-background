@@ -34,7 +34,11 @@ const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
 });
 
-type CandidateEnqueueOutcome = "enqueued" | "refreshed" | "discarded-shop-unavailable";
+type CandidateEnqueueOutcome =
+  | "enqueued"
+  | "refreshed"
+  | "discarded-shop-unavailable"
+  | "discarded-subscription-frozen";
 
 export type CandidateActivityResult =
   | { outcome: "rescheduled"; jobId: string; candidate: PendingRecoveryCandidate }
@@ -80,6 +84,7 @@ export class PendingRecoveryCandidateService {
         candidate: PendingRecoveryCandidate;
       }
     | { outcome: "discarded-shop-unavailable"; shopDomain: string }
+    | { outcome: "discarded-subscription-frozen"; shopDomain: string }
   > {
     const shopDomain = input.shopDomain.trim().toLowerCase();
     const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
@@ -89,6 +94,9 @@ export class PendingRecoveryCandidateService {
     }
     if (shop.status !== "ACTIVE") {
       return { outcome: "discarded-shop-unavailable", shopDomain };
+    }
+    if (shop.subscription?.status === "FROZEN") {
+      return { outcome: "discarded-subscription-frozen", shopDomain };
     }
 
     const delayMinutes =
