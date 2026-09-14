@@ -391,6 +391,11 @@ describe("BillingSubscriptionReconciliationService", () => {
     for (const field of ["status", "planId", "billingPeriodId", "currentPeriodStart", "currentPeriodEnd"]) expect(call.data).not.toHaveProperty(field);
     expect(test.database.subscription.update).not.toHaveBeenCalled();
     expect(test.queue.add).toHaveBeenCalledOnce();
+    expect(test.queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ expectedNextReconcileAt: "2026-09-30T23:55:00.000Z" }),
+      expect.objectContaining({ jobId: expect.any(String) }),
+    );
   });
 
   it.each([
@@ -471,6 +476,13 @@ describe("BillingSubscriptionReconciliationService", () => {
     await expect(test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now))).resolves.toBeUndefined();
 
     expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.objectContaining({ shopId: "shop-1" }));
+    expect(
+      test.database.subscription.updateMany.mock.calls.some(([call]: any[]) =>
+        call.data?.status === "SYNC_ERROR"
+        || call.data?.lastSyncErrorCode != null
+        || call.data?.nextReconcileAt?.getTime?.() === new Date("2026-09-12T12:01:00.000Z").getTime(),
+      ),
+    ).toBe(false);
     transition.mockRestore();
     resume.mockRestore();
   });
