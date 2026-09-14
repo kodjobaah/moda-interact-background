@@ -14,7 +14,11 @@ function harness(candidates = [
       updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
         const purchase = purchases.find((candidate) => candidate.id === where.id && candidate.status === where.status && candidate.version === where.version && candidate.currentAmount === where.currentAmount && candidate.reservedAmount === where.reservedAmount);
         if (!purchase) return { count: 0 };
-        Object.assign(purchase, data, { providerPurchaseAmount: data.providerPurchaseAmount?.toString() ?? null });
+        Object.assign(purchase, data, {
+          providerUsageCostAfterSnapshot: data.providerUsageCostAfterSnapshot?.toString() ?? null,
+          providerPurchaseAmount: data.providerPurchaseAmount?.toString() ?? null,
+          version: (data.version as { increment: number }).increment + purchase.version,
+        });
         return { count: 1 };
       }),
     },
@@ -26,7 +30,7 @@ function harness(candidates = [
     },
   };
   const database = { ...transaction, $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)) };
-  return { service: new RecoveryCreditPurchaseService(database as never, 3, () => new Date("2026-09-08T12:00:00.000Z")), purchases, counter };
+  return { service: new RecoveryCreditPurchaseService(database as never, 3, () => new Date("2026-09-08T12:00:00.000Z")), database, purchases, counter };
 }
 
 function matches(purchase: Record<string, any>, where: Record<string, any>) {
@@ -51,7 +55,48 @@ describe("RecoveryCreditPurchaseService", () => {
     const test = harness();
     await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({ activatedCount: 1, confirmedDelta: 1, discrepancy: null });
     expect(test.purchases[0]?.status).toBe("ACTIVE");
-    expect(test.purchases[0]).toMatchObject({ currentAmount: 5, reservedAmount: 0, providerPurchaseAmount: "2.5", providerUsageQuantityAfterSnapshot: 3 });
+    expect(test.purchases[0]).toMatchObject({
+      currentAmount: 5,
+      reservedAmount: 0,
+      providerUsageQuantityAfterSnapshot: 3,
+      providerUsageCostAfterSnapshot: "12.5",
+      providerUsageCostCurrencyAfterSnapshot: "USD",
+      providerPurchaseAmount: "2.5",
+      providerPurchaseCurrency: "USD",
+      providerValuationConfirmedAt: new Date("2026-09-08T12:00:00.000Z"),
+      activatedAt: new Date("2026-09-08T12:00:00.000Z"),
+      version: 1,
+    });
+    expect(test.counter.grantedQuantity).toBe(5);
+  });
+
+  it("uses the purchase snapshot scope, not only the linked event scope", async () => {
+    for (const change of [
+      { billingPeriodId: "period-other" },
+      { shopifyPlanHandleSnapshot: "pro-other" },
+      { shopifyEventHandleSnapshot: "other-meter" },
+    ]) {
+      const test = harness();
+      Object.assign(test.purchases[0]!, change);
+
+      await expect(test.service.reconcileProviderConfirmed(input)).resolves.toMatchObject({
+        activatedCount: 0,
+        discrepancy: { kind: "over" },
+      });
+      expect(test.purchases[0]).toMatchObject({ status: "REQUESTED", currentAmount: 0 });
+      expect(test.counter.grantedQuantity).toBe(0);
+    }
+  });
+
+  it("runs activation at Serializable isolation with the aggregate grant in the same transaction", async () => {
+    const test = harness();
+
+    await test.service.reconcileProviderConfirmed(input);
+
+    expect(test.database.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: "Serializable" },
+    );
     expect(test.counter.grantedQuantity).toBe(5);
   });
 

@@ -48,10 +48,10 @@ function createHarness(grantedQuantity = 1, lotInputs = [{ id: "purchase-1", cre
     },
     recoveryCreditPurchase: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => state.lots.find((lot) => lot.id === where.id) ?? null),
-      findMany: vi.fn(async () => [...state.lots].sort((left, right) => {
+      findMany: vi.fn(async ({ where }: { where: { status?: string } }) => [...state.lots].sort((left, right) => {
         const activation = (left.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER) - (right.activatedAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
         return activation || left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id);
-      }).filter((lot) => lot.status === "ACTIVE")),
+      }).filter((lot) => where.status === undefined || lot.status === where.status)),
       updateMany: vi.fn(async ({ where, data }: { where: { id: string; version: number; status?: string; reservedAmount?: { gte?: number; lte?: number } }; data: Record<string, unknown> }) => {
         const lot = state.lots.find((candidate) => candidate.id === where.id);
         if (!lot || lot.version !== where.version || (where.status && lot.status !== where.status)) return { count: 0 };
@@ -162,8 +162,8 @@ describe("PurchasedRecoveryReservationService", () => {
   it("skips exhausted, refund-held, and refunded lots", async () => {
     const { service } = createHarness(3, [
       { id: "exhausted", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") },
-      { id: "held", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
-      { id: "refunded", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-03T00:00:00.000Z"), createdAt: new Date("2026-09-03T00:00:00.000Z") },
+      { id: "held", status: "WITHDRAWN", creditsGranted: 1, currentAmount: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z") },
+      { id: "refunded", status: "REFUNDED", creditsGranted: 1, currentAmount: 0, activatedAt: new Date("2026-09-03T00:00:00.000Z"), createdAt: new Date("2026-09-03T00:00:00.000Z") },
       { id: "available", creditsGranted: 1, activatedAt: new Date("2026-09-04T00:00:00.000Z"), createdAt: new Date("2026-09-04T00:00:00.000Z") },
     ]);
 
