@@ -87,7 +87,7 @@ describe("ShopifyPartnerBillingApi", () => {
                 description: "Recovery conversations",
                 price: {
                   __typename: "TieredPrice",
-                  active: true,
+                  active: false,
                   currency: "USD",
                   tiersMode: "VOLUME",
                   tiers: [{ upTo: null, amountPerUnit: "0.05", amount: "0.05" }],

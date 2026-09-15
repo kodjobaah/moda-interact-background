@@ -39,6 +39,8 @@ function activatedHarness(events: string[]) {
           currentAmount: 0,
           reservedAmount: 0,
           providerSubscriptionIdSnapshot: "subscription-1",
+          shopifyPlanHandleSnapshot: "pro-2026",
+          shopifyEventHandleSnapshot: "pack-meter",
           providerUsageQuantityBeforeSnapshot: 2,
           providerUsageCostBeforeSnapshot: "10.00",
           providerUsageCostCurrencyBeforeSnapshot: "USD",

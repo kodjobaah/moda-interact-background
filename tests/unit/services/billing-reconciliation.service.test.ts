@@ -543,10 +543,13 @@ describe("BillingReconciliationService", () => {
       billingPeriodId: "period-1",
       providerPlanHandle: "pro-2026",
       packMeterHandle: "pack-meter",
-        providerSubscriptionId: "sub-1",
+      providerSubscriptionId: "sub-1",
       providerUnits: 2,
-        providerCostAmount: "20.00",
-        providerCostCurrency: "USD",
+      providerCostAmount: "20.00",
+      providerCostCurrency: "USD",
+      providerUsageSnapshot: providerSubscription.providerUsageSnapshot,
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
     });
     expect(result.purchasesActivated).toBe(1);
   });

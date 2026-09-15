@@ -1,6 +1,6 @@
 export type PartnerUsageSnapshot = {
   handle: string;
-  quantity: number | null;
+  quantity: string | number | null;
   costAmount: string | null;
   costCurrency: string | null;
 };
@@ -325,7 +325,7 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       ? new Date(subscription.currentBillingCycle.endTime)
       : null;
     const tieredItems = subscription.items.filter(
-      (item) => item.handle && item.price?.__typename === "TieredPrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "TieredPrice" && (item.price.active || item.usage !== null),
     );
 
     return {
@@ -341,7 +341,9 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       providerSubscriptionId: subscription.legacySubscriptionId,
       providerUsageSnapshot: tieredItems.flatMap((item) => item.handle ? [{
         handle: item.handle,
-        quantity: item.usage?.quantity ?? null,
+        quantity: item.usage?.quantity === null || item.usage?.quantity === undefined
+          ? null
+          : String(item.usage.quantity),
         costAmount: item.usage?.cost?.amount ?? null,
         costCurrency: item.usage?.cost?.currencyCode ?? null,
       }] : []),

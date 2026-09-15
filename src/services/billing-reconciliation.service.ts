@@ -93,9 +93,9 @@ export class BillingReconciliationService {
             shopId: shop.id,
             billingPeriodId: purchaseReconciliation.discrepancy.billingPeriodId,
             meterHandle: purchaseReconciliation.discrepancy.packMeterHandle,
-            modaQuantity: purchaseReconciliation.discrepancy.alreadyMatchedUnits
+            modaQuantity: Number(purchaseReconciliation.discrepancy.alreadyMatchedUnits)
               + purchaseReconciliation.discrepancy.eligibleCandidateCount,
-            shopifyQuantity: purchaseReconciliation.discrepancy.providerUnits,
+            shopifyQuantity: Number(purchaseReconciliation.discrepancy.providerUnits),
             kind: purchaseReconciliation.discrepancy.kind,
             ...(purchaseReconciliation.discrepancy.detail
               ? { detail: purchaseReconciliation.discrepancy.detail }
@@ -166,6 +166,9 @@ export class BillingReconciliationService {
       providerUnits: providerUsage?.quantity ?? Number.NaN,
       providerCostAmount: providerUsage?.costAmount ?? null,
       providerCostCurrency: providerUsage?.costCurrency ?? null,
+      providerUsageSnapshot: provider.providerUsageSnapshot,
+      currentPeriodStart: provider.currentPeriodStart,
+      currentPeriodEnd: provider.currentPeriodEnd,
     });
     return reconciliation;
   }
@@ -686,13 +689,13 @@ export class BillingReconciliationService {
       },
       _sum: { quantity: true },
     }))._sum.quantity ?? 0);
-    if (modaQuantity === shopifyQuantity) return null;
+    if (new Prisma.Decimal(modaQuantity).equals(new Prisma.Decimal(shopifyQuantity))) return null;
     const discrepancy = {
       shopId,
       billingPeriodId: subscription.billingPeriodId,
       meterHandle,
       modaQuantity,
-      shopifyQuantity,
+      shopifyQuantity: Number(shopifyQuantity),
     };
     this.logger.warn("billing.usage_reconciliation.discrepancy", discrepancy);
     return discrepancy;
