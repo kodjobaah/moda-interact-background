@@ -1,6 +1,6 @@
 export type PartnerUsageSnapshot = {
   handle: string;
-  quantity: number | null;
+  quantity: string | number | null;
   costAmount: string | null;
   costCurrency: string | null;
 };
@@ -79,7 +79,7 @@ type PartnerResponse = {
         handle: string | null;
         description: string | null;
         price: ShopifyPrice | null;
-        usage: { quantity: number | null; cost: { amount: string; currencyCode: string } | null } | null;
+        usage: { quantity: number | string | null; cost: { amount: string; currencyCode: string } | null } | null;
       }>;
       pendingUpdate: {
         billingPeriod: string | null;
@@ -305,13 +305,13 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
     if (!subscription) return null;
 
     const flatRateItems = subscription.items.filter(
-      (item) => item.handle && item.price?.__typename === "FlatRatePrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "FlatRatePrice",
     );
     if (flatRateItems.length !== 1 || !flatRateItems[0]?.handle) {
       throw new Error("Active Shopify subscription must have exactly one active flat-rate plan handle");
     }
     const pendingFlatRateItems = subscription.pendingUpdate?.items.filter(
-      (item) => item.handle && item.price?.__typename === "FlatRatePrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "FlatRatePrice",
     ) ?? [];
     if (pendingFlatRateItems.length > 1) {
       throw new Error("Pending Shopify subscription update has multiple active flat-rate plan handles");
@@ -325,7 +325,7 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       ? new Date(subscription.currentBillingCycle.endTime)
       : null;
     const tieredItems = subscription.items.filter(
-      (item) => item.handle && item.price?.__typename === "TieredPrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "TieredPrice",
     );
 
     return {
@@ -341,7 +341,9 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       providerSubscriptionId: subscription.legacySubscriptionId,
       providerUsageSnapshot: tieredItems.flatMap((item) => item.handle ? [{
         handle: item.handle,
-        quantity: item.usage?.quantity ?? null,
+        quantity: item.usage?.quantity === null || item.usage?.quantity === undefined
+          ? null
+          : String(item.usage.quantity),
         costAmount: item.usage?.cost?.amount ?? null,
         costCurrency: item.usage?.cost?.currencyCode ?? null,
       }] : []),

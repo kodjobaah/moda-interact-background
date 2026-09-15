@@ -12,6 +12,7 @@ import {
   APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
   BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
   createBillingSubscriptionReconcileJobId,
+  deriveShopifyProviderContextIdentity,
 } from "@modainteract/moda-interact-shared/billing";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -93,9 +94,9 @@ export class BillingReconciliationService {
             shopId: shop.id,
             billingPeriodId: purchaseReconciliation.discrepancy.billingPeriodId,
             meterHandle: purchaseReconciliation.discrepancy.packMeterHandle,
-            modaQuantity: purchaseReconciliation.discrepancy.alreadyMatchedUnits
+            modaQuantity: Number(purchaseReconciliation.discrepancy.alreadyMatchedUnits)
               + purchaseReconciliation.discrepancy.eligibleCandidateCount,
-            shopifyQuantity: purchaseReconciliation.discrepancy.providerUnits,
+            shopifyQuantity: Number(purchaseReconciliation.discrepancy.providerUnits),
             kind: purchaseReconciliation.discrepancy.kind,
             ...(purchaseReconciliation.discrepancy.detail
               ? { detail: purchaseReconciliation.discrepancy.detail }
@@ -121,7 +122,9 @@ export class BillingReconciliationService {
     if (!provider) {
       return { activatedCount: 0, discrepancy: null };
     }
-    if (!provider.currentPeriodStart || !provider.currentPeriodEnd) {
+    if (!provider.currentPeriodStart
+      || !provider.currentPeriodEnd
+      || provider.currentPeriodEnd.getTime() <= provider.currentPeriodStart.getTime()) {
       return {
         activatedCount: 0,
         discrepancy: {
@@ -138,8 +141,7 @@ export class BillingReconciliationService {
         },
       };
     }
-    const packMeterHandle = projection.packMeterHandle;
-    if (!packMeterHandle || !projection.billingPeriodId) {
+    if (!projection.billingPeriodId) {
       return {
         activatedCount: 0,
         discrepancy: {
@@ -147,25 +149,33 @@ export class BillingReconciliationService {
           shopId,
           billingPeriodId: projection.billingPeriodId ?? "",
           providerPlanHandle: provider.planHandle,
-          packMeterHandle: packMeterHandle ?? "",
+          packMeterHandle: projection.packMeterHandle ?? "",
           providerUnits: 0,
           alreadyMatchedUnits: 0,
           eligibleCandidateCount: 0,
           confirmedDelta: 0,
-          detail: "Exact current billing period and pack meter are required",
+          detail: "Exact current billing period is required",
         },
       };
     }
-    const providerUsage = provider.providerUsageSnapshot.find((usage) => usage.handle === packMeterHandle);
+    const providerContextIdentity = deriveShopifyProviderContextIdentity({
+      providerSubscriptionId: provider.providerSubscriptionId,
+      planHandle: provider.planHandle,
+      currentPeriodStart: provider.currentPeriodStart,
+      currentPeriodEnd: provider.currentPeriodEnd,
+    });
     const reconciliation = await this.purchases.reconcileProviderConfirmed({
       shopId,
       billingPeriodId: projection.billingPeriodId,
       providerPlanHandle: provider.planHandle,
-      packMeterHandle,
-      providerSubscriptionId: provider.providerSubscriptionId,
-      providerUnits: providerUsage?.quantity ?? Number.NaN,
-      providerCostAmount: providerUsage?.costAmount ?? null,
-      providerCostCurrency: providerUsage?.costCurrency ?? null,
+      packMeterHandle: projection.packMeterHandle ?? "",
+      providerContextIdentity,
+      providerUnits: Number.NaN,
+      providerCostAmount: null,
+      providerCostCurrency: null,
+      providerUsageSnapshot: provider.providerUsageSnapshot,
+      currentPeriodStart: provider.currentPeriodStart,
+      currentPeriodEnd: provider.currentPeriodEnd,
     });
     return reconciliation;
   }
@@ -686,13 +696,13 @@ export class BillingReconciliationService {
       },
       _sum: { quantity: true },
     }))._sum.quantity ?? 0);
-    if (modaQuantity === shopifyQuantity) return null;
+    if (new Prisma.Decimal(modaQuantity).equals(new Prisma.Decimal(shopifyQuantity))) return null;
     const discrepancy = {
       shopId,
       billingPeriodId: subscription.billingPeriodId,
       meterHandle,
       modaQuantity,
-      shopifyQuantity,
+      shopifyQuantity: Number(shopifyQuantity),
     };
     this.logger.warn("billing.usage_reconciliation.discrepancy", discrepancy);
     return discrepancy;

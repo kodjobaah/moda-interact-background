@@ -5,7 +5,10 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { createShopifyUsageIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import {
+  createShopifyUsageIdempotencyKey,
+  isSameShopifyPurchaseProviderContext,
+} from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
@@ -22,10 +25,18 @@ export type ProviderConfirmedPurchaseReconciliationInput = {
   billingPeriodId: string;
   providerPlanHandle: string;
   packMeterHandle: string;
-  providerSubscriptionId: string | null;
-  providerUnits: number;
+  providerContextIdentity: string;
+  providerUnits: number | string | Prisma.Decimal;
   providerCostAmount: string | null;
   providerCostCurrency: string | null;
+  providerUsageSnapshot?: Array<{
+    handle: string;
+    quantity: number | string | null;
+    costAmount: string | null;
+    costCurrency: string | null;
+  }>;
+  currentPeriodStart?: Date | null;
+  currentPeriodEnd?: Date | null;
 };
 
 export type PurchaseReconciliationDiscrepancy = {
@@ -34,8 +45,8 @@ export type PurchaseReconciliationDiscrepancy = {
   billingPeriodId: string;
   providerPlanHandle: string;
   packMeterHandle: string;
-  providerUnits: number;
-  alreadyMatchedUnits: number;
+  providerUnits: string;
+  alreadyMatchedUnits: string;
   eligibleCandidateCount: number;
   confirmedDelta: number;
   detail?: string;
@@ -57,7 +68,7 @@ export type RecoveryCreditPurchaseInput = {
   providerSubscriptionIdSnapshot: string;
   shopifyPlanHandleSnapshot: string;
   shopifyEventHandleSnapshot: string;
-  providerUsageQuantityBeforeSnapshot: number;
+  providerUsageQuantityBeforeSnapshot: number | string | Prisma.Decimal;
   providerUsageCostBeforeSnapshot: string | Prisma.Decimal;
   providerUsageCostCurrencyBeforeSnapshot: string;
   providerPriceSnapshot?: Prisma.InputJsonValue;
@@ -132,13 +143,15 @@ export class RecoveryCreditPurchaseService {
       confirmedDelta: 0,
       discrepancy: null,
     } satisfies ProviderConfirmedPurchaseReconciliationResult;
-    if (!Number.isInteger(input.providerUnits) || input.providerUnits < 0) {
+    const providerUnits = parseProviderQuantity(input.providerUnits);
+    if (input.providerUsageSnapshot === undefined && providerUnits === null) {
       return {
         ...empty,
         discrepancy: {
           kind: "invalid-provider-units",
           ...input,
-          alreadyMatchedUnits: 0,
+          providerUnits: String(input.providerUnits),
+          alreadyMatchedUnits: "0",
           eligibleCandidateCount: 0,
           confirmedDelta: 0,
           detail: "Provider pack usage must be a finite non-negative integer",
@@ -148,18 +161,20 @@ export class RecoveryCreditPurchaseService {
 
     const result = await this.withRetry(() =>
       this.database.$transaction(async (transaction) => {
+        const scopedToCurrentMeter = input.providerUsageSnapshot === undefined;
         const scope = {
           shopId: input.shopId,
-          shopifyPlanHandleSnapshot: input.providerPlanHandle,
-          shopifyEventHandleSnapshot: input.packMeterHandle,
-          billingPeriodId: input.billingPeriodId,
+          ...(scopedToCurrentMeter ? {
+            shopifyPlanHandleSnapshot: input.providerPlanHandle,
+            shopifyEventHandleSnapshot: input.packMeterHandle,
+            billingPeriodId: input.billingPeriodId,
+          } : {}),
           usageEvent: {
             shopId: input.shopId,
-            shopifyEventHandle: input.packMeterHandle,
+            ...(scopedToCurrentMeter ? { shopifyEventHandle: input.packMeterHandle, billingPeriodId: input.billingPeriodId } : {}),
             metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
             quantity: 1,
             shopifyReportState: ShopifyReportState.REPORTED,
-            billingPeriodId: input.billingPeriodId,
           },
         } satisfies Prisma.RecoveryCreditPurchaseWhereInput;
         const alreadyMatchedUnits = await transaction.recoveryCreditPurchase.count({
@@ -178,121 +193,151 @@ export class RecoveryCreditPurchaseService {
             currentAmount: true,
             reservedAmount: true,
             providerSubscriptionIdSnapshot: true,
+            shopifyPlanHandleSnapshot: true,
+            shopifyEventHandleSnapshot: true,
+            billingPeriodId: true,
             providerUsageQuantityBeforeSnapshot: true,
             providerUsageCostBeforeSnapshot: true,
             providerUsageCostCurrencyBeforeSnapshot: true,
+            billingPeriod: { select: { periodStart: true, periodEnd: true } },
           },
         });
-        const reportedDelta = input.providerUnits - alreadyMatchedUnits;
         const discrepancy = (kind: PurchaseReconciliationDiscrepancy["kind"], detail?: string): PurchaseReconciliationDiscrepancy => ({
           kind,
           ...input,
-          alreadyMatchedUnits,
+          providerUnits: providerUnits?.toString() ?? String(input.providerUnits),
+          alreadyMatchedUnits: String(alreadyMatchedUnits),
           eligibleCandidateCount: candidates.length,
-          confirmedDelta: reportedDelta,
+          confirmedDelta: 0,
           ...(detail ? { detail } : {}),
         });
-        if (reportedDelta <= 0 || candidates.length === 0) {
+        if (candidates.length === 0) {
           return {
             activatedCount: 0,
             alreadyMatchedUnits,
-            eligibleCandidateCount: candidates.length,
-            confirmedDelta: candidates.length === 0 && alreadyMatchedUnits > 0 ? 0 : reportedDelta,
-            discrepancy: reportedDelta < 0
-              ? discrepancy("under", "Provider quantity is below already matched local purchases")
-              : candidates.length > 0 && reportedDelta === 0
-                ? null
-                : input.providerUnits > alreadyMatchedUnits && alreadyMatchedUnits === 0
-                  ? discrepancy("over", "Provider units have no eligible local purchase")
-                  : null,
+            eligibleCandidateCount: 0,
+            confirmedDelta: 0,
+            discrepancy: providerUnits?.gt(0) && alreadyMatchedUnits === 0
+              ? discrepancy("over", "Provider units have no eligible local purchase")
+              : null,
           };
         }
 
-        const confirmedDelta = 1;
-        if (candidates.length !== 1) {
+        const candidatesByHandle = new Map<string, typeof candidates>();
+        for (const candidate of candidates) {
+          const sameHandle = candidatesByHandle.get(candidate.shopifyEventHandleSnapshot) ?? [];
+          sameHandle.push(candidate);
+          candidatesByHandle.set(candidate.shopifyEventHandleSnapshot, sameHandle);
+        }
+        if ([...candidatesByHandle.values()].some((sameHandle) => sameHandle.length > 1)) {
           return {
             activatedCount: 0,
             alreadyMatchedUnits,
             eligibleCandidateCount: candidates.length,
-            confirmedDelta,
+            confirmedDelta: 0,
             discrepancy: discrepancy("ambiguous", "Provider quantity/cost cannot be attributed uniquely to one unresolved purchase"),
           };
         }
 
-        const candidate = candidates[0]!;
-        const providerCost = parseProviderCost(input.providerCostAmount);
-        const beforeCost = new Prisma.Decimal(candidate.providerUsageCostBeforeSnapshot);
-        const providerPurchaseAmount = providerCost?.minus(beforeCost);
-        if (
-          input.providerSubscriptionId === null
-          || candidate.providerSubscriptionIdSnapshot !== input.providerSubscriptionId
-          || input.providerCostCurrency === null
-          || input.providerCostCurrency !== candidate.providerUsageCostCurrencyBeforeSnapshot
-          || providerCost === null
-          || providerPurchaseAmount === undefined
-          || providerPurchaseAmount.lte(0)
-          || input.providerUnits !== candidate.providerUsageQuantityBeforeSnapshot + 1
-        ) {
-          return {
-            activatedCount: 0,
-            alreadyMatchedUnits,
-            eligibleCandidateCount: candidates.length,
-            confirmedDelta,
-            discrepancy: discrepancy("ambiguous", "Provider subscription, quantity, cost, or currency does not prove this purchase"),
-          };
+        let activatedCount = 0;
+        let grantedQuantity = 0;
+        let failedProof = false;
+        for (const candidate of candidates) {
+          const candidateUsage = input.providerUsageSnapshot?.find(
+            (usage) => usage.handle === candidate.shopifyEventHandleSnapshot,
+          );
+          const candidateUnits = candidateUsage
+            ? parseProviderQuantity(candidateUsage.quantity as number | string | Prisma.Decimal)
+            : providerUnits;
+          const hasExactProviderUsage = input.providerUsageSnapshot === undefined
+            ? candidate.shopifyEventHandleSnapshot === input.packMeterHandle
+            : candidateUsage !== undefined;
+          const candidateCostAmount = candidateUsage?.costAmount ?? input.providerCostAmount;
+          const candidateCostCurrency = candidateUsage?.costCurrency ?? input.providerCostCurrency;
+          const exactProviderCost = parseProviderCost(candidateCostAmount);
+          const beforeCost = new Prisma.Decimal(candidate.providerUsageCostBeforeSnapshot);
+          const providerPurchaseAmount = exactProviderCost?.minus(beforeCost);
+          const expectedQuantity = new Prisma.Decimal(candidate.providerUsageQuantityBeforeSnapshot).plus(1);
+          const proven = hasExactProviderUsage
+            && candidateUnits !== null
+            && isSameShopifyPurchaseProviderContext(
+              {
+                providerContextIdentity: candidate.providerSubscriptionIdSnapshot,
+                shopifyPlanHandleSnapshot: candidate.shopifyPlanHandleSnapshot,
+                billingPeriodId: candidate.billingPeriodId,
+              },
+              {
+                providerContextIdentity: input.providerContextIdentity,
+                shopifyPlanHandle: input.providerPlanHandle,
+                billingPeriodId: input.billingPeriodId,
+              },
+            )
+            && candidateCostCurrency !== null
+            && candidateCostCurrency === candidate.providerUsageCostCurrencyBeforeSnapshot
+            && exactProviderCost !== null
+            && providerPurchaseAmount !== undefined
+            && providerPurchaseAmount.gte(0)
+            && new Prisma.Decimal(candidateUnits).equals(expectedQuantity)
+            && (input.currentPeriodStart === undefined || (
+              candidate.billingPeriod?.periodStart.getTime() === input.currentPeriodStart?.getTime()
+              && candidate.billingPeriod?.periodEnd.getTime() === input.currentPeriodEnd?.getTime()
+            ));
+          if (!proven) {
+            failedProof = true;
+            continue;
+          }
+          const activated = await transaction.recoveryCreditPurchase.updateMany({
+            where: {
+              id: candidate.id,
+              version: candidate.version,
+              status: RecoveryCreditPurchaseStatus.REQUESTED,
+              currentAmount: 0,
+              reservedAmount: 0,
+              providerUsageQuantityAfterSnapshot: null,
+              providerPurchaseAmount: null,
+              providerValuationConfirmedAt: null,
+            },
+            data: {
+              providerUsageQuantityAfterSnapshot: candidateUnits,
+              providerUsageCostAfterSnapshot: exactProviderCost,
+              providerUsageCostCurrencyAfterSnapshot: candidateCostCurrency,
+              providerPurchaseAmount,
+              providerPurchaseCurrency: candidateCostCurrency,
+              providerValuationConfirmedAt: this.now(),
+              currentAmount: candidate.creditsGranted,
+              status: RecoveryCreditPurchaseStatus.ACTIVE,
+              activatedAt: this.now(),
+              version: { increment: 1 },
+            },
+          });
+          if (activated.count !== 1) {
+            failedProof = true;
+            continue;
+          }
+          activatedCount += 1;
+          grantedQuantity += candidate.creditsGranted;
         }
-        const activated = await transaction.recoveryCreditPurchase.updateMany({
-          where: {
-            id: candidate.id,
-            version: candidate.version,
-            status: RecoveryCreditPurchaseStatus.REQUESTED,
-            currentAmount: 0,
-            reservedAmount: 0,
-            providerUsageQuantityAfterSnapshot: null,
-            providerPurchaseAmount: null,
-            providerValuationConfirmedAt: null,
-          },
-          data: {
-            providerUsageQuantityAfterSnapshot: input.providerUnits,
-            providerUsageCostAfterSnapshot: providerCost,
-            providerUsageCostCurrencyAfterSnapshot: input.providerCostCurrency,
-            providerPurchaseAmount,
-            providerPurchaseCurrency: input.providerCostCurrency,
-            providerValuationConfirmedAt: this.now(),
-            currentAmount: candidate.creditsGranted,
-            status: RecoveryCreditPurchaseStatus.ACTIVE,
-            activatedAt: this.now(),
-            version: { increment: 1 },
-          },
-        });
-        if (activated.count !== 1) {
-          return {
-            activatedCount: 0,
-            alreadyMatchedUnits,
-            eligibleCandidateCount: candidates.length,
-            confirmedDelta,
-            discrepancy: discrepancy("ambiguous", "Purchase changed before valuation could commit"),
-          };
+        if (grantedQuantity > 0) {
+          await transaction.shopEntitlementCounter.upsert({
+            where: { shopId_counter: { shopId: input.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
+            create: {
+              shopId: input.shopId,
+              counter: "PURCHASED_RECOVERY_CREDITS",
+              grantedQuantity,
+            },
+            update: {
+              grantedQuantity: { increment: grantedQuantity },
+              version: { increment: 1 },
+            },
+          });
         }
-        await transaction.shopEntitlementCounter.upsert({
-          where: { shopId_counter: { shopId: input.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
-          create: {
-            shopId: input.shopId,
-            counter: "PURCHASED_RECOVERY_CREDITS",
-            grantedQuantity: candidate.creditsGranted,
-          },
-          update: {
-            grantedQuantity: { increment: candidate.creditsGranted },
-            version: { increment: 1 },
-          },
-        });
         return {
-          activatedCount: 1,
+          activatedCount,
           alreadyMatchedUnits,
           eligibleCandidateCount: candidates.length,
-          confirmedDelta,
-          discrepancy: confirmedDelta > candidates.length
-            ? discrepancy("over", "Provider units exceed eligible local purchases")
+          confirmedDelta: activatedCount,
+          discrepancy: failedProof
+            ? discrepancy("ambiguous", "Provider subscription, quantity, cost, or currency does not prove this purchase")
             : null,
         };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
@@ -329,8 +374,8 @@ function validatePurchaseInput(input: RecoveryCreditPurchaseInput): void {
   if (!input.id || !input.shopId || !input.planId || !input.billingPeriodId || !input.providerSubscriptionIdSnapshot || !input.shopifyPlanHandleSnapshot || !input.shopifyEventHandleSnapshot || !input.providerUsageCostCurrencyBeforeSnapshot) {
     throw new Error("Recovery credit purchase identity and Shopify handles are required");
   }
-  if (!Number.isSafeInteger(input.providerUsageQuantityBeforeSnapshot) || input.providerUsageQuantityBeforeSnapshot < 0) {
-    throw new Error("Recovery credit purchase provider quantity snapshot must be a non-negative safe integer");
+  if (parseProviderQuantity(input.providerUsageQuantityBeforeSnapshot) === null) {
+    throw new Error("Recovery credit purchase provider quantity snapshot must be a finite non-negative amount");
   }
   try {
     if (new Prisma.Decimal(input.providerUsageCostBeforeSnapshot).lt(0)) throw new Error("negative");
@@ -347,6 +392,15 @@ function parseProviderCost(value: string | null): Prisma.Decimal | null {
   try {
     const cost = new Prisma.Decimal(value);
     return cost.isFinite() && cost.gte(0) ? cost : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseProviderQuantity(value: number | string | Prisma.Decimal): Prisma.Decimal | null {
+  try {
+    const quantity = new Prisma.Decimal(value);
+    return quantity.isFinite() && quantity.gte(0) ? quantity : null;
   } catch {
     return null;
   }
