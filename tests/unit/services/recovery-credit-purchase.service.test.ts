@@ -220,4 +220,34 @@ describe("RecoveryCreditPurchaseService", () => {
     })).resolves.toMatchObject({ activatedCount: 2, confirmedDelta: 2, discrepancy: null });
     expect(test.counter.grantedQuantity).toBe(12);
   });
+
+  it("activates sequential purchases with the same event handle from successive baselines", async () => {
+    const test = harness([{ id: "purchase-1", creditsGranted: 5, beforeQuantity: "0", createdAt: new Date("2026-09-08T10:00:00.000Z") }]);
+
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerUnits: Number.NaN,
+      providerUsageSnapshot: [{ handle: "pack-meter", quantity: "1", costAmount: "10.00", costCurrency: "USD" }],
+    })).resolves.toMatchObject({ activatedCount: 1, discrepancy: null });
+
+    test.purchases.push({
+      ...test.purchases[0]!,
+      id: "purchase-2",
+      providerUsageQuantityBeforeSnapshot: "1",
+      status: "REQUESTED",
+      currentAmount: 0,
+      providerUsageQuantityAfterSnapshot: null,
+      providerPurchaseAmount: null,
+      providerValuationConfirmedAt: null,
+      version: 0,
+    });
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerUnits: Number.NaN,
+      providerUsageSnapshot: [{ handle: "pack-meter", quantity: "2", costAmount: "10.00", costCurrency: "USD" }],
+    })).resolves.toMatchObject({ activatedCount: 1, discrepancy: null });
+
+    expect(test.purchases.map((purchase) => purchase.status)).toEqual(["ACTIVE", "ACTIVE"]);
+    expect(test.counter.grantedQuantity).toBe(10);
+  });
 });

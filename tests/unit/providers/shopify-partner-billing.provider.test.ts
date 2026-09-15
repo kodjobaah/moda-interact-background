@@ -92,7 +92,19 @@ describe("ShopifyPartnerBillingApi", () => {
                   tiersMode: "VOLUME",
                   tiers: [{ upTo: null, amountPerUnit: "0.05", amount: "0.05" }],
                 },
-                usage: { quantity: 3, cost: { amount: "0.15", currencyCode: "USD" } },
+                usage: { quantity: "1.75", cost: { amount: "0.0875", currencyCode: "USD" } },
+              },
+              {
+                handle: "legacy-meter",
+                description: "Legacy recovery pack",
+                price: {
+                  __typename: "TieredPrice",
+                  active: false,
+                  currency: "USD",
+                  tiersMode: "VOLUME",
+                  tiers: [{ upTo: null, amountPerUnit: "0.00", amount: "0.00" }],
+                },
+                usage: null,
               },
               {
                 handle: "growth-plan",
@@ -121,7 +133,11 @@ describe("ShopifyPartnerBillingApi", () => {
 
     await expect(api.getActiveSubscription("gid://shopify/Shop/1")).resolves.toMatchObject({
       planHandle: "growth-plan",
-      usageEventHandles: ["recovery-meter"],
+      usageEventHandles: ["recovery-meter", "legacy-meter"],
+      providerUsageSnapshot: [
+        { handle: "recovery-meter", quantity: "1.75", costAmount: "0.0875", costCurrency: "USD" },
+        { handle: "legacy-meter", quantity: null, costAmount: null, costCurrency: null },
+      ],
       pendingPlanHandle: "scale-plan",
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
       currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),

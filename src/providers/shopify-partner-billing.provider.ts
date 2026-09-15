@@ -79,7 +79,7 @@ type PartnerResponse = {
         handle: string | null;
         description: string | null;
         price: ShopifyPrice | null;
-        usage: { quantity: number | null; cost: { amount: string; currencyCode: string } | null } | null;
+        usage: { quantity: number | string | null; cost: { amount: string; currencyCode: string } | null } | null;
       }>;
       pendingUpdate: {
         billingPeriod: string | null;
@@ -325,7 +325,7 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
       ? new Date(subscription.currentBillingCycle.endTime)
       : null;
     const tieredItems = subscription.items.filter(
-      (item) => item.handle && item.price?.__typename === "TieredPrice" && (item.price.active || item.usage !== null),
+      (item) => item.handle && item.price?.__typename === "TieredPrice",
     );
 
     return {
