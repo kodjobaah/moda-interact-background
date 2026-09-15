@@ -114,7 +114,7 @@ describe("BillingReconciliationService", () => {
 
     expect(result.subscriptionErrors).toBe(0);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }) }));
-    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalled();
   });
 
   it("schedules plan-change capacity resume after a successful rotating Paid transition", async () => {
@@ -161,7 +161,7 @@ describe("BillingReconciliationService", () => {
 
     expect(result.subscriptionErrors).toBe(0);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }) }));
-    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalled();
     expect(queue.add).toHaveBeenCalledOnce();
     expect(transition).not.toHaveBeenCalled();
     transition.mockRestore();
@@ -213,7 +213,7 @@ describe("BillingReconciliationService", () => {
 
     expect(result.subscriptionErrors).toBe(0);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: expectedCode }) }));
-    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalled();
     expect(queue.add).toHaveBeenCalledOnce();
     expect(transition).not.toHaveBeenCalled();
     transition.mockRestore();
@@ -249,7 +249,7 @@ describe("BillingReconciliationService", () => {
 
     expect(result.subscriptionErrors).toBe(0);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }) }));
-    expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalled();
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalled();
     expect(queue.add).toHaveBeenCalledOnce();
     transition.mockRestore();
   });
@@ -544,9 +544,9 @@ describe("BillingReconciliationService", () => {
       providerPlanHandle: "pro-2026",
       packMeterHandle: "pack-meter",
       providerContextIdentity: "sub-1",
-      providerUnits: 2,
-      providerCostAmount: "20.00",
-      providerCostCurrency: "USD",
+      providerUnits: Number.NaN,
+      providerCostAmount: null,
+      providerCostCurrency: null,
       providerUsageSnapshot: providerSubscription.providerUsageSnapshot,
       currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
       currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
@@ -571,6 +571,46 @@ describe("BillingReconciliationService", () => {
       shopId: "shop-1",
       kind: "invalid-scope",
       detail: "Present Partner subscription has no exact current billing cycle",
+    }));
+  });
+
+  it("reconciles durable purchases without the retired singular pack configuration", async () => {
+    const test = harness({
+      plan: {
+        id: "plan-1",
+        active: true,
+        kind: "PAID_METERED",
+        shopifyUsageEventHandle: "recovery-meter",
+        shopifyRecoveryCreditPackEventHandle: null,
+        recoveryCreditPackEnabled: false,
+      },
+      partnerResult: {
+        ...providerSubscription,
+        providerUsageSnapshot: [{
+          handle: "pack-meter",
+          quantity: "3",
+          costAmount: "20.00",
+          costCurrency: "USD",
+        }],
+      },
+    });
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({
+      subscriptionErrors: 0,
+      purchasesActivated: 1,
+    });
+
+    expect(test.purchases.reconcileProviderConfirmed).toHaveBeenCalledWith(expect.objectContaining({
+      packMeterHandle: "",
+      providerUnits: Number.NaN,
+      providerCostAmount: null,
+      providerCostCurrency: null,
+      providerUsageSnapshot: [{
+        handle: "pack-meter",
+        quantity: "3",
+        costAmount: "20.00",
+        costCurrency: "USD",
+      }],
     }));
   });
 

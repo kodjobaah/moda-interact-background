@@ -122,7 +122,9 @@ export class BillingReconciliationService {
     if (!provider) {
       return { activatedCount: 0, discrepancy: null };
     }
-    if (!provider.currentPeriodStart || !provider.currentPeriodEnd) {
+    if (!provider.currentPeriodStart
+      || !provider.currentPeriodEnd
+      || provider.currentPeriodEnd.getTime() <= provider.currentPeriodStart.getTime()) {
       return {
         activatedCount: 0,
         discrepancy: {
@@ -139,8 +141,7 @@ export class BillingReconciliationService {
         },
       };
     }
-    const packMeterHandle = projection.packMeterHandle;
-    if (!packMeterHandle || !projection.billingPeriodId) {
+    if (!projection.billingPeriodId) {
       return {
         activatedCount: 0,
         discrepancy: {
@@ -148,16 +149,15 @@ export class BillingReconciliationService {
           shopId,
           billingPeriodId: projection.billingPeriodId ?? "",
           providerPlanHandle: provider.planHandle,
-          packMeterHandle: packMeterHandle ?? "",
+          packMeterHandle: projection.packMeterHandle ?? "",
           providerUnits: 0,
           alreadyMatchedUnits: 0,
           eligibleCandidateCount: 0,
           confirmedDelta: 0,
-          detail: "Exact current billing period and pack meter are required",
+          detail: "Exact current billing period is required",
         },
       };
     }
-    const providerUsage = provider.providerUsageSnapshot.find((usage) => usage.handle === packMeterHandle);
     const providerContextIdentity = deriveShopifyProviderContextIdentity({
       providerSubscriptionId: provider.providerSubscriptionId,
       planHandle: provider.planHandle,
@@ -168,11 +168,11 @@ export class BillingReconciliationService {
       shopId,
       billingPeriodId: projection.billingPeriodId,
       providerPlanHandle: provider.planHandle,
-      packMeterHandle,
+      packMeterHandle: projection.packMeterHandle ?? "",
       providerContextIdentity,
-      providerUnits: providerUsage?.quantity ?? Number.NaN,
-      providerCostAmount: providerUsage?.costAmount ?? null,
-      providerCostCurrency: providerUsage?.costCurrency ?? null,
+      providerUnits: Number.NaN,
+      providerCostAmount: null,
+      providerCostCurrency: null,
       providerUsageSnapshot: provider.providerUsageSnapshot,
       currentPeriodStart: provider.currentPeriodStart,
       currentPeriodEnd: provider.currentPeriodEnd,
