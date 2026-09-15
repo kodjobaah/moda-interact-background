@@ -305,13 +305,13 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
     if (!subscription) return null;
 
     const flatRateItems = subscription.items.filter(
-      (item) => item.handle && item.price?.__typename === "FlatRatePrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "FlatRatePrice",
     );
     if (flatRateItems.length !== 1 || !flatRateItems[0]?.handle) {
       throw new Error("Active Shopify subscription must have exactly one active flat-rate plan handle");
     }
     const pendingFlatRateItems = subscription.pendingUpdate?.items.filter(
-      (item) => item.handle && item.price?.__typename === "FlatRatePrice" && item.price.active,
+      (item) => item.handle && item.price?.__typename === "FlatRatePrice",
     ) ?? [];
     if (pendingFlatRateItems.length > 1) {
       throw new Error("Pending Shopify subscription update has multiple active flat-rate plan handles");

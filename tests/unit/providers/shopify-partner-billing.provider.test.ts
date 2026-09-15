@@ -109,7 +109,7 @@ describe("ShopifyPartnerBillingApi", () => {
               {
                 handle: "growth-plan",
                 description: "Growth plan",
-                price: { __typename: "FlatRatePrice", active: true, currency: "USD", amount: "75.00" },
+                price: { __typename: "FlatRatePrice", active: false, currency: "USD", amount: "75.00" },
                 usage: null,
               },
             ],
@@ -119,7 +119,7 @@ describe("ShopifyPartnerBillingApi", () => {
               items: [{
                 handle: "scale-plan",
                 description: "Scale plan",
-                price: { __typename: "FlatRatePrice", active: true, currency: "USD", amount: "149.00" },
+                price: { __typename: "FlatRatePrice", active: false, currency: "USD", amount: "149.00" },
               }],
             },
           },

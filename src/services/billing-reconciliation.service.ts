@@ -12,6 +12,7 @@ import {
   APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
   BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
   createBillingSubscriptionReconcileJobId,
+  deriveShopifyProviderContextIdentity,
 } from "@modainteract/moda-interact-shared/billing";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -157,12 +158,18 @@ export class BillingReconciliationService {
       };
     }
     const providerUsage = provider.providerUsageSnapshot.find((usage) => usage.handle === packMeterHandle);
+    const providerContextIdentity = deriveShopifyProviderContextIdentity({
+      providerSubscriptionId: provider.providerSubscriptionId,
+      planHandle: provider.planHandle,
+      currentPeriodStart: provider.currentPeriodStart,
+      currentPeriodEnd: provider.currentPeriodEnd,
+    });
     const reconciliation = await this.purchases.reconcileProviderConfirmed({
       shopId,
       billingPeriodId: projection.billingPeriodId,
       providerPlanHandle: provider.planHandle,
       packMeterHandle,
-      providerSubscriptionId: provider.providerSubscriptionId,
+      providerContextIdentity,
       providerUnits: providerUsage?.quantity ?? Number.NaN,
       providerCostAmount: providerUsage?.costAmount ?? null,
       providerCostCurrency: providerUsage?.costCurrency ?? null,

@@ -543,7 +543,7 @@ describe("BillingReconciliationService", () => {
       billingPeriodId: "period-1",
       providerPlanHandle: "pro-2026",
       packMeterHandle: "pack-meter",
-      providerSubscriptionId: "sub-1",
+      providerContextIdentity: "sub-1",
       providerUnits: 2,
       providerCostAmount: "20.00",
       providerCostCurrency: "USD",

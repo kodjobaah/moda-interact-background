@@ -5,7 +5,10 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { createShopifyUsageIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import {
+  createShopifyUsageIdempotencyKey,
+  isSameShopifyPurchaseProviderContext,
+} from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
@@ -22,7 +25,7 @@ export type ProviderConfirmedPurchaseReconciliationInput = {
   billingPeriodId: string;
   providerPlanHandle: string;
   packMeterHandle: string;
-  providerSubscriptionId: string | null;
+  providerContextIdentity: string;
   providerUnits: number | string | Prisma.Decimal;
   providerCostAmount: string | null;
   providerCostCurrency: string | null;
@@ -257,9 +260,18 @@ export class RecoveryCreditPurchaseService {
           const expectedQuantity = new Prisma.Decimal(candidate.providerUsageQuantityBeforeSnapshot).plus(1);
           const proven = hasExactProviderUsage
             && candidateUnits !== null
-            && input.providerSubscriptionId !== null
-            && candidate.providerSubscriptionIdSnapshot === input.providerSubscriptionId
-            && candidate.shopifyPlanHandleSnapshot === input.providerPlanHandle
+            && isSameShopifyPurchaseProviderContext(
+              {
+                providerContextIdentity: candidate.providerSubscriptionIdSnapshot,
+                shopifyPlanHandleSnapshot: candidate.shopifyPlanHandleSnapshot,
+                billingPeriodId: candidate.billingPeriodId,
+              },
+              {
+                providerContextIdentity: input.providerContextIdentity,
+                shopifyPlanHandle: input.providerPlanHandle,
+                billingPeriodId: input.billingPeriodId,
+              },
+            )
             && candidateCostCurrency !== null
             && candidateCostCurrency === candidate.providerUsageCostCurrencyBeforeSnapshot
             && exactProviderCost !== null

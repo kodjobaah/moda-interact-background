@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
+import { deriveShopifyProviderContextIdentity } from "@modainteract/moda-interact-shared/billing";
 
 import { RecoveryCreditPurchaseService } from "../../../src/services/recovery-credit-purchase.service.js";
 
@@ -41,7 +42,7 @@ function matches(purchase: Record<string, any>, where: Record<string, any>) {
     : value === undefined || purchase[key] === value);
 }
 
-const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter", providerSubscriptionId: "subscription-1", providerUnits: 3, providerCostAmount: "12.50", providerCostCurrency: "USD" };
+const input = { shopId: "shop-1", billingPeriodId: "period-1", providerPlanHandle: "pro-2026", packMeterHandle: "pack-meter", providerContextIdentity: "subscription-1", providerUnits: 3, providerCostAmount: "12.50", providerCostCurrency: "USD" };
 
 describe("RecoveryCreditPurchaseService", () => {
   it("activates one equivalent provider-confirmed unit deterministically", async () => {
@@ -176,10 +177,46 @@ describe("RecoveryCreditPurchaseService", () => {
   });
 
   it("fails closed when provider currency or subscription does not match", async () => {
-    for (const change of [{ providerSubscriptionId: "other" }, { providerCostCurrency: "EUR" }]) {
+    for (const change of [{ providerContextIdentity: "other" }, { providerCostCurrency: "EUR" }]) {
       const test = harness();
       await expect(test.service.reconcileProviderConfirmed({ ...input, ...change })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
     }
+  });
+
+  it("activates a native App Pricing purchase only for its derived context identity", async () => {
+    const test = harness();
+    test.purchases[0]!.providerSubscriptionIdSnapshot = deriveShopifyProviderContextIdentity({
+      providerSubscriptionId: null,
+      planHandle: "pro-2026",
+      currentPeriodStart: "2026-09-01T00:00:00.000Z",
+      currentPeriodEnd: "2026-10-01T00:00:00.000Z",
+    });
+
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerContextIdentity: test.purchases[0]!.providerSubscriptionIdSnapshot,
+    })).resolves.toMatchObject({ activatedCount: 1, discrepancy: null });
+
+    const mismatch = harness();
+    mismatch.purchases[0]!.providerSubscriptionIdSnapshot = test.purchases[0]!.providerSubscriptionIdSnapshot;
+    await expect(mismatch.service.reconcileProviderConfirmed({
+      ...input,
+      providerContextIdentity: deriveShopifyProviderContextIdentity({
+        providerSubscriptionId: null,
+        planHandle: "pro-2026",
+        currentPeriodStart: "2026-10-01T00:00:00.000Z",
+        currentPeriodEnd: "2026-11-01T00:00:00.000Z",
+      }),
+    })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
+  });
+
+  it("fails closed for a blank or malformed provider context identity", async () => {
+    const test = harness();
+
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerContextIdentity: "   ",
+    })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
   });
 
   it("proves a candidate from its exact snapshot handle and supports fractional baselines", async () => {
