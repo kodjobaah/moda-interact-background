@@ -14,8 +14,11 @@ const hoisted = vi.hoisted(() => {
       },
       checkoutRecovery: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
+        create: vi.fn(),
         upsert: vi.fn(),
         update: vi.fn(),
+        updateMany: vi.fn(),
       },
       conversation: {
         upsert: vi.fn(),
@@ -260,10 +263,11 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       kind: "found",
       checkout: recoverableCheckout,
     });
-    prismaMock.checkoutRecovery.upsert.mockImplementation(async ({ create }) => ({
+    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) => prismaMock.checkoutRecovery.findUnique(args));
+      prismaMock.checkoutRecovery.create.mockImplementation(async ({ data }) => ({
       id: "recovery-1",
       status: "DETECTED",
-      ...create,
+        ...data,
     }));
   });
 
@@ -275,15 +279,15 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     expect(result.outcome).toBe("recovery-created");
 
-    // Recovery must be upserted with current Shopify data, not webhook basket.
-    expect(prismaMock.checkoutRecovery.upsert).toHaveBeenCalled();
-    const call = prismaMock.checkoutRecovery.upsert.mock.calls[0][0];
-    expect(call.create.currency).toBe("USD");
-    expect(call.create.totalPrice).toBe("49.99");
-    expect(call.create.localTotal).toBeUndefined();
-    expect(call.create.checkoutUrl).toBe(recoverableCheckout.abandonedCheckoutUrl);
-    expect(call.create.lineItems[0].title).toBe("Teal Dress");
-    expect(call.create.lineItems[0].quantity).toBe(2);
+    // Recovery must use current Shopify data, not webhook basket.
+    expect(prismaMock.checkoutRecovery.create).toHaveBeenCalled();
+    const call = prismaMock.checkoutRecovery.create.mock.calls[0][0];
+    expect(call.data.currency).toBe("USD");
+    expect(call.data.totalPrice).toBe("49.99");
+    expect(call.data.localTotal).toBeUndefined();
+    expect(call.data.checkoutUrl).toBe(recoverableCheckout.abandonedCheckoutUrl);
+    expect(call.data.lineItems[0].title).toBe("Teal Dress");
+    expect(call.data.lineItems[0].quantity).toBe(2);
 
     expect(
       conversationServiceMock.getOrCreateRecoveryConversation,
@@ -608,10 +612,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(recoveryBillingServiceMock.admit).toHaveBeenCalledTimes(2);
     expect(recoveryBillingServiceMock.commitSuccessfulInitiation).toHaveBeenCalledTimes(1);
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
-    expect(prismaMock.checkoutRecovery.update).toHaveBeenCalledWith(
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "MESSAGE_SENT" }) }),
     );
-    expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalledWith(
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "CANCELLED" }) }),
     );
   });
@@ -662,9 +666,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     await service.materializeMaturedCandidate(richCandidate);
 
-    const call = prismaMock.checkoutRecovery.upsert.mock.calls[0][0];
-    expect(call.create.lineItems[0].title).toBe("Teal Dress");
-    expect(call.create.customerId).toBeUndefined();
+    const call = prismaMock.checkoutRecovery.create.mock.calls[0][0];
+    expect(call.data.lineItems[0].title).toBe("Teal Dress");
+    expect(call.data.customerId).toBeUndefined();
   });
 
   it("uses merchant defaults only when current and event context are absent", async () => {

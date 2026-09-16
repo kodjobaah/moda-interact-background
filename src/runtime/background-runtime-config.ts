@@ -27,6 +27,7 @@ const NUMERIC_BOUNDS: Record<string, readonly [number, number]> = {
   turnSenderLimitPerTenMinutes: [1, 100000], turnConversationLimitPerMinute: [1, 10000], turnConversationLimitPerTenMinutes: [1, 100000],
   turnShopLimitPerMinute: [1, 100000], turnGlobalLimitPerMinute: [1, 1000000], discoverySenderLimitPerMinute: [1, 10000],
   discoverySenderLimitPerTenMinutes: [1, 100000], discoveryConversationLimitPerMinute: [1, 10000], discoveryConversationLimitPerTenMinutes: [1, 100000],
+  checkoutRecoveryLifetimeDays: [1, 90],
 };
 const CROSS_FIELD_RULES: readonly [string, string, string, "gte" | "lte"][] = [
   ["conversationMaxSettleWindowMs", "conversationQuietWindowMs", "must be at least the quiet window", "gte"],
@@ -59,6 +60,7 @@ const CONFIG_FIELDS = [
   "orderQueueGlobalConcurrency",
   "pendingRecoveryQueueGlobalConcurrency", "recoveryResumeQueueGlobalConcurrency", "whatsappQueueGlobalConcurrency",
   "merchantCommunicationsQueueGlobalConcurrency", "billingSubscriptionQueueGlobalConcurrency", "createdAt", "updatedAt",
+  "checkoutRecoveryLifetimeDays",
 ] as const;
 
 const logger = createLogger({ serviceName: "moda-background-runtime", environment: process.env.NODE_ENV ?? "development" });

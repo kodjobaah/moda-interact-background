@@ -14,6 +14,7 @@ const hoisted = vi.hoisted(() => {
       },
       checkoutRecovery: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
         updateMany: vi.fn(),
         upsert: vi.fn(),
         update: vi.fn(),
@@ -22,6 +23,7 @@ const hoisted = vi.hoisted(() => {
         create: vi.fn(),
         update: vi.fn(),
       },
+      $transaction: vi.fn(),
     },
     lookupServiceMock: {
       resolveShopDomain: vi.fn(async () => "shop.myshopify.com"),
@@ -73,6 +75,7 @@ const hoisted = vi.hoisted(() => {
     },
     pendingCandidateServiceMock: {
       refreshCandidateActivity: vi.fn(),
+      scheduleFromCheckoutUpdated: vi.fn(),
     },
     recoveryBillingServiceMock: {
       admit: vi.fn(async () => ({
@@ -140,6 +143,7 @@ const service = new CheckoutRecoveryService();
 const event = {
   shopDomain: "shop.myshopify.com",
   checkoutToken: "checkout_1",
+  activityAt: "2026-09-10T12:00:00.000Z",
 };
 
 const activeRecovery = {
@@ -187,7 +191,11 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       subscription: { status: "ACTIVE" },
     });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(activeRecovery);
+    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) =>
+      prismaMock.checkoutRecovery.findUnique(args),
+    );
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
     lookupServiceMock.lookup.mockResolvedValue({
       kind: "found",
       checkout: currentCheckout,
@@ -432,7 +440,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result.kind).toBe("refreshed");
-    const args = prismaMock.checkoutRecovery.updateMany.mock.calls[0][0];
+    const args = prismaMock.checkoutRecovery.updateMany.mock.calls.find(
+      ([call]) => call.data.currency !== undefined,
+    )[0];
     expect(args.data.currency).toBe("USD");
     expect(args.data.totalPrice).toBe("59.99");
     expect(args.data.lineItems[0].title).toBe("Teal Dress");
@@ -471,6 +481,40 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
+  it("schedules a pending restart for an expired recovery without refreshing it", async () => {
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
+      ...activeRecovery,
+      status: "EXPIRED",
+    });
+    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue({
+      outcome: "scheduled",
+      jobId: "candidate-restart-1",
+    });
+
+    const result = await service.handleCheckoutUpdatedContract({
+      ...event,
+      activityAt: "2026-09-10T12:00:00.000Z",
+    });
+
+    expect(result).toEqual({
+      kind: "pending",
+      outcome: "scheduled",
+      jobId: "candidate-restart-1",
+    });
+    expect(
+      hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledWith({
+      shopDomain: event.shopDomain,
+      checkoutToken: event.checkoutToken,
+      cartToken: activeRecovery.cartToken,
+      checkoutCreatedAt: activeRecovery.detectedAt.toISOString(),
+      abandonedCheckoutUrl: activeRecovery.checkoutUrl,
+      activityAt: "2026-09-10T12:00:00.000Z",
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
   it("is idempotent: a duplicate/stale update with an already-transitioned recovery is ignored", async () => {
     // A concurrent order completion transitioned the recovery to terminal, so
     // the status-guarded updateMany matches nothing.
@@ -490,8 +534,14 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     await expect(service.handleCheckoutUpdatedContract(event)).rejects.toThrow(
       /provider error/,
     );
-    // No write was attempted.
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: activeRecovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: new Date(event.activityAt) },
+      },
+      data: { lastExternalActivityAt: new Date(event.activityAt) },
+    });
   });
 
   it("discards when the current checkout cannot be identified deterministically", async () => {
@@ -503,7 +553,14 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result).toEqual({ kind: "discarded", reason: "lookup-ambiguous" });
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: activeRecovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: new Date(event.activityAt) },
+      },
+      data: { lastExternalActivityAt: new Date(event.activityAt) },
+    });
   });
 });
 
