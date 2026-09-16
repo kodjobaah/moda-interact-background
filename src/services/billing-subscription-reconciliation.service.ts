@@ -22,6 +22,7 @@ import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
 import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 import { backgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
+import { shopifyDiscountCatalogueService } from "./shopify-discount-catalogue.service.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -141,10 +142,14 @@ export class BillingSubscriptionReconciliationService {
       webhookTopic: null,
     };
     try {
+      const requestResult = await shopifyDiscountCatalogueService.requestSync(shopId, requestedAt);
+      if (requestResult === "unavailable") return;
       await this.discountQueue.add(SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.jobName, job, {
         jobId: createShopifyDiscountSyncJobId({ shopId, reason, requestedAt: job.requestedAt }),
-        removeOnComplete: 100,
-        removeOnFail: true,
+        attempts: 3,
+        backoff: { type: "exponential", delay: 1000 },
+        removeOnComplete: true,
+        removeOnFail: false,
       });
     } catch (error) {
       this.logger.warn("shopify.discount_sync.enqueue_failed", { shopId, reason, errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure" });
@@ -644,6 +649,12 @@ export class BillingSubscriptionReconciliationService {
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: false } });
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+      if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
+        const catalogue = await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null } });
+        await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
+        if (catalogue.unavailableAt === null) await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { unavailableAt: now } });
+        await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
+      }
       return true;
     });
     if (committed) this.logger.warn("billing.subscription_reconciliation.reinstall_no_contract", { shopId });
@@ -775,7 +786,10 @@ export class BillingSubscriptionReconciliationService {
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
-    if (committed === true) await this.publishNext(shopId, expected.subscriptionId, next);
+    if (committed === true) {
+      await this.publishDiscountSync(shopId, "REINSTALL_RECONCILED");
+      await this.publishNext(shopId, expected.subscriptionId, next);
+    }
     return committed;
   }
 

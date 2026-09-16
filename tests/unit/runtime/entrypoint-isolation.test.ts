@@ -92,8 +92,8 @@ describe("production worker entrypoints", () => {
   it("uses one queue-aware reconciliation service for the worker and repair cadence", async () => {
     const source = await readFile("src/entrypoints/billing.ts", "utf8");
 
-    expect(source).toContain("createBillingReconciliationService(billingSubscriptionQueue)");
-    expect(source).toContain("new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue)");
+    expect(source).toContain("createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue)");
+    expect(source).toContain("new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue)");
     expect(source).toContain("createBillingSubscriptionReconciliationWorker(subscriptionReconciliation)");
     expect(source).toContain("await subscriptionReconciliation.reconstruct()");
     expect(source).toContain("startQueuePerformanceTelemetry");

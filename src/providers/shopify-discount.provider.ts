@@ -14,10 +14,10 @@ query DiscountNodes($first: Int!, $after: String) {
         ... on DiscountAutomaticBasic { title summary status startsAt endsAt }
         ... on DiscountAutomaticBxgy { title summary status startsAt endsAt }
         ... on DiscountAutomaticFreeShipping { title summary status startsAt endsAt }
-        ... on DiscountCodeApp { title summary status startsAt endsAt }
-        ... on DiscountCodeBasic { title summary status startsAt endsAt codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
-        ... on DiscountCodeBxgy { title summary status startsAt endsAt codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
-        ... on DiscountCodeFreeShipping { title summary status startsAt endsAt codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
+        ... on DiscountCodeApp { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
+        ... on DiscountCodeBasic { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
+        ... on DiscountCodeBxgy { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
+        ... on DiscountCodeFreeShipping { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
       }
     }
     pageInfo { hasNextPage endCursor }
@@ -74,10 +74,17 @@ function normalizeDiscount(node: DiscountNode): ShopifyDiscountRecord {
   const discount = node.discount!;
   const providerType = String(discount.__typename ?? "UNKNOWN");
   const method = providerType.startsWith("DiscountAutomatic") ? "AUTOMATIC" : "CODE";
-  const codes = Array.isArray(discount.codes) ? discount.codes : null;
-  const codeNodes = codes && typeof codes === "object" ? (codes as { nodes?: Array<{ code?: string }> }).nodes ?? [] : [];
-  const codeCount = method === "CODE" ? codeNodes.length : null;
-  const singleRedeemCode = codeCount === 1 && codeNodes[0]?.code ? codeNodes[0].code : null;
+  const codes = isCodeConnection(discount.codes) ? discount.codes : null;
+  const codesCount = isCodesCount(discount.codesCount) ? discount.codesCount : null;
+  const codeCount = method === "CODE" && codesCount?.precision === "EXACT" ? codesCount.count : null;
+  const codeNodes = codes?.nodes ?? [];
+  const singleRedeemCode = codeCount === 1
+    && codeNodes.length === 1
+    && codes?.pageInfo.hasNextPage === false
+    && typeof codeNodes[0]?.code === "string"
+    && codeNodes[0].code.length > 0
+    ? codeNodes[0].code
+    : null;
   const fixedSelectable = method === "AUTOMATIC"
     ? !providerType.includes("App")
     : !providerType.includes("App") && codeCount === 1 && singleRedeemCode !== null;
@@ -93,8 +100,20 @@ function normalizeDiscount(node: DiscountNode): ShopifyDiscountRecord {
     codeCount,
     singleRedeemCode,
     fixedSelectable,
-    providerSnapshot: { ...discount, id: node.id },
+    providerSnapshot: { ...discount, id: node.id, codesCount, codes },
   };
+}
+
+function isCodesCount(value: unknown): value is { count: number; precision: string } {
+  return typeof value === "object" && value !== null
+    && typeof (value as { count?: unknown }).count === "number"
+    && typeof (value as { precision?: unknown }).precision === "string";
+}
+
+function isCodeConnection(value: unknown): value is { nodes: Array<{ code?: string }>; pageInfo: { hasNextPage: boolean } } {
+  return typeof value === "object" && value !== null
+    && Array.isArray((value as { nodes?: unknown }).nodes)
+    && typeof (value as { pageInfo?: { hasNextPage?: unknown } }).pageInfo?.hasNextPage === "boolean";
 }
 
 function toDate(value: unknown): Date | null {
