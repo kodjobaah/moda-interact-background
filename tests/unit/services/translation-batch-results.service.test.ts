@@ -21,6 +21,14 @@ function sqlText(query: { strings: readonly string[] }): string {
   return query.strings.join("");
 }
 
+function runtimeConfig(overrides: Record<string, number> = {}) {
+  return { current: vi.fn(() => ({
+    translationResultRetrySeconds: 660,
+    translationMaxAutoRetries: 3,
+    ...overrides,
+  })) } as any;
+}
+
 function createDatabase(options: {
   kind?: "ADMINISTRATIVE" | "SYSTEM" | "MERCHANT";
   translationStatus?: "PENDING" | "AVAILABLE" | "FAILED";
@@ -144,7 +152,6 @@ describe("TranslationBatchResultsService", () => {
   });
 
   it("returns retryable item failures to pending with a bounded next attempt", async () => {
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "2";
     const database = createDatabase({ kind: "MERCHANT", retryCount: 0 });
     const currentProvider = provider({
       status: "failed" as const,
@@ -154,6 +161,7 @@ describe("TranslationBatchResultsService", () => {
     const service = new TranslationBatchResultsService({
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
+      runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 2 }),
     });
 
     await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toMatchObject({
@@ -167,7 +175,6 @@ describe("TranslationBatchResultsService", () => {
   });
 
   it("marks exhausted non-retryable admin translation failures terminally", async () => {
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "0";
     const database = createDatabase({ kind: "ADMINISTRATIVE", retryCount: 0 });
     const currentProvider = provider({
       status: "failed" as const,
@@ -177,6 +184,7 @@ describe("TranslationBatchResultsService", () => {
     const service = new TranslationBatchResultsService({
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
+      runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 0 }),
     });
 
     await service.apply({ translationBatchId: "batch-1" });
@@ -184,7 +192,6 @@ describe("TranslationBatchResultsService", () => {
   });
 
   it("does not mutate the message when a failed-result ownership update affects no rows", async () => {
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "0";
     const database = createDatabase({ kind: "ADMINISTRATIVE", retryCount: 0 });
     database.execute
       .mockResolvedValueOnce(0)
@@ -197,6 +204,7 @@ describe("TranslationBatchResultsService", () => {
     const service = new TranslationBatchResultsService({
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
+      runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 0 }),
     });
 
     await expect(service.apply({ translationBatchId: "batch-1" })).resolves.toEqual({
@@ -249,10 +257,10 @@ describe("TranslationBatchResultsService", () => {
     }
   });
 
-  it("bounds result retry configuration", () => {
-    process.env.TRANSLATION_BATCH_POLL_INTERVAL_MINUTES = "999999";
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "999999";
-    expect(translationBatchResultsTestInternals.retryMinutes()).toBe(24 * 60);
-    expect(translationBatchResultsTestInternals.maxAutoRetries()).toBe(10);
+  it("uses result retry seconds separately from the poll interval", () => {
+    const config = runtimeConfig({ translationResultRetrySeconds: 90, translationMaxAutoRetries: 4 });
+    expect(config.current().translationResultRetrySeconds).toBe(90);
+    expect(config.current().translationMaxAutoRetries).toBe(4);
+    expect(translationBatchResultsTestInternals.resultFailureIsRetryable("rate_limit")).toBe(true);
   });
 });

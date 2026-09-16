@@ -7,7 +7,6 @@ process.env.TRANSLATION_MODEL ??= "test-model";
 const {
   TranslationBatchSubmissionError,
   TranslationBatchSubmitService,
-  translationBatchSubmitTestInternals,
 } =
   await import("../../../src/services/translation-batch-submit.service.js");
 
@@ -71,6 +70,15 @@ function sqlText(query: { strings: readonly string[] }): string {
   return query.strings.join("");
 }
 
+function runtimeConfig(overrides: Record<string, number> = {}) {
+  return { current: vi.fn(() => ({
+    translationInitialPollSeconds: 420,
+    translationSubmitRetrySeconds: 660,
+    translationSubmitMaxAttempts: 3,
+    ...overrides,
+  })) } as any;
+}
+
 describe("TranslationBatchSubmitService", () => {
   it("lets only one concurrent delivery cross provider create", async () => {
     let claimed = true;
@@ -105,7 +113,6 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("loads authoritative requests, persists success, and schedules the first poll in minutes", async () => {
-    process.env.TRANSLATION_BATCH_INITIAL_POLL_MINUTES = "7";
     const database = createDatabase({ claim: [claimedBatch], requests: [request] });
     const provider = createProvider();
     const add = vi.fn(async () => undefined);
@@ -113,6 +120,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add },
+      runtimeConfig: runtimeConfig(),
     });
 
     const result = await service.submit({ translationBatchId: "batch-1" });
@@ -123,7 +131,7 @@ describe("TranslationBatchSubmitService", () => {
     expect(add).toHaveBeenCalledWith(
       "translation-batch-poll",
       { schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 1 },
-      expect.objectContaining({ delay: 7 * 60_000 }),
+      expect.objectContaining({ delay: 420_000 }),
     );
     expect(database.execute).toHaveBeenCalledTimes(2);
   });
@@ -145,7 +153,6 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("returns definite retryable preparation failure to READY with a minute delay", async () => {
-    process.env.TRANSLATION_BATCH_SUBMIT_RETRY_MINUTES = "11";
     const database = createDatabase({ claim: [claimedBatch], requests: [request] });
     const provider = createProvider({
       prepareBatchInput: vi.fn(async () => {
@@ -159,6 +166,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
@@ -221,7 +229,6 @@ describe("TranslationBatchSubmitService", () => {
   });
 
   it("keeps an ambiguous create unknown even after the attempt limit", async () => {
-    process.env.TRANSLATION_BATCH_SUBMIT_MAX_ATTEMPTS = "1";
     const database = createDatabase({
       claim: [{ ...claimedBatch, submitAttemptCount: 1 }],
       requests: [request],
@@ -235,6 +242,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig({ translationSubmitMaxAttempts: 1 }),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
@@ -316,13 +324,14 @@ describe("TranslationBatchSubmitService", () => {
     expect(provider.createBatch).toHaveBeenCalledTimes(1);
   });
 
-  it("bounds retry, attempt and initial-poll configuration", () => {
-    process.env.TRANSLATION_BATCH_SUBMIT_RETRY_MINUTES = "999999";
-    process.env.TRANSLATION_BATCH_SUBMIT_MAX_ATTEMPTS = "999999";
-    process.env.TRANSLATION_BATCH_INITIAL_POLL_MINUTES = "999999";
-
-    expect(translationBatchSubmitTestInternals.retryMinutes()).toBe(24 * 60);
-    expect(translationBatchSubmitTestInternals.maxAttempts()).toBe(10);
-    expect(translationBatchSubmitTestInternals.initialPollMinutes()).toBe(24 * 60);
+  it("reads submit retry, max attempts, and initial poll from the runtime snapshot", () => {
+    const config = runtimeConfig({
+      translationSubmitRetrySeconds: 11.5,
+      translationSubmitMaxAttempts: 7,
+      translationInitialPollSeconds: 90,
+    });
+    expect(config.current().translationSubmitRetrySeconds).toBe(11.5);
+    expect(config.current().translationSubmitMaxAttempts).toBe(7);
+    expect(config.current().translationInitialPollSeconds).toBe(90);
   });
 });

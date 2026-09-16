@@ -112,12 +112,35 @@ describe("dynamic leased scheduler", () => {
       first.lease.tryAcquire = acquire;
       second.lease.tryAcquire = acquire;
       const run = vi.fn().mockResolvedValue(undefined);
-      const stopFirst = await startDynamicLeasedScheduler({ config: first.config as any, lease: first.lease as any, leaseName: "BILLING_RECONCILIATION" as any, intervalMs: 10, runImmediately: true, run });
-      const stopSecond = await startDynamicLeasedScheduler({ config: second.config as any, lease: second.lease as any, leaseName: "BILLING_RECONCILIATION" as any, intervalMs: 10, runImmediately: true, run });
+      const stopFirst = await startDynamicLeasedScheduler({ config: first.config as any, lease: first.lease as any, leaseName: "TRANSLATION_RECONCILIATION" as any, intervalMs: 10, runImmediately: true, run });
+      const stopSecond = await startDynamicLeasedScheduler({ config: second.config as any, lease: second.lease as any, leaseName: "TRANSLATION_RECONCILIATION" as any, intervalMs: 10, runImmediately: true, run });
       await vi.advanceTimersByTimeAsync(0);
       expect(run).toHaveBeenCalledOnce();
       await stopFirst();
       await stopSecond();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("applies a 300-to-60-second translation interval update without restart", async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, lease } = harness();
+      config.change({ version: 1, interval: 300 });
+      const run = vi.fn().mockResolvedValue(undefined);
+      const stop = await startDynamicLeasedScheduler({
+        config: config as any,
+        lease: lease as any,
+        leaseName: "TRANSLATION_RECONCILIATION" as any,
+        intervalMs: 0,
+        getIntervalMs: (snapshot) => snapshot.interval * 1000,
+        run,
+      });
+      config.change({ version: 2, interval: 60 });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(run).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(run).toHaveBeenCalledOnce();
+      await stop();
     } finally { vi.useRealTimers(); }
   });
 

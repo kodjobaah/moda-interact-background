@@ -14,8 +14,8 @@ import {
 } from "../domain/translation-batch.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
-
-const DEFAULT_MAX_REQUESTS = 100;
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
 type TranslationCandidate = {
   id: string;
@@ -45,16 +45,6 @@ type TranslationBatchDatabase = {
   ): Promise<T>;
 };
 
-function configuredMaxRequests(): number {
-  const configured = Number.parseInt(
-    process.env.TRANSLATION_BATCH_MAX_REQUESTS ?? "",
-    10,
-  );
-  return Number.isInteger(configured) && configured > 0
-    ? configured
-    : DEFAULT_MAX_REQUESTS;
-}
-
 function configuredProvider(): string {
   return process.env.TRANSLATION_PROVIDER?.trim() || "openai";
 }
@@ -69,19 +59,19 @@ function configuredModel(): string {
 
 export class TranslationBatchAssemblyService {
   private readonly queue: TranslationBatchQueue;
-  private readonly maxRequests: number;
   private readonly database: TranslationBatchDatabase;
+  private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     queue?: TranslationBatchQueue;
-    maxRequests?: number;
     database?: TranslationBatchDatabase;
+    runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
       connection: connectionRedis,
     });
-    this.maxRequests = options.maxRequests ?? configuredMaxRequests();
     this.database = options.database ?? prisma;
+    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
   async assembleFromDispatch(
@@ -103,7 +93,7 @@ export class TranslationBatchAssemblyService {
           AND (t."nextAttemptAt" IS NULL OR t."nextAttemptAt" <= NOW())
         ORDER BY t."createdAt", t."id"
         FOR UPDATE OF t SKIP LOCKED
-        LIMIT ${this.maxRequests}
+        LIMIT ${currentTranslationRuntimeConfig(this.runtimeConfig).translationBatchMaxRequests}
       `);
 
       if (candidates.length === 0) {

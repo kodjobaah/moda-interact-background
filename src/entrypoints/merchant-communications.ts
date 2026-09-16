@@ -2,7 +2,10 @@ import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
-import { reconciliationIntervalMs, translationReconciliationService } from "../services/translation-reconciliation.service.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
+import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
+import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-communications-worker",
@@ -12,13 +15,17 @@ void startReadyWorkerProcess({
       import("../workers/merchant-communications.worker.js"),
     ]);
 
-    await translationReconciliationService.reconcile();
-    const interval = setInterval(() => {
-      void translationReconciliationService.reconcile().catch((error: unknown) => {
-        console.error("translation reconciliation failed", error);
-      });
-    }, reconciliationIntervalMs());
-    interval.unref();
+    await backgroundRuntimeConfigService.start();
+    const stopScheduler = await startDynamicLeasedScheduler({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+      leaseName: "TRANSLATION_RECONCILIATION",
+      intervalMs: 0,
+      runImmediately: true,
+      getIntervalMs: (snapshot) => snapshot.translationReconciliationIntervalSeconds * 1000,
+      run: async (snapshot) => { await translationReconciliationService.reconcile(undefined, snapshot); },
+      onError: (error) => console.error("translation reconciliation failed", error),
+    });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
@@ -29,7 +36,8 @@ void startReadyWorkerProcess({
       workers: [merchantCommunicationsWorker],
       closeResources: [
         ...closeWorkerResources,
-        async () => clearInterval(interval),
+        stopScheduler,
+        () => backgroundRuntimeConfigService.close(),
         () => translationReconciliationService.close(),
         closeWorkerObservability,
         closeQueuePerformanceTelemetry,
