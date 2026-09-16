@@ -84,6 +84,7 @@ describe("TranslationBatchPollService", () => {
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
       queue: { add: vi.fn() },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
@@ -143,6 +144,7 @@ describe("TranslationBatchPollService", () => {
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
       queue: { add },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
@@ -180,11 +182,12 @@ describe("TranslationBatchPollService", () => {
     const database = createDatabase(batch);
     const add = vi.fn();
     const currentProvider = provider("completed");
-    const service = new TranslationBatchPollService({
-      database: database.database,
-      providerFactory: vi.fn(() => currentProvider as never),
-      queue: { add },
-    });
+     const service = new TranslationBatchPollService({
+       database: database.database,
+       providerFactory: vi.fn(() => currentProvider as never),
+       queue: { add },
+       runtimeConfig: runtimeConfig(),
+     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
       .resolves.toEqual({ status: "completed", batchId: "batch-1" });
@@ -240,6 +243,7 @@ describe("TranslationBatchPollService", () => {
       database,
       providerFactory: vi.fn(() => provider("failed") as never),
       queue: { add: vi.fn() },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
@@ -268,6 +272,7 @@ describe("TranslationBatchPollService", () => {
       database,
       providerFactory: vi.fn(() => provider("failed") as never),
       queue: { add: vi.fn() },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))

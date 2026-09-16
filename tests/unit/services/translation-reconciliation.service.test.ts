@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { TranslationReconciliationService } from "../../../src/services/translation-reconciliation.service.js";
+import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
+
+const runtimeConfig = { current: () => backgroundRuntimeConfig() };
 
 function createDatabase() {
   return {
@@ -43,7 +46,7 @@ describe("TranslationReconciliationService", () => {
       translationReconciliationPageSize: 7,
       translationClaimTimeoutSeconds: 90,
     } as any;
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     await service.reconcile(undefined, snapshot);
 
@@ -58,6 +61,7 @@ describe("TranslationReconciliationService", () => {
     const service = new TranslationReconciliationService({
       queue,
       database: createDatabase(),
+      runtimeConfig,
     });
 
     const result = await service.reconcile();
@@ -74,6 +78,7 @@ describe("TranslationReconciliationService", () => {
       const service = new TranslationReconciliationService({
         queue,
         database: createDatabase(),
+        runtimeConfig,
       });
 
       const result = await service.reconcile();
@@ -128,6 +133,7 @@ describe("TranslationReconciliationService", () => {
       queue,
       database,
       providerFactory: () => provider,
+      runtimeConfig,
     });
 
     const result = await service.reconcile();
@@ -186,7 +192,7 @@ describe("TranslationReconciliationService", () => {
         },
       }),
     };
-    const service = new TranslationReconciliationService({ queue, database, providerFactory: () => provider });
+    const service = new TranslationReconciliationService({ queue, database, providerFactory: () => provider, runtimeConfig });
     await service.reconcile();
     expect(queue.add).toHaveBeenCalledWith(
       "translation-batch-poll",
@@ -210,6 +216,7 @@ describe("TranslationReconciliationService", () => {
       queue: lostQueue,
       database: lostCasDatabase,
       providerFactory: () => provider,
+      runtimeConfig,
     });
     await lostService.reconcile();
     expect(lostQueue.add).not.toHaveBeenCalled();
@@ -227,7 +234,7 @@ describe("TranslationReconciliationService", () => {
       $transaction: vi.fn(),
     };
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     const result = await service.reconcile();
 
@@ -247,7 +254,7 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([{ id: "failed-1", status: "FAILED", currentBatchId: null, batchStatus: null, pollSequence: null }])
       .mockResolvedValueOnce([{ id: "failed-1" }]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     const result = await service.reconcile("request-outside-page");
 
@@ -273,7 +280,7 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([{ id: "failed-1" }])
       .mockResolvedValueOnce([{ id: "remaining-failed" }]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     await service.reconcile();
 
@@ -302,7 +309,7 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([{ id: "failed-2" }])
       .mockResolvedValueOnce([]);
     const queue = createQueue(undefined);
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     await service.reconcile();
 
@@ -323,7 +330,7 @@ describe("TranslationReconciliationService", () => {
       .mockResolvedValueOnce([{ id: "failed-1" }]);
     const queue = createQueue(undefined);
     queue.add.mockRejectedValue(new Error("redis unavailable"));
-    const service = new TranslationReconciliationService({ queue, database });
+    const service = new TranslationReconciliationService({ queue, database, runtimeConfig });
 
     await expect(service.reconcile()).rejects.toThrow("redis unavailable");
     expect(database.$executeRaw).toHaveBeenLastCalledWith(expect.objectContaining({

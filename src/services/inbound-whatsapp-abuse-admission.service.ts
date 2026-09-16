@@ -67,35 +67,16 @@ type RuntimeConfigReader = {
   current(): BackgroundRuntimeConfigSnapshot;
 };
 
-const testDefaults = {
-  rawSenderLimitPerMinute: 60,
-  rawGlobalLimitPerMinute: 20_000,
-  turnSenderLimitPerMinute: 12,
-  turnSenderLimitPerTenMinutes: 60,
-  turnConversationLimitPerMinute: 12,
-  turnConversationLimitPerTenMinutes: 60,
-  turnShopLimitPerMinute: 600,
-  turnGlobalLimitPerMinute: 5_000,
-  discoverySenderLimitPerMinute: 4,
-  discoverySenderLimitPerTenMinutes: 12,
-  discoveryConversationLimitPerMinute: 4,
-  discoveryConversationLimitPerTenMinutes: 12,
-};
-
 function currentAbuseRuntimeConfig(
   reader: RuntimeConfigReader,
 ): Pick<
   BackgroundRuntimeConfigSnapshot,
-  keyof typeof testDefaults
+  "rawSenderLimitPerMinute" | "rawGlobalLimitPerMinute" | "turnSenderLimitPerMinute"
+  | "turnSenderLimitPerTenMinutes" | "turnConversationLimitPerMinute" | "turnConversationLimitPerTenMinutes"
+  | "turnShopLimitPerMinute" | "turnGlobalLimitPerMinute" | "discoverySenderLimitPerMinute"
+  | "discoverySenderLimitPerTenMinutes" | "discoveryConversationLimitPerMinute" | "discoveryConversationLimitPerTenMinutes"
 > {
-  try {
-    return reader.current();
-  } catch (error) {
-    if (error instanceof Error && error.message === "Background runtime configuration has not started.") {
-      return testDefaults;
-    }
-    throw error;
-  }
+  return reader.current();
 }
 
 const ADMIT_SCRIPT = `

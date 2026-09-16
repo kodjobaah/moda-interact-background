@@ -17,15 +17,30 @@ export class BackgroundRuntimeLeaseService {
 
   async tryAcquire(name: BackgroundRuntimeLeaseName): Promise<BackgroundLeaseHandle | null> {
     const rows = await this.database.$queryRaw<LeaseRow[]>(Prisma.sql`
+      WITH runtime_config AS (
+        SELECT CASE ${name}::"BackgroundRuntimeLeaseName"
+          WHEN 'BILLING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "billingReconciliationIntervalSeconds"
+          WHEN 'RECOVERY_CAPACITY_REPAIR'::"BackgroundRuntimeLeaseName" THEN "recoveryRepairIntervalSeconds"
+          WHEN 'TRANSLATION_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "translationReconciliationIntervalSeconds"
+          WHEN 'QUEUE_CONCURRENCY_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 0
+        END AS "cadenceSeconds"
+        FROM "public"."BackgroundRuntimeConfig"
+        WHERE "id" = 'default'
+      )
       INSERT INTO "public"."BackgroundRuntimeLease"
         ("name", "ownerToken", "generation", "acquiredAt", "heartbeatAt", "leaseUntil", "updatedAt")
-      VALUES (${name}::"BackgroundRuntimeLeaseName", ${this.ownerToken}, 1, NOW(), NOW(), NOW() + INTERVAL '120 seconds', NOW())
+      SELECT ${name}::"BackgroundRuntimeLeaseName", ${this.ownerToken}, 1, NOW(), NOW(), NOW() + INTERVAL '120 seconds', NOW()
+      FROM runtime_config
       ON CONFLICT ("name") DO UPDATE SET
         "ownerToken" = EXCLUDED."ownerToken",
         "generation" = "BackgroundRuntimeLease"."generation" + 1,
         "acquiredAt" = NOW(), "heartbeatAt" = NOW(),
         "leaseUntil" = NOW() + INTERVAL '120 seconds', "updatedAt" = NOW()
       WHERE "BackgroundRuntimeLease"."leaseUntil" <= NOW()
+        AND (
+          "BackgroundRuntimeLease"."lastFinishedAt" IS NULL
+          OR "BackgroundRuntimeLease"."lastFinishedAt" + (SELECT "cadenceSeconds" * INTERVAL '1 second' FROM runtime_config) <= NOW()
+        )
       RETURNING "name", "generation"
     `);
     const row = rows[0];
@@ -47,7 +62,8 @@ export class BackgroundRuntimeLeaseService {
 
   async release(handle: BackgroundLeaseHandle): Promise<boolean> {
     const rows = await this.database.$queryRaw<Array<{ name: BackgroundRuntimeLeaseName }>>(Prisma.sql`
-      DELETE FROM "public"."BackgroundRuntimeLease"
+      UPDATE "public"."BackgroundRuntimeLease"
+      SET "leaseUntil" = NOW(), "heartbeatAt" = NOW(), "lastFinishedAt" = NOW(), "updatedAt" = NOW()
       WHERE "name" = ${handle.name}::"BackgroundRuntimeLeaseName"
         AND "ownerToken" = ${handle.ownerToken}
         AND "generation" = ${handle.generation}

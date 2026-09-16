@@ -112,7 +112,7 @@ export class BillingReconciliationService {
         if (discrepancy) result.discrepancies.push(discrepancy);
       } catch (error) {
         result.subscriptionErrors += 1;
-        await this.markSyncError(shop.id, error);
+        await this.markSyncError(shop.id, error, runtimeConfig);
       }
     }
     return result;
@@ -255,7 +255,7 @@ export class BillingReconciliationService {
             pendingEffectiveAt: null,
           };
       if (existing) {
-        const nextReconcileAt = new Date(now.getTime() + 5 * 60 * 1000);
+        const nextReconcileAt = new Date(now.getTime() + (runtimeConfig?.billingProviderRetrySeconds ?? 300) * 1000);
         await this.database.subscription.updateMany({
           where: { id: existing.id, nextReconcileAt: existing.nextReconcileAt },
           data: { nextReconcileAt, lastSyncedAt: now },
@@ -712,7 +712,11 @@ export class BillingReconciliationService {
     return discrepancy;
   }
 
-  private async markSyncError(shopId: string, error: unknown): Promise<void> {
+  private async markSyncError(
+    shopId: string,
+    error: unknown,
+    runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">,
+  ): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     this.logger.error("billing.subscription_reconciliation.error", { shopId, error: message });
     const now = this.now();
@@ -722,8 +726,8 @@ export class BillingReconciliationService {
     });
     if (!subscription) return;
     const nextReconcileAt = subscription.status === SubscriptionProjectionStatus.FROZEN
-      ? new Date(now.getTime() + 60 * 60 * 1000)
-      : new Date(now.getTime() + 5 * 60 * 1000);
+      ? new Date(now.getTime() + (runtimeConfig?.billingFrozenRecheckSeconds ?? 3600) * 1000)
+      : new Date(now.getTime() + (runtimeConfig?.billingProviderRetrySeconds ?? 300) * 1000);
     const updated = await this.database.subscription.updateMany({
       where: {
         id: subscription.id,

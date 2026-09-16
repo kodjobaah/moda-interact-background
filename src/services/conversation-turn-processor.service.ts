@@ -22,25 +22,13 @@ type RuntimeConfigReader = {
   current(): BackgroundRuntimeConfigSnapshot;
 };
 
-const testDefaults = {
-  conversationQuietWindowMs: 3_000,
-  conversationMaxSettleWindowMs: 10_000,
-};
-
 function currentConversationRuntimeConfig(
   reader: RuntimeConfigReader,
 ): Pick<
   BackgroundRuntimeConfigSnapshot,
   "conversationQuietWindowMs" | "conversationMaxSettleWindowMs"
 > {
-  try {
-    return reader.current();
-  } catch (error) {
-    if (error instanceof Error && error.message === "Background runtime configuration has not started.") {
-      return testDefaults;
-    }
-    throw error;
-  }
+  return reader.current();
 }
 
 export type ConversationTurnJob = {

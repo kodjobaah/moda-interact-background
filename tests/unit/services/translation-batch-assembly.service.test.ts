@@ -75,6 +75,7 @@ describe("TranslationBatchAssemblyService", () => {
     const service = new TranslationBatchAssemblyService({
       database: database.database,
       queue: { add },
+      runtimeConfig: runtimeConfig(10),
       runtimeConfig: runtimeConfig(1),
     });
 
@@ -95,6 +96,7 @@ describe("TranslationBatchAssemblyService", () => {
     const service = new TranslationBatchAssemblyService({
       database: database.database,
       queue: { add },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(
