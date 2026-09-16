@@ -20,10 +20,9 @@ import {
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
 import { createOpenAITranslationProvider, type TranslationProvider } from "../providers/translation.provider.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
-const DEFAULT_PAGE_SIZE = 100;
-const DEFAULT_INTERVAL_MINUTES = 5;
-const DEFAULT_REQUEST_CLAIM_TIMEOUT_MINUTES = 15;
 const HEALTHY_STATES = new Set(["waiting", "delayed", "active"]);
 const TERMINAL_BATCH_STATUSES = ["FAILED", "EXPIRED", "CANCELLED"] as const;
 
@@ -55,39 +54,25 @@ export type TranslationReconciliationResult = {
   correlationConflicts: number;
 };
 
-function pageSize(): number {
-  const value = Number.parseInt(process.env.TRANSLATION_RECONCILIATION_PAGE_SIZE ?? "", 10);
-  return Number.isInteger(value) && value > 0 ? Math.min(value, 500) : DEFAULT_PAGE_SIZE;
-}
-
-function requestClaimTimeoutMs(): number {
-  const value = Number.parseInt(process.env.TRANSLATION_RECONCILIATION_CLAIM_TIMEOUT_MINUTES ?? "", 10);
-  const minutes = Number.isInteger(value) && value > 0 ? value : DEFAULT_REQUEST_CLAIM_TIMEOUT_MINUTES;
-  return minutes * 60_000;
-}
-
-export function reconciliationIntervalMs(): number {
-  const value = Number.parseInt(process.env.TRANSLATION_RECONCILIATION_INTERVAL_MINUTES ?? "", 10);
-  const minutes = Number.isInteger(value) && value > 0 ? value : DEFAULT_INTERVAL_MINUTES;
-  return minutes * 60_000;
-}
-
 export class TranslationReconciliationService {
   private readonly queue: ReconciliationQueue;
   private readonly database: ReconciliationDatabase;
   private readonly providerFactory: (options: { provider: string; model: string }) => TranslationProvider;
+  private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     queue?: ReconciliationQueue;
     database?: ReconciliationDatabase;
     providerFactory?: (options: { provider: string; model: string }) => TranslationProvider;
+    runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, { connection: connectionRedis });
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
-  async reconcile(reconciliationRequestId?: string): Promise<TranslationReconciliationResult> {
+  async reconcile(reconciliationRequestId?: string, snapshot = currentTranslationRuntimeConfig(this.runtimeConfig)): Promise<TranslationReconciliationResult> {
     const result: TranslationReconciliationResult = {
       repairedJobs: 0,
       requestsProcessed: 0,
@@ -101,7 +86,7 @@ export class TranslationReconciliationService {
         AND t."currentBatchId" IS NULL
         AND (t."nextAttemptAt" IS NULL OR t."nextAttemptAt" <= NOW())
       ORDER BY t."createdAt", t."id"
-      LIMIT ${pageSize()}
+      LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const translation of translations) {
       result.repairedJobs += await this.ensureJob({
@@ -116,7 +101,7 @@ export class TranslationReconciliationService {
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'READY' AND ("nextSubmitAt" IS NULL OR "nextSubmitAt" <= NOW())
       ORDER BY "createdAt", "id"
-      LIMIT ${pageSize()}
+      LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const batch of readyBatches ?? []) {
       result.repairedJobs += await this.ensureSubmitJob(batch.id);
@@ -127,7 +112,7 @@ export class TranslationReconciliationService {
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'SUBMITTED' AND ("nextPollAt" IS NULL OR "nextPollAt" <= NOW())
       ORDER BY "createdAt", "id"
-      LIMIT ${pageSize()}
+      LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const batch of duePollBatches ?? []) {
       result.repairedJobs += await this.ensurePollJob(batch);
@@ -138,7 +123,7 @@ export class TranslationReconciliationService {
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'PROVIDER_COMPLETED'
       ORDER BY "createdAt", "id"
-      LIMIT ${pageSize()}
+      LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const batch of completedBatches ?? []) {
       result.repairedJobs += await this.ensureResultsJob(batch.id);
@@ -149,19 +134,19 @@ export class TranslationReconciliationService {
       FROM "support"."MerchantTranslationBatch"
       WHERE "status" = 'SUBMISSION_UNKNOWN'
       ORDER BY "lastSubmitAttemptAt" NULLS FIRST, "createdAt", "id"
-      LIMIT ${pageSize()}
+      LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const batch of unknownBatches ?? []) {
-      const correlation = await this.reconcileUnknownBatch(batch);
+      const correlation = await this.reconcileUnknownBatch(batch, snapshot);
       result.correlationConflicts += correlation === "conflict" ? 1 : 0;
       if (correlation === "completed") result.repairedJobs += await this.ensureResultsJob(batch.id);
       if (correlation === "poll") result.repairedJobs += await this.ensurePollJob(batch);
     }
 
     await this.queue.getJob(createTranslationReconcileJobId("availability-check"));
-    const requests = await this.claimRequests(reconciliationRequestId);
+    const requests = await this.claimRequests(reconciliationRequestId, snapshot);
     for (const request of requests ?? []) {
-      await this.processRequest(request.id, request.scope, request.translationId);
+      await this.processRequest(request.id, request.scope, request.translationId, snapshot);
       result.requestsProcessed += 1;
     }
     return result;
@@ -220,10 +205,10 @@ export class TranslationReconciliationService {
     model: string;
     inputFileId: string | null;
     submissionStartedAt: Date | null;
-  }): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
+  }, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
     const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
     const submittedAfter = batch.submissionStartedAt
-      ? new Date(batch.submissionStartedAt.getTime() - requestClaimTimeoutMs())
+      ? new Date(batch.submissionStartedAt.getTime() - snapshot.translationClaimTimeoutSeconds * 1000)
       : undefined;
     const correlation = await provider.findBatchByCorrelation({
       logicalBatchId: batch.id,
@@ -255,8 +240,8 @@ export class TranslationReconciliationService {
     return completed ? "completed" : "poll";
   }
 
-  private async claimRequests(requestId?: string): Promise<Array<{ id: string; scope: string; translationId: string | null }>> {
-    const staleBefore = new Date(Date.now() - requestClaimTimeoutMs());
+  private async claimRequests(requestId: string | undefined, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<Array<{ id: string; scope: string; translationId: string | null }>> {
+    const staleBefore = new Date(Date.now() - snapshot.translationClaimTimeoutSeconds * 1000);
     return this.database.$queryRaw(Prisma.sql`
       UPDATE "support"."MerchantTranslationReconciliationRequest"
       SET "status" = 'PROCESSING', "startedAt" = NOW()
@@ -266,17 +251,17 @@ export class TranslationReconciliationService {
         WHERE ("status" = 'PENDING' OR ("status" = 'PROCESSING' AND "startedAt" < ${staleBefore}))
           ${requestId ? Prisma.sql`AND "id" = ${requestId}` : Prisma.empty}
         ORDER BY "requestedAt", "id"
-        LIMIT ${requestId ? 1 : pageSize()}
+        LIMIT ${requestId ? 1 : snapshot.translationReconciliationPageSize}
         FOR UPDATE SKIP LOCKED
       )
       RETURNING "id", "scope", "translationId"
     `);
   }
 
-  private async processRequest(id: string, scope: string, translationId: string | null): Promise<void> {
+  private async processRequest(id: string, scope: string, translationId: string | null, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<void> {
     try {
       if (scope === "TRANSLATION" && translationId) {
-        await this.reconcileTargetedTranslation(translationId);
+        await this.reconcileTargetedTranslation(translationId, snapshot);
       } else if (scope === "FAILED_TRANSLATIONS") {
         const restored = await this.database.$queryRaw<Array<{ id: string }>>(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
@@ -291,7 +276,7 @@ export class TranslationReconciliationService {
                   WHERE b."id" = "currentBatchId" AND b."status" IN ('FAILED', 'EXPIRED', 'CANCELLED')
                 ))
               ORDER BY "createdAt", "id"
-              LIMIT ${pageSize()}
+              LIMIT ${snapshot.translationReconciliationPageSize}
             )
           RETURNING "id"
         `);
@@ -337,7 +322,7 @@ export class TranslationReconciliationService {
     }
   }
 
-  private async reconcileTargetedTranslation(translationId: string): Promise<void> {
+  private async reconcileTargetedTranslation(translationId: string, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<void> {
     const rows = await this.database.$queryRaw<Array<{
       id: string;
       status: string;
@@ -365,7 +350,7 @@ export class TranslationReconciliationService {
           SELECT "id", "status", "pollSequence", "provider", "model", "inputFileId", "providerBatchId", "submissionStartedAt", "outputFileId", "errorFileId"
           FROM "support"."MerchantTranslationBatch" WHERE "id" = ${translation.currentBatchId}
         `);
-        const correlation = batch[0] ? await this.reconcileUnknownBatch(batch[0]) : "stale";
+        const correlation = batch[0] ? await this.reconcileUnknownBatch(batch[0], snapshot) : "stale";
         if (correlation === "completed") await this.ensureResultsJob(translation.currentBatchId);
         if (correlation === "poll") await this.ensurePollJob({ id: translation.currentBatchId, pollSequence: translation.pollSequence ?? 0 });
       } else if (translation.status === "FAILED" && TERMINAL_BATCH_STATUSES.includes(translation.batchStatus as typeof TERMINAL_BATCH_STATUSES[number])) {

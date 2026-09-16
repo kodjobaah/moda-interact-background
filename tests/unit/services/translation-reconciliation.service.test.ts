@@ -35,6 +35,24 @@ function emptyScanDatabase() {
 }
 
 describe("TranslationReconciliationService", () => {
+  it("uses runtime page size and claim timeout for reconciliation decisions", async () => {
+    const database = emptyScanDatabase();
+    database.$queryRaw.mockResolvedValue([]);
+    const queue = createQueue(undefined);
+    const snapshot = {
+      translationReconciliationPageSize: 7,
+      translationClaimTimeoutSeconds: 90,
+    } as any;
+    const service = new TranslationReconciliationService({ queue, database });
+
+    await service.reconcile(undefined, snapshot);
+
+    expect(database.$queryRaw.mock.calls[0]?.[0].values).toContain(7);
+    const claimQuery = database.$queryRaw.mock.calls[5]?.[0];
+    expect(claimQuery.values).toContain(7);
+    expect(claimQuery.values.some((value: unknown) => value instanceof Date)).toBe(true);
+  });
+
   it("reuses a healthy deterministic dispatch job", async () => {
     const queue = createQueue("waiting");
     const service = new TranslationReconciliationService({

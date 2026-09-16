@@ -1,11 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { createOpenAITranslationProvider, type TranslationProvider, type TranslationProviderResult } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
-const DEFAULT_RETRY_MINUTES = 5;
-const MAX_RETRY_MINUTES = 24 * 60;
-const DEFAULT_MAX_AUTO_RETRIES = 3;
-const MAX_AUTO_RETRIES = 10;
 
 type ResultBatch = {
   id: string;
@@ -48,20 +46,6 @@ type ResultDatabase = {
 
 type ProviderFactory = (options: { provider: string; model: string }) => TranslationProvider;
 
-function retryMinutes(): number {
-  const value = Number.parseInt(process.env.TRANSLATION_BATCH_POLL_INTERVAL_MINUTES ?? "", 10);
-  return Number.isInteger(value) && value > 0
-    ? Math.min(value, MAX_RETRY_MINUTES)
-    : DEFAULT_RETRY_MINUTES;
-}
-
-function maxAutoRetries(): number {
-  const value = Number.parseInt(process.env.TRANSLATION_MAX_AUTO_RETRIES ?? "", 10);
-  return Number.isInteger(value) && value >= 0
-    ? Math.min(value, MAX_AUTO_RETRIES)
-    : DEFAULT_MAX_AUTO_RETRIES;
-}
-
 function resultFailureIsRetryable(failureCode: string | null): boolean {
   if (!failureCode) return true;
   const normalized = failureCode.toLowerCase();
@@ -80,14 +64,17 @@ export type TranslationBatchResultsResult =
 export class TranslationBatchResultsService {
   private readonly database: ResultDatabase;
   private readonly providerFactory: ProviderFactory;
+  private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     database?: ResultDatabase;
     providerFactory?: ProviderFactory;
+    runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) =>
       createOpenAITranslationProvider(providerOptions));
+    this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
   async apply(input: { translationBatchId: string }): Promise<TranslationBatchResultsResult> {
@@ -208,15 +195,16 @@ export class TranslationBatchResultsService {
         return true;
       }
 
+      const config = currentTranslationRuntimeConfig(this.runtimeConfig);
       const retryable = resultFailureIsRetryable(result.failureCode);
-      const retry = retryable && record.retryCount < maxAutoRetries();
+      const retry = retryable && record.retryCount < config.translationMaxAutoRetries;
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantMessageTranslation"
         SET
           "status" = CAST(${retry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
           "currentBatchId" = NULL,
           "retryCount" = "retryCount" + ${retry ? 1 : 0},
-          "nextAttemptAt" = ${retry ? new Date(Date.now() + retryMinutes() * 60_000) : null},
+          "nextAttemptAt" = ${retry ? new Date(Date.now() + config.translationResultRetrySeconds * 1000) : null},
           "failureCode" = ${result.failureCode ?? "provider-result-failed"},
           "updatedAt" = NOW()
         WHERE "id" = ${record.translationId}
@@ -295,8 +283,4 @@ async function markMessageAvailable(
 
 export const translationBatchResultsService = new TranslationBatchResultsService();
 
-export const translationBatchResultsTestInternals = {
-  retryMinutes,
-  maxAutoRetries,
-  resultFailureIsRetryable,
-};
+export const translationBatchResultsTestInternals = { resultFailureIsRetryable };

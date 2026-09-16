@@ -57,6 +57,25 @@ function sqlText(query: { strings: readonly string[] }): string {
   return query.strings.join("");
 }
 
+function runtimeConfig(overrides: Record<string, number> = {}) {
+  return { current: vi.fn(() => ({
+    translationPollIntervalSeconds: 300,
+    translationResultRetrySeconds: 300,
+    translationMaxAutoRetries: 3,
+    ...overrides,
+  })) } as any;
+}
+
+function changingRuntimeConfig() {
+  const first = {
+    translationPollIntervalSeconds: 420,
+    translationResultRetrySeconds: 37,
+    translationMaxAutoRetries: 3,
+  };
+  const second = { ...first, translationPollIntervalSeconds: 60 };
+  return { current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } as any;
+}
+
 describe("TranslationBatchPollService", () => {
   it("ignores stale or terminal poll jobs without provider work", async () => {
     const database = createDatabase({ ...batch, pollSequence: 5 });
@@ -73,7 +92,6 @@ describe("TranslationBatchPollService", () => {
   });
 
   it("reschedules nonterminal provider state with the next minute sequence", async () => {
-    process.env.TRANSLATION_BATCH_POLL_INTERVAL_MINUTES = "7";
     const database = createDatabase(batch, 5);
     const add = vi.fn();
     const currentProvider = provider();
@@ -81,6 +99,7 @@ describe("TranslationBatchPollService", () => {
       database: database.database,
       providerFactory: vi.fn(() => currentProvider as never),
       queue: { add },
+      runtimeConfig: runtimeConfig({ translationPollIntervalSeconds: 420 }),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
@@ -88,7 +107,30 @@ describe("TranslationBatchPollService", () => {
     expect(add).toHaveBeenCalledWith(
       "translation-batch-poll",
       { schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 5 },
-      expect.objectContaining({ delay: 7 * 60_000 }),
+      expect.objectContaining({ delay: 420_000 }),
+    );
+  });
+
+  it("uses one runtime snapshot for persisted and queued nonterminal poll timing", async () => {
+    const database = createDatabase(batch, 5);
+    const add = vi.fn();
+    const config = changingRuntimeConfig();
+    const service = new TranslationBatchPollService({
+      database: database.database,
+      providerFactory: vi.fn(() => provider() as never),
+      queue: { add },
+      runtimeConfig: config,
+    });
+
+    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+
+    expect(config.current).toHaveBeenCalledTimes(1);
+    const persisted = database.query.mock.calls[1]?.[0];
+    expect(persisted.values).toContain(420);
+    expect(add).toHaveBeenCalledWith(
+      "translation-batch-poll",
+      expect.any(Object),
+      expect.objectContaining({ delay: 420_000 }),
     );
   });
 
@@ -107,6 +149,31 @@ describe("TranslationBatchPollService", () => {
       .resolves.toMatchObject({ status: "rescheduled", pollSequence: 5 });
     expect(database.execute).not.toHaveBeenCalled();
     expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses one runtime snapshot for persisted and queued read-failure retry timing", async () => {
+    const database = createDatabase(batch, 5);
+    const add = vi.fn();
+    const currentProvider = provider();
+    currentProvider.retrieveBatch.mockRejectedValue(new Error("429"));
+    const config = changingRuntimeConfig();
+    const service = new TranslationBatchPollService({
+      database: database.database,
+      providerFactory: vi.fn(() => currentProvider as never),
+      queue: { add },
+      runtimeConfig: config,
+    });
+
+    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+
+    expect(config.current).toHaveBeenCalledTimes(1);
+    const persisted = database.query.mock.calls[1]?.[0];
+    expect(persisted.values).toContain(420);
+    expect(add).toHaveBeenCalledWith(
+      "translation-batch-poll",
+      expect.any(Object),
+      expect.objectContaining({ delay: 420_000 }),
+    );
   });
 
   it("persists provider completion before enqueueing deterministic results work", async () => {
@@ -130,7 +197,6 @@ describe("TranslationBatchPollService", () => {
   });
 
   it("retains terminal Batch history and bounds affected translation retry", async () => {
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "0";
     const query = vi.fn()
       .mockResolvedValueOnce([batch])
       .mockResolvedValueOnce([{
@@ -149,6 +215,7 @@ describe("TranslationBatchPollService", () => {
       database,
       providerFactory: vi.fn(() => currentProvider as never),
       queue: { add: vi.fn() },
+      runtimeConfig: runtimeConfig({ translationMaxAutoRetries: 0 }),
     });
 
     await expect(service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 }))
@@ -216,10 +283,9 @@ describe("TranslationBatchPollService", () => {
     }
   });
 
-  it("bounds polling and automatic result retry configuration", () => {
-    process.env.TRANSLATION_BATCH_POLL_INTERVAL_MINUTES = "999999";
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "999999";
-    expect(translationBatchPollTestInternals.configuredPollMinutes()).toBe(24 * 60);
-    expect(translationBatchPollTestInternals.configuredMaxAutoRetries()).toBe(10);
+  it("reads poll interval and automatic retry limit from the runtime snapshot", () => {
+    const config = runtimeConfig({ translationPollIntervalSeconds: 90, translationMaxAutoRetries: 8 });
+    expect(config.current().translationPollIntervalSeconds).toBe(90);
+    expect(config.current().translationMaxAutoRetries).toBe(8);
   });
 });

@@ -4,6 +4,10 @@ import { TranslationBatchAssemblyService } from "../../../src/services/translati
 
 process.env.TRANSLATION_MODEL = "test-model";
 
+function runtimeConfig(translationBatchMaxRequests = 100) {
+  return { current: vi.fn(() => ({ translationBatchMaxRequests })) } as any;
+}
+
 function createDatabase() {
   const candidates = [
     {
@@ -34,7 +38,7 @@ describe("TranslationBatchAssemblyService", () => {
     const service = new TranslationBatchAssemblyService({
       database: database.database,
       queue: { add },
-      maxRequests: 10,
+      runtimeConfig: runtimeConfig(10),
     });
     const events: string[] = [];
     database.transaction.mockImplementationOnce(async (callback) => {
@@ -71,7 +75,7 @@ describe("TranslationBatchAssemblyService", () => {
     const service = new TranslationBatchAssemblyService({
       database: database.database,
       queue: { add },
-      maxRequests: 1,
+      runtimeConfig: runtimeConfig(1),
     });
 
     await expect(

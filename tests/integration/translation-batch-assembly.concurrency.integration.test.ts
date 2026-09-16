@@ -102,7 +102,7 @@ VALUES (
         const createService = () =>
           new TranslationBatchAssemblyService({
             database,
-            maxRequests: 1,
+            runtimeConfig: { current: () => ({ translationBatchMaxRequests: 1 }) } as any,
             queue: { add: async () => undefined },
           });
 
