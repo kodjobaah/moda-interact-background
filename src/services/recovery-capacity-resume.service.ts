@@ -45,7 +45,7 @@ export class RecoveryCapacityResumeService {
     const limit = typeof runtimeConfigOrLimit === "number"
       ? runtimeConfigOrLimit
       : runtimeConfigOrLimit?.recoveryRepairShopBatchSize ?? 100;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error("Recovery repair shop batch size is outside the database range.");
     }
     const shops = await prisma.checkoutRecovery.findMany({

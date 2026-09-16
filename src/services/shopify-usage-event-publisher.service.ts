@@ -271,8 +271,10 @@ function createDefaultClient(): BillingEventClient {
 }
 
 function boundedPageSize(value: number): number {
-  if (!Number.isInteger(value) || value < 1) return DEFAULT_PAGE_SIZE;
-  return Math.min(value, MAX_PAGE_SIZE);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_SIZE) {
+    throw new Error("Shopify usage publish batch size is outside the database range.");
+  }
+  return value;
 }
 
 function validateReportableUsage(row: UsageEventRecord): string | null {
