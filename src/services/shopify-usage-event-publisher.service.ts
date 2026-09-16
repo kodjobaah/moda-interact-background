@@ -142,12 +142,15 @@ export class ShopifyUsageEventPublisherService {
 
       try {
         const provider = this.getProvider();
+        const quantity = new Prisma.Decimal(row.quantity);
         await provider.createBillingEvent({
           shopId: row.shop.shopifyShopId!,
           eventHandle: row.shopifyEventHandle!,
           occurredAt: row.occurredAt.toISOString(),
           idempotencyKey: row.shopifyIdempotencyKey!,
-          value: Number(row.quantity),
+          value: quantity.isInteger() && quantity.abs().lte(Number.MAX_SAFE_INTEGER)
+            ? quantity.toNumber()
+            : quantity.toString(),
         });
         await this.markReported(row.id, now);
         result.reported += 1;
@@ -284,9 +287,9 @@ function validateReportableUsage(row: UsageEventRecord): string | null {
   if (!row.shop.shopifyShopId?.trim()) return "Shop has no Shopify shop GID";
   if (!row.shopifyEventHandle?.trim()) return "Usage event handle is missing";
   if (!row.shopifyIdempotencyKey?.trim()) return "Shopify idempotency key is missing";
-  const quantity = Number(row.quantity);
-  if (!Number.isInteger(quantity) || quantity === 0) {
-    return "Usage quantity must be a non-zero integer";
+  const quantity = new Prisma.Decimal(row.quantity);
+  if (!quantity.isFinite() || quantity.isZero()) {
+    return "Usage quantity must be a finite non-zero decimal";
   }
   return null;
 }

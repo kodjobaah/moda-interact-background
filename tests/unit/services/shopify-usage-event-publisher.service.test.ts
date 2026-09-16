@@ -112,6 +112,13 @@ describe("ShopifyUsageEventPublisherService", () => {
       ]);
   });
 
+  it("publishes fractional correction quantities without rounding", async () => {
+    const test = harness([usageRow({ quantity: -0.25 })]);
+
+    await expect(test.service.publishDue()).resolves.toMatchObject({ reported: 1 });
+    expect(test.provider.createBillingEvent).toHaveBeenCalledWith(expect.objectContaining({ value: "-0.25" }));
+  });
+
   it("fails closed before the provider when reportable mapping is incomplete", async () => {
     const test = harness([usageRow({ shop: { shopifyShopId: null } })]);
 

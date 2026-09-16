@@ -5,6 +5,13 @@ export type PartnerUsageSnapshot = {
   costCurrency: string | null;
 };
 
+export type PartnerUsagePricingSnapshot = {
+  handle: string;
+  currency: string | null;
+  tiersMode: string;
+  tiers: Array<{ upTo: number | null; amountPerUnit: string; amount: string }>;
+};
+
 export type PartnerSubscription = {
   planHandle: string;
   usageEventHandles: string[];
@@ -17,6 +24,7 @@ export type PartnerSubscription = {
   cancelAtPeriodEnd: boolean;
   providerSubscriptionId: string | null;
   providerUsageSnapshot: PartnerUsageSnapshot[];
+  providerUsagePricingSnapshot: PartnerUsagePricingSnapshot[];
 };
 
 export type PartnerSubscriptionLifecycleEvent = {
@@ -346,6 +354,12 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
           : String(item.usage.quantity),
         costAmount: item.usage?.cost?.amount ?? null,
         costCurrency: item.usage?.cost?.currencyCode ?? null,
+      }] : []),
+      providerUsagePricingSnapshot: tieredItems.flatMap((item) => item.handle && item.price?.__typename === "TieredPrice" ? [{
+        handle: item.handle,
+        currency: item.price.currency,
+        tiersMode: item.price.tiersMode,
+        tiers: item.price.tiers,
       }] : []),
     };
   }
