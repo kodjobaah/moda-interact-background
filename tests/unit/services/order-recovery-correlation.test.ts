@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => {
       },
       checkoutRecovery: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
       },
     },
     pendingCandidateServiceMock: {
@@ -74,7 +75,8 @@ function installPrismaTransaction() {
       const tx = {
         checkoutRecovery: {
           findUnique: prismaMock.checkoutRecovery.findUnique,
-        updateMany: txFake.updateMany,
+          findFirst: prismaMock.checkoutRecovery.findFirst,
+          updateMany: txFake.updateMany,
         },
       checkoutRecoveryStatusHistory: {
         create: txFake.statusHistoryCreate,
@@ -113,6 +115,9 @@ describe("CheckoutRecoveryService.handleOrderCompleted (ARCH-001-BACKGROUND-005)
       id: "recovery-1",
       status: "MESSAGE_SENT",
     });
+    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) =>
+      prismaMock.checkoutRecovery.findUnique(args),
+    );
     pendingCandidateServiceMock.resolveCandidate.mockResolvedValue(null);
     pendingCandidateServiceMock.cancelCandidate.mockResolvedValue({ removed: true });
     pendingCandidateServiceMock.markOrderProcessed.mockResolvedValue(undefined);

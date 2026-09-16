@@ -96,6 +96,7 @@ describe("ConversationService language persistence", () => {
         pendingTurnStartedAt: true,
         languageTag: true,
         languageSource: true,
+        checkoutRecoveryId: true,
       },
     });
     expect(detector.detect).not.toHaveBeenCalled();

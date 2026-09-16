@@ -122,6 +122,13 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   if (route.kind === "shop-unavailable") return;
 
+  if (route.kind === "resolved") {
+    await checkoutRecoveryService.recordExternalActivity(
+      route.checkoutRecoveryId,
+      new Date(event.occurredAt),
+    );
+  }
+
   const content = event.content;
   if (content.type === "audio") {
     if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;

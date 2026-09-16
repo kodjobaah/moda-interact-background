@@ -44,6 +44,7 @@ const defaults: BackgroundRuntimeConfigSnapshot = {
   whatsappQueueGlobalConcurrency: 20,
   merchantCommunicationsQueueGlobalConcurrency: 10,
   billingSubscriptionQueueGlobalConcurrency: 10,
+  checkoutRecoveryLifetimeDays: 21,
   createdAt: new Date(0),
   updatedAt: new Date(0),
 };

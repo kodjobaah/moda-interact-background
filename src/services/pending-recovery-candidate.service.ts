@@ -222,6 +222,18 @@ export class PendingRecoveryCandidateService {
     };
   }
 
+  async scheduleFromCheckoutUpdated(input: {
+    shopDomain: string;
+    checkoutToken: string;
+    cartToken: string | null;
+    checkoutCreatedAt: string | null;
+    abandonedCheckoutUrl: string | null;
+    activityAt: string;
+    internationalContext?: InternationalContext;
+  }) {
+    return this.scheduleFromCheckoutCreated(input);
+  }
+
   async findCandidateJobIdByCheckout(input: {
     shopId: string;
     checkoutToken: string;
