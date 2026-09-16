@@ -12,15 +12,17 @@ void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { recoveryCapacityResumeService }] =
+    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { createShopifyDiscountSyncWorker }, { recoveryCapacityResumeService }] =
       await Promise.all([
         import("./resources.js"),
         import("../workers/pending-recovery-candidate.worker.js"),
         import("../workers/recovery-capacity-resume.worker.js"),
+        import("../workers/shopify-discount-sync.worker.js"),
         import("../services/recovery-capacity-resume.service.js"),
       ]);
     const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker();
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
+    const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -54,7 +56,7 @@ void startReadyWorkerProcess({
     });
 
     return {
-      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker],
+      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, shopifyDiscountSyncWorker],
       closeResources: [
         ...closeWorkerResources,
         stopQueueConcurrencyController,

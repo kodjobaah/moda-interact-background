@@ -10,6 +10,8 @@ import {
 import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
+import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS, type ShopifyDiscountSyncJob } from "@modainteract/moda-interact-shared/shopify";
+import { createShopifyDiscountSyncJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../lib/db.js";
@@ -20,6 +22,7 @@ import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
 import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 import { backgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
+import { shopifyDiscountCatalogueService } from "./shopify-discount-catalogue.service.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -121,7 +124,37 @@ export class BillingSubscriptionReconciliationService {
     }),
     private readonly now: () => Date = () => new Date(),
     private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
+    private readonly discountQueue?: Pick<Queue, "add">,
   ) {}
+
+  private async publishDiscountSync(shopId: string, reason: "SUBSCRIPTION_ACTIVATED" | "REINSTALL_RECONCILED"): Promise<void> {
+    if (!this.discountQueue) return;
+    const shop = await this.database.shop.findUnique({ where: { id: shopId }, select: { domain: true } });
+    if (!shop) return;
+    const requestedAt = this.now();
+    const job: ShopifyDiscountSyncJob = {
+      schemaVersion: 1,
+      shopId,
+      shopDomain: shop.domain,
+      reason,
+      requestedAt: requestedAt.toISOString(),
+      deliveryId: null,
+      webhookTopic: null,
+    };
+    try {
+      const requestResult = await shopifyDiscountCatalogueService.requestSync(shopId, requestedAt);
+      if (requestResult === "unavailable") return;
+      await this.discountQueue.add(SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.jobName, job, {
+        jobId: createShopifyDiscountSyncJobId({ shopId, reason, requestedAt: job.requestedAt }),
+        attempts: 3,
+        backoff: { type: "exponential", delay: 1000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      });
+    } catch (error) {
+      this.logger.warn("shopify.discount_sync.enqueue_failed", { shopId, reason, errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure" });
+    }
+  }
 
   async activateInitialPaid(
     shopId: string,
@@ -616,6 +649,12 @@ export class BillingSubscriptionReconciliationService {
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: false } });
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+      if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
+        const catalogue = await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null } });
+        await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
+        if (catalogue.unavailableAt === null) await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { unavailableAt: now } });
+        await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
+      }
       return true;
     });
     if (committed) this.logger.warn("billing.subscription_reconciliation.reinstall_no_contract", { shopId });
@@ -659,7 +698,10 @@ export class BillingSubscriptionReconciliationService {
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
-    if (committed && next) await this.publishNext(shopId, expected.subscriptionId, next);
+    if (committed) {
+      await this.publishDiscountSync(shopId, "REINSTALL_RECONCILED");
+      if (next) await this.publishNext(shopId, expected.subscriptionId, next);
+    }
   }
 
   private async completeReinstallPaid(
@@ -694,6 +736,7 @@ export class BillingSubscriptionReconciliationService {
         return rollover;
       });
       if (result.kind === "transitioned" || result.kind === "unchanged") {
+        await this.publishDiscountSync(shopId, "REINSTALL_RECONCILED");
         if (result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         return;
       }
@@ -743,7 +786,10 @@ export class BillingSubscriptionReconciliationService {
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
-    if (committed === true) await this.publishNext(shopId, expected.subscriptionId, next);
+    if (committed === true) {
+      await this.publishDiscountSync(shopId, "REINSTALL_RECONCILED");
+      await this.publishNext(shopId, expected.subscriptionId, next);
+    }
     return committed;
   }
 
@@ -1415,7 +1461,10 @@ export class BillingSubscriptionReconciliationService {
       }
       return true;
     });
-    if (committed === true && nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+    if (committed === true) {
+      await this.publishDiscountSync(shopId, "SUBSCRIPTION_ACTIVATED");
+      if (nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+    }
   }
 
   private async completeVerifiedPaid(
@@ -1578,7 +1627,10 @@ export class BillingSubscriptionReconciliationService {
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
       return true;
     });
-    if (committed) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+    if (committed) {
+      await this.publishDiscountSync(shopId, "SUBSCRIPTION_ACTIVATED");
+      await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+    }
   }
 
   private async recordUnsupportedPaidTrial(shopId: string, expected: InitialActivationExpected): Promise<void> {
