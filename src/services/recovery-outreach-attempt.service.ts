@@ -113,10 +113,26 @@ export class RecoveryOutreachAttemptService {
     });
   }
 
-  async markWaitingAfterConfirmedSend(id: string, data: { sentAt: Date; outboundMessageId: string }) {
+  async markWaitingAfterConfirmedSend(
+    id: string,
+    data: { sentAt: Date; outboundMessageId: string; followUpDueAt?: Date | null },
+  ) {
     if (!this.attemptModel) return null;
     return this.attemptModel.updateMany({
-      where: { id, status: { in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.WAITING_FOR_RESPONSE] } },
+      where: {
+        id,
+        OR: [
+          {
+            status: {
+              in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.CAPACITY_BLOCKED],
+            },
+          },
+          {
+            status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+            outboundMessageId: data.outboundMessageId,
+          },
+        ],
+      },
       data: { status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE, ...data },
     });
   }
@@ -126,19 +142,34 @@ export class RecoveryOutreachAttemptService {
     const attempt = await this.attemptModel.findFirst({
       where: {
         checkoutRecoveryId: recoveryId,
-        status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+        status: {
+          in: [
+            RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+            RecoveryOutreachStatus.ENGAGED,
+          ],
+        },
         sentAt: { lte: occurredAt },
       },
       orderBy: { sequence: "desc" },
     });
     if (!attempt) return null;
     return this.attemptModel.updateMany({
-      where: { id: attempt.id, status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE },
+      where: {
+        id: attempt.id,
+        status: {
+          in: [
+            RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+            RecoveryOutreachStatus.ENGAGED,
+          ],
+        },
+        OR: [
+          { customerRespondedAt: null },
+          { customerRespondedAt: { gt: occurredAt } },
+        ],
+      },
       data: {
         status: RecoveryOutreachStatus.ENGAGED,
-        customerRespondedAt: attempt.customerRespondedAt && attempt.customerRespondedAt <= occurredAt
-          ? attempt.customerRespondedAt
-          : occurredAt,
+        customerRespondedAt: occurredAt,
       },
     });
   }

@@ -19,7 +19,7 @@ export class InboundWhatsAppAudioService {
   ) {}
 
   async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
-    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, transcriptionStatus: true } });
+    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true } });
     if (existing) return existing;
     return prisma.conversationMessage.create({ data: {
       conversationId, providerMessageId: event.providerMessageId, inReplyToProviderId: event.contextMessageId,
@@ -29,7 +29,7 @@ export class InboundWhatsAppAudioService {
       providerMediaSha256: event.content.type === "audio" ? event.content.sha256 : null,
       transcriptionStatus: "PENDING",
     } }).catch((error: unknown) => {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, transcriptionStatus: true } });
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true } });
       throw error;
     });
   }
@@ -37,7 +37,7 @@ export class InboundWhatsAppAudioService {
   async process(event: NormalizedWhatsAppInboundMessage, conversationId: string): Promise<{ kind: "completed" | "rejected" | "failed"; fallback?: string }> {
     const reservation = await this.reserve(event, conversationId);
     await recoveryOutreachAttemptService.markEngagedForConversation(
-      conversationId,
+      reservation.conversationId,
       new Date(event.occurredAt),
     );
     if (reservation.transcriptionStatus === "COMPLETED") return { kind: "completed" };

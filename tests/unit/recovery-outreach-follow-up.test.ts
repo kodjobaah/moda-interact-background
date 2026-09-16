@@ -69,7 +69,14 @@ describe("recovery outreach follow-up", () => {
     expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledTimes(3);
     await service.markEngagedForConversation("conversation-1", new Date("2026-09-16T10:01:00Z"));
     expect(database.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "attempt-1", status: "WAITING_FOR_RESPONSE" },
+      where: expect.objectContaining({
+        id: "attempt-1",
+        status: { in: ["WAITING_FOR_RESPONSE", "ENGAGED"] },
+        OR: [
+          { customerRespondedAt: null },
+          { customerRespondedAt: { gt: new Date("2026-09-16T10:01:00Z") } },
+        ],
+      }),
     }));
     });
 });
