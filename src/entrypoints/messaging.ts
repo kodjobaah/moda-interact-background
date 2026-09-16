@@ -2,10 +2,12 @@ import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-messaging-worker",
   loadWorkerProcess: async () => {
+    await backgroundRuntimeConfigService.start();
     const [{ closeWorkerResources }, { whatsappWorker }] = await Promise.all([
       import("./resources.js"),
       import("../workers/whatsapp.worker.js"),
@@ -18,7 +20,12 @@ void startReadyWorkerProcess({
 
     return {
       workers: [whatsappWorker],
-      closeResources: [...closeWorkerResources, closeWorkerObservability, closeQueuePerformanceTelemetry],
+      closeResources: [
+        ...closeWorkerResources,
+        () => backgroundRuntimeConfigService.close(),
+        closeWorkerObservability,
+        closeQueuePerformanceTelemetry,
+      ],
     };
   },
 }).catch(reportReadinessFailure);

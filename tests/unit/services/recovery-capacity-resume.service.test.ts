@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("bullmq", () => ({ Queue: class {} }));
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
@@ -14,35 +14,32 @@ vi.mock("../../../src/lib/db.js", () => ({
 import { RecoveryCapacityResumeService } from "../../../src/services/recovery-capacity-resume.service.js";
 
 describe("RecoveryCapacityResumeService", () => {
-  it("repairs only active blocked shops and caps the scan at 100", async () => {
+  beforeEach(() => {
+    findMany.mockReset();
+  });
+
+  it("uses the configured repair shop batch", async () => {
+    findMany.mockResolvedValue([{ shopId: "shop-1" }, { shopId: "shop-2" }]);
+    const service = new RecoveryCapacityResumeService();
+    vi.spyOn(service, "schedule").mockResolvedValue("job-id");
+
+    await service.repair({ recoveryRepairShopBatchSize: 2 });
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 2 }));
+  });
+
+  it("rejects an out-of-range repair batch before scanning", async () => {
     findMany.mockResolvedValue(
       Array.from({ length: 100 }, (_, index) => ({ shopId: `shop-${index}` })),
     );
     const service = new RecoveryCapacityResumeService();
     const schedule = vi.spyOn(service, "schedule").mockResolvedValue("job-id");
 
-    await expect(service.repair(500)).resolves.toBe(100);
-
-    expect(findMany).toHaveBeenCalledWith({
-      where: {
-        status: "DETECTED",
-        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
-        shop: { status: "ACTIVE" },
-      },
-      orderBy: [{ shopId: "asc" }, { detectedAt: "asc" }, { id: "asc" }],
-      distinct: ["shopId"],
-      take: 100,
-      select: { shopId: true },
-    });
-    expect(schedule).toHaveBeenCalledTimes(100);
-    expect(schedule).toHaveBeenCalledWith({
-      shopId: "shop-0",
-      trigger: "repair",
-    });
-    expect(schedule).toHaveBeenCalledWith({
-      shopId: "shop-99",
-      trigger: "repair",
-    });
+    await expect(service.repair(501)).rejects.toThrow(
+      "Recovery repair shop batch size is outside the database range.",
+    );
+    expect(findMany).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
   });
 
   it("continues repairing after one deterministic schedule failure", async () => {

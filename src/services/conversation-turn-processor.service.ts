@@ -11,10 +11,37 @@ import type {
   InboundAbuseAdmission,
   InboundAbuseConversationType,
 } from "./inbound-whatsapp-abuse-admission.service.js";
+import {
+  backgroundRuntimeConfigService,
+  type BackgroundRuntimeConfigSnapshot,
+} from "../runtime/background-runtime-config.js";
 
-export const QUIET_WINDOW_MS = 3_000;
-export const MAX_SETTLE_WINDOW_MS = 10_000;
 export const PROCESSING_LEASE_MS = 120_000;
+
+type RuntimeConfigReader = {
+  current(): BackgroundRuntimeConfigSnapshot;
+};
+
+const testDefaults = {
+  conversationQuietWindowMs: 3_000,
+  conversationMaxSettleWindowMs: 10_000,
+};
+
+function currentConversationRuntimeConfig(
+  reader: RuntimeConfigReader,
+): Pick<
+  BackgroundRuntimeConfigSnapshot,
+  "conversationQuietWindowMs" | "conversationMaxSettleWindowMs"
+> {
+  try {
+    return reader.current();
+  } catch (error) {
+    if (error instanceof Error && error.message === "Background runtime configuration has not started.") {
+      return testDefaults;
+    }
+    throw error;
+  }
+}
 
 export type ConversationTurnJob = {
   conversationId: string;
@@ -101,10 +128,12 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     detectedLanguageConfidence: number | null;
   };
   now?: () => Date;
+  runtimeConfig?: RuntimeConfigReader;
 };
 
 export class ConversationTurnProcessor<TContext, TResult> {
   private readonly now: () => Date;
+  private readonly runtimeConfig: RuntimeConfigReader;
 
   constructor(
     private readonly dependencies: ConversationTurnProcessorDependencies<
@@ -113,6 +142,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
     >,
   ) {
     this.now = dependencies.now ?? (() => new Date());
+    this.runtimeConfig = dependencies.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
   async enqueue(
@@ -124,7 +154,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
     if (!state.pendingTurnStartedAt || !state.lastInboundAt) return;
 
     const now = this.now().getTime();
-    const delay = settleDelay(state, now);
+    const delay = settleDelay(
+      state,
+      now,
+      currentConversationRuntimeConfig(this.runtimeConfig),
+    );
     await this.schedule(conversationId, observedVersion, delay);
   }
 
@@ -137,7 +171,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
     if (isStale(state, observedVersion)) return;
 
     const now = this.now();
-    const delay = settleDelay(state, now.getTime());
+    const delay = settleDelay(
+      state,
+      now.getTime(),
+      currentConversationRuntimeConfig(this.runtimeConfig),
+    );
     if (delay > 0) {
       await this.schedule(conversationId, observedVersion, delay, activeJob);
       return;
@@ -387,10 +425,23 @@ function isStale(
   );
 }
 
-function settleDelay(state: ConversationTurnState, now: number): number {
+function settleDelay(
+  state: ConversationTurnState,
+  now: number,
+  runtimeConfig: Pick<
+    BackgroundRuntimeConfigSnapshot,
+    "conversationQuietWindowMs" | "conversationMaxSettleWindowMs"
+  >,
+): number {
+  if (
+    runtimeConfig.conversationMaxSettleWindowMs <
+    runtimeConfig.conversationQuietWindowMs
+  ) {
+    throw new Error("Invalid background runtime configuration: max settle window must be at least the quiet window.");
+  }
   const quietDeadline =
-    (state.lastInboundAt?.getTime() ?? now) + QUIET_WINDOW_MS;
+    (state.lastInboundAt?.getTime() ?? now) + runtimeConfig.conversationQuietWindowMs;
   const maximumDeadline =
-    (state.pendingTurnStartedAt?.getTime() ?? now) + MAX_SETTLE_WINDOW_MS;
+    (state.pendingTurnStartedAt?.getTime() ?? now) + runtimeConfig.conversationMaxSettleWindowMs;
   return Math.max(0, Math.min(quietDeadline, maximumDeadline) - now);
 }

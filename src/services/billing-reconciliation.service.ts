@@ -26,8 +26,8 @@ import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publish
 import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 import { BillingSubscriptionReconciliationService } from "./billing-subscription-reconciliation.service.js";
 import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
+import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 
-const DEFAULT_SHOP_PAGE_SIZE = 50;
 const MAX_SHOP_PAGE_SIZE = 200;
 
 type BillingReconciliationDatabase = PrismaClient;
@@ -70,9 +70,13 @@ export class BillingReconciliationService {
     private readonly subscriptionQueue?: SubscriptionQueue,
   ) {}
 
-  async reconcileOnce(limit = DEFAULT_SHOP_PAGE_SIZE): Promise<BillingReconciliationResult> {
-    const published = await this.publisher.publishDue();
-    const shops = await this.selectRotatingShopPage(boundedLimit(limit));
+  async reconcileOnce(runtimeConfigOrShopBatchSize?: Pick<BackgroundRuntimeConfigSnapshot, "billingReconciliationShopBatchSize" | "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds" | "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds"> | number): Promise<BillingReconciliationResult> {
+    const runtimeConfig = typeof runtimeConfigOrShopBatchSize === "number" ? undefined : runtimeConfigOrShopBatchSize;
+    const shopBatchSize = typeof runtimeConfigOrShopBatchSize === "number"
+      ? runtimeConfigOrShopBatchSize
+      : runtimeConfig?.billingReconciliationShopBatchSize ?? 50;
+    const published = await this.publisher.publishDue(runtimeConfig ? { runtimeConfig } : {});
+    const shops = await this.selectRotatingShopPage(boundedLimit(shopBatchSize));
 
     const result: BillingReconciliationResult = {
       published,
@@ -85,7 +89,7 @@ export class BillingReconciliationService {
     for (const shop of shops) {
       try {
         const snapshot = await getSubscriptionReconciliationSnapshot(this.partner, shop.shopifyShopId!);
-        const projection = await this.applySubscription(shop.id, snapshot);
+        const projection = await this.applySubscription(shop.id, snapshot, runtimeConfig);
         result.subscriptionsSynced += 1;
         const purchaseReconciliation = await this.reconcilePackPurchases(shop.id, snapshot.activeSubscription, projection);
         result.purchasesActivated += purchaseReconciliation.activatedCount;
@@ -205,7 +209,7 @@ export class BillingReconciliationService {
     return shops;
   }
 
-  private async applySubscription(shopId: string, snapshot: PartnerSubscriptionReconciliationSnapshot): Promise<{ billingPeriodId: string | null; packMeterHandle: string | null }> {
+  private async applySubscription(shopId: string, snapshot: PartnerSubscriptionReconciliationSnapshot, runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">): Promise<{ billingPeriodId: string | null; packMeterHandle: string | null }> {
     const provider = snapshot.activeSubscription;
     const now = this.now();
     if (!provider) {
@@ -224,7 +228,7 @@ export class BillingReconciliationService {
       });
       if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
         && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
-        const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+        const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database, undefined, undefined, runtimeConfig).reconcile(
           shopId,
           existing.id,
           snapshot,
@@ -315,7 +319,7 @@ export class BillingReconciliationService {
     });
     if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
       && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
-      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database, undefined, undefined, runtimeConfig).reconcile(
         shopId,
         existing.id,
         snapshot,
@@ -776,8 +780,10 @@ export function createBillingReconciliationService(subscriptionQueue?: Subscript
 }
 
 function boundedLimit(value: number): number {
-  if (!Number.isInteger(value) || value < 1) return DEFAULT_SHOP_PAGE_SIZE;
-  return Math.min(value, MAX_SHOP_PAGE_SIZE);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_SHOP_PAGE_SIZE) {
+    throw new Error("Billing reconciliation shop batch size is outside the database range.");
+  }
+  return value;
 }
 
 export const billingReconciliationService = createBillingReconciliationService();

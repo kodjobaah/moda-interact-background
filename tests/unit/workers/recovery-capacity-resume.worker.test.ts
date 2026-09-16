@@ -40,6 +40,9 @@ vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: { evaluate: hoisted.evaluate },
 }));
+vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
+  backgroundRuntimeConfigService: { current: vi.fn(() => ({ recoveryResumeBatchSize: 25 })) },
+}));
 
 import { RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB } from "../../../src/domain/recovery-capacity-resume.js";
 import "../../../src/workers/recovery-capacity-resume.worker.js";
