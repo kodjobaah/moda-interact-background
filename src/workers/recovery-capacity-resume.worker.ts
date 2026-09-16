@@ -12,8 +12,8 @@ import prisma from "../lib/db.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { recoveryCapacityResumeService } from "../services/recovery-capacity-resume.service.js";
 import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 
-const MAX_RECOVERIES_PER_JOB = 25;
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
   enableMetrics: false,
@@ -29,7 +29,8 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
     const execution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
     if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
 
-    const recoveries = await findBlockedRecoveries(job.data.shopId);
+    const batchSize = backgroundRuntimeConfigService.current().recoveryResumeBatchSize;
+    const recoveries = await findBlockedRecoveries(job.data.shopId, batchSize);
     let attempted = 0;
     let capacityExhausted = false;
     for (const recovery of recoveries) {
@@ -44,7 +45,7 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
       }
     }
 
-    if (!capacityExhausted && attempted === MAX_RECOVERIES_PER_JOB) {
+    if (!capacityExhausted && attempted === batchSize) {
       const lastRecovery = recoveries[attempted - 1];
       if (lastRecovery) {
         const finalExecution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
@@ -69,7 +70,7 @@ recoveryCapacityResumeWorker.on("failed", (job, error) => {
   console.error(`Recovery capacity resume job ${job?.id} failed`, error);
 });
 
-async function findBlockedRecoveries(shopId: string) {
+async function findBlockedRecoveries(shopId: string, batchSize: number) {
   return prisma.checkoutRecovery.findMany({
     where: {
       shopId,
@@ -77,7 +78,7 @@ async function findBlockedRecoveries(shopId: string) {
       admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
     },
     orderBy: [{ detectedAt: "asc" }, { id: "asc" }],
-    take: MAX_RECOVERIES_PER_JOB,
+    take: batchSize,
     select: { id: true },
   });
 }

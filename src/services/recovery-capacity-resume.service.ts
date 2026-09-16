@@ -10,8 +10,8 @@ import {
   type RecoveryCapacityResumeJob,
 } from "../domain/recovery-capacity-resume.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
+import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 
-const MAX_REPAIR_SHOPS = 100;
 const bullMQTelemetry = createBullMQTelemetry({ serviceName: "moda-recovery-worker" });
 
 let resumeQueue: Queue<RecoveryCapacityResumeJob> | null = null;
@@ -41,7 +41,13 @@ export class RecoveryCapacityResumeService {
     return jobId;
   }
 
-  async repair(limit = MAX_REPAIR_SHOPS): Promise<number> {
+  async repair(runtimeConfigOrLimit?: Pick<BackgroundRuntimeConfigSnapshot, "recoveryRepairShopBatchSize"> | number): Promise<number> {
+    const limit = typeof runtimeConfigOrLimit === "number"
+      ? runtimeConfigOrLimit
+      : runtimeConfigOrLimit?.recoveryRepairShopBatchSize ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new Error("Recovery repair shop batch size is outside the database range.");
+    }
     const shops = await prisma.checkoutRecovery.findMany({
       where: {
         status: "DETECTED",
@@ -50,7 +56,7 @@ export class RecoveryCapacityResumeService {
       },
       orderBy: [{ shopId: "asc" }, { detectedAt: "asc" }, { id: "asc" }],
       distinct: ["shopId"],
-      take: Math.min(Math.max(limit, 1), MAX_REPAIR_SHOPS),
+      take: limit,
       select: { shopId: true },
     });
 

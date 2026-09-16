@@ -104,6 +104,23 @@ function harness({
 }
 
 describe("BillingReconciliationService", () => {
+  it("passes the configured shop and usage batches through one cycle", async () => {
+    const test = harness();
+    const runtimeConfig = {
+      billingReconciliationShopBatchSize: 15,
+      shopifyUsagePublishBatchSize: 12,
+      shopifyUsageRetryBaseSeconds: 7,
+      shopifyUsageRetryMaxSeconds: 70,
+      billingFrozenRecheckSeconds: 90,
+      billingProviderRetrySeconds: 30,
+    } as const;
+
+    await test.service.reconcileOnce(runtimeConfig);
+
+    expect(test.database.shop.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 15 }));
+    expect(test.publisher.publishDue).toHaveBeenCalledWith({ runtimeConfig });
+  });
+
   it("fails closed before the boundary and never exposes the stale pack meter", async () => {
     const queue = { add: vi.fn().mockResolvedValue({}) };
     const test = harness({ queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") } });
@@ -480,24 +497,16 @@ describe("BillingReconciliationService", () => {
     }));
   });
 
-  it("bounds the active-shop scan and keeps an unknown plan unmapped", async () => {
+  it("rejects an out-of-range active-shop batch before scanning", async () => {
     const test = harness({
       plan: null,
       partnerResult: { ...providerSubscription, planHandle: "unknown-plan" },
     });
 
-    const result = await test.service.reconcileOnce(999);
-
-    expect(test.database.shop.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 200 }));
-    expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 1 });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
-        status: "UNMAPPED",
-        observedShopifyPlanHandle: "unknown-plan",
-        planId: null,
-        lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE",
-      }),
-    }));
+    await expect(test.service.reconcileOnce(999)).rejects.toThrow(
+      "Billing reconciliation shop batch size is outside the database range.",
+    );
+    expect(test.database.shop.findMany).not.toHaveBeenCalled();
   });
 
   it("preserves the mapped plan when the Partner API fails", async () => {

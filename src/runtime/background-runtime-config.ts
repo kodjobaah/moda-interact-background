@@ -75,6 +75,9 @@ function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
       throw new Error(`Invalid background runtime configuration: invalid ${field}.`);
     }
   }
+  if ((value.shopifyUsageRetryMaxSeconds as number) < (value.shopifyUsageRetryBaseSeconds as number)) {
+    throw new Error("Invalid background runtime configuration: usage retry max must be at least the base.");
+  }
   return Object.freeze({
     ...value,
     createdAt: immutableDate(value.createdAt as Date),

@@ -7,6 +7,7 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
+import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import {
   ShopifyAppEventsError,
   ShopifyAppEventsClient,
@@ -15,8 +16,6 @@ import {
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
-const RETRY_BASE_MS = 60_000;
-const RETRY_MAX_MS = 60 * 60_000;
 const IN_FLIGHT_RECOVERY_MS = 15 * 60_000;
 const MAX_RESPONSE_SUMMARY_LENGTH = 2000;
 const logger = createLogger({
@@ -52,6 +51,7 @@ export type ShopifyUsageEventPublisherResult = {
 
 export type ShopifyUsageEventPublishOptions = {
   billingPeriodId?: string;
+  runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds">;
 };
 
 export class ShopifyUsageEventPublisherService {
@@ -67,7 +67,9 @@ export class ShopifyUsageEventPublisherService {
 
   async publishDue(options: ShopifyUsageEventPublishOptions = {}): Promise<ShopifyUsageEventPublisherResult> {
     const now = this.now();
-    const pageSize = boundedPageSize(this.pageSize);
+    const pageSize = boundedPageSize(options.runtimeConfig?.shopifyUsagePublishBatchSize ?? this.pageSize);
+    const retryBaseMs = (options.runtimeConfig?.shopifyUsageRetryBaseSeconds ?? 60) * 1000;
+    const retryMaxMs = (options.runtimeConfig?.shopifyUsageRetryMaxSeconds ?? 3600) * 1000;
     await this.recoverStaleClaims(now, options);
 
     const dueWhere = {
@@ -151,7 +153,7 @@ export class ShopifyUsageEventPublisherService {
         result.reported += 1;
       } catch (error) {
         if (isRetryable(error)) {
-          await this.markRetryable(row, error, now);
+          await this.markRetryable(row, error, now, retryBaseMs, retryMaxMs);
           result.retryable += 1;
         } else {
           await this.markNeedsAttention(row.id, errorCode(error), errorSummary(error));
@@ -230,10 +232,12 @@ export class ShopifyUsageEventPublisherService {
     row: UsageEventRecord,
     error: unknown,
     now: Date,
+    retryBaseMs = 60_000,
+    retryMaxMs = 60 * 60_000,
   ): Promise<void> {
     const delay = Math.min(
-      RETRY_MAX_MS,
-      RETRY_BASE_MS * 2 ** row.reportAttemptCount,
+      retryMaxMs,
+      retryBaseMs * 2 ** row.reportAttemptCount,
     );
     await this.database.usageEvent.updateMany({
       where: { id: row.id, shopifyReportState: ShopifyReportState.IN_FLIGHT },
