@@ -9,6 +9,7 @@ import type { PrismaClient, UsageReservation } from "@prisma/client";
 import {
   availablePurchasedRecoveryCredits,
   createRecoveryIdempotencyKey,
+  isSameShopifyPurchaseProviderContext,
 } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
@@ -44,7 +45,7 @@ export class PurchasedRecoveryReservationError extends Error {
 type ReservationTransaction = Prisma.TransactionClient;
 type ReservationDatabase = Pick<
   PrismaClient,
-  "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent" | "recoveryCreditRefund"
+  "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent" | "recoveryCreditRefund" | "subscription"
 > & Pick<PrismaClient, "recoveryCreditPurchase">;
 
 class ReservationConcurrencyConflict extends Error {}
@@ -456,15 +457,56 @@ async function selectOldestSpendableLot(
   shopId: string,
   quantity: number,
 ): Promise<NonNullable<PurchaseLot> | null> {
-  const lots = await transaction.recoveryCreditPurchase.findMany({
-    where: { shopId, status: RecoveryCreditPurchaseStatus.ACTIVE },
-    orderBy: [
-      { activatedAt: { sort: "asc", nulls: "last" } },
-      { createdAt: "asc" },
-      { id: "asc" },
-    ],
-  });
-  return lots.find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+  const [subscription, lots] = await Promise.all([
+    transaction.subscription.findUnique({
+      where: { shopId },
+      select: {
+        status: true,
+        providerSubscriptionId: true,
+        observedShopifyPlanHandle: true,
+        billingPeriodId: true,
+        plan: { select: { active: true } },
+      },
+    }),
+    transaction.recoveryCreditPurchase.findMany({
+      where: { shopId, status: RecoveryCreditPurchaseStatus.ACTIVE },
+      orderBy: [
+        { activatedAt: { sort: "asc", nulls: "last" } },
+        { createdAt: "asc" },
+        { id: "asc" },
+      ],
+    }),
+  ]);
+
+  const currentContext = subscription?.status === "ACTIVE" || subscription?.status === "TRIALING"
+    ? subscription.plan?.active && subscription.providerSubscriptionId && subscription.observedShopifyPlanHandle && subscription.billingPeriodId
+      ? {
+          providerContextIdentity: subscription.providerSubscriptionId,
+          shopifyPlanHandle: subscription.observedShopifyPlanHandle,
+          billingPeriodId: subscription.billingPeriodId,
+        }
+      : null
+    : null;
+  const historical = [] as NonNullable<PurchaseLot>[];
+  const current = [] as NonNullable<PurchaseLot>[];
+  for (const lot of lots) {
+    if (
+      currentContext &&
+      isSameShopifyPurchaseProviderContext(
+        {
+          providerContextIdentity: lot.providerSubscriptionIdSnapshot,
+          shopifyPlanHandleSnapshot: lot.shopifyPlanHandleSnapshot,
+          billingPeriodId: lot.billingPeriodId,
+        },
+        currentContext,
+      )
+    ) {
+      current.push(lot);
+    } else {
+      historical.push(lot);
+    }
+  }
+  return [...historical, ...current].find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
 }
 
 function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
