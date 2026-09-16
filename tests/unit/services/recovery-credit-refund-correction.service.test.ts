@@ -25,6 +25,7 @@ function refundRow(overrides: Record<string, unknown> = {}) {
   const context = deriveShopifyProviderContextIdentity({ providerSubscriptionId: "sub-1", planHandle: "pro-2026", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd });
   return {
     id: "refund-1",
+    createdAt: new Date("2026-09-01T00:00:00.000Z"),
     shopId: "shop-1",
     status: "REQUESTED",
     reason: null,
@@ -55,10 +56,10 @@ function harness(row = refundRow(), providerResult = provider) {
   const refundUpdate = vi.fn().mockResolvedValue({ count: 1 });
   const usageUpsert = vi.fn().mockResolvedValue({ id: "correction-event-1" });
   const database = {
-    recoveryCreditRefund: { findMany: vi.fn().mockResolvedValue([row]), findUnique: vi.fn(), updateMany: refundUpdate },
+    recoveryCreditRefund: { findMany: vi.fn().mockResolvedValue([row]), findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn(), updateMany: refundUpdate },
     billingPeriod: { findUnique: vi.fn().mockResolvedValue({ periodStart, periodEnd }) },
     usageEvent: { upsert: usageUpsert },
-    recoveryCreditPurchase: { findUnique: vi.fn(), updateMany: vi.fn() },
+    recoveryCreditPurchase: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn(), updateMany: vi.fn() },
     shopEntitlementCounter: { findUnique: vi.fn(), updateMany: vi.fn() },
     merchantSupportThread: { upsert: vi.fn().mockResolvedValue({ id: "thread-1" }), update: vi.fn() },
     merchantSupportMessage: { upsert: vi.fn() },
@@ -223,5 +224,95 @@ describe("RecoveryCreditRefundCorrectionService", () => {
 
     await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, prepared: 0, reconciled: 1, providerActionRequired: 0 });
     expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("prepares only the oldest requested refund for a meter in one scheduler pass", async () => {
+    const oldest = refundRow({ id: "refund-oldest", createdAt: new Date("2026-09-01T00:00:00.000Z") });
+    const newest = refundRow({ id: "refund-newest", createdAt: new Date("2026-09-02T00:00:00.000Z") });
+    const test = harness(oldest);
+    test.database.recoveryCreditRefund.findMany.mockResolvedValue([oldest, newest]);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 1 });
+    expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows different handles for the same shop to prepare independently", async () => {
+    const first = refundRow({ id: "refund-first" });
+    const second = refundRow({ id: "refund-second", eventHandleSnapshot: "other-meter" });
+    const test = harness(first, {
+      ...provider,
+      usageEventHandles: ["pack-meter", "other-meter"],
+      providerUsageSnapshot: [
+        { handle: "pack-meter", quantity: "1", costAmount: "1.00", costCurrency: "USD" },
+        { handle: "other-meter", quantity: "1", costAmount: "1.00", costCurrency: "USD" },
+      ],
+      providerUsagePricingSnapshot: [
+        { handle: "pack-meter", currency: "USD", tiersMode: "VOLUME", tiers: [{ upTo: null, amountPerUnit: "1.00", amount: "0.00" }] },
+        { handle: "other-meter", currency: "USD", tiersMode: "VOLUME", tiers: [{ upTo: null, amountPerUnit: "1.00", amount: "0.00" }] },
+      ],
+    });
+    test.database.recoveryCreditRefund.findMany.mockResolvedValue([first, second]);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 2 });
+    expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["PROVIDER_ACTION_REQUIRED", "an earlier provider-action refund"],
+    ["NEEDS_ATTENTION", "an earlier needs-attention refund"],
+  ])("defers behind %s on the same meter", async (status) => {
+    const test = harness(refundRow());
+    test.database.recoveryCreditRefund.findFirst.mockResolvedValue({ id: "older-refund" });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ reconciled: 1, prepared: 0 });
+    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("defers while an unresolved purchase exists on the same meter", async () => {
+    const test = harness(refundRow());
+    test.database.recoveryCreditPurchase.findFirst.mockResolvedValue({ id: "purchase-1" });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ reconciled: 1, prepared: 0 });
+    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("classifies exact before state as reconciled without changing the refund", async () => {
+    const row = refundRow({
+      automaticCorrectionUsageEventId: "correction-event-1",
+      finalCreditQuantity: 1,
+      expectedProviderAmount: new Prisma.Decimal("1.00"),
+      expectedProviderCurrency: "USD",
+      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
+      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
+      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
+      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
+      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
+    });
+    const test = harness(row);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ reconciled: 1, completed: 0 });
+    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["quantity", { quantity: "0.5", costAmount: "0.50" }],
+    ["cost", { quantity: "0", costAmount: "0.50" }],
+    ["currency", { quantity: "0", costAmount: "0.00", costCurrency: "EUR" }],
+  ])("marks a third provider %s value as a conflict", async (_kind, usage) => {
+    const row = refundRow({
+      automaticCorrectionUsageEventId: "correction-event-1",
+      finalCreditQuantity: 1,
+      expectedProviderAmount: new Prisma.Decimal("1.00"),
+      expectedProviderCurrency: "USD",
+      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
+      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
+      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
+      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
+      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
+    });
+    const test = harness(row, { ...provider, providerUsageSnapshot: [{ handle: "pack-meter", costCurrency: "USD", ...usage }] });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ needsAttention: 1 });
+    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_ATTENTION", reason: "automatic-correction-provider-state-conflict" }) }));
   });
 });
