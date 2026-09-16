@@ -959,7 +959,7 @@ export class CheckoutRecoveryService {
         const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
         if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
           this.requireConfirmedMessage(existing, conversation.id, attempt.id);
-          await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: existing });
+          await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: existing, policy });
           return recovery;
         }
         if (existing?.status === "PENDING") {
@@ -1040,12 +1040,7 @@ export class CheckoutRecoveryService {
           data: { status: "MESSAGE_SENT", messageSentAt: input.message.sentAt, admissionBlockedAt: null, admissionBlockReason: null },
         });
       }
-      if (followUpDueAt) {
-        await recoveryOutreachFollowUpService.schedule(
-          { checkoutRecoveryId: input.recovery.id, sequence: 2 },
-          followUpDueAt,
-        );
-      }
+      await this.ensureScheduledInitialFollowUp(input.recovery.id);
     }
   }
 

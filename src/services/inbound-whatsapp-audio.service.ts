@@ -64,7 +64,7 @@ export class InboundWhatsAppAudioService {
         await this.reject(reservation.id, "VOICE_UNREADABLE", durationMs);
         return { kind: "rejected", fallback: UNREADABLE };
       }
-      await this.complete(reservation.id, conversationId, transcript.text, transcript.provider, transcript.model, durationMs);
+      await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs);
       this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
       return { kind: "completed" };
     } catch (error) {
