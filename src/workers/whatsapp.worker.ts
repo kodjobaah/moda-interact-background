@@ -1,6 +1,9 @@
 import { Queue, Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
+import {
+  safeParseNormalizedWhatsAppInboundMessage,
+} from "@modainteract/moda-interact-shared/whatsapp";
 
 import { connectionRedis } from "../lib/redis.js";
 import prisma from "../lib/db.js";
@@ -67,11 +70,7 @@ export function createWhatsappWorker() {
     observeWorkerJob(workerMetricDefinition, job, async () => {
       switch (job.name) {
         case "message-received":
-          await observeConversationTurn(
-            "whatsapp",
-            () => processInboundMessage(job.data as WhatsAppInboundEvent),
-            conversationTurnObservation,
-          );
+          await processInboundJobData(job.data, job.id);
           return;
 
         case "process-conversation-turn":
@@ -123,7 +122,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   if (route.kind === "shop-unavailable") return;
 
-  const content = inboundContent(event);
+  const content = event.content;
   if (content.type === "audio") {
     if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
     const result = await inboundWhatsAppAudioService.process(event, route.conversationId);
@@ -219,6 +218,19 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
   await conversationTurnProcessor.enqueue(
     route.conversationId,
     received.version,
+  );
+}
+
+export async function processInboundJobData(input: unknown, jobId?: string) {
+  const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
+  if (!parsed.success) {
+    console.warn("Ignoring non-canonical WhatsApp inbound job", { jobId });
+    return;
+  }
+  await observeConversationTurn(
+    "whatsapp",
+    () => processInboundMessage(parsed.data),
+    conversationTurnObservation,
   );
 }
 export async function loadConversationTurn(
@@ -423,18 +435,8 @@ function buildProductOnlyContext(
   };
 }
 
-function inboundContent(event: WhatsAppInboundEvent):
-  | { type: "text"; text: string }
-  | { type: "audio"; mediaId: string; mimeType: string | null; sha256: string | null; voice: boolean | null }
-  | { type: "unsupported"; providerType: string } {
-  if ("content" in event && event.content) return event.content;
-  const legacy = event as unknown as { text?: string | null };
-  return { type: "text", text: legacy.text ?? "" };
-}
-
 function inboundText(event: WhatsAppInboundEvent): string {
-  const content = inboundContent(event);
-  return content.type === "text" ? content.text : "";
+  return event.content.type === "text" ? event.content.text : "";
 }
 
 export {};

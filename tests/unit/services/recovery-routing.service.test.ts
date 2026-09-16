@@ -58,6 +58,7 @@ describe("RecoveryRoutingService", () => {
     "returns a terminal route for a %s context-linked recovery",
     async (status) => {
       vi.mocked(prisma.conversationMessage.findUnique).mockResolvedValue({
+        direction: "OUTBOUND",
         conversationId: "conversation-1",
         conversation: {
           checkoutRecoveryId: "recovery-1",
@@ -119,6 +120,38 @@ describe("RecoveryRoutingService", () => {
       customerPhone: "+447700900000",
     });
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("falls through to contextless routing for an inbound referenced message", async () => {
+    vi.mocked(prisma.conversationMessage.findUnique).mockResolvedValue({
+      direction: "INBOUND",
+      conversationId: "wrong-conversation",
+      conversation: {
+        checkoutRecoveryId: "wrong-recovery",
+        shopId: "wrong-shop",
+        customerId: "wrong-customer",
+        type: "RECOVERY",
+        shop: { domain: "wrong.myshopify.com" },
+        checkoutRecovery: { shopId: "wrong-shop" },
+      },
+    } as any);
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([]);
+
+    const route = await new RecoveryRoutingService().resolveInboundMessage({
+      schemaVersion: 1,
+      provider: "whatsapp",
+      providerAccountId: "waba-1",
+      providerPhoneNumberId: "phone-1",
+      providerMessageId: "inbound-1",
+      customerPhone: "+447700900000",
+      contextMessageId: "inbound-reference",
+      occurredAt: "2026-09-16T12:00:00.000Z",
+      content: { type: "text", text: "Can you help?" },
+    });
+
+    expect(route).toMatchObject({ kind: "product-only" });
+    expect(route).not.toMatchObject({ conversationId: "wrong-conversation" });
   });
 
   it("returns a terminal route when all recovery ownership is inactive", async () => {

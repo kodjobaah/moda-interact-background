@@ -12,12 +12,16 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: mocks.database }));
-vi.mock("../../../src/services/whatsapp-media.service.js", () => ({ whatsappMediaService: mocks.media }));
+vi.mock("../../../src/services/whatsapp-media.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/services/whatsapp-media.service.js")>()),
+  whatsappMediaService: mocks.media,
+}));
 vi.mock("../../../src/services/speech-transcription.service.js", () => ({ groqSpeechTranscriptionService: mocks.transcription }));
 vi.mock("music-metadata", () => ({ parseBuffer: mocks.parseBuffer }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({ createLogger: () => ({ info: vi.fn(), warn: vi.fn() }) }));
 
 import { InboundWhatsAppAudioService } from "../../../src/services/inbound-whatsapp-audio.service.js";
+import { WhatsAppMediaError } from "../../../src/services/whatsapp-media.service.js";
 
 const event = {
   schemaVersion: 1 as const, provider: "whatsapp" as const, providerAccountId: "waba",
@@ -29,6 +33,7 @@ const event = {
 describe("InboundWhatsAppAudioService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.WHATSAPP_ACCESS_TOKEN = "test-token";
     mocks.database.conversationMessage.findUnique.mockResolvedValue(null);
     mocks.database.conversationMessage.create.mockResolvedValue({ id: "message-row", transcriptionStatus: "PENDING" });
     mocks.database.conversationMessage.updateMany.mockResolvedValue({ count: 1 });
@@ -65,6 +70,27 @@ describe("InboundWhatsAppAudioService", () => {
     const result = await new InboundWhatsAppAudioService(mocks.media, mocks.transcription).process(event, "conversation-1");
     expect(result).toEqual({ kind: "completed" });
     expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
+    expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
+  });
+
+  it("keeps a transient Meta failure pending and rethrows for queue retry", async () => {
+    mocks.media.downloadAudio.mockRejectedValue(new WhatsAppMediaError("metadata-http", true));
+
+    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).process(event, "conversation-1"))
+      .rejects.toMatchObject({ code: "metadata-http", retryable: true });
+    expect(mocks.database.conversationMessage.updateMany).not.toHaveBeenCalled();
+    expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
+  });
+
+  it("marks corrupt media terminal and returns the unreadable fallback", async () => {
+    mocks.parseBuffer.mockRejectedValue(new Error("parser exploded"));
+
+    const result = await new InboundWhatsAppAudioService(mocks.media, mocks.transcription).process(event, "conversation-1");
+
+    expect(result).toEqual({ kind: "failed", fallback: "I couldn't understand that voice note. Please try again or send your message as text." });
+    expect(mocks.database.conversationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ transcriptionStatus: "FAILED", transcriptionFailureCode: "MEDIA_UNREADABLE" }),
+    }));
     expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
   });
 });

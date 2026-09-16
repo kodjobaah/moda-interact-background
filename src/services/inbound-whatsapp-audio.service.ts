@@ -3,8 +3,8 @@ import { parseBuffer } from "music-metadata";
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import prisma from "../lib/db.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
-import { whatsappMediaService } from "./whatsapp-media.service.js";
-import { groqSpeechTranscriptionService, type SpeechTranscriptionService } from "./speech-transcription.service.js";
+import { whatsappMediaService, WhatsAppMediaError } from "./whatsapp-media.service.js";
+import { groqSpeechTranscriptionService, SpeechTranscriptionError, type SpeechTranscriptionService } from "./speech-transcription.service.js";
 
 const MAX_DURATION_MS = 120_000;
 const TOO_LONG = "Please send a voice note that is 2 minutes or shorter.";
@@ -40,7 +40,14 @@ export class InboundWhatsAppAudioService {
     try {
       if (event.content.type !== "audio") throw new Error("audio-event-required");
       const downloaded = await this.media.downloadAudio(event.content.mediaId, event.content.mimeType);
-      const metadata = await parseBuffer(downloaded.bytes, { mimeType: downloaded.mimeType });
+      let metadata;
+      try {
+        metadata = await parseBuffer(downloaded.bytes, { mimeType: downloaded.mimeType });
+      } catch {
+        await this.fail(reservation.id, "MEDIA_UNREADABLE");
+        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId, reason: "media-parse-failed" });
+        return { kind: "failed", fallback: UNREADABLE };
+      }
       const durationMs = Math.round((metadata.format.duration ?? 0) * 1000);
       if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > MAX_DURATION_MS) {
         await this.reject(reservation.id, durationMs > MAX_DURATION_MS ? "VOICE_TOO_LONG" : "VOICE_UNREADABLE", durationMs);
@@ -56,9 +63,13 @@ export class InboundWhatsAppAudioService {
       this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
       return { kind: "completed" };
     } catch (error) {
-      if (isTerminalAudioError(error)) await this.fail(reservation.id, "MEDIA_UNREADABLE");
-      this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId });
-      return isTerminalAudioError(error) ? { kind: "failed", fallback: UNREADABLE } : Promise.reject(error);
+      if (isTerminalAudioError(error)) {
+        await this.fail(reservation.id, "MEDIA_UNREADABLE");
+        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId, reason: "typed-terminal-error" });
+        return { kind: "failed", fallback: UNREADABLE };
+      }
+      this.logger.warn("whatsapp.inbound.transcription-retryable-failure", { providerMessageId: event.providerMessageId });
+      throw error;
     }
   }
 
@@ -77,8 +88,9 @@ export class InboundWhatsAppAudioService {
 }
 
 function isTerminalAudioError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : "";
-  return message.includes("type-unsupported") || message.includes("too-large") || message.includes("metadata");
+  if (error instanceof WhatsAppMediaError) return !error.retryable;
+  if (error instanceof SpeechTranscriptionError) return !error.retryable;
+  return false;
 }
 
 export const inboundWhatsAppAudioService = new InboundWhatsAppAudioService();

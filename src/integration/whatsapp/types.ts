@@ -1,13 +1,5 @@
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 
-export type WhatsAppMessageType =
-  | "text"
-  | "image"
-  | "audio"
-  | "document"
-  | "interactive"
-  | "unknown";
-
 export type WhatsAppInboundEvent = NormalizedWhatsAppInboundMessage;
 
 export interface SendMessageResult {
