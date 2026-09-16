@@ -11,6 +11,7 @@ import {
   ConversationLanguageService,
   conversationLanguageService,
 } from "./conversation-language.service.js";
+import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 
 export interface ResolvedIncomingMessage {
   conversationId: string;
@@ -167,6 +168,11 @@ export class ConversationService {
 
       return conversation;
     });
+
+    await recoveryOutreachAttemptService.markEngagedForConversation(
+      result.id,
+      now,
+    );
 
     return {
       conversationId: result.id,

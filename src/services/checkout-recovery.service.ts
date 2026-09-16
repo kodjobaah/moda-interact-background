@@ -18,6 +18,9 @@ import {
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
+import { recoveryPolicyService } from "./recovery-policy.service.js";
+import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
+import { recoveryOutreachFollowUpService } from "./recovery-outreach-follow-up.service.js";
 import {
   shopExecutionEligibilityService,
   type ShopExecutionDenialReason,
@@ -856,6 +859,13 @@ export class CheckoutRecoveryService {
       return recovery;
     }
 
+    const policy = await recoveryPolicyService.resolve(recovery.shopId);
+    const attempt = await recoveryOutreachAttemptService.getOrCreate({
+      recoveryId: recovery.id,
+      sequence: 1,
+      policy,
+    });
+
     // 3
     const recipient = this.resolveRecipient(event);
 
@@ -880,10 +890,12 @@ export class CheckoutRecoveryService {
     let billing = await this.billingService.admit({
       shopId: recovery.shopId,
       recoveryId: recovery.id,
+      outreachAttemptId: attempt.id,
     });
     if (billing.kind === "blocked") {
       if (billing.reason === "capacity-exhausted") {
         await this.markRecoveryCapacityBlocked(recovery.id);
+        await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED");
       }
       return recovery;
     }
@@ -911,15 +923,21 @@ export class CheckoutRecoveryService {
       const revalidated = await this.billingService.revalidateBeforeProvider({
         admission: billing.admission,
         recoveryId: recovery.id,
+        outreachAttemptId: attempt.id,
       });
-      if (revalidated.kind === "blocked") return recovery;
+      if (revalidated.kind === "blocked") {
+        await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", {
+          failureCode: revalidated.reason,
+        });
+        return recovery;
+      }
       billing = revalidated;
 
       // 5b
       result = await outboundWhatsAppAdmissionService.sendTemplate({
         shopId: recovery.shopId,
         conversationId: conversation.id,
-        idempotencyKey: `recovery-message:${recovery.id}`,
+        idempotencyKey: `recovery-outreach:${attempt.id}`,
         senderType: "AUTOMATION",
         content,
         to: recipient,
@@ -931,12 +949,18 @@ export class CheckoutRecoveryService {
         admission: billing.admission,
         error,
       });
+      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
+        failureCode: "PROVIDER_FAILURE",
+      });
 
       throw error;
     }
 
     if (result.kind === "suppressed") {
       await this.billingService.releaseBeforeProvider(billing.admission);
+      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
+        failureCode: result.reason,
+      });
       return recovery;
     }
 
@@ -957,8 +981,133 @@ export class CheckoutRecoveryService {
     }
 
     await this.markRecoveryMessageSent(recovery.id);
+    const sentAt = new Date();
+    const followUpDueAt = policy.followUpEnabled && policy.followUpDelayMinutes
+      ? new Date(sentAt.getTime() + policy.followUpDelayMinutes * 60_000)
+      : null;
+    await recoveryOutreachAttemptService.markStatus(attempt.id, "WAITING_FOR_RESPONSE", {
+      sentAt,
+      outboundMessageId: result.messageId,
+      followUpDueAt,
+    });
+    if (followUpDueAt) {
+      await recoveryOutreachFollowUpService.schedule(
+        { checkoutRecoveryId: recovery.id, sequence: 2 },
+        followUpDueAt,
+      );
+    }
 
     return recovery;
+  }
+
+  async processRecoveryOutreachFollowUp(recoveryId: string) {
+    const lockTarget = await prisma.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: { shopId: true, checkoutToken: true },
+    });
+    if (!lockTarget) return { kind: "suppressed", reason: "missing-recovery" } as const;
+    return pendingRecoveryCandidateService.withCheckoutLock(
+      lockTarget.shopId,
+      lockTarget.checkoutToken,
+      async () => {
+        const recovery = await prisma.checkoutRecovery.findUnique({
+          where: { id: recoveryId },
+          include: {
+            shop: { select: { domain: true, status: true } },
+            outreachAttempts: { orderBy: { sequence: "asc" } },
+            conversation: true,
+            customer: { select: { phone: true } },
+          },
+        });
+        const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
+        if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation || !recovery.customer?.phone) {
+          return { kind: "suppressed", reason: "not-due" } as const;
+        }
+        if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
+          return { kind: "suppressed", reason: "terminal" } as const;
+        }
+        if (recovery.outreachAttempts.some((item) => item.sequence === 2 && item.status === "WAITING_FOR_RESPONSE")) {
+          return { kind: "suppressed", reason: "already-sent" } as const;
+        }
+        const engaged = recovery.conversation
+          ? await prisma.conversationMessage.findFirst({
+              where: { conversationId: recovery.conversation.id, direction: "INBOUND", createdAt: { gte: initial.sentAt } },
+              orderBy: { createdAt: "asc" },
+            })
+          : null;
+        if (engaged) {
+          await recoveryOutreachAttemptService.markStatus(initial.id, "ENGAGED", { customerRespondedAt: engaged.createdAt });
+          return { kind: "suppressed", reason: "engaged" } as const;
+        }
+        await recoveryOutreachAttemptService.markStatus(initial.id, "NO_RESPONSE");
+        const attempt = await recoveryOutreachAttemptService.getOrCreateFollowUp({
+          recoveryId,
+          initialAttempt: initial,
+        });
+        const execution = await shopExecutionEligibilityService.evaluate(recovery.shopId);
+        if (!execution.allowed) {
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "CANCELLED", { failureCode: execution.reason });
+          return { kind: "suppressed", reason: execution.reason } as const;
+        }
+        const selection = await whatsappTemplateSelectorService.select({
+          shopId: recovery.shopId,
+          providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
+          purpose: "checkout-recovery",
+          languageTag: recovery.conversation?.languageTag ?? null,
+          countryCode: recovery.conversation?.countryCode ?? null,
+          resolveMarketCapability: async () => "unknown" as const,
+        });
+        if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: "TEMPLATE_UNAVAILABLE" });
+          return { kind: "suppressed", reason: "template-unavailable" } as const;
+        }
+        let billing = await this.billingService.admit({ shopId: recovery.shopId, recoveryId, outreachAttemptId: attempt.id });
+        if (billing.kind === "blocked") {
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", { failureCode: billing.reason });
+          return { kind: "capacity-blocked", reason: billing.reason } as const;
+        }
+        const revalidated = await this.billingService.revalidateBeforeProvider({
+          admission: billing.admission,
+          recoveryId,
+          outreachAttemptId: attempt.id,
+        });
+        if (revalidated.kind === "blocked") {
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", { failureCode: revalidated.reason });
+          return { kind: "capacity-blocked", reason: revalidated.reason } as const;
+        }
+        billing = revalidated;
+        const content = conversationMessageService.buildRecoveryTemplateDescriptor({
+          purpose: "checkout-recovery",
+          templateName: selection.providerTemplateName,
+          canonicalLanguageTag: selection.canonicalLanguageTag,
+          providerLanguageCode: selection.providerLanguageCode,
+        });
+        try {
+          const result = await outboundWhatsAppAdmissionService.sendTemplate({
+            shopId: recovery.shopId,
+            conversationId: recovery.conversation.id,
+            idempotencyKey: `recovery-outreach:${attempt.id}`,
+            senderType: "AUTOMATION",
+            content,
+            to: recovery.customer.phone,
+            templateName: selection.providerTemplateName,
+            languageCode: selection.providerLanguageCode,
+          });
+          if (result.kind === "suppressed") {
+            await this.billingService.releaseBeforeProvider(billing.admission);
+            await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: result.reason });
+            return result;
+          }
+          await this.billingService.commitSuccessfulInitiation({ admission: billing.admission, recoveryId, occurredAt: new Date() });
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "WAITING_FOR_RESPONSE", { sentAt: new Date(), outboundMessageId: result.messageId });
+          return { kind: "sent", attemptId: attempt.id } as const;
+        } catch (error) {
+          await this.billingService.handleProviderFailure({ admission: billing.admission, error });
+          await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: "PROVIDER_FAILURE" });
+          throw error;
+        }
+      },
+    );
   }
 
   async markRecoveryCapacityBlocked(recoveryId: string, blockedAt = new Date()) {

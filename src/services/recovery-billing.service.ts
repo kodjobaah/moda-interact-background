@@ -122,6 +122,7 @@ export class RecoveryBillingService {
   async admit(input: {
     shopId: string;
     recoveryId: string;
+    outreachAttemptId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
     let policy: EffectiveBillingPolicy;
     try {
@@ -139,7 +140,9 @@ export class RecoveryBillingService {
     }
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,
-      input.recoveryId,
+      input.outreachAttemptId
+        ? `recovery-outreach:${input.outreachAttemptId}`
+        : input.recoveryId,
     );
 
     if (policy.newRecoveriesPaused) {
@@ -181,10 +184,11 @@ export class RecoveryBillingService {
       policy.planKind === "PAID_METERED" &&
       policy.billingPeriod?.phase === "ACTIVE"
     ) {
-      const paid = await this.paidIncludedReservationService.reserve({
-        shopId: input.shopId,
-        recoveryId: input.recoveryId,
-      });
+      const paid = await this.paidIncludedReservationService.reserve(
+        input.outreachAttemptId
+          ? { shopId: input.shopId, sourceKey }
+          : { shopId: input.shopId, recoveryId: input.recoveryId },
+      );
       if (isPaidIncludedAdmission(paid)) {
         return {
           kind: "admitted",
@@ -243,6 +247,7 @@ export class RecoveryBillingService {
   async revalidateBeforeProvider(input: {
     admission: RecoveryBillingAdmission;
     recoveryId: string;
+    outreachAttemptId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
     let current: EffectiveBillingPolicy;
     try {
@@ -294,6 +299,9 @@ export class RecoveryBillingService {
     return this.admit({
       shopId: input.admission.policy.shopId,
       recoveryId: input.recoveryId,
+      ...(input.outreachAttemptId
+        ? { outreachAttemptId: input.outreachAttemptId }
+        : {}),
     });
   }
 

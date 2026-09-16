@@ -60,7 +60,7 @@ describe("queue concurrency controller", () => {
 
     expect(events[0]).toBe("lease");
     expect(events.slice(1)).toEqual(CONTROLLED_QUEUE_DEFINITIONS.map((_, index) => `set:${index}`));
-    expect(values).toEqual([11, 12, 13, 14, 15, 16, 17]);
+    expect(values).toEqual([11, 12, 13, 14, 13, 15, 16, 17]);
     expect(queues.every((queue) => queue.getGlobalConcurrency.mock.calls.length === 1)).toBe(true);
     await stop();
   });
