@@ -455,13 +455,29 @@ describe("CheckoutRecoveryService capacity resume", () => {
   });
 
   it("clears capacity-block fields when a recovery becomes MESSAGE_SENT", async () => {
-    hoisted.update.mockResolvedValueOnce({ id: "recovery-1" });
+    hoisted.updateMany.mockResolvedValueOnce({ count: 1 });
 
     await new CheckoutRecoveryService().markRecoveryMessageSent("recovery-1");
 
-    expect(hoisted.update).toHaveBeenCalledTimes(1);
-    expect(hoisted.update).toHaveBeenCalledWith({
-      where: { id: "recovery-1" },
+    expect(hoisted.updateMany).toHaveBeenCalledTimes(1);
+    expect(hoisted.updateMany).toHaveBeenCalledWith({
+      where: { id: "recovery-1", status: "DETECTED" },
+      data: {
+        status: "MESSAGE_SENT",
+        messageSentAt: expect.any(Date),
+        admissionBlockedAt: null,
+        admissionBlockReason: null,
+      },
+    });
+  });
+
+  it("cannot reopen an expired recovery after an in-flight send", async () => {
+    hoisted.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await new CheckoutRecoveryService().markRecoveryMessageSent("recovery-1");
+
+    expect(hoisted.updateMany).toHaveBeenCalledWith({
+      where: { id: "recovery-1", status: "DETECTED" },
       data: {
         status: "MESSAGE_SENT",
         messageSentAt: expect.any(Date),

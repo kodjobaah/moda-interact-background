@@ -32,7 +32,7 @@ export class CheckoutRecoveryExpiryService {
           const update = await transaction.checkoutRecovery.updateMany({
             where: {
               id: candidate.id,
-              status: { in: [...ACTIVE_STATUSES] },
+              status: candidate.status,
               lastExternalActivityAt: { lte: cutoff },
             },
             data: { status: "EXPIRED", expiredAt: now },

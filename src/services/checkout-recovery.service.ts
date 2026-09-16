@@ -267,6 +267,17 @@ export class CheckoutRecoveryService {
     });
   }
 
+  async recordExternalActivity(recoveryId: string, activityAt: Date) {
+    return prisma.checkoutRecovery.updateMany({
+      where: {
+        id: recoveryId,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: activityAt },
+      },
+      data: { lastExternalActivityAt: activityAt },
+    });
+  }
+
   /**
    * Map current Shopify data plus candidate correlation identifiers into the
    * existing recovery seed shape. Only the lookup result supplies customer,
@@ -494,6 +505,8 @@ export class CheckoutRecoveryService {
         : null,
     };
 
+      await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
+
     const outcome = await abandonedCheckoutLookupService.lookup(lookupInput);
 
     // Transient provider failures remain retryable and are never converted into
@@ -531,16 +544,6 @@ export class CheckoutRecoveryService {
           lineItems: this.serializeLineItems(checkout.lineItems),
         },
       });
-      if (updated.count === 1) {
-        await transaction.checkoutRecovery.updateMany({
-          where: {
-            id: recovery.id,
-            status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-            lastExternalActivityAt: { lt: new Date(event.activityAt) },
-          },
-          data: { lastExternalActivityAt: new Date(event.activityAt) },
-        });
-      }
       return updated;
     });
 
@@ -633,11 +636,8 @@ export class CheckoutRecoveryService {
   }
 
   async attachCustomer(recoveryId: string, customerId: string) {
-    return prisma.checkoutRecovery.update({
-      where: {
-        id: recoveryId,
-      },
-
+    return prisma.checkoutRecovery.updateMany({
+      where: { id: recoveryId, status: "DETECTED" },
       data: {
         customerId,
       },
@@ -661,11 +661,8 @@ export class CheckoutRecoveryService {
   }
 
   async markRecoveryMessageSent(recoveryId: string) {
-    return prisma.checkoutRecovery.update({
-      where: {
-        id: recoveryId,
-      },
-
+    return prisma.checkoutRecovery.updateMany({
+      where: { id: recoveryId, status: "DETECTED" },
       data: {
         status: "MESSAGE_SENT",
         messageSentAt: new Date(),

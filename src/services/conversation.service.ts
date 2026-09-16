@@ -166,17 +166,6 @@ export class ConversationService {
         },
       });
 
-      if (currentConversation.checkoutRecoveryId) {
-        await tx.checkoutRecovery.updateMany({
-          where: {
-            id: currentConversation.checkoutRecoveryId,
-            status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-            lastExternalActivityAt: { lt: now },
-          },
-          data: { lastExternalActivityAt: now },
-        });
-      }
-
       return conversation;
     });
 

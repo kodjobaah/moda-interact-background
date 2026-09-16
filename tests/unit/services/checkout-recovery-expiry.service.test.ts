@@ -76,7 +76,7 @@ describe("CheckoutRecoveryExpiryService", () => {
     expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: {
         id: "recovery-1",
-        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        status: "MESSAGE_SENT",
         lastExternalActivityAt: {
           lte: new Date("2026-08-26T12:00:00.000Z"),
         },

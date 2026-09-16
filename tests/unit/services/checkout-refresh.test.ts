@@ -143,6 +143,7 @@ const service = new CheckoutRecoveryService();
 const event = {
   shopDomain: "shop.myshopify.com",
   checkoutToken: "checkout_1",
+  activityAt: "2026-09-10T12:00:00.000Z",
 };
 
 const activeRecovery = {
@@ -439,7 +440,9 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result.kind).toBe("refreshed");
-    const args = prismaMock.checkoutRecovery.updateMany.mock.calls[0][0];
+    const args = prismaMock.checkoutRecovery.updateMany.mock.calls.find(
+      ([call]) => call.data.currency !== undefined,
+    )[0];
     expect(args.data.currency).toBe("USD");
     expect(args.data.totalPrice).toBe("59.99");
     expect(args.data.lineItems[0].title).toBe("Teal Dress");
@@ -531,8 +534,14 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     await expect(service.handleCheckoutUpdatedContract(event)).rejects.toThrow(
       /provider error/,
     );
-    // No write was attempted.
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: activeRecovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: new Date(event.activityAt) },
+      },
+      data: { lastExternalActivityAt: new Date(event.activityAt) },
+    });
   });
 
   it("discards when the current checkout cannot be identified deterministically", async () => {
@@ -544,7 +553,14 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     const result = await service.handleCheckoutUpdatedContract(event);
 
     expect(result).toEqual({ kind: "discarded", reason: "lookup-ambiguous" });
-    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: activeRecovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: new Date(event.activityAt) },
+      },
+      data: { lastExternalActivityAt: new Date(event.activityAt) },
+    });
   });
 });
 

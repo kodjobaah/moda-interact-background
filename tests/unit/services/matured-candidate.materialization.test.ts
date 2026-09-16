@@ -18,6 +18,7 @@ const hoisted = vi.hoisted(() => {
         create: vi.fn(),
         upsert: vi.fn(),
         update: vi.fn(),
+        updateMany: vi.fn(),
       },
       conversation: {
         upsert: vi.fn(),
@@ -611,10 +612,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(recoveryBillingServiceMock.admit).toHaveBeenCalledTimes(2);
     expect(recoveryBillingServiceMock.commitSuccessfulInitiation).toHaveBeenCalledTimes(1);
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
-    expect(prismaMock.checkoutRecovery.update).toHaveBeenCalledWith(
+    expect(prismaMock.checkoutRecovery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "MESSAGE_SENT" }) }),
     );
-    expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalledWith(
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "CANCELLED" }) }),
     );
   });
