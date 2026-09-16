@@ -208,6 +208,8 @@ describe("PurchasedRecoveryReservationService", () => {
       status: "ACTIVE",
       providerSubscriptionId: "provider-current",
       observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
       billingPeriodId: "period-current",
       plan: { active: true },
     });
@@ -231,6 +233,8 @@ describe("PurchasedRecoveryReservationService", () => {
       status: "ACTIVE",
       providerSubscriptionId: "provider-current",
       observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
       billingPeriodId: "period-current",
       plan: { active: true },
     });
@@ -256,6 +260,44 @@ describe("PurchasedRecoveryReservationService", () => {
     const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:ambiguous-context" });
 
     expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "old-lot" } });
+  });
+
+  it("classifies all lots as historical when the current period projection is invalid", async () => {
+    const { service } = createHarness(2, [
+      { id: "old-lot", creditsGranted: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z"), providerSubscriptionIdSnapshot: "provider-current", shopifyPlanHandleSnapshot: "growth", billingPeriodId: "period-current" },
+      { id: "new-lot", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z"), providerSubscriptionIdSnapshot: "provider-current", shopifyPlanHandleSnapshot: "growth", billingPeriodId: "period-current" },
+    ], {
+      status: "ACTIVE",
+      providerSubscriptionId: "provider-current",
+      observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-09-01T00:00:00.000Z"),
+      billingPeriodId: "period-current",
+      plan: { active: true },
+    });
+
+    const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:invalid-period" });
+
+    expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "old-lot" } });
+  });
+
+  it("classifies all lots as historical while the subscription is TRIALING", async () => {
+    const { service } = createHarness(2, [
+      { id: "trialing-lot", creditsGranted: 1, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z"), providerSubscriptionIdSnapshot: "provider-current", shopifyPlanHandleSnapshot: "growth", billingPeriodId: "period-current" },
+      { id: "historical-lot", creditsGranted: 1, activatedAt: new Date("2026-09-02T00:00:00.000Z"), createdAt: new Date("2026-09-02T00:00:00.000Z"), providerSubscriptionIdSnapshot: "provider-old", shopifyPlanHandleSnapshot: "starter", billingPeriodId: "period-old" },
+    ], {
+      status: "TRIALING",
+      providerSubscriptionId: "provider-current",
+      observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      billingPeriodId: "period-current",
+      plan: { active: true },
+    });
+
+    const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:trialing" });
+
+    expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "trialing-lot" } });
   });
 
   it("skips exhausted, refund-held, and refunded lots", async () => {

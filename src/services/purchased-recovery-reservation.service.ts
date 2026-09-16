@@ -9,6 +9,7 @@ import type { PrismaClient, UsageReservation } from "@prisma/client";
 import {
   availablePurchasedRecoveryCredits,
   createRecoveryIdempotencyKey,
+  deriveShopifyProviderContextIdentity,
   isSameShopifyPurchaseProviderContext,
 } from "@modainteract/moda-interact-shared/billing";
 
@@ -464,6 +465,8 @@ async function selectOldestSpendableLot(
         status: true,
         providerSubscriptionId: true,
         observedShopifyPlanHandle: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
         billingPeriodId: true,
         plan: { select: { active: true } },
       },
@@ -478,10 +481,16 @@ async function selectOldestSpendableLot(
     }),
   ]);
 
-  const currentContext = subscription?.status === "ACTIVE" || subscription?.status === "TRIALING"
-    ? subscription.plan?.active && subscription.providerSubscriptionId && subscription.observedShopifyPlanHandle && subscription.billingPeriodId
+  const currentContext = subscription?.status === "ACTIVE"
+    ? subscription.plan?.active && subscription.observedShopifyPlanHandle && subscription.billingPeriodId
+      && isValidCurrentPeriod(subscription.currentPeriodStart, subscription.currentPeriodEnd)
       ? {
-          providerContextIdentity: subscription.providerSubscriptionId,
+          providerContextIdentity: deriveShopifyProviderContextIdentity({
+            providerSubscriptionId: subscription.providerSubscriptionId,
+            planHandle: subscription.observedShopifyPlanHandle,
+            currentPeriodStart: subscription.currentPeriodStart,
+            currentPeriodEnd: subscription.currentPeriodEnd,
+          }),
           shopifyPlanHandle: subscription.observedShopifyPlanHandle,
           billingPeriodId: subscription.billingPeriodId,
         }
@@ -507,6 +516,14 @@ async function selectOldestSpendableLot(
     }
   }
   return [...historical, ...current].find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+}
+
+function isValidCurrentPeriod(start: Date | null, end: Date | null): boolean {
+  return start !== null
+    && end !== null
+    && Number.isFinite(start.getTime())
+    && Number.isFinite(end.getTime())
+    && start < end;
 }
 
 function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
