@@ -6,6 +6,10 @@ import {
 } from "@modainteract/moda-interact-shared/logging";
 
 import { connectionRedis } from "../lib/redis.js";
+import {
+  backgroundRuntimeConfigService,
+  type BackgroundRuntimeConfigSnapshot,
+} from "../runtime/background-runtime-config.js";
 
 export type InboundAbuseAdmission =
   | { kind: "allowed" }
@@ -50,26 +54,49 @@ type AdmissionTelemetry = {
 };
 
 const RAW_SENDER_WINDOW_MS = 60_000;
-const RAW_SENDER_LIMIT = 60;
 const RAW_GLOBAL_WINDOW_MS = 60_000;
-const RAW_GLOBAL_LIMIT = 20_000;
 
 const TURN_SENDER_SHORT_WINDOW_MS = 60_000;
-const TURN_SENDER_SHORT_LIMIT = 12;
 const TURN_SENDER_LONG_WINDOW_MS = 600_000;
-const TURN_SENDER_LONG_LIMIT = 60;
 const TURN_CONVERSATION_SHORT_WINDOW_MS = 60_000;
-const TURN_CONVERSATION_SHORT_LIMIT = 12;
 const TURN_CONVERSATION_LONG_WINDOW_MS = 600_000;
-const TURN_CONVERSATION_LONG_LIMIT = 60;
 const TURN_SHOP_WINDOW_MS = 60_000;
-const TURN_SHOP_LIMIT = 600;
 const TURN_GLOBAL_WINDOW_MS = 60_000;
-const TURN_GLOBAL_LIMIT = 5_000;
-const DISCOVERY_SENDER_SHORT_LIMIT = 4;
-const DISCOVERY_SENDER_LONG_LIMIT = 12;
-const DISCOVERY_CONVERSATION_SHORT_LIMIT = 4;
-const DISCOVERY_CONVERSATION_LONG_LIMIT = 12;
+
+type RuntimeConfigReader = {
+  current(): BackgroundRuntimeConfigSnapshot;
+};
+
+const testDefaults = {
+  rawSenderLimitPerMinute: 60,
+  rawGlobalLimitPerMinute: 20_000,
+  turnSenderLimitPerMinute: 12,
+  turnSenderLimitPerTenMinutes: 60,
+  turnConversationLimitPerMinute: 12,
+  turnConversationLimitPerTenMinutes: 60,
+  turnShopLimitPerMinute: 600,
+  turnGlobalLimitPerMinute: 5_000,
+  discoverySenderLimitPerMinute: 4,
+  discoverySenderLimitPerTenMinutes: 12,
+  discoveryConversationLimitPerMinute: 4,
+  discoveryConversationLimitPerTenMinutes: 12,
+};
+
+function currentAbuseRuntimeConfig(
+  reader: RuntimeConfigReader,
+): Pick<
+  BackgroundRuntimeConfigSnapshot,
+  keyof typeof testDefaults
+> {
+  try {
+    return reader.current();
+  } catch (error) {
+    if (error instanceof Error && error.message === "Background runtime configuration has not started.") {
+      return testDefaults;
+    }
+    throw error;
+  }
+}
 
 const ADMIT_SCRIPT = `
 local nowReply = redis.call('TIME')
@@ -121,23 +148,25 @@ export class InboundWhatsAppAbuseAdmissionService {
       serviceName: "moda-messaging-worker",
       environment: process.env.NODE_ENV ?? "development",
     }),
+    private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
   ) {}
 
   async admitRaw(input: {
     providerMessageId: string;
     customerPhone: string;
   }): Promise<InboundAbuseAdmission> {
+    const runtimeConfig = currentAbuseRuntimeConfig(this.runtimeConfig);
     return this.admit("raw", input.providerMessageId, [
       {
         key: `raw:sender:${senderHash(input.customerPhone)}:60s`,
         windowMs: RAW_SENDER_WINDOW_MS,
-        limit: RAW_SENDER_LIMIT,
+        limit: runtimeConfig.rawSenderLimitPerMinute,
         reason: "RAW_SENDER",
       },
       {
         key: "raw:global:60s",
         windowMs: RAW_GLOBAL_WINDOW_MS,
-        limit: RAW_GLOBAL_LIMIT,
+        limit: runtimeConfig.rawGlobalLimitPerMinute,
         reason: "RAW_GLOBAL",
       },
     ]);
@@ -152,6 +181,7 @@ export class InboundWhatsAppAbuseAdmissionService {
     hasReplyContext: boolean;
     checkoutRecoveryId: string | null;
   }): Promise<InboundAbuseAdmission> {
+    const runtimeConfig = currentAbuseRuntimeConfig(this.runtimeConfig);
     const discoveryOnly =
       input.conversationType === "PRODUCT_DISCOVERY" && !input.hasReplyContext;
     const senderHashValue = senderHash(input.customerPhone);
@@ -160,44 +190,44 @@ export class InboundWhatsAppAbuseAdmissionService {
         key: `turn:sender:${senderHashValue}:60s`,
         windowMs: TURN_SENDER_SHORT_WINDOW_MS,
         limit: discoveryOnly
-          ? DISCOVERY_SENDER_SHORT_LIMIT
-          : TURN_SENDER_SHORT_LIMIT,
+          ? runtimeConfig.discoverySenderLimitPerMinute
+          : runtimeConfig.turnSenderLimitPerMinute,
         reason: "TURN_SENDER_SHORT",
       },
       {
         key: `turn:sender:${senderHashValue}:600s`,
         windowMs: TURN_SENDER_LONG_WINDOW_MS,
         limit: discoveryOnly
-          ? DISCOVERY_SENDER_LONG_LIMIT
-          : TURN_SENDER_LONG_LIMIT,
+          ? runtimeConfig.discoverySenderLimitPerTenMinutes
+          : runtimeConfig.turnSenderLimitPerTenMinutes,
         reason: "TURN_SENDER_LONG",
       },
       {
         key: `turn:conversation:${input.conversationId}:60s`,
         windowMs: TURN_CONVERSATION_SHORT_WINDOW_MS,
         limit: discoveryOnly
-          ? DISCOVERY_CONVERSATION_SHORT_LIMIT
-          : TURN_CONVERSATION_SHORT_LIMIT,
+          ? runtimeConfig.discoveryConversationLimitPerMinute
+          : runtimeConfig.turnConversationLimitPerMinute,
         reason: "TURN_CONVERSATION_SHORT",
       },
       {
         key: `turn:conversation:${input.conversationId}:600s`,
         windowMs: TURN_CONVERSATION_LONG_WINDOW_MS,
         limit: discoveryOnly
-          ? DISCOVERY_CONVERSATION_LONG_LIMIT
-          : TURN_CONVERSATION_LONG_LIMIT,
+          ? runtimeConfig.discoveryConversationLimitPerTenMinutes
+          : runtimeConfig.turnConversationLimitPerTenMinutes,
         reason: "TURN_CONVERSATION_LONG",
       },
       {
         key: `turn:shop:${input.shopId}:60s`,
         windowMs: TURN_SHOP_WINDOW_MS,
-        limit: TURN_SHOP_LIMIT,
+        limit: runtimeConfig.turnShopLimitPerMinute,
         reason: "TURN_SHOP",
       },
       {
         key: "turn:global:60s",
         windowMs: TURN_GLOBAL_WINDOW_MS,
-        limit: TURN_GLOBAL_LIMIT,
+        limit: runtimeConfig.turnGlobalLimitPerMinute,
         reason: "TURN_GLOBAL",
       },
     ];
