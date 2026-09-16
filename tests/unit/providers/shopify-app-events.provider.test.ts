@@ -136,6 +136,18 @@ describe("ShopifyAppEventsClient", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each(["-0.25", "-0.5"])("submits finite fractional correction %s", async (value) => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(response(202));
+    const client = createClient(fetchImpl);
+
+    await client.createBillingEvent({ ...event, value });
+
+    expect(JSON.parse(fetchImpl.mock.calls[1]?.[1]?.body as string).attributes).toEqual({ value });
+  });
+
   it("refreshes exactly once after an expired-token 401", async () => {
     const fetchImpl = vi
       .fn()

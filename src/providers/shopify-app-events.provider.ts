@@ -51,7 +51,7 @@ export type ShopifyBillingEvent = {
   eventHandle: string;
   occurredAt: string;
   idempotencyKey: string;
-  value: number;
+  value: number | string;
 };
 
 export type ShopifyAppEventsFetch = (
@@ -104,14 +104,18 @@ export class ShopifyAppEventsClient {
   }
 
   async createBillingEvent(event: ShopifyBillingEvent): Promise<void> {
-    this.validateEvent(event);
+    const normalizedEvent = {
+      ...event,
+      value: canonicalEventValue(event.value),
+    };
+    this.validateEvent(normalizedEvent);
 
     let token = await this.getToken();
-    let response = await this.postEvent(token, event);
+    let response = await this.postEvent(token, normalizedEvent);
 
     if (response.status === 401) {
       token = await this.refreshAfterUnauthorized(token);
-      response = await this.postEvent(token, event);
+      response = await this.postEvent(token, normalizedEvent);
     }
 
     if (!response.ok) {
@@ -313,11 +317,25 @@ export class ShopifyAppEventsClient {
         "Shopify App Events idempotency key must be 1 to 64 characters",
       );
     }
-    if (!Number.isInteger(event.value) || event.value === 0) {
+    const value = canonicalDecimal(event.value);
+    if (!value || value === "0") {
       throw new ShopifyAppEventsError(
         "request",
-        "Shopify App Events value must be a non-zero integer",
+        "Shopify App Events value must be a finite non-zero decimal",
       );
     }
   }
+}
+
+function canonicalDecimal(value: number | string): string | null {
+  const text = typeof value === "number" ? String(value) : value.trim();
+  if (!text || !/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) return null;
+  const decimal = Number(text);
+  if (!Number.isFinite(decimal) || decimal === 0) return null;
+  return text.replace(/^(-?)0+(?=\d)/, "$1").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+function canonicalEventValue(value: number | string): number | string {
+  const canonical = canonicalDecimal(value);
+  return canonical && Number.isSafeInteger(Number(canonical)) ? Number(canonical) : canonical ?? value;
 }

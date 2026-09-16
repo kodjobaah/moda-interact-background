@@ -22,9 +22,14 @@ function reportBillingReconciliationFailure(error: unknown): void {
 void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
-    const [{ closeBillingResources, billingSubscriptionQueue }, { createBillingReconciliationService }] = await Promise.all([
+    const [
+      { closeBillingResources, billingSubscriptionQueue },
+      { createBillingReconciliationService },
+      { RecoveryCreditRefundCorrectionService },
+    ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
+      import("../services/recovery-credit-refund-correction.service.js"),
     ]);
     const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
@@ -32,6 +37,7 @@ void startReadyWorkerProcess({
       import("../workers/billing-subscription-reconciliation.worker.js"),
     ]);
     const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue);
+    const recoveryCreditRefundCorrectionService = new RecoveryCreditRefundCorrectionService();
     const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
     const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
@@ -40,6 +46,7 @@ void startReadyWorkerProcess({
     });
     const runBillingCycle = async () => {
       await billingReconciliationService.reconcileOnce();
+      await recoveryCreditRefundCorrectionService.processDue();
       await subscriptionReconciliation.reconstruct();
     };
     await runBillingCycle();
