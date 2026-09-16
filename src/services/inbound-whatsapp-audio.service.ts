@@ -78,8 +78,14 @@ export class InboundWhatsAppAudioService {
       const updated = await tx.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { content: text, mediaDurationMs: durationMs, transcriptionProvider: provider, transcriptionModel: model, transcriptionStatus: "COMPLETED", transcriptionCompletedAt: new Date() } });
       if (updated.count === 1) {
         const now = new Date();
-        const state = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { inboundVersion: true, lastProcessedVersion: true, pendingTurnStartedAt: true } });
+        const state = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { inboundVersion: true, lastProcessedVersion: true, pendingTurnStartedAt: true, checkoutRecoveryId: true } });
         await tx.conversation.update({ where: { id: conversationId }, data: { ...(state.inboundVersion === state.lastProcessedVersion && state.pendingTurnStartedAt === null ? { pendingTurnStartedAt: now } : {}), inboundVersion: { increment: 1 }, lastInboundAt: now, lastMessageAt: now } });
+        if (state.checkoutRecoveryId) {
+          await tx.checkoutRecovery.updateMany({
+            where: { id: state.checkoutRecoveryId, status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] }, lastExternalActivityAt: { lt: now } },
+            data: { lastExternalActivityAt: now },
+          });
+        }
       }
     });
   }

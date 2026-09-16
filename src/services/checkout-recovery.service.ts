@@ -2,6 +2,7 @@
 
 import prisma from "../lib/db.js";
 import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
+import { Prisma } from "@prisma/client";
 import type {
   CheckoutCreatedContractInput,
   CartActivityContractInput,
@@ -166,6 +167,29 @@ export class CheckoutRecoveryService {
           } as const;
         }
 
+        const existing = await this.findLatestRecovery(
+          candidate.shopId,
+          candidate.checkoutToken,
+        );
+        let generation = 1;
+        if (existing) {
+          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+            return {
+              outcome: "no-op-existing",
+              checkoutToken: candidate.checkoutToken,
+              status: existing.status,
+            } as const;
+          }
+          if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
+            return {
+              outcome: "discarded-terminal",
+              checkoutToken: candidate.checkoutToken,
+              status: existing.status,
+            } as const;
+          }
+          generation = existing.generation + 1;
+        }
+
         const outcome = await abandonedCheckoutLookupService.lookup(
           toLookupInput(candidate, shopDomain),
         );
@@ -209,27 +233,6 @@ export class CheckoutRecoveryService {
           } as const;
         }
 
-        // Idempotency guard: never reopen an existing recovery or re-run the
-        // recovery-message workflow for a checkout that has already materialized.
-        const existing = await this.findExistingRecovery(
-          shopDomain,
-          candidate.checkoutToken,
-        );
-        if (existing) {
-          if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(existing.status)) {
-            return {
-              outcome: "discarded-terminal",
-              checkoutToken: candidate.checkoutToken,
-              status: existing.status,
-            } as const;
-          }
-          return {
-            outcome: "no-op-existing",
-            checkoutToken: candidate.checkoutToken,
-            status: existing.status,
-          } as const;
-        }
-
         const internationalContext = await this.resolveInternationalContext(
           candidate,
           checkout,
@@ -240,7 +243,11 @@ export class CheckoutRecoveryService {
           checkout,
           internationalContext,
         );
-        await this.handleCheckoutCreated(seed);
+        if (generation === 1) {
+          await this.handleCheckoutCreated(seed);
+        } else {
+          await this.handleCheckoutCreated(seed, generation);
+        }
 
         return {
           outcome: "recovery-created",
@@ -250,25 +257,13 @@ export class CheckoutRecoveryService {
     );
   }
 
-  private async findExistingRecovery(
-    shopDomain: string,
+  private async findLatestRecovery(
+    shopId: string,
     checkoutToken: string,
   ) {
-    const shop = await prisma.shop.findUnique({
-      where: { domain: shopDomain },
-      select: { id: true },
-    });
-    if (!shop) {
-      return null;
-    }
-    return prisma.checkoutRecovery.findUnique({
-      where: {
-        shopId_checkoutToken: {
-          shopId: shop.id,
-          checkoutToken,
-        },
-      },
-      select: { status: true },
+    return prisma.checkoutRecovery.findFirst({
+      where: { shopId, checkoutToken },
+      orderBy: [{ generation: "desc" }, { id: "desc" }],
     });
   }
 
@@ -292,6 +287,9 @@ export class CheckoutRecoveryService {
         checkout.createdAt ||
         candidate.checkoutCreatedAt ||
         new Date().toISOString(),
+      ...(candidate.lastActivityAt
+        ? { lastExternalActivityAt: candidate.lastActivityAt }
+        : {}),
       currency: checkout.currencyCode,
       totalPrice: checkout.totalPrice,
       checkoutUrl: checkout.abandonedCheckoutUrl,
@@ -447,21 +445,7 @@ export class CheckoutRecoveryService {
       };
     }
 
-    const recovery = await prisma.checkoutRecovery.findUnique({
-      where: {
-        shopId_checkoutToken: {
-          shopId: shop.id,
-          checkoutToken: event.checkoutToken,
-        },
-      },
-      select: {
-        id: true,
-        status: true,
-        cartToken: true,
-        checkoutUrl: true,
-        detectedAt: true,
-      },
-    });
+    const recovery = await this.findLatestRecovery(shop.id, event.checkoutToken);
 
     // No recovery: the update is irrelevant before recovery exists.
     if (!recovery) {
@@ -469,10 +453,29 @@ export class CheckoutRecoveryService {
     }
 
     // A terminal recovery is never reopened by a checkout update.
-    if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
+    if (["COMPLETED", "CANCELLED"].includes(recovery.status)) {
       return {
         kind: "ignored",
         reason: `terminal-${recovery.status.toLowerCase()}`,
+      } as const;
+    }
+
+    if (recovery.status === "EXPIRED") {
+      const scheduled = await pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
+        shopDomain: event.shopDomain,
+        checkoutToken: event.checkoutToken,
+        cartToken: recovery.cartToken,
+        checkoutCreatedAt: recovery.detectedAt.toISOString(),
+        abandonedCheckoutUrl: recovery.checkoutUrl,
+        activityAt: event.activityAt,
+        ...(event.internationalContext
+          ? { internationalContext: event.internationalContext }
+          : {}),
+      });
+      return {
+        kind: "pending",
+        outcome: scheduled.outcome,
+        ...("jobId" in scheduled ? { jobId: scheduled.jobId } : {}),
       } as const;
     }
 
@@ -515,17 +518,30 @@ export class CheckoutRecoveryService {
     // Refresh basket/content fields only. The status-guarded updateMany preserves
     // lifecycle status and prevents refreshing a recovery that concurrently
     // transitioned to a terminal state.
-    const refreshed = await prisma.checkoutRecovery.updateMany({
-      where: {
-        id: recovery.id,
-        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-      },
-      data: {
-        currency: checkout.currencyCode,
-        totalPrice: checkout.totalPrice,
-        checkoutUrl: checkout.abandonedCheckoutUrl,
-        lineItems: this.serializeLineItems(checkout.lineItems),
-      },
+    const refreshed = await prisma.$transaction(async (transaction) => {
+      const updated = await transaction.checkoutRecovery.updateMany({
+        where: {
+          id: recovery.id,
+          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        },
+        data: {
+          currency: checkout.currencyCode,
+          totalPrice: checkout.totalPrice,
+          checkoutUrl: checkout.abandonedCheckoutUrl,
+          lineItems: this.serializeLineItems(checkout.lineItems),
+        },
+      });
+      if (updated.count === 1) {
+        await transaction.checkoutRecovery.updateMany({
+          where: {
+            id: recovery.id,
+            status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+            lastExternalActivityAt: { lt: new Date(event.activityAt) },
+          },
+          data: { lastExternalActivityAt: new Date(event.activityAt) },
+        });
+      }
+      return updated;
     });
 
     if (refreshed.count === 0) {
@@ -577,31 +593,21 @@ export class CheckoutRecoveryService {
     });
   }
 
-  async upsertRecovery(event: RecoveryCheckoutSeed) {
+  async upsertRecovery(event: RecoveryCheckoutSeed, generation = 1) {
     const shop = await prisma.shop.findUniqueOrThrow({
-      where: {
-        domain: event.shop,
-      },
-      select: {
-        id: true,
-      },
+      where: { domain: event.shop },
+      select: { id: true },
     });
-
-    return prisma.checkoutRecovery.upsert({
-      where: {
-        shopId_checkoutToken: {
-          shopId: shop.id,
-          checkoutToken: event.checkoutToken,
-        },
-      },
-
-      create: {
+    try {
+      return await prisma.checkoutRecovery.create({
+        data: {
         shopId: shop.id,
 
         checkoutToken: event.checkoutToken,
         cartToken: event.cartToken,
 
         status: "DETECTED",
+        generation,
 
         currency: event.currency,
 
@@ -612,25 +618,18 @@ export class CheckoutRecoveryService {
         lineItems: event.lineItems,
 
         detectedAt: new Date(event.detectedAt),
+        lastExternalActivityAt: new Date(
+          event.lastExternalActivityAt ?? event.detectedAt,
+        ),
 
         completedAt:
           event.completedAt !== null ? new Date(event.completedAt) : null,
-      },
-
-      update: {
-        cartToken: event.cartToken,
-        currency: event.currency,
-
-        totalPrice: event.totalPrice !== null ? event.totalPrice : null,
-
-        checkoutUrl: event.checkoutUrl,
-
-        lineItems: event.lineItems,
-
-        completedAt:
-          event.completedAt !== null ? new Date(event.completedAt) : null,
-      },
-    });
+        },
+      });
+    } catch (error) {
+      if (!isUniqueConflict(error)) throw error;
+      return this.findLatestRecovery(shop.id, event.checkoutToken);
+    }
   }
 
   async attachCustomer(recoveryId: string, customerId: string) {
@@ -765,14 +764,10 @@ export class CheckoutRecoveryService {
 
         // 3. Look up and complete the existing recovery if eligible.
         return prisma.$transaction(async (transaction) => {
-          const recovery = await transaction.checkoutRecovery.findUnique({
-            where: {
-              shopId_checkoutToken: {
-                shopId: shop.id,
-                checkoutToken,
-              },
-            },
-            select: { id: true, status: true },
+          const recovery = await transaction.checkoutRecovery.findFirst({
+            where: { shopId: shop.id, checkoutToken },
+            orderBy: [{ generation: "desc" }, { id: "desc" }],
+            select: { id: true, status: true, generation: true },
           });
 
           if (!recovery) {
@@ -831,9 +826,12 @@ export class CheckoutRecoveryService {
     );
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed) {
+  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1) {
     // 1
-    let recovery = await this.upsertRecovery(event);
+    let recovery = await this.upsertRecovery(event, generation);
+    if (!recovery) {
+      throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
+    }
 
     // 2
     const customer = await customerService.resolveCustomer(event);
@@ -985,6 +983,7 @@ export class CheckoutRecoveryService {
         cartToken: true,
         checkoutUrl: true,
         detectedAt: true,
+        generation: true,
         status: true,
         admissionBlockReason: true,
         shop: { select: { domain: true, status: true } },
@@ -1019,6 +1018,7 @@ export class CheckoutRecoveryService {
             cartToken: true,
             checkoutUrl: true,
             detectedAt: true,
+            generation: true,
           },
         });
         if (
@@ -1073,9 +1073,17 @@ export class CheckoutRecoveryService {
           checkoutCreatedAt: current.detectedAt.toISOString(),
         };
         const context = await this.resolveInternationalContext(candidate, outcome.checkout);
-        await this.handleCheckoutCreated(
-          this.toRecoverySeed(candidate, recovery.shop.domain, outcome.checkout, context),
+        const seed = this.toRecoverySeed(
+          candidate,
+          recovery.shop.domain,
+          outcome.checkout,
+          context,
         );
+        if ((current.generation ?? 1) === 1) {
+          await this.handleCheckoutCreated(seed);
+        } else {
+          await this.handleCheckoutCreated(seed, current.generation);
+        }
         const after = await prisma.checkoutRecovery.findUnique({
           where: { id: recovery.id },
           select: { status: true, admissionBlockReason: true },
@@ -1342,4 +1350,8 @@ function safelyNormalize(
   } catch {
     return null;
   }
+}
+
+function isUniqueConflict(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }

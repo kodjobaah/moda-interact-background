@@ -14,6 +14,7 @@ const hoisted = vi.hoisted(() => {
       },
       checkoutRecovery: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
         updateMany: vi.fn(),
         upsert: vi.fn(),
         update: vi.fn(),
@@ -22,6 +23,7 @@ const hoisted = vi.hoisted(() => {
         create: vi.fn(),
         update: vi.fn(),
       },
+      $transaction: vi.fn(),
     },
     lookupServiceMock: {
       resolveShopDomain: vi.fn(async () => "shop.myshopify.com"),
@@ -73,6 +75,7 @@ const hoisted = vi.hoisted(() => {
     },
     pendingCandidateServiceMock: {
       refreshCandidateActivity: vi.fn(),
+      scheduleFromCheckoutUpdated: vi.fn(),
     },
     recoveryBillingServiceMock: {
       admit: vi.fn(async () => ({
@@ -187,7 +190,11 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
       subscription: { status: "ACTIVE" },
     });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(activeRecovery);
+    prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) =>
+      prismaMock.checkoutRecovery.findUnique(args),
+    );
     prismaMock.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
     lookupServiceMock.lookup.mockResolvedValue({
       kind: "found",
       checkout: currentCheckout,
@@ -466,6 +473,40 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
     expect(result).toEqual({
       kind: "ignored",
       reason: "terminal-completed",
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("schedules a pending restart for an expired recovery without refreshing it", async () => {
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
+      ...activeRecovery,
+      status: "EXPIRED",
+    });
+    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue({
+      outcome: "scheduled",
+      jobId: "candidate-restart-1",
+    });
+
+    const result = await service.handleCheckoutUpdatedContract({
+      ...event,
+      activityAt: "2026-09-10T12:00:00.000Z",
+    });
+
+    expect(result).toEqual({
+      kind: "pending",
+      outcome: "scheduled",
+      jobId: "candidate-restart-1",
+    });
+    expect(
+      hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated,
+    ).toHaveBeenCalledWith({
+      shopDomain: event.shopDomain,
+      checkoutToken: event.checkoutToken,
+      cartToken: activeRecovery.cartToken,
+      checkoutCreatedAt: activeRecovery.detectedAt.toISOString(),
+      abandonedCheckoutUrl: activeRecovery.checkoutUrl,
+      activityAt: "2026-09-10T12:00:00.000Z",
     });
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();

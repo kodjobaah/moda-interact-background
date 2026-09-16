@@ -94,6 +94,7 @@ export class ConversationService {
         pendingTurnStartedAt: true,
         languageTag: true,
         languageSource: true,
+        checkoutRecoveryId: true,
       },
     });
 
@@ -164,6 +165,17 @@ export class ConversationService {
           inboundVersion: true,
         },
       });
+
+      if (currentConversation.checkoutRecoveryId) {
+        await tx.checkoutRecovery.updateMany({
+          where: {
+            id: currentConversation.checkoutRecoveryId,
+            status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+            lastExternalActivityAt: { lt: now },
+          },
+          data: { lastExternalActivityAt: now },
+        });
+      }
 
       return conversation;
     });
