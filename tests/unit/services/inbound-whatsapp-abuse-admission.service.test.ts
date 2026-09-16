@@ -137,6 +137,85 @@ function settledScopeKeys(input: ReturnType<typeof turnInput>): string[] {
 }
 
 describe("InboundWhatsAppAbuseAdmissionService", () => {
+  it("uses runtime raw limits and fixed one-minute windows", async () => {
+    const redis = new RedisLikeAdmissionHarness();
+    const runtimeConfig = {
+      current: () => ({
+        rawSenderLimitPerMinute: 1,
+        rawGlobalLimitPerMinute: 2,
+      }),
+    };
+    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+
+    await expect(service.admitRaw(rawInput(1))).resolves.toEqual({ kind: "allowed" });
+    await expect(service.admitRaw(rawInput(2))).resolves.toMatchObject({ reason: "RAW_SENDER" });
+    const args = redis.eval.mock.calls[0] as unknown[];
+    expect(args.slice(-4)).toEqual(["60000", "1", "60000", "2"]);
+  });
+
+  it("uses each settled-turn runtime limit while keeping 60s and 600s windows", async () => {
+    const redis = { eval: vi.fn().mockResolvedValue(0) };
+    const runtimeConfig = {
+      current: () => ({
+        turnSenderLimitPerMinute: 11,
+        turnSenderLimitPerTenMinutes: 22,
+        turnConversationLimitPerMinute: 33,
+        turnConversationLimitPerTenMinutes: 44,
+        turnShopLimitPerMinute: 55,
+        turnGlobalLimitPerMinute: 66,
+        discoverySenderLimitPerMinute: 7,
+        discoverySenderLimitPerTenMinutes: 8,
+        discoveryConversationLimitPerMinute: 9,
+        discoveryConversationLimitPerTenMinutes: 10,
+      }),
+    };
+    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+
+    await service.admitSettledTurn(turnInput(1));
+
+    const args = redis.eval.mock.calls[0] as unknown[];
+    expect(args.slice(-12)).toEqual([
+      "60000", "11", "600000", "22", "60000", "33", "600000", "44", "60000", "55", "60000", "66",
+    ]);
+    expect(args.filter((value) => value === "60000")).toHaveLength(4);
+    expect(args.filter((value) => value === "600000")).toHaveLength(2);
+  });
+
+  it("keeps discovery limits distinct from general turn limits", async () => {
+    const redis = { eval: vi.fn().mockResolvedValue(0) };
+    const runtimeConfig = {
+      current: () => ({
+        turnSenderLimitPerMinute: 11,
+        turnSenderLimitPerTenMinutes: 22,
+        turnConversationLimitPerMinute: 33,
+        turnConversationLimitPerTenMinutes: 44,
+        turnShopLimitPerMinute: 55,
+        turnGlobalLimitPerMinute: 66,
+        discoverySenderLimitPerMinute: 1,
+        discoverySenderLimitPerTenMinutes: 2,
+        discoveryConversationLimitPerMinute: 3,
+        discoveryConversationLimitPerTenMinutes: 4,
+      }),
+    };
+    const service = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+
+    await service.admitSettledTurn(turnInput(1, { conversationType: "PRODUCT_DISCOVERY" }));
+
+    const args = redis.eval.mock.calls[0] as unknown[];
+    expect(args.slice(-12)).toEqual(["60000", "1", "600000", "2", "60000", "3", "600000", "4", "60000", "55", "60000", "66"]);
+    expect(args).not.toContain("11");
+  });
+
+  it("enforces the same committed limits across service instances sharing Redis", async () => {
+    const redis = new RedisLikeAdmissionHarness();
+    const runtimeConfig = { current: () => ({ rawSenderLimitPerMinute: 1, rawGlobalLimitPerMinute: 2 }) };
+    const firstService = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+    const secondService = new InboundWhatsAppAbuseAdmissionService(redis, logger(), runtimeConfig as any);
+
+    await expect(firstService.admitRaw(rawInput(1))).resolves.toEqual({ kind: "allowed" });
+    await expect(secondService.admitRaw(rawInput(2))).resolves.toMatchObject({ reason: "RAW_SENDER" });
+  });
+
   it("uses one atomic Redis operation and hashes sender keys", async () => {
     const redis = { eval: vi.fn().mockResolvedValue(0) };
     const service = new InboundWhatsAppAbuseAdmissionService(redis, logger());

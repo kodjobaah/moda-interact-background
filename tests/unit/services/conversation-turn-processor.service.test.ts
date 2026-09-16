@@ -21,8 +21,7 @@ vi.mock(
 
 import {
   ConversationTurnProcessor,
-  MAX_SETTLE_WINDOW_MS,
-  QUIET_WINDOW_MS,
+  PROCESSING_LEASE_MS,
 } from "../../../src/services/conversation-turn-processor.service.js";
 
 const first = new Date("2026-09-08T12:00:00.000Z");
@@ -31,7 +30,7 @@ function state(overrides: Partial<any> = {}) {
   return {
     inboundVersion: 3,
     lastProcessedVersion: 0,
-    lastInboundAt: new Date(first.getTime() + QUIET_WINDOW_MS),
+    lastInboundAt: new Date(first.getTime() + 3_000),
     pendingTurnStartedAt: first,
     processingInboundVersion: null,
     processingStartedAt: null,
@@ -83,6 +82,12 @@ function harness(overrides: Partial<any> = {}) {
     languageMessage: "Hi",
   };
   const now = overrides.now ?? (() => new Date(first.getTime() + 20_000));
+  const runtimeConfig = overrides.runtimeConfig ?? {
+    current: vi.fn().mockReturnValue({
+      conversationQuietWindowMs: 3_000,
+      conversationMaxSettleWindowMs: 10_000,
+    }),
+  };
   const processor = new ConversationTurnProcessor({
     queue,
     conversation,
@@ -92,6 +97,7 @@ function harness(overrides: Partial<any> = {}) {
     runAgent,
     getResult: (result: any) => result,
     now,
+    runtimeConfig,
   });
 
   return {
@@ -102,11 +108,70 @@ function harness(overrides: Partial<any> = {}) {
     abuseAdmission,
     runAgent,
     loaded,
+    runtimeConfig,
     ...overrides,
   };
 }
 
 describe("ConversationTurnProcessor", () => {
+  it("uses the current runtime quiet window when enqueueing", async () => {
+    const test = harness({
+      now: () => first,
+      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 5_000 }) },
+    });
+    test.conversation.getTurnState.mockResolvedValue(
+      state({ lastInboundAt: first, pendingTurnStartedAt: first }),
+    );
+
+    await test.processor.enqueue("conversation-1", 3);
+
+    expect(test.queue.add.mock.calls[0]?.[2].delay).toBe(1_000);
+  });
+
+  it("uses the current runtime maximum settle window", async () => {
+    const test = harness({
+      now: () => first,
+      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 5_000 }) },
+    });
+    test.conversation.getTurnState.mockResolvedValue(
+      state({ lastInboundAt: new Date(first.getTime() + 9_000) }),
+    );
+
+    await test.processor.enqueue("conversation-1", 3);
+
+    expect(test.queue.add.mock.calls[0]?.[2].delay).toBe(5_000);
+  });
+
+  it("fails closed when the injected maximum is below the quiet window", async () => {
+    const test = harness({
+      runtimeConfig: { current: () => ({ conversationQuietWindowMs: 5_000, conversationMaxSettleWindowMs: 1_000 }) },
+    });
+
+    await expect(test.processor.process({ conversationId: "conversation-1", observedVersion: 3 })).rejects.toThrow(
+      "max settle window must be at least the quiet window",
+    );
+    expect(test.conversation.claimTurn).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
+  it("applies a changed quiet window to a subsequent turn without restart", async () => {
+    let config = { conversationQuietWindowMs: 3_000, conversationMaxSettleWindowMs: 10_000 };
+    const test = harness({ now: () => first, runtimeConfig: { current: () => config } });
+    test.conversation.getTurnState.mockResolvedValue(
+      state({ lastInboundAt: first, pendingTurnStartedAt: first }),
+    );
+
+    await test.processor.enqueue("conversation-1", 3);
+    config = { conversationQuietWindowMs: 1_000, conversationMaxSettleWindowMs: 10_000 };
+    await test.processor.enqueue("conversation-1", 4);
+
+    expect(test.queue.add.mock.calls.map((call) => call[2].delay)).toEqual([3_000, 1_000]);
+  });
+
+  it("keeps the processing lease system-managed", () => {
+    expect(PROCESSING_LEASE_MS).toBe(120_000);
+  });
+
   it("settles three fragments into one agent turn and one response", async () => {
     const test = harness();
     test.loaded.context.conversation.messages = [
