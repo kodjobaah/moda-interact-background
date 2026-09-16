@@ -19,6 +19,7 @@ import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publish
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
 import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
+import { backgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -42,6 +43,7 @@ function sameDate(left: Date | null, right: Date | null): boolean {
 
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
+type RuntimeConfigReader = { current: () => BackgroundRuntimeConfigSnapshot };
 type InitialActivationExpected = {
   subscriptionId: string;
   pendingPlanId: string;
@@ -118,6 +120,7 @@ export class BillingSubscriptionReconciliationService {
       environment: process.env.NODE_ENV ?? "development",
     }),
     private readonly now: () => Date = () => new Date(),
+    private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
   ) {}
 
   async activateInitialPaid(
@@ -216,6 +219,7 @@ export class BillingSubscriptionReconciliationService {
 
   async reconcileJob(input: unknown): Promise<void> {
     const job = parseBillingSubscriptionReconcileJob(input);
+    const runtimeConfig = this.runtimeConfig.current();
     const rowResult = await this.database.shop.findUnique({
       where: { id: job.shopId },
       select: {
@@ -350,6 +354,7 @@ export class BillingSubscriptionReconciliationService {
           row.subscription.nextReconcileAt,
           row.subscription.planId!,
           error,
+          runtimeConfig,
         );
       } else {
         await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
@@ -358,7 +363,7 @@ export class BillingSubscriptionReconciliationService {
     }
 
     if (!isInitialActivation && (snapshot.latestLifecycleEvent || isFrozenReconciliation)) {
-      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database).reconcile(
+      const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database, undefined, undefined, runtimeConfig).reconcile(
         row.id,
         row.subscription.id,
         snapshot,
@@ -384,7 +389,7 @@ export class BillingSubscriptionReconciliationService {
       const next = this.now() < preCloseAt ? preCloseAt : provider.currentPeriodEnd;
       if (this.now() >= preCloseAt && this.now() < provider.currentPeriodEnd) {
         try {
-          await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: row.subscription.billingPeriodId! });
+          await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: row.subscription.billingPeriodId!, runtimeConfig });
         } catch (error) {
           const retryAt = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, provider.currentPeriodEnd.getTime()));
           const failed = await this.database.subscription.updateMany({
@@ -427,7 +432,7 @@ export class BillingSubscriptionReconciliationService {
       const now = this.now();
       const preCloseAt = new Date(row.subscription.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
       if (now < row.subscription.currentPeriodEnd) {
-        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt);
+        await this.reconcilePreClose(row.id, expected as RolloverExpected, preCloseAt, runtimeConfig);
         return;
       }
     }
@@ -818,9 +823,10 @@ export class BillingSubscriptionReconciliationService {
     consumedAt: Date,
     planId: string,
     error: unknown,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
     const now = this.now();
-    const next = new Date(now.getTime() + 60 * 60 * 1000);
+    const next = new Date(now.getTime() + runtimeConfig.billingFrozenRecheckSeconds * 1000);
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
       shopId,
       subscriptionId,
@@ -1194,6 +1200,7 @@ export class BillingSubscriptionReconciliationService {
     shopId: string,
     expected: RolloverExpected,
     preCloseAt: Date,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
     const now = this.now();
     const scheduled = await this.database.subscription.findUnique({
@@ -1238,7 +1245,7 @@ export class BillingSubscriptionReconciliationService {
     }
     let flushFailed = false;
     try {
-      await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: expected.billingPeriodId });
+      await shopifyUsageEventPublisherService.publishDue({ billingPeriodId: expected.billingPeriodId, runtimeConfig });
     } catch (error) {
       flushFailed = true;
       this.logger.warn("billing.subscription_reconciliation.pre_close_publish_failed", {
