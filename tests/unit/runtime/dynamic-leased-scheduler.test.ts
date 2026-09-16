@@ -11,7 +11,14 @@ function harness() {
     subscribe: vi.fn((listener: (next: any) => void) => { listeners.add(listener); return () => listeners.delete(listener); }),
     change(next: any) { snapshot = next; for (const listener of listeners) listener(next); },
   };
-  const lease = { tryAcquire: vi.fn(async () => ({ name: "BILLING_RECONCILIATION", ownerToken: "owner", generation: 1 })) };
+  const lease: any = {
+    tryAcquire: vi.fn(async () => ({ name: "BILLING_RECONCILIATION", ownerToken: "owner", generation: 1 })),
+    runWithLease: vi.fn(async (_name: any, work: any) => {
+      const handle = await lease.tryAcquire();
+      if (!handle) return { kind: "skipped" as const };
+      return { kind: "completed" as const, value: await work(handle), leaseLost: false };
+    }),
+  };
   return { config, lease };
 }
 
@@ -27,6 +34,7 @@ describe("dynamic leased scheduler", () => {
       await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(100);
       expect(run).toHaveBeenCalledOnce();
+      expect(lease.runWithLease).toHaveBeenCalledOnce();
       expect(active).toBe(1);
       resolveRun();
       await stop();
@@ -65,6 +73,27 @@ describe("dynamic leased scheduler", () => {
       config.change({ version: 3, interval: 1 });
       expect(run).toHaveBeenCalledOnce();
       resolveRun();
+      await stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("uses the lease lifecycle for completed cycles and reads fresh config after acquisition", async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, lease } = harness();
+      const events: string[] = [];
+      lease.runWithLease.mockImplementation(async (_name: any, work: any) => {
+        events.push("acquired");
+        const value = await work({ name: "BILLING_RECONCILIATION", ownerToken: "owner", generation: 1 });
+        events.push("released");
+        return { kind: "completed", value, leaseLost: false };
+      });
+      config.getFresh.mockImplementation(async () => { events.push("fresh"); return config.current(); });
+      const run = vi.fn(async () => { events.push("run"); });
+      const stop = await startDynamicLeasedScheduler({ config: config as any, lease: lease as any, leaseName: "BILLING_RECONCILIATION" as any, intervalMs: 10, runImmediately: true, run });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events).toEqual(["acquired", "fresh", "run", "released"]);
+      expect(lease.runWithLease).toHaveBeenCalledOnce();
       await stop();
     } finally { vi.useRealTimers(); }
   });

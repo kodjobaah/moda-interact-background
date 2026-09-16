@@ -29,11 +29,10 @@ export async function startDynamicLeasedScheduler(options: DynamicLeasedSchedule
   const cycle = async (): Promise<void> => {
     if (stopped) return;
     running = (async () => {
-      const handle = await options.lease.tryAcquire(options.leaseName);
-      if (handle) {
+      await options.lease.runWithLease(options.leaseName, async (handle) => {
         const snapshot = await options.config.getFresh();
         await options.run(snapshot, handle);
-      }
+      });
     })().catch((error) => options.onError?.(error)).finally(() => {
       running = undefined;
       if (stopped) resolveStop();
