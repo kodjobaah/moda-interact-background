@@ -38,12 +38,14 @@ describe("dynamic leased scheduler", () => {
     vi.useFakeTimers();
     try {
       const { config, lease } = harness();
+      const freshSnapshot = { version: 2, interval: 5 };
+      config.getFresh.mockResolvedValue(freshSnapshot);
       const run = vi.fn().mockResolvedValue(undefined);
       const stop = await startDynamicLeasedScheduler({ config: config as any, lease: lease as any, leaseName: "BILLING_RECONCILIATION" as any, intervalMs: 100, getIntervalMs: (value) => value.interval, run });
       config.change({ version: 2, interval: 5 });
       await vi.advanceTimersByTimeAsync(5);
       expect(config.getFresh).toHaveBeenCalledOnce();
-      expect(run).toHaveBeenCalledWith(config.current(), expect.anything());
+      expect(run).toHaveBeenCalledWith(freshSnapshot, expect.anything());
       await stop();
     } finally { vi.useRealTimers(); }
   });
@@ -88,5 +90,16 @@ describe("dynamic leased scheduler", () => {
       await stopFirst();
       await stopSecond();
     } finally { vi.useRealTimers(); }
+  });
+
+  it("requires a started config service", async () => {
+    const config = { current: vi.fn(() => { throw new Error("not started"); }) };
+    await expect(startDynamicLeasedScheduler({
+      config: config as any,
+      lease: {} as any,
+      leaseName: "BILLING_RECONCILIATION" as any,
+      intervalMs: 10,
+      run: vi.fn(),
+    })).rejects.toThrow("not started");
   });
 });

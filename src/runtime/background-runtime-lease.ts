@@ -75,15 +75,16 @@ export class BackgroundRuntimeLeaseService {
       timer.unref();
     };
     heartbeatLoop();
+    let value!: T;
     try {
-      const value = await work(handle);
-      return { kind: "completed", value, leaseLost };
+      value = await work(handle);
     } finally {
       closed = true;
       if (timer) clearTimeout(timer);
       await heartbeatInFlight;
       if (!leaseLost) await this.release(handle);
     }
+    return { kind: "completed", value, leaseLost };
   }
 }
 

@@ -31,6 +31,22 @@ function database(row: BackgroundRuntimeConfigSnapshot | null) {
 }
 
 describe("BackgroundRuntimeConfigService", () => {
+  it("requires startup before current can be read and publishes immutable dates", async () => {
+    const row = config();
+    const service = new BackgroundRuntimeConfigService(database(row));
+    expect(() => service.current()).toThrow("Background runtime configuration has not started.");
+
+    await service.start();
+    const snapshot = service.current();
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.createdAt)).toBe(true);
+    expect(Object.isFrozen(snapshot.updatedAt)).toBe(true);
+    expect(() => snapshot.createdAt.setTime(2)).toThrow("Immutable runtime configuration date.");
+    expect(() => snapshot.updatedAt.setUTCFullYear(2020)).toThrow("Immutable runtime configuration date.");
+    expect(row.createdAt.getTime()).toBe(1);
+    expect(row.updatedAt.getTime()).toBe(1);
+  });
+
   it("loads the singleton initially and rejects a missing row", async () => {
     const service = new BackgroundRuntimeConfigService(database(config()));
     await service.start();

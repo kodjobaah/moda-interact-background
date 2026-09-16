@@ -25,7 +25,7 @@ describe("BackgroundRuntimeLeaseService", () => {
     expect(await service.release({ name, ownerToken: "old-owner", generation: 1 })).toBe(false);
   });
 
-  it("reports a successful guarded heartbeat and cleans up work errors", async () => {
+  it("extends expiry with PostgreSQL time and cleans up work errors", async () => {
     const db = sqlDatabase([{ name }], [{ name }]);
     const service = new BackgroundRuntimeLeaseService(db, "owner");
     expect(await service.heartbeat({ name, ownerToken: "owner", generation: 1 })).toBe(true);
@@ -33,7 +33,11 @@ describe("BackgroundRuntimeLeaseService", () => {
     const fragments = String(query.sql ?? query.strings ?? "");
     expect(fragments).toContain("NOW()");
     expect(fragments).toContain("120 seconds");
+    expect(fragments).toContain('"ownerToken" =');
+    expect(fragments).toContain('"generation" =');
+    expect(fragments).toContain('"leaseUntil" > NOW()');
     await expect(service.runWithLease(name, async () => { throw new Error("work"); })).rejects.toThrow("work");
+    expect(db.$queryRaw).toHaveBeenCalledTimes(3);
   });
 
   it("marks work lease-lost after a failed heartbeat", async () => {
@@ -46,6 +50,7 @@ describe("BackgroundRuntimeLeaseService", () => {
       await vi.advanceTimersByTimeAsync(LEASE_HEARTBEAT_MS);
       resolveWork();
       expect((await resultPromise)).toEqual({ kind: "completed", value: undefined, leaseLost: true });
+      expect(db.$queryRaw).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

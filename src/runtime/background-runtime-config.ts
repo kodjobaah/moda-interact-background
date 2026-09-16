@@ -32,6 +32,29 @@ const CONFIG_FIELDS = [
 
 const logger = createLogger({ serviceName: "moda-background-runtime", environment: process.env.NODE_ENV ?? "development" });
 
+class ImmutableDate extends Date {
+  override setDate(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setFullYear(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setHours(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setMilliseconds(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setMinutes(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setMonth(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setSeconds(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setTime(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCDate(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCFullYear(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCHours(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCMilliseconds(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCMinutes(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCMonth(): number { throw new TypeError("Immutable runtime configuration date."); }
+  override setUTCSeconds(): number { throw new TypeError("Immutable runtime configuration date."); }
+  setYear(): number { throw new TypeError("Immutable runtime configuration date."); }
+}
+
+function immutableDate(value: Date): Date {
+  return Object.freeze(new ImmutableDate(value.getTime()));
+}
+
 function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
   if (!row || typeof row !== "object") throw new Error("Invalid background runtime configuration.");
   const value = row as Record<string, unknown>;
@@ -52,7 +75,11 @@ function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
       throw new Error(`Invalid background runtime configuration: invalid ${field}.`);
     }
   }
-  return Object.freeze({ ...value }) as BackgroundRuntimeConfigSnapshot;
+  return Object.freeze({
+    ...value,
+    createdAt: immutableDate(value.createdAt as Date),
+    updatedAt: immutableDate(value.updatedAt as Date),
+  }) as BackgroundRuntimeConfigSnapshot;
 }
 
 export class BackgroundRuntimeConfigService {
