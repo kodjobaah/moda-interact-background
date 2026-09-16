@@ -15,7 +15,10 @@ import {
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
-import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import {
+  backgroundRuntimeConfigService,
+  type BackgroundRuntimeConfigSnapshot,
+} from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
 
@@ -123,6 +126,7 @@ export class TranslationBatchSubmitService {
     if (!claimed) {
       return { status: "skipped", batchId: input.translationBatchId };
     }
+    const runtimeConfig = currentTranslationRuntimeConfig(this.runtimeConfig);
 
     let provider: TranslationProvider;
     try {
@@ -135,6 +139,7 @@ export class TranslationBatchSubmitService {
         claimed,
         "DEFINITE_TERMINAL_NOT_CREATED",
         error,
+        runtimeConfig,
       );
       return { status: "skipped", batchId: claimed.id };
     }
@@ -152,14 +157,15 @@ export class TranslationBatchSubmitService {
             claimed,
             failureClassification(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
             error,
+            runtimeConfig,
           );
           return { status: "skipped", batchId: claimed.id };
         }
       }
 
       const providerBatch = await provider.createBatch(claimed.id, inputFileId);
-      await this.persistSubmitted(claimed.id, providerBatch.providerBatchId, inputFileId);
-      await this.enqueuePoll(claimed.id, 1);
+      await this.persistSubmitted(claimed.id, providerBatch.providerBatchId, inputFileId, runtimeConfig);
+      await this.enqueuePoll(claimed.id, 1, runtimeConfig);
       return {
         status: "claimed",
         batchId: claimed.id,
@@ -167,7 +173,7 @@ export class TranslationBatchSubmitService {
       };
     } catch (error) {
       const classification = failureClassification(error, "AMBIGUOUS_CREATE");
-      await this.persistFailure(claimed, classification, error);
+      await this.persistFailure(claimed, classification, error, runtimeConfig);
       if (classification === "AMBIGUOUS_CREATE") throw error;
       return { status: "skipped", batchId: claimed.id };
     }
@@ -233,6 +239,7 @@ export class TranslationBatchSubmitService {
     batchId: string,
     providerBatchId: string,
     inputFileId: string,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       const affectedRows = await transaction.$executeRaw(Prisma.sql`
@@ -243,7 +250,7 @@ export class TranslationBatchSubmitService {
           "inputFileId" = ${inputFileId},
           "submittedAt" = NOW(),
           "pollSequence" = 1,
-          "nextPollAt" = NOW() + (${currentTranslationRuntimeConfig(this.runtimeConfig).translationInitialPollSeconds} * INTERVAL '1 second'),
+          "nextPollAt" = NOW() + (${runtimeConfig.translationInitialPollSeconds} * INTERVAL '1 second'),
           "updatedAt" = NOW()
         WHERE "id" = ${batchId} AND "status" = 'SUBMITTING'
       `);
@@ -260,18 +267,18 @@ export class TranslationBatchSubmitService {
     batch: BatchToSubmit,
     classification: SubmitFailureClassification,
     error: unknown,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<void> {
-    const config = currentTranslationRuntimeConfig(this.runtimeConfig);
     const nextStatus = classification === "AMBIGUOUS_CREATE"
       ? "SUBMISSION_UNKNOWN"
       : classification === "DEFINITE_TERMINAL_NOT_CREATED" ||
-          batch.submitAttemptCount >= config.translationSubmitMaxAttempts
+          batch.submitAttemptCount >= runtimeConfig.translationSubmitMaxAttempts
         ? "FAILED"
         : "READY";
     const terminal = nextStatus === "FAILED";
     const nextSubmitAt = terminal || nextStatus !== "READY"
       ? null
-      : new Date(Date.now() + config.translationSubmitRetrySeconds * 1000);
+      : new Date(Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000);
     await this.database.$transaction(async (transaction) => {
       await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
@@ -285,7 +292,11 @@ export class TranslationBatchSubmitService {
     });
   }
 
-  private async enqueuePoll(batchId: string, pollSequence: number): Promise<void> {
+  private async enqueuePoll(
+    batchId: string,
+    pollSequence: number,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  ): Promise<void> {
     const job: TranslationBatchPollJob = {
       schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
       translationBatchId: batchId,
@@ -297,7 +308,7 @@ export class TranslationBatchSubmitService {
         job,
         {
           jobId: createTranslationBatchPollJobId(batchId, pollSequence),
-          delay: currentTranslationRuntimeConfig(this.runtimeConfig).translationInitialPollSeconds * 1000,
+          delay: runtimeConfig.translationInitialPollSeconds * 1000,
         },
       );
     } catch (error) {

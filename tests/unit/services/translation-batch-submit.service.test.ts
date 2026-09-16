@@ -79,6 +79,16 @@ function runtimeConfig(overrides: Record<string, number> = {}) {
   })) } as any;
 }
 
+function changingRuntimeConfig() {
+  const first = {
+    translationInitialPollSeconds: 420,
+    translationSubmitRetrySeconds: 660,
+    translationSubmitMaxAttempts: 3,
+  };
+  const second = { ...first, translationInitialPollSeconds: 60 };
+  return { current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } as any;
+}
+
 describe("TranslationBatchSubmitService", () => {
   it("lets only one concurrent delivery cross provider create", async () => {
     let claimed = true;
@@ -134,6 +144,29 @@ describe("TranslationBatchSubmitService", () => {
       expect.objectContaining({ delay: 420_000 }),
     );
     expect(database.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses one runtime snapshot for persisted and queued initial poll timing", async () => {
+    const database = createDatabase({ claim: [{ ...claimedBatch, inputFileId: "file-existing" }], requests: [] });
+    const add = vi.fn(async () => undefined);
+    const config = changingRuntimeConfig();
+    const service = new TranslationBatchSubmitService({
+      database: database.database,
+      provider: createProvider(),
+      queue: { add },
+      runtimeConfig: config,
+    });
+
+    await service.submit({ translationBatchId: "batch-1" });
+
+    expect(config.current).toHaveBeenCalledTimes(1);
+    const persisted = database.execute.mock.calls[0]?.[0];
+    expect(persisted.values).toContain(420);
+    expect(add).toHaveBeenCalledWith(
+      "translation-batch-poll",
+      expect.any(Object),
+      expect.objectContaining({ delay: 420_000 }),
+    );
   });
 
   it("does not submit a batch that is no longer READY", async () => {

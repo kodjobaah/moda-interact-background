@@ -16,7 +16,10 @@ import {
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
-import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import {
+  backgroundRuntimeConfigService,
+  type BackgroundRuntimeConfigSnapshot,
+} from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
 
@@ -96,21 +99,22 @@ export class TranslationBatchPollService {
     ) {
       return { status: "stale", batchId: input.translationBatchId };
     }
+    const runtimeConfig = currentTranslationRuntimeConfig(this.runtimeConfig);
 
     let providerBatch;
     try {
       const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
       providerBatch = await provider.retrieveBatch(batch.providerBatchId);
     } catch (error) {
-      const nextSequence = await this.rescheduleAfterReadFailure(batch);
-      await this.enqueuePoll(batch.id, nextSequence);
+      const nextSequence = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
       console.error("translation batch poll failed", error);
       return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
     }
 
     if (providerBatch.status === "nonterminal") {
-      const nextSequence = await this.advanceNonterminal(batch);
-      await this.enqueuePoll(batch.id, nextSequence);
+      const nextSequence = await this.advanceNonterminal(batch, runtimeConfig);
+      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
       return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
     }
 
@@ -139,6 +143,7 @@ export class TranslationBatchPollService {
       batch,
       providerBatch.status,
       providerBatch.failureCode,
+      runtimeConfig,
     );
     if (!terminalApplied) return { status: "stale", batchId: batch.id };
     return { status: "terminal", batchId: batch.id, providerStatus: providerBatch.status };
@@ -155,13 +160,16 @@ export class TranslationBatchPollService {
     });
   }
 
-  private async rescheduleAfterReadFailure(batch: PollBatch): Promise<number> {
+  private async rescheduleAfterReadFailure(
+    batch: PollBatch,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  ): Promise<number> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
-          "nextPollAt" = NOW() + (${currentTranslationRuntimeConfig(this.runtimeConfig).translationPollIntervalSeconds} * INTERVAL '1 second'),
+          "nextPollAt" = NOW() + (${runtimeConfig.translationPollIntervalSeconds} * INTERVAL '1 second'),
           "pollSequence" = "pollSequence" + 1,
           "failureCode" = 'poll-read-failed',
           "updatedAt" = NOW()
@@ -174,13 +182,16 @@ export class TranslationBatchPollService {
     });
   }
 
-  private async advanceNonterminal(batch: PollBatch): Promise<number> {
+  private async advanceNonterminal(
+    batch: PollBatch,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  ): Promise<number> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
         UPDATE "support"."MerchantTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
-          "nextPollAt" = NOW() + (${currentTranslationRuntimeConfig(this.runtimeConfig).translationPollIntervalSeconds} * INTERVAL '1 second'),
+          "nextPollAt" = NOW() + (${runtimeConfig.translationPollIntervalSeconds} * INTERVAL '1 second'),
           "pollSequence" = "pollSequence" + 1,
           "failureCode" = NULL,
           "updatedAt" = NOW()
@@ -197,6 +208,7 @@ export class TranslationBatchPollService {
     batch: PollBatch,
     providerStatus: string,
     failureCode: string | null,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
   ): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const claimed = await transaction.$executeRaw(Prisma.sql`
@@ -222,14 +234,14 @@ export class TranslationBatchPollService {
       `);
       const retryable = failureIsRetryable(failureCode);
       for (const item of items) {
-        const shouldRetry = retryable && item.retryCount < currentTranslationRuntimeConfig(this.runtimeConfig).translationMaxAutoRetries;
+        const shouldRetry = retryable && item.retryCount < runtimeConfig.translationMaxAutoRetries;
         const affected = await transaction.$executeRaw(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
           SET
             "status" = CAST(${shouldRetry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
             "currentBatchId" = NULL,
             "retryCount" = "retryCount" + ${shouldRetry ? 1 : 0},
-            "nextAttemptAt" = ${shouldRetry ? new Date(Date.now() + currentTranslationRuntimeConfig(this.runtimeConfig).translationResultRetrySeconds * 1000) : null},
+            "nextAttemptAt" = ${shouldRetry ? new Date(Date.now() + runtimeConfig.translationResultRetrySeconds * 1000) : null},
             "failureCode" = ${failureCode ?? providerStatus},
             "updatedAt" = NOW()
           WHERE "id" = ${item.translationId}
@@ -250,7 +262,11 @@ export class TranslationBatchPollService {
     });
   }
 
-  private async enqueuePoll(batchId: string, pollSequence: number): Promise<void> {
+  private async enqueuePoll(
+    batchId: string,
+    pollSequence: number,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  ): Promise<void> {
     const job: TranslationBatchPollJob = {
       schemaVersion: 1,
       translationBatchId: batchId,
@@ -262,7 +278,7 @@ export class TranslationBatchPollService {
         job,
         {
           jobId: createTranslationBatchPollJobId(batchId, pollSequence),
-          delay: currentTranslationRuntimeConfig(this.runtimeConfig).translationPollIntervalSeconds * 1000,
+          delay: runtimeConfig.translationPollIntervalSeconds * 1000,
         },
       );
     } catch (error) {

@@ -60,9 +60,20 @@ function sqlText(query: { strings: readonly string[] }): string {
 function runtimeConfig(overrides: Record<string, number> = {}) {
   return { current: vi.fn(() => ({
     translationPollIntervalSeconds: 300,
+    translationResultRetrySeconds: 300,
     translationMaxAutoRetries: 3,
     ...overrides,
   })) } as any;
+}
+
+function changingRuntimeConfig() {
+  const first = {
+    translationPollIntervalSeconds: 420,
+    translationResultRetrySeconds: 37,
+    translationMaxAutoRetries: 3,
+  };
+  const second = { ...first, translationPollIntervalSeconds: 60 };
+  return { current: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } as any;
 }
 
 describe("TranslationBatchPollService", () => {
@@ -100,6 +111,29 @@ describe("TranslationBatchPollService", () => {
     );
   });
 
+  it("uses one runtime snapshot for persisted and queued nonterminal poll timing", async () => {
+    const database = createDatabase(batch, 5);
+    const add = vi.fn();
+    const config = changingRuntimeConfig();
+    const service = new TranslationBatchPollService({
+      database: database.database,
+      providerFactory: vi.fn(() => provider() as never),
+      queue: { add },
+      runtimeConfig: config,
+    });
+
+    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+
+    expect(config.current).toHaveBeenCalledTimes(1);
+    const persisted = database.query.mock.calls[1]?.[0];
+    expect(persisted.values).toContain(420);
+    expect(add).toHaveBeenCalledWith(
+      "translation-batch-poll",
+      expect.any(Object),
+      expect.objectContaining({ delay: 420_000 }),
+    );
+  });
+
   it("keeps transient provider reads nonterminal and schedules a minute retry", async () => {
     const database = createDatabase(batch, 5);
     const add = vi.fn();
@@ -115,6 +149,31 @@ describe("TranslationBatchPollService", () => {
       .resolves.toMatchObject({ status: "rescheduled", pollSequence: 5 });
     expect(database.execute).not.toHaveBeenCalled();
     expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses one runtime snapshot for persisted and queued read-failure retry timing", async () => {
+    const database = createDatabase(batch, 5);
+    const add = vi.fn();
+    const currentProvider = provider();
+    currentProvider.retrieveBatch.mockRejectedValue(new Error("429"));
+    const config = changingRuntimeConfig();
+    const service = new TranslationBatchPollService({
+      database: database.database,
+      providerFactory: vi.fn(() => currentProvider as never),
+      queue: { add },
+      runtimeConfig: config,
+    });
+
+    await service.poll({ schemaVersion: 1, translationBatchId: "batch-1", pollSequence: 4 });
+
+    expect(config.current).toHaveBeenCalledTimes(1);
+    const persisted = database.query.mock.calls[1]?.[0];
+    expect(persisted.values).toContain(420);
+    expect(add).toHaveBeenCalledWith(
+      "translation-batch-poll",
+      expect.any(Object),
+      expect.objectContaining({ delay: 420_000 }),
+    );
   });
 
   it("persists provider completion before enqueueing deterministic results work", async () => {
