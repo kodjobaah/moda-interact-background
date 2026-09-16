@@ -9,6 +9,8 @@ import type { PrismaClient, UsageReservation } from "@prisma/client";
 import {
   availablePurchasedRecoveryCredits,
   createRecoveryIdempotencyKey,
+  deriveShopifyProviderContextIdentity,
+  isSameShopifyPurchaseProviderContext,
 } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
@@ -44,7 +46,7 @@ export class PurchasedRecoveryReservationError extends Error {
 type ReservationTransaction = Prisma.TransactionClient;
 type ReservationDatabase = Pick<
   PrismaClient,
-  "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent" | "recoveryCreditRefund"
+  "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent" | "recoveryCreditRefund" | "subscription"
 > & Pick<PrismaClient, "recoveryCreditPurchase">;
 
 class ReservationConcurrencyConflict extends Error {}
@@ -456,15 +458,99 @@ async function selectOldestSpendableLot(
   shopId: string,
   quantity: number,
 ): Promise<NonNullable<PurchaseLot> | null> {
-  const lots = await transaction.recoveryCreditPurchase.findMany({
-    where: { shopId, status: RecoveryCreditPurchaseStatus.ACTIVE },
-    orderBy: [
-      { activatedAt: { sort: "asc", nulls: "last" } },
-      { createdAt: "asc" },
-      { id: "asc" },
-    ],
-  });
-  return lots.find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+  const [subscription, lots] = await Promise.all([
+    transaction.subscription.findUnique({
+      where: { shopId },
+      select: {
+        status: true,
+        providerSubscriptionId: true,
+        observedShopifyPlanHandle: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
+        billingPeriodId: true,
+        plan: { select: { active: true } },
+      },
+    }),
+    transaction.recoveryCreditPurchase.findMany({
+      where: { shopId, status: RecoveryCreditPurchaseStatus.ACTIVE },
+      orderBy: [
+        { activatedAt: { sort: "asc", nulls: "last" } },
+        { createdAt: "asc" },
+        { id: "asc" },
+      ],
+    }),
+  ]);
+
+  const currentContext = deriveCurrentConsumptionContext(subscription);
+  const historical = [] as NonNullable<PurchaseLot>[];
+  const current = [] as NonNullable<PurchaseLot>[];
+  for (const lot of lots) {
+    if (
+      currentContext &&
+      isSameShopifyPurchaseProviderContext(
+        {
+          providerContextIdentity: lot.providerSubscriptionIdSnapshot,
+          shopifyPlanHandleSnapshot: lot.shopifyPlanHandleSnapshot,
+          billingPeriodId: lot.billingPeriodId,
+        },
+        currentContext,
+      )
+    ) {
+      current.push(lot);
+    } else {
+      historical.push(lot);
+    }
+  }
+  return [...historical, ...current].find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+}
+
+type ConsumptionContext = {
+  providerContextIdentity: string;
+  shopifyPlanHandle: string;
+  billingPeriodId: string;
+};
+
+function deriveCurrentConsumptionContext(
+  subscription: {
+    status: string;
+    providerSubscriptionId: string | null;
+    observedShopifyPlanHandle: string | null;
+    currentPeriodStart: Date | null;
+    currentPeriodEnd: Date | null;
+    billingPeriodId: string | null;
+    plan: { active: boolean } | null;
+  } | null,
+): ConsumptionContext | null {
+  if (!subscription || subscription.status !== "ACTIVE" || !subscription.plan?.active) return null;
+
+  const planHandle = subscription.observedShopifyPlanHandle?.trim() ?? "";
+  const billingPeriodId = subscription.billingPeriodId?.trim() ?? "";
+  if (!planHandle || !billingPeriodId || !isValidCurrentPeriod(subscription.currentPeriodStart, subscription.currentPeriodEnd)) {
+    return null;
+  }
+
+  try {
+    return {
+      providerContextIdentity: deriveShopifyProviderContextIdentity({
+        providerSubscriptionId: subscription.providerSubscriptionId,
+        planHandle,
+        currentPeriodStart: subscription.currentPeriodStart,
+        currentPeriodEnd: subscription.currentPeriodEnd,
+      }),
+      shopifyPlanHandle: planHandle,
+      billingPeriodId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isValidCurrentPeriod(start: Date | null, end: Date | null): boolean {
+  return start !== null
+    && end !== null
+    && Number.isFinite(start.getTime())
+    && Number.isFinite(end.getTime())
+    && start < end;
 }
 
 function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
