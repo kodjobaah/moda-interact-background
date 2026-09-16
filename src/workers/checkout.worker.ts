@@ -14,6 +14,8 @@ import {
 } from "../events/shopify-contract-adapter.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
@@ -29,8 +31,8 @@ const workerMetricDefinition = {
   ],
 } as const;
 
-export const checkoutWorker =
-  new Worker<unknown>(
+export function createCheckoutWorker() {
+  const worker = new Worker<unknown>(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
     async (job) =>
       observeWorkerJob(workerMetricDefinition, job, async () => {
@@ -64,21 +66,22 @@ export const checkoutWorker =
 
     {
       connection: connectionRedis,
-      concurrency: 10,
       telemetry: bullMQTelemetry,
     },
   );
-
-  checkoutWorker.on("completed", (job) => {
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "checkoutQueueGlobalConcurrency");
+  worker.on("completed", (job) => {
     console.log(`Job ${job.id} completed successfully`);
   });
   
-  checkoutWorker.on("failed", (job, error) => {
+  worker.on("failed", (job, error) => {
     console.error(`Job ${job?.id} failed`, error);
   });
   
-  checkoutWorker.on("error", (error) => {
+  worker.on("error", (error) => {
     console.error("Worker error", error);
   });
   
   console.log("Checkout worker started");
+  return worker;
+}

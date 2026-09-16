@@ -2,10 +2,9 @@ import http from "node:http";
 
 import { closeWorkerResources } from "./entrypoints/resources.js";
 import { startWorkerProcess } from "./runtime/worker-process.js";
-import { checkoutWorker } from "./workers/checkout.worker.js";
-import { orderWorker } from "./workers/orders.worker.js";
-import { pendingRecoveryCandidateWorker } from "./workers/pending-recovery-candidate.worker.js";
-import { whatsappWorker } from "./workers/whatsapp.worker.js";
+import { backgroundRuntimeConfigService } from "./runtime/background-runtime-config.js";
+import { backgroundRuntimeLeaseService } from "./runtime/background-runtime-lease.js";
+import { startQueueConcurrencyController } from "./runtime/queue-concurrency-controller.js";
 
 const port = Number(process.env.PORT ?? 3000);
 
@@ -36,26 +35,47 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Health server listening on port ${port}`);
 });
 
-startWorkerProcess({
-  serviceName: "moda-interact-worker-development",
-  workers: [
-    checkoutWorker,
-    orderWorker,
-    pendingRecoveryCandidateWorker,
-    whatsappWorker,
-  ],
-  closeResources: [
-    () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
+async function startDevelopmentWorker(): Promise<void> {
+  await backgroundRuntimeConfigService.start();
+  const [{ createCheckoutWorker }, { createOrderWorker }, { createPendingRecoveryCandidateWorker }, { createWhatsappWorker }] = await Promise.all([
+    import("./workers/checkout.worker.js"),
+    import("./workers/orders.worker.js"),
+    import("./workers/pending-recovery-candidate.worker.js"),
+    import("./workers/whatsapp.worker.js"),
+  ]);
+  const workers = [
+    createCheckoutWorker(),
+    createOrderWorker(),
+    createPendingRecoveryCandidateWorker(),
+    createWhatsappWorker(),
+  ];
+  const stopQueueConcurrencyController = await startQueueConcurrencyController({
+    config: backgroundRuntimeConfigService,
+    lease: backgroundRuntimeLeaseService,
+  });
+  startWorkerProcess({
+    serviceName: "moda-interact-worker-development",
+    workers,
+    closeResources: [
+      stopQueueConcurrencyController,
+      () => backgroundRuntimeConfigService.close(),
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
 
-          resolve();
-        });
-      }),
-    ...closeWorkerResources,
-  ],
+            resolve();
+          });
+        }),
+      ...closeWorkerResources,
+    ],
+  });
+}
+
+void startDevelopmentWorker().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
 });

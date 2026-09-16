@@ -10,6 +10,8 @@ import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { pendingRecoveryCandidateService } from "../services/pending-recovery-candidate.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
@@ -21,7 +23,8 @@ const workerMetricDefinition = {
   jobNames: [EVALUATE_PENDING_RECOVERY_JOB],
 } as const;
 
-export const pendingRecoveryCandidateWorker = new Worker<PendingRecoveryCandidate>(
+export function createPendingRecoveryCandidateWorker() {
+  const worker = new Worker<PendingRecoveryCandidate>(
   PENDING_RECOVERY_CANDIDATE_QUEUE,
   async (job) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
@@ -48,19 +51,21 @@ export const pendingRecoveryCandidateWorker = new Worker<PendingRecoveryCandidat
     }),
   {
     connection: connectionRedis,
-    concurrency: 10,
     telemetry: bullMQTelemetry,
   },
 );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "pendingRecoveryQueueGlobalConcurrency");
 
-pendingRecoveryCandidateWorker.on("completed", (job) => {
+  worker.on("completed", (job) => {
   console.log(`Pending recovery candidate job ${job.id} completed`);
 });
 
-pendingRecoveryCandidateWorker.on("failed", (job, error) => {
+  worker.on("failed", (job, error) => {
   console.error(`Pending recovery candidate job ${job?.id} failed`, error);
 });
 
-pendingRecoveryCandidateWorker.on("error", (error) => {
+  worker.on("error", (error) => {
   console.error("Pending recovery candidate worker error", error);
-});
+  });
+  return worker;
+}

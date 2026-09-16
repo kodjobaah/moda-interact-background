@@ -8,6 +8,8 @@ import {
   parseRuntimeShopifyEvent,
 } from "../events/shopify-contract-adapter.js";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
@@ -19,7 +21,8 @@ const workerMetricDefinition = {
   jobNames: [SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.jobName],
 } as const;
 
-export const orderWorker = new Worker<unknown>(
+export function createOrderWorker() {
+  const worker = new Worker<unknown>(
   SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName,
   async (job) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
@@ -42,21 +45,22 @@ export const orderWorker = new Worker<unknown>(
 
   {
     connection: connectionRedis,
-    concurrency: 5,
     telemetry: bullMQTelemetry,
   },
 );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "orderQueueGlobalConcurrency");
 
-orderWorker.on("completed", (job) => {
+  worker.on("completed", (job) => {
   console.log(`Job ${job.id} completed successfully`);
 });
 
-orderWorker.on("failed", (job, error) => {
+  worker.on("failed", (job, error) => {
   console.error(`Job ${job?.id} failed`, error);
 });
 
-orderWorker.on("error", (error) => {
+  worker.on("error", (error) => {
   console.error("Worker error", error);
 });
 
-console.log("Order worker started");
+  return worker;
+}

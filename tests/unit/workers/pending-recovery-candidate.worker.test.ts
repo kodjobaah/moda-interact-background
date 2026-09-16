@@ -37,11 +37,19 @@ vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
     handleCandidateMatured: hoisted.cleanup,
   },
 }));
+vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
+  backgroundRuntimeConfigService: {
+    current: vi.fn(() => ({ version: 1, pendingRecoveryQueueGlobalConcurrency: 10 })),
+    subscribe: vi.fn(() => () => undefined),
+  },
+}));
 
 import {
   EVALUATE_PENDING_RECOVERY_JOB,
 } from "../../../src/domain/pending-recovery-candidate.js";
-import "../../../src/workers/pending-recovery-candidate.worker.js";
+import { createPendingRecoveryCandidateWorker } from "../../../src/workers/pending-recovery-candidate.worker.js";
+
+createPendingRecoveryCandidateWorker();
 
 describe("pending recovery candidate worker", () => {
   it("cleans up an inactive matured candidate in finally", async () => {

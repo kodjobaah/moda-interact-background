@@ -12,6 +12,8 @@ import { handleTranslationBatchSubmit } from "./translation-batch-submit.worker.
 import { handleTranslationBatchPoll } from "./translation-batch-poll.worker.js";
 import { handleTranslationBatchResults } from "./translation-batch-results.worker.js";
 import { handleTranslationReconcile } from "./translation-reconcile.worker.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const jobNames = Object.values(MERCHANT_COMMUNICATIONS_JOB_NAMES);
 const bullMQTelemetry = createBullMQTelemetry({
@@ -19,7 +21,8 @@ const bullMQTelemetry = createBullMQTelemetry({
   enableMetrics: false,
 });
 
-export const merchantCommunicationsWorker = new Worker(
+export function createMerchantCommunicationsWorker() {
+  const worker = new Worker(
   MERCHANT_COMMUNICATIONS_QUEUE_NAME,
   async (job: Job) => observeWorkerJob(
     {
@@ -47,15 +50,17 @@ export const merchantCommunicationsWorker = new Worker(
   ),
   {
     connection: connectionRedis,
-    concurrency: 10,
     telemetry: bullMQTelemetry,
   },
 );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "merchantCommunicationsQueueGlobalConcurrency");
 
-merchantCommunicationsWorker.on("failed", (job, error) => {
+  worker.on("failed", (job, error) => {
   console.error(`Merchant communications job ${job?.id} failed`, error);
-});
+  });
 
-merchantCommunicationsWorker.on("error", (error) => {
+  worker.on("error", (error) => {
   console.error("Merchant communications worker error", error);
-});
+  });
+  return worker;
+}

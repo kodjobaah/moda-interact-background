@@ -6,16 +6,21 @@ import { backgroundRuntimeConfigService } from "../runtime/background-runtime-co
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
+import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-communications-worker",
   loadWorkerProcess: async () => {
-    const [{ closeWorkerResources }, { merchantCommunicationsWorker }] = await Promise.all([
+    await backgroundRuntimeConfigService.start();
+    const [{ closeWorkerResources }, { createMerchantCommunicationsWorker }] = await Promise.all([
       import("./resources.js"),
       import("../workers/merchant-communications.worker.js"),
     ]);
-
-    await backgroundRuntimeConfigService.start();
+    const merchantCommunicationsWorker = createMerchantCommunicationsWorker();
+    const stopQueueConcurrencyController = await startQueueConcurrencyController({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+    });
     const stopScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -36,6 +41,7 @@ void startReadyWorkerProcess({
       workers: [merchantCommunicationsWorker],
       closeResources: [
         ...closeWorkerResources,
+        stopQueueConcurrencyController,
         stopScheduler,
         () => backgroundRuntimeConfigService.close(),
         () => translationReconciliationService.close(),

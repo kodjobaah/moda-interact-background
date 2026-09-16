@@ -20,6 +20,8 @@ import {
   ConversationTurnProcessor,
   type ConversationTurnJob,
 } from "../services/conversation-turn-processor.service.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-messaging-worker",
@@ -54,7 +56,8 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   getResult: (result) => result,
 });
 
-export const whatsappWorker = new Worker<
+export function createWhatsappWorker() {
+  const worker = new Worker<
   WhatsAppInboundEvent | ConversationTurnJob
 >(
   "whatsapp-events",
@@ -88,11 +91,24 @@ export const whatsappWorker = new Worker<
 
   {
     connection: connectionRedis,
-    concurrency: 20,
     telemetry: bullMQTelemetry,
   },
 );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "whatsappQueueGlobalConcurrency");
+  worker.on("completed", (job) => {
+    console.log(`WhatsApp job ${job.id} completed successfully`);
+  });
+  worker.on("failed", (job, error) => {
+    console.error(`WhatsApp job ${job?.id} failed`, error);
+  });
+  worker.on("error", (error) => {
+    console.error("WhatsApp worker error", error);
+  });
+  console.log("WhatsApp worker started");
+  return worker;
+}
 
+export {};
 export async function processInboundMessage(event: WhatsAppInboundEvent) {
   console.log("Processing WhatsApp message", event.providerMessageId);
 
@@ -165,7 +181,6 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
     received.version,
   );
 }
-
 export async function loadConversationTurn(
   conversationId: string,
   pendingTurnStartedAt: Date,
@@ -281,7 +296,6 @@ export async function loadConversationTurn(
       .join("\n"),
   };
 }
-
 function formatClarification(
   recoveries: Array<{ checkoutToken: string; totalPrice: string | null }>,
 ): string {
@@ -369,16 +383,4 @@ function buildProductOnlyContext(
   };
 }
 
-whatsappWorker.on("completed", (job) => {
-  console.log(`WhatsApp job ${job.id} completed successfully`);
-});
-
-whatsappWorker.on("failed", (job, error) => {
-  console.error(`WhatsApp job ${job?.id} failed`, error);
-});
-
-whatsappWorker.on("error", (error) => {
-  console.error("WhatsApp worker error", error);
-});
-
-console.log("WhatsApp worker started");
+export {};

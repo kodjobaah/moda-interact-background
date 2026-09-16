@@ -8,19 +8,23 @@ import {
 import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { BillingSubscriptionReconciliationService } from "../services/billing-subscription-reconciliation.service.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({ serviceName: "moda-billing-worker", enableMetrics: false });
 
 export function createBillingSubscriptionReconciliationWorker(
   service: Pick<BillingSubscriptionReconciliationService, "reconcileJob">,
 ): Worker {
-  return new Worker(
+  const worker = new Worker(
     BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME,
     async (job: Job) => observeWorkerJob(
       { workerName: "billing-subscription-reconciliation", queueName: BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME, jobNames: [BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME] },
       job,
       () => service.reconcileJob(job.data),
     ),
-    { connection: connectionRedis, concurrency: 10, telemetry: bullMQTelemetry },
+    { connection: connectionRedis, telemetry: bullMQTelemetry },
   );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "billingSubscriptionQueueGlobalConcurrency");
+  return worker;
 }
