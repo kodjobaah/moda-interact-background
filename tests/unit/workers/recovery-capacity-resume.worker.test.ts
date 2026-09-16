@@ -41,11 +41,16 @@ vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: { evaluate: hoisted.evaluate },
 }));
 vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
-  backgroundRuntimeConfigService: { current: vi.fn(() => ({ recoveryResumeBatchSize: 25 })) },
+  backgroundRuntimeConfigService: {
+    current: vi.fn(() => ({ version: 1, recoveryResumeQueueGlobalConcurrency: 10, recoveryResumeBatchSize: 25 })),
+    subscribe: vi.fn(() => () => undefined),
+  },
 }));
 
 import { RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB } from "../../../src/domain/recovery-capacity-resume.js";
-import "../../../src/workers/recovery-capacity-resume.worker.js";
+import { createRecoveryCapacityResumeWorker } from "../../../src/workers/recovery-capacity-resume.worker.js";
+
+createRecoveryCapacityResumeWorker();
 
 describe("recovery capacity resume worker", () => {
   beforeEach(() => {

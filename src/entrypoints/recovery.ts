@@ -5,18 +5,25 @@ import { startQueuePerformanceTelemetry } from "../observability/queue-performan
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
+import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { pendingRecoveryCandidateWorker }, { recoveryCapacityResumeWorker }, { recoveryCapacityResumeService }] =
+    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { recoveryCapacityResumeService }] =
       await Promise.all([
         import("./resources.js"),
         import("../workers/pending-recovery-candidate.worker.js"),
         import("../workers/recovery-capacity-resume.worker.js"),
         import("../services/recovery-capacity-resume.service.js"),
       ]);
+    const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker();
+    const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
+    const stopQueueConcurrencyController = await startQueueConcurrencyController({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+    });
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -38,6 +45,7 @@ void startReadyWorkerProcess({
       workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker],
       closeResources: [
         ...closeWorkerResources,
+        stopQueueConcurrencyController,
         closeWorkerObservability,
         stopRepairScheduler,
         () => backgroundRuntimeConfigService.close(),

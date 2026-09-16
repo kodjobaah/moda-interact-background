@@ -13,13 +13,15 @@ import { checkoutRecoveryService } from "../services/checkout-recovery.service.j
 import { recoveryCapacityResumeService } from "../services/recovery-capacity-resume.service.js";
 import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
   enableMetrics: false,
 });
 
-export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob>(
+export function createRecoveryCapacityResumeWorker() {
+  const worker = new Worker<RecoveryCapacityResumeJob>(
   RECOVERY_CAPACITY_RESUME_QUEUE,
   async (job) => {
     if (job.name !== RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB) {
@@ -61,14 +63,16 @@ export const recoveryCapacityResumeWorker = new Worker<RecoveryCapacityResumeJob
   },
   {
     connection: connectionRedis,
-    concurrency: 10,
     telemetry: bullMQTelemetry,
   },
 );
+  bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "recoveryResumeQueueGlobalConcurrency");
 
-recoveryCapacityResumeWorker.on("failed", (job, error) => {
+  worker.on("failed", (job, error) => {
   console.error(`Recovery capacity resume job ${job?.id} failed`, error);
-});
+  });
+  return worker;
+}
 
 async function findBlockedRecoveries(shopId: string, batchSize: number) {
   return prisma.checkoutRecovery.findMany({

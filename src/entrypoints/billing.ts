@@ -8,6 +8,7 @@ import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runt
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
+import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -38,6 +39,10 @@ void startReadyWorkerProcess({
     const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue);
     const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
+    const stopQueueConcurrencyController = await startQueueConcurrencyController({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+    });
     const stopQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
       queueNames: [billingSubscriptionQueue.name as QueueName],
@@ -60,6 +65,7 @@ void startReadyWorkerProcess({
     return {
       workers: [billingSubscriptionReconciliationWorker],
       closeResources: [
+        stopQueueConcurrencyController,
         async () => stopScheduler(),
         () => backgroundRuntimeConfigService.close(),
         stopQueuePerformanceTelemetry,
