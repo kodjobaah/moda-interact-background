@@ -55,4 +55,17 @@ describe("BackgroundRuntimeLeaseService", () => {
       vi.useRealTimers();
     }
   });
+
+  it("uses the fixed hourly cadence for checkout recovery expiry", async () => {
+    const expiryName = "CHECKOUT_RECOVERY_EXPIRY" as any;
+    const db = sqlDatabase([{ name: expiryName, generation: 1 }]);
+    const service = new BackgroundRuntimeLeaseService(db, "owner");
+
+    await service.tryAcquire(expiryName);
+
+    const query = db.$queryRaw.mock.calls[0]?.[0] as { sql?: unknown; strings?: unknown };
+    const fragments = String(query.sql ?? query.strings ?? "");
+    expect(fragments).toContain("CHECKOUT_RECOVERY_EXPIRY");
+    expect(fragments).toContain("THEN 3600");
+  });
 });

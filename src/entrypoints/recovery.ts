@@ -6,6 +6,7 @@ import { backgroundRuntimeConfigService } from "../runtime/background-runtime-co
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
+import { checkoutRecoveryExpiryService } from "../services/checkout-recovery-expiry.service.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
@@ -35,6 +36,17 @@ void startReadyWorkerProcess({
       run: async (runtimeConfig) => { await recoveryCapacityResumeService.repair(runtimeConfig); },
       onError: (error) => { console.error("Recovery capacity repair failed", error); },
     });
+    const stopExpiryScheduler = await startDynamicLeasedScheduler({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+      leaseName: "CHECKOUT_RECOVERY_EXPIRY",
+      intervalMs: 60 * 60 * 1000,
+      runImmediately: true,
+      run: async (runtimeConfig) => {
+        await checkoutRecoveryExpiryService.expireInactive(runtimeConfig);
+      },
+      onError: (error) => { console.error("Checkout recovery expiry failed", error); },
+    });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
@@ -48,6 +60,7 @@ void startReadyWorkerProcess({
         stopQueueConcurrencyController,
         closeWorkerObservability,
         stopRepairScheduler,
+        stopExpiryScheduler,
         () => backgroundRuntimeConfigService.close(),
         closeQueuePerformanceTelemetry,
         () => recoveryCapacityResumeService.close(),

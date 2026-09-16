@@ -9,6 +9,7 @@ export interface RecoveryCheckoutSeed {
   cartToken: string | null;
 
   detectedAt: string;
+  lastExternalActivityAt?: string;
 
   currency: string | null;
   totalPrice: string | null;

@@ -94,6 +94,7 @@ export class ConversationService {
         pendingTurnStartedAt: true,
         languageTag: true,
         languageSource: true,
+        checkoutRecoveryId: true,
       },
     });
 
