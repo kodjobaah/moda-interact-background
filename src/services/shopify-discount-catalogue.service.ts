@@ -8,13 +8,15 @@ const ACTIVE = ["ACTIVE", "TRIALING"] as const;
 export class ShopifyDiscountCatalogueService {
   async requestSync(shopId: string, requestedAt: Date): Promise<"requested" | "unavailable"> {
     return prisma.$transaction(async (transaction) => {
+      const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { id: true } });
+      if (!shop) return "unavailable";
       const catalogue = await this.lockCatalogue(transaction, shopId);
+      const syncRequestedAt = maxDate(catalogue?.syncRequestedAt ?? null, requestedAt);
       const eligibility = await this.getEligibility(transaction, shopId);
       if (!eligibility) {
-        await this.markCatalogueUnavailable(transaction, shopId, catalogue?.unavailableAt);
+        await this.markCatalogueUnavailable(transaction, shopId, catalogue?.unavailableAt, syncRequestedAt);
         return "unavailable";
       }
-      const syncRequestedAt = maxDate(catalogue?.syncRequestedAt ?? null, requestedAt);
       await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { status: "SYNC_REQUIRED", syncRequestedAt, activeSyncToken: null, syncStartedAt: null } });
       return "requested";
     });
@@ -22,6 +24,8 @@ export class ShopifyDiscountCatalogueService {
 
   async markUnavailable(shopId: string): Promise<void> {
     await prisma.$transaction(async (transaction) => {
+      const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { id: true } });
+      if (!shop) return;
       const catalogue = await this.lockCatalogue(transaction, shopId);
       await this.markCatalogueUnavailable(transaction, shopId, catalogue?.unavailableAt);
     });
@@ -29,11 +33,11 @@ export class ShopifyDiscountCatalogueService {
 
   async reconcile(shopId: string, requestedAt: Date): Promise<"current" | "unavailable" | "superseded" | "error"> {
     const claimed = await prisma.$transaction(async (transaction) => {
-      const catalogue = await this.lockCatalogue(transaction, shopId);
       const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { id: true, domain: true } });
       if (!shop) return null;
+      const catalogue = await this.lockCatalogue(transaction, shopId);
       if (!catalogue || !(await this.getEligibility(transaction, shopId))) {
-        await this.markCatalogueUnavailable(transaction, shopId, catalogue?.unavailableAt);
+        await this.markCatalogueUnavailable(transaction, shopId, catalogue?.unavailableAt, maxDate(catalogue?.syncRequestedAt ?? null, requestedAt));
         return null;
       }
       const activeSyncToken = randomUUID();
@@ -96,9 +100,9 @@ export class ShopifyDiscountCatalogueService {
       && session?.scope?.split(",").some((scope) => scope.trim() === "read_discounts") === true;
   }
 
-  private async markCatalogueUnavailable(transaction: Prisma.TransactionClient, shopId: string, unavailableAt: Date | null | undefined): Promise<void> {
+  private async markCatalogueUnavailable(transaction: Prisma.TransactionClient, shopId: string, unavailableAt: Date | null | undefined, syncRequestedAt?: Date): Promise<void> {
     const now = new Date();
-    await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null, unavailableAt: unavailableAt ?? now } });
+    await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now, ...(syncRequestedAt ? { syncRequestedAt } : {}) }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null, unavailableAt: unavailableAt ?? now, ...(syncRequestedAt ? { syncRequestedAt } : {}) } });
     await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
     await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
   }
