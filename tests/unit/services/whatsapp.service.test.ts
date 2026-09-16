@@ -6,6 +6,7 @@ import {
 } from "../../../src/services/whatsapp.service.js";
 
 const phoneNumberId = "test-phone-number-id";
+const businessAccountId = "test-waba-id";
 const accessToken = "test-access-token";
 const input = {
   to: "15551234567",
@@ -15,6 +16,7 @@ const input = {
 describe("WhatsAppService API base URL", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    vi.stubEnv("WHATSAPP_BUSINESS_ACCOUNT_ID", businessAccountId);
     vi.stubEnv("WHATSAPP_PHONE_NUMBER_ID", phoneNumberId);
     vi.stubEnv("WHATSAPP_ACCESS_TOKEN", accessToken);
   });
@@ -119,5 +121,101 @@ describe("WhatsAppService API base URL", () => {
       },
     });
     expect(body.template.language.code).not.toBe(canonicalLanguageTag);
+  });
+
+  it("keeps WABA identity separate from the sender phone identity", () => {
+    const service = new WhatsAppService();
+
+    expect(service.getProviderAccountId()).toBe(businessAccountId);
+    expect(service.resolveSender()).toEqual({
+      providerAccountId: businessAccountId,
+      providerPhoneNumberId: phoneNumberId,
+    });
+  });
+
+  it.each(["WHATSAPP_BUSINESS_ACCOUNT_ID", "WHATSAPP_PHONE_NUMBER_ID"])(
+    "fails boundedly when %s is missing",
+    (variable) => {
+    vi.stubEnv(variable, "");
+
+    expect(() => new WhatsAppService().resolveSender()).toThrowError(
+      expect.objectContaining({ code: "configuration-missing" }),
+    );
+    },
+  );
+
+  it("fails boundedly when the access token is missing", async () => {
+    vi.stubEnv("WHATSAPP_ACCESS_TOKEN", "");
+
+    await expect(new WhatsAppService().sendWhatsAppText(input)).rejects.toMatchObject({
+      code: "configuration-missing",
+    });
+  });
+
+  it("serializes preview URLs and reply context only when requested", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ messages: [{ id: "wamid-text" }] }), { status: 200 }),
+    );
+
+    await new WhatsAppService(fetchMock).sendWhatsAppText({
+      ...input,
+      text: "Open https://example.myshopify.com/cart/1",
+      previewUrl: true,
+      replyToProviderMessageId: "wamid-inbound",
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toMatchObject({
+      text: {
+        body: "Open https://example.myshopify.com/cart/1",
+        preview_url: true,
+      },
+      context: { message_id: "wamid-inbound" },
+    });
+  });
+
+  it("serializes approved image header and dynamic URL button components", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ messages: [{ id: "wamid-template" }] }), { status: 200 }),
+    );
+
+    await new WhatsAppService(fetchMock).sendWhatsAppTemplate({
+      to: input.to,
+      templateName: "recovery",
+      languageCode: "en_US",
+      bodyParameters: ["Ada"],
+      imageHeader: { link: "https://cdn.example.com/recovery.png" },
+      dynamicUrlButton: { index: 0, text: "checkout-token" },
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).template.components).toEqual([
+      {
+        type: "header",
+        parameters: [{ type: "image", image: { link: "https://cdn.example.com/recovery.png" } }],
+      },
+      { type: "body", parameters: [{ type: "text", text: "Ada" }] },
+      {
+        type: "button",
+        sub_type: "url",
+        index: "0",
+        parameters: [{ type: "text", text: "checkout-token" }],
+      },
+    ]);
+  });
+
+  it("does not invent components for a static approved template URL", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ messages: [{ id: "wamid-static" }] }), { status: 200 }),
+    );
+
+    await new WhatsAppService(fetchMock).sendWhatsAppTemplate({
+      to: input.to,
+      templateName: "static-link",
+      languageCode: "en_US",
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).template).toEqual({
+      name: "static-link",
+      language: { code: "en_US" },
+    });
   });
 });

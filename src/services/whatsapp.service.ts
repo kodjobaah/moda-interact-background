@@ -15,6 +15,11 @@ export type WhatsAppServiceErrorCode =
   | "provider-rejected"
   | "invalid-provider-response";
 
+export type ModaWhatsAppSender = {
+  providerAccountId: string;
+  providerPhoneNumberId: string;
+};
+
 export class WhatsAppServiceError extends Error {
   constructor(
     readonly code: WhatsAppServiceErrorCode,
@@ -28,25 +33,32 @@ export class WhatsAppServiceError extends Error {
 export class WhatsAppService {
   constructor(private readonly fetchImplementation: FetchImplementation = fetch) {}
 
-  getProviderAccountId(): string {
+  resolveSender(): ModaWhatsAppSender {
+    const providerAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim();
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    if (!phoneNumberId) {
+    if (!providerAccountId || !phoneNumberId?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
         "WhatsApp configuration is missing",
       );
     }
-    return phoneNumberId;
+    return { providerAccountId, providerPhoneNumberId: phoneNumberId.trim() };
+  }
+
+  getProviderAccountId(): string {
+    return this.resolveSender().providerAccountId;
   }
 
   async sendWhatsAppText({
     to,
     text,
+    previewUrl,
+    replyToProviderMessageId,
   }: SendTextInput): Promise<SendMessageResult> {
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
-    const phoneNumberId = this.getProviderAccountId();
-    if (!accessToken) {
+    const sender = this.resolveSender();
+    if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
         "WhatsApp configuration is missing",
@@ -59,7 +71,7 @@ export class WhatsAppService {
     ).replace(/\/+$/, "");
 
     const response = await this.fetchImplementation(
-      `${apiBaseUrl}/${phoneNumberId}/messages`,
+      `${apiBaseUrl}/${sender.providerPhoneNumberId}/messages`,
       {
         method: "POST",
 
@@ -76,8 +88,12 @@ export class WhatsAppService {
 
           type: "text",
 
+          ...(replyToProviderMessageId
+            ? { context: { message_id: replyToProviderMessageId } }
+            : {}),
           text: {
             body: text,
+            ...(previewUrl ? { preview_url: true } : {}),
           },
         }),
         signal: AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
@@ -109,10 +125,12 @@ export class WhatsAppService {
     templateName,
     languageCode,
     bodyParameters = [],
+    imageHeader,
+    dynamicUrlButton,
   }: SendTemplateInput): Promise<SendMessageResult> {
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = this.getProviderAccountId();
-    if (!accessToken) {
+    const sender = this.resolveSender();
+    if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
         "WhatsApp configuration is missing",
@@ -124,26 +142,36 @@ export class WhatsAppService {
       DEFAULT_WHATSAPP_API_BASE_URL
     ).replace(/\/+$/, "");
 
+    const components = [
+      ...(imageHeader
+        ? [{
+            type: "header",
+            parameters: [{ type: "image", image: { link: imageHeader.link } }],
+          }]
+        : []),
+      ...(bodyParameters.length > 0
+        ? [{
+            type: "body",
+            parameters: bodyParameters.map((text) => ({ type: "text", text })),
+          }]
+        : []),
+      ...(dynamicUrlButton
+        ? [{
+            type: "button",
+            sub_type: "url",
+            index: String(dynamicUrlButton.index),
+            parameters: [{ type: "text", text: dynamicUrlButton.text }],
+          }]
+        : []),
+    ];
     const template = {
       name: templateName,
       language: { code: languageCode },
-      ...(bodyParameters.length > 0
-        ? {
-            components: [
-              {
-                type: "body",
-                parameters: bodyParameters.map((text) => ({
-                  type: "text",
-                  text,
-                })),
-              },
-            ],
-          }
-        : {}),
+      ...(components.length > 0 ? { components } : {}),
     };
 
     const response = await this.fetchImplementation(
-      `${apiBaseUrl}/${phoneNumberId}/messages`,
+      `${apiBaseUrl}/${sender.providerPhoneNumberId}/messages`,
       {
         method: "POST",
         headers: {
