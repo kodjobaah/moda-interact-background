@@ -11,17 +11,13 @@ const source = readFileSync(
 );
 
 describe("recovery entrypoint capacity-resume wiring", () => {
-  it("runs repair at startup and every five minutes", () => {
-    expect(source).toContain(
-      "await recoveryCapacityResumeService.repair();",
-    );
-    expect(source).toContain(
-      "const repairInterval = setInterval(() => {",
-    );
-    expect(source).toContain(
-      "void recoveryCapacityResumeService.repair();",
-    );
-    expect(source).toContain("}, 5 * 60 * 1000);");
+  it("uses the shared dynamic leased scheduler for repair", () => {
+    expect(source).toContain("startDynamicLeasedScheduler");
+    expect(source).toContain('leaseName: "RECOVERY_CAPACITY_REPAIR"');
+    expect(source).toContain("recoveryRepairIntervalSeconds * 1000");
+    expect(source).toContain("recoveryCapacityResumeService.repair(runtimeConfig)");
+    expect(source).not.toContain("setInterval");
+    expect(source).not.toContain("void recoveryCapacityResumeService.repair();");
   });
 
   it("starts both recovery workers and observes both queues", () => {
@@ -33,8 +29,8 @@ describe("recovery entrypoint capacity-resume wiring", () => {
     );
   });
 
-  it("clears the repair timer and closes the resume queue on shutdown", () => {
-    expect(source).toContain("clearInterval(repairInterval)");
+  it("stops the repair scheduler and closes the resume queue on shutdown", () => {
+    expect(source).toContain("stopRepairScheduler");
     expect(source).toContain(
       "() => recoveryCapacityResumeService.close()",
     );

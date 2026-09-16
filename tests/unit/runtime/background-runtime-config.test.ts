@@ -31,6 +31,12 @@ function database(row: BackgroundRuntimeConfigSnapshot | null) {
 }
 
 describe("BackgroundRuntimeConfigService", () => {
+  it("rejects a usage retry maximum below its base", async () => {
+    const invalid = { ...config(), shopifyUsageRetryBaseSeconds: 10, shopifyUsageRetryMaxSeconds: 5 };
+    await expect(new BackgroundRuntimeConfigService(database(invalid)).start()).rejects.toThrow(
+      "usage retry max must be at least the base",
+    );
+  });
   it("requires startup before current can be read and publishes immutable dates", async () => {
     const row = config();
     const service = new BackgroundRuntimeConfigService(database(row));

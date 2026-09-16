@@ -19,11 +19,10 @@ import type {
 } from "../providers/shopify-partner-billing.provider.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
+import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transition.service.js";
 
-const FROZEN_RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
-const PROVIDER_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 
 type LifecycleDatabase = Pick<PrismaClient, "$transaction">;
 type ResumeService = Pick<typeof recoveryCapacityResumeService, "schedule">;
@@ -35,7 +34,11 @@ export class ShopifySubscriptionLifecycleReconciliationService {
     private readonly database: LifecycleDatabase,
     private readonly resumeService: ResumeService = recoveryCapacityResumeService,
     private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-billing-worker", environment: process.env.NODE_ENV ?? "development" }),
+    private readonly runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">,
   ) {}
+
+  private frozenReconcileIntervalMs(): number { return (this.runtimeConfig?.billingFrozenRecheckSeconds ?? 3600) * 1000; }
+  private providerRetryIntervalMs(): number { return (this.runtimeConfig?.billingProviderRetrySeconds ?? 300) * 1000; }
 
   async reconcile(
     shopId: string,
@@ -66,7 +69,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         await transaction.subscription.update({
           where: { id: subscriptionId },
           data: {
-            nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
+            nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()),
             lastSyncedAt: now,
           },
         });
@@ -76,7 +79,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         await transaction.subscription.update({
           where: { id: subscriptionId },
           data: {
-            nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+            nextReconcileAt: new Date(now.getTime() + this.providerRetryIntervalMs()),
             lastSyncedAt: now,
             lastSyncErrorCode: "PROVIDER_STATE_UNRESOLVED",
             lastSyncErrorAt: now,
@@ -136,7 +139,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       });
       if (isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle)) {
         if (current?.status === SubscriptionProjectionStatus.FROZEN) {
-          await transaction.subscription.update({ where: { id: subscriptionId }, data: { nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS), lastSyncedAt: now } });
+          await transaction.subscription.update({ where: { id: subscriptionId }, data: { nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()), lastSyncedAt: now } });
         }
         return;
       }
@@ -149,7 +152,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         data: {
           status: SubscriptionProjectionStatus.FROZEN,
           ...(active ? { cancelAtPeriodEnd: active.cancelAtPeriodEnd } : {}),
-          nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
+          nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()),
           lastSyncedAt: now,
           ...(clearError ? { lastSyncErrorCode: null, lastSyncErrorAt: null } : {}),
           ...(replay ? {} : { lastProviderLifecycleState: lifecycle.state, lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt }),
@@ -170,7 +173,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       await transaction.subscription.update({
         where: { id: subscriptionId },
         data: {
-          nextReconcileAt: new Date(now.getTime() + (frozen ? FROZEN_RECONCILE_INTERVAL_MS : PROVIDER_RETRY_INTERVAL_MS)),
+          nextReconcileAt: new Date(now.getTime() + (frozen ? this.frozenReconcileIntervalMs() : this.providerRetryIntervalMs())),
           lastSyncedAt: now,
           lastSyncErrorCode: lifecycle?.state === "UNFROZEN" && !older ? "UNFROZEN_LIVE_CONTRACT_PENDING" : "PROVIDER_STATE_UNRESOLVED",
           lastSyncErrorAt: now,
@@ -191,7 +194,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       if (isStrictlyOlder(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle)) return;
       await transaction.subscription.update({ where: { id: subscriptionId }, data: {
         status: SubscriptionProjectionStatus.FROZEN,
-        nextReconcileAt: new Date(now.getTime() + FROZEN_RECONCILE_INTERVAL_MS),
+        nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()),
         lastSyncedAt: now,
         lastSyncErrorCode: "UNFROZEN_LIVE_CONTRACT_PENDING",
         lastSyncErrorAt: now,
@@ -250,7 +253,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
           lastProviderLifecycleState: lifecycle.state,
           lastProviderLifecycleEventId: lifecycle.id,
           lastProviderLifecycleEventAt: lifecycle.occurredAt,
-          nextReconcileAt: provider.currentPeriodEnd ? nextCycleReconcileAt(provider.currentPeriodEnd, now) : new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+          nextReconcileAt: provider.currentPeriodEnd ? nextCycleReconcileAt(provider.currentPeriodEnd, now) : new Date(now.getTime() + this.providerRetryIntervalMs()),
         } });
         return true;
       }
@@ -259,7 +262,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         ? await new SamePlanBillingPeriodRolloverService({ $transaction: async (callback: (client: typeof transaction) => unknown) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, now })
         : await new ShopifyPlanChangeTransitionService({ $transaction: async (callback: (client: typeof transaction) => unknown) => callback(transaction) } as never).transitionInTransaction(transaction, { shopId, subscriptionId, provider, plan: planInput, expectedCurrentPlanId: subscription.planId ?? "", now });
       if (transition.kind !== "transitioned" && transition.kind !== "unchanged") {
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncedAt: now, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", lastSyncErrorAt: now, nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS), lastProviderLifecycleState: lifecycle.state, lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt } });
+        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncedAt: now, lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", lastSyncErrorAt: now, nextReconcileAt: new Date(now.getTime() + this.providerRetryIntervalMs()), lastProviderLifecycleState: lifecycle.state, lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt } });
         return false;
       }
       await transaction.subscription.update({ where: { id: subscriptionId }, data: {
@@ -287,7 +290,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       lastSyncedAt: now,
       lastSyncErrorCode: errorCode,
       lastSyncErrorAt: now,
-      nextReconcileAt: new Date(now.getTime() + PROVIDER_RETRY_INTERVAL_MS),
+      nextReconcileAt: new Date(now.getTime() + this.providerRetryIntervalMs()),
       lastProviderLifecycleState: lifecycle.state,
       lastProviderLifecycleEventId: lifecycle.id,
       lastProviderLifecycleEventAt: lifecycle.occurredAt,

@@ -12,6 +12,13 @@ import { recoveryCapacityResumeService } from "../../../src/services/recovery-ca
 
 const now = new Date("2026-09-12T12:00:00.000Z");
 const pendingEffectiveAt = new Date("2026-09-12T11:00:00.000Z");
+const defaultRuntimeConfig = {
+  billingFrozenRecheckSeconds: 3600,
+  billingProviderRetrySeconds: 300,
+  shopifyUsagePublishBatchSize: 50,
+  shopifyUsageRetryBaseSeconds: 60,
+  shopifyUsageRetryMaxSeconds: 3600,
+} as const;
 
 function harness({
   row,
@@ -21,6 +28,8 @@ function harness({
   policy = { lifetimeFreeRecoveryAllowance: 7 },
   lifetimeCounter = null,
   nowValue = now,
+  runtimeConfig = defaultRuntimeConfig,
+  runtimeConfigReader = { current: () => runtimeConfig },
 } = {}) {
   const selectFields = (value: any, select: any): any => {
     if (!value || !select) return value;
@@ -102,8 +111,9 @@ function harness({
     queue,
     logger as never,
     () => nowValue,
+    runtimeConfigReader,
   );
-  return { database, partner, queue, logger, transaction, service };
+  return { database, partner, queue, logger, transaction, service, runtimeConfig, runtimeConfigReader };
 }
 
 function pendingRow(overrides = {}) {
@@ -353,11 +363,11 @@ describe("BillingSubscriptionReconciliationService", () => {
   });
 
   it("replays FROZEN lifecycle evidence and republishes the committed hourly job", async () => {
-    const hourly = new Date("2026-09-12T13:00:00.000Z");
+    const hourly = new Date("2026-09-12T12:00:15.000Z");
     const row = establishedRow({ subscription: { ...establishedRow().subscription, status: "FROZEN", nextReconcileAt: now } });
-    const test = harness({ row, providerResult: null, plan: establishedCurrentPlan });
+    const test = harness({ row, providerResult: null, plan: establishedCurrentPlan, runtimeConfig: { ...defaultRuntimeConfig, billingFrozenRecheckSeconds: 15 } });
     test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
-    test.transaction.subscription.findUnique.mockResolvedValue({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-12T11:00:00.000Z"), lastProviderLifecycleEventId: "event-frozen" });
+    test.transaction.subscription.findUnique.mockResolvedValue({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-12T10:00:00.000Z"), lastProviderLifecycleEventId: "event-old" });
     test.database.subscription.findUnique.mockResolvedValue({ nextReconcileAt: hourly });
     test.partner.getSubscriptionReconciliationSnapshot.mockResolvedValue({ activeSubscription: null, latestLifecycleEvent: { id: "event-frozen", eventType: "SUBSCRIPTION_FROZEN", state: "FROZEN", occurredAt: new Date("2026-09-12T11:00:00.000Z"), cancelEffectiveOn: null, planHandle: "paid-current", billingPeriod: "2026-09-01/2026-10-01" } });
 
@@ -366,6 +376,45 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.queue.add).toHaveBeenCalledOnce();
     expect(test.queue.add.mock.calls[0][1].expectedNextReconcileAt).toBe(hourly.toISOString());
     expect(test.queue.add.mock.calls[0][2].jobId).toMatch(/^billing-subscription-reconcile-/);
+  });
+
+  it("captures one runtime snapshot and reuses it for queued usage publishing", async () => {
+    const insideDrain = new Date("2026-09-30T23:57:00.000Z");
+    const runtimeConfig = { ...defaultRuntimeConfig, shopifyUsagePublishBatchSize: 17, shopifyUsageRetryBaseSeconds: 9, shopifyUsageRetryMaxSeconds: 90 };
+    const runtimeConfigReader = { current: vi.fn(() => runtimeConfig) };
+    const test = harness({
+      nowValue: insideDrain,
+      runtimeConfig,
+      runtimeConfigReader,
+      row: establishedRow({ subscription: { ...establishedRow().subscription, pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, cancelAtPeriodEnd: false, nextReconcileAt: insideDrain } }),
+      providerResult: { ...establishedProvider, planHandle: "paid-current", pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), cancelAtEndOfCycle: true, cancelAtPeriodEnd: true },
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+    const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue(undefined);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", insideDrain));
+
+    expect(runtimeConfigReader.current).toHaveBeenCalledOnce();
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-current", runtimeConfig });
+    publishDue.mockRestore();
+  });
+
+  it("uses the captured frozen interval for provider failures", async () => {
+    const runtimeConfig = { ...defaultRuntimeConfig, billingFrozenRecheckSeconds: 15 };
+    const test = harness({
+      runtimeConfig,
+      row: establishedRow({ subscription: { ...establishedRow().subscription, status: "FROZEN", nextReconcileAt: now } }),
+      providerError: new Error("timeout"),
+      plan: establishedCurrentPlan,
+    });
+    test.database.billingPlan.findUnique.mockResolvedValueOnce(establishedCurrentPlan);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-12T12:00:15.000Z") }),
+    }));
   });
 
   it("projects scheduled full cancellation without changing current entitlement", async () => {
@@ -714,7 +763,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", insideDrain));
 
-    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-current" });
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-current", runtimeConfig: test.runtimeConfig });
     expect(test.database.subscription.updateMany.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-10-01T00:00:00.000Z"));
     expect(test.queue.add).toHaveBeenCalledOnce();
     publishDue.mockRestore();
@@ -1815,7 +1864,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: preCloseAt.toISOString() });
 
-    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old" });
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old", runtimeConfig: test.runtimeConfig });
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ nextReconcileAt: periodEnd, lastSyncErrorCode: null, lastSyncErrorAt: null }),
     }));
@@ -1840,7 +1889,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: preCloseAt.toISOString() });
 
-    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old" });
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old", runtimeConfig: test.runtimeConfig });
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ nextReconcileAt: retryAt, lastSyncErrorCode: "PRE_CLOSE_USAGE_FLUSH_FAILED", lastSyncErrorAt: retryNow }),
     }));
@@ -1886,7 +1935,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: retryNow.toISOString() });
 
-    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old" });
+    expect(publishDue).toHaveBeenCalledWith({ billingPeriodId: "period-old", runtimeConfig: test.runtimeConfig });
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: { nextReconcileAt: periodEnd, lastSyncedAt: retryNow, lastSyncErrorCode: null, lastSyncErrorAt: null },
     }));

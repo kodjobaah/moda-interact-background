@@ -1,7 +1,10 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import { closeWorkerObservability } from "../runtime/observability.js";
-import { startBillingReconciliationScheduler } from "../runtime/billing-scheduler.js";
+import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
+import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
+import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
+import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
@@ -22,6 +25,7 @@ function reportBillingReconciliationFailure(error: unknown): void {
 void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
+    await backgroundRuntimeConfigService.start();
     const [{ closeBillingResources, billingSubscriptionQueue }, { createBillingReconciliationService }] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
@@ -38,21 +42,26 @@ void startReadyWorkerProcess({
       connection: connectionRedis,
       queueNames: [billingSubscriptionQueue.name as QueueName],
     });
-    const runBillingCycle = async () => {
-      await billingReconciliationService.reconcileOnce();
+    const runBillingCycle = async (runtimeConfig: BackgroundRuntimeConfigSnapshot) => {
+      await billingReconciliationService.reconcileOnce(runtimeConfig);
       await subscriptionReconciliation.reconstruct();
     };
-    await runBillingCycle();
-    const stopScheduler = startBillingReconciliationScheduler(
-      runBillingCycle,
-      60_000,
-      reportBillingReconciliationFailure,
-    );
+    const stopScheduler = await startDynamicLeasedScheduler({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+      leaseName: "BILLING_RECONCILIATION",
+      intervalMs: 0,
+      runImmediately: true,
+      getIntervalMs: (runtimeConfig) => runtimeConfig.billingReconciliationIntervalSeconds * 1000,
+      run: runBillingCycle,
+      onError: reportBillingReconciliationFailure,
+    });
 
     return {
       workers: [billingSubscriptionReconciliationWorker],
       closeResources: [
         async () => stopScheduler(),
+        () => backgroundRuntimeConfigService.close(),
         stopQueuePerformanceTelemetry,
         ...closeBillingResources,
         closeWorkerObservability,
