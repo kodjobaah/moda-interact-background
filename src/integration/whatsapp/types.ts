@@ -54,6 +54,17 @@ export interface SendMessageResult {
 export interface SendTextInput {
   to: string;
   text: string;
+  previewUrl?: boolean;
+  replyToProviderMessageId?: string;
+}
+
+export interface WhatsAppTemplateImageHeader {
+  link: string;
+}
+
+export interface WhatsAppTemplateUrlButton {
+  index: number;
+  text: string;
 }
 
 export interface SendTemplateInput {
@@ -61,4 +72,6 @@ export interface SendTemplateInput {
   templateName: string;
   languageCode: string;
   bodyParameters?: string[];
+  imageHeader?: WhatsAppTemplateImageHeader;
+  dynamicUrlButton?: WhatsAppTemplateUrlButton;
 }

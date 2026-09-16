@@ -25,6 +25,7 @@ import { whatsAppService } from "./whatsapp.service.js";
 import type {
   SendMessageResult,
   SendTemplateInput,
+  SendTextInput,
 } from "../integration/whatsapp/types.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
@@ -97,7 +98,7 @@ export class OutboundWhatsAppAdmissionService {
   }
 
   async sendText(
-    input: OutboundAdmissionInput & { to: string; text: string },
+    input: OutboundAdmissionInput & Omit<SendTextInput, "to"> & { to: string },
   ): Promise<OutboundAdmissionResult> {
     const admission = await this.reserve({ ...input, content: input.text });
     if (admission.kind !== "admitted") return admission;
@@ -106,6 +107,10 @@ export class OutboundWhatsAppAdmissionService {
       ...admission,
       to: input.to,
       text: admission.terminal ? TERMINAL_MESSAGE : input.text,
+      ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
+      ...(input.replyToProviderMessageId
+        ? { replyToProviderMessageId: input.replyToProviderMessageId }
+        : {}),
     });
   }
 
@@ -134,6 +139,10 @@ export class OutboundWhatsAppAdmissionService {
             ...(input.bodyParameters
               ? { bodyParameters: input.bodyParameters }
               : {}),
+            ...(input.imageHeader ? { imageHeader: input.imageHeader } : {}),
+            ...(input.dynamicUrlButton
+              ? { dynamicUrlButton: input.dynamicUrlButton }
+              : {}),
           });
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
@@ -150,9 +159,13 @@ export class OutboundWhatsAppAdmissionService {
     terminal,
     to,
     text,
+    previewUrl,
+    replyToProviderMessageId,
   }: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
     to: string;
     text: string;
+    previewUrl?: boolean;
+    replyToProviderMessageId?: string;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
     const execution = await this.executionEligibility.evaluate(shopId);
@@ -169,6 +182,10 @@ export class OutboundWhatsAppAdmissionService {
       const result = await this.provider.sendWhatsAppText({
         to,
         text: outboundText,
+        ...(previewUrl !== undefined ? { previewUrl } : {}),
+        ...(replyToProviderMessageId
+          ? { replyToProviderMessageId }
+          : {}),
       });
       await this.markSent(messageId, result.providerMessageId);
       return { kind: "admitted", shopId, messageId, conversationId, terminal };

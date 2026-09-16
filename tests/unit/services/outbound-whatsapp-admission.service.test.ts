@@ -108,6 +108,7 @@ function harness({
     usage,
     resolver,
     providerMock,
+    executionEligibility,
     service: new OutboundWhatsAppAdmissionService(
       database as never,
       () => resolver,
@@ -144,7 +145,11 @@ describe("OutboundWhatsAppAdmissionService", () => {
 
     const result = await test.service.sendText(baseInput);
 
-    expect(result).toMatchObject({ kind: "admitted", terminal: false });
+    expect(result).toMatchObject({
+      kind: "admitted",
+      shopId: "shop-1",
+      terminal: false,
+    });
     expect(test.transaction.conversationMessage.create).toHaveBeenCalledBefore(
       test.providerMock.sendWhatsAppText,
     );
@@ -153,6 +158,24 @@ describe("OutboundWhatsAppAdmissionService", () => {
       text: baseInput.text,
     });
     expect(test.messages.get("message-1")).toMatchObject({ status: "SENT", content: "Hello" });
+  });
+
+  it("forwards preview and reply context after the immediate eligibility check", async () => {
+    const test = harness();
+
+    await test.service.sendText({
+      ...baseInput,
+      previewUrl: true,
+      replyToProviderMessageId: "wamid-inbound",
+    });
+
+    expect(test.executionEligibility?.evaluate).toHaveBeenCalledWith("shop-1");
+    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      to: baseInput.to,
+      text: baseInput.text,
+      previewUrl: true,
+      replyToProviderMessageId: "wamid-inbound",
+    });
   });
 
   it("does not count inbound or other metrics and reserves the terminal slot exactly once", async () => {
