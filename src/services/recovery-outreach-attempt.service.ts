@@ -105,6 +105,22 @@ export class RecoveryOutreachAttemptService {
     });
   }
 
+  async markNoResponseIfWaiting(id: string) {
+    if (!this.attemptModel) return null;
+    return this.attemptModel.updateMany({
+      where: { id, status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE, customerRespondedAt: null },
+      data: { status: RecoveryOutreachStatus.NO_RESPONSE },
+    });
+  }
+
+  async markWaitingAfterConfirmedSend(id: string, data: { sentAt: Date; outboundMessageId: string }) {
+    if (!this.attemptModel) return null;
+    return this.attemptModel.updateMany({
+      where: { id, status: { in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.WAITING_FOR_RESPONSE] } },
+      data: { status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE, ...data },
+    });
+  }
+
   async markEngagedFromInbound(recoveryId: string, occurredAt: Date) {
     if (!this.attemptModel) return null;
     const attempt = await this.attemptModel.findFirst({

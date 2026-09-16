@@ -31,7 +31,7 @@ export class RecoveryPolicyService {
         include: { fixedShopifyDiscount: { include: { catalogue: true } } },
       }),
     ]);
-    const source = override && (!override.expiresAt || override.expiresAt > now)
+      const source = override && (!override.expiresAt || override.expiresAt > now)
       ? override
       : settings;
     if (!source) {
@@ -50,7 +50,7 @@ export class RecoveryPolicyService {
     const discount = source.fixedShopifyDiscount;
     const fixedUsable = configuredOfferMode === "FIXED" && discount !== null &&
       discount.fixedSelectable && discount.isAvailable &&
-      discount.providerStatus === "CURRENT" &&
+        discount.providerStatus === "ACTIVE" &&
       discount.catalogue.status === "CURRENT" &&
       (discount.startsAt === null || discount.startsAt <= now) &&
       (discount.endsAt === null || discount.endsAt > now);

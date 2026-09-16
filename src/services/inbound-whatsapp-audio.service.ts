@@ -5,6 +5,7 @@ import prisma from "../lib/db.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { whatsappMediaService, WhatsAppMediaError } from "./whatsapp-media.service.js";
 import { groqSpeechTranscriptionService, SpeechTranscriptionError, type SpeechTranscriptionService } from "./speech-transcription.service.js";
+import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 
 const MAX_DURATION_MS = 120_000;
 const TOO_LONG = "Please send a voice note that is 2 minutes or shorter.";
@@ -22,7 +23,7 @@ export class InboundWhatsAppAudioService {
     if (existing) return existing;
     return prisma.conversationMessage.create({ data: {
       conversationId, providerMessageId: event.providerMessageId, inReplyToProviderId: event.contextMessageId,
-      direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", content: "",
+      direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", content: "", createdAt: new Date(event.occurredAt),
       contentType: "AUDIO", providerMediaId: event.content.type === "audio" ? event.content.mediaId : null,
       providerMediaMimeType: event.content.type === "audio" ? event.content.mimeType : null,
       providerMediaSha256: event.content.type === "audio" ? event.content.sha256 : null,
@@ -35,6 +36,10 @@ export class InboundWhatsAppAudioService {
 
   async process(event: NormalizedWhatsAppInboundMessage, conversationId: string): Promise<{ kind: "completed" | "rejected" | "failed"; fallback?: string }> {
     const reservation = await this.reserve(event, conversationId);
+    await recoveryOutreachAttemptService.markEngagedForConversation(
+      conversationId,
+      new Date(event.occurredAt),
+    );
     if (reservation.transcriptionStatus === "COMPLETED") return { kind: "completed" };
     if (reservation.transcriptionStatus === "REJECTED" || reservation.transcriptionStatus === "FAILED") return { kind: "failed", fallback: UNREADABLE };
     try {

@@ -952,6 +952,16 @@ export class CheckoutRecoveryService {
     }
 
     if (result.kind === "suppressed") {
+      if (result.reason === "duplicate") {
+        const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
+        if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
+          await this.billingService.commitSuccessfulInitiation({ admission: billing.admission, recoveryId: recovery.id, occurredAt: existing.sentAt ?? new Date() });
+          const sentAt = existing.sentAt ?? new Date();
+          await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(attempt.id, { sentAt, outboundMessageId: existing.id });
+          return recovery;
+        }
+        if (existing?.status === "PENDING") return recovery;
+      }
       await this.billingService.releaseBeforeProvider(billing.admission);
       await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
         failureCode: result.reason,
@@ -980,11 +990,12 @@ export class CheckoutRecoveryService {
     const followUpDueAt = policy.followUpEnabled && policy.followUpDelayMinutes
       ? new Date(sentAt.getTime() + policy.followUpDelayMinutes * 60_000)
       : null;
-    await recoveryOutreachAttemptService.markStatus(attempt.id, "WAITING_FOR_RESPONSE", {
-      sentAt,
+    const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
+    await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(attempt.id, {
+      sentAt: persistedMessage?.sentAt ?? sentAt,
       outboundMessageId: result.messageId,
-      followUpDueAt,
     });
+    await recoveryOutreachAttemptService.markStatus(attempt.id, "WAITING_FOR_RESPONSE", { followUpDueAt });
     if (followUpDueAt) {
       await recoveryOutreachFollowUpService.schedule(
         { checkoutRecoveryId: recovery.id, sequence: 2 },
@@ -1034,7 +1045,14 @@ export class CheckoutRecoveryService {
           await recoveryOutreachAttemptService.markStatus(initial.id, "ENGAGED", { customerRespondedAt: engaged.createdAt });
           return { kind: "suppressed", reason: "engaged" } as const;
         }
-        await recoveryOutreachAttemptService.markStatus(initial.id, "NO_RESPONSE");
+        const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
+        if (!claimedNoResponse || claimedNoResponse.count !== 1) {
+          const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId) });
+          if (currentAttempt.status === "ENGAGED" || ("customerRespondedAt" in currentAttempt && currentAttempt.customerRespondedAt)) {
+            return { kind: "suppressed", reason: "engaged" } as const;
+          }
+          return { kind: "suppressed", reason: "already-claimed" } as const;
+        }
         const attempt = await recoveryOutreachAttemptService.getOrCreateFollowUp({
           recoveryId,
           initialAttempt: initial,
@@ -1089,12 +1107,22 @@ export class CheckoutRecoveryService {
             languageCode: selection.providerLanguageCode,
           });
           if (result.kind === "suppressed") {
+            if (result.reason === "duplicate") {
+              const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
+              if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
+                await this.billingService.commitSuccessfulInitiation({ admission: billing.admission, recoveryId, occurredAt: existing.sentAt ?? new Date() });
+                await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(attempt.id, { sentAt: existing.sentAt ?? new Date(), outboundMessageId: existing.id });
+                return { kind: "sent", attemptId: attempt.id } as const;
+              }
+              if (existing?.status === "PENDING") return { kind: "suppressed", reason: "send-pending" } as const;
+            }
             await this.billingService.releaseBeforeProvider(billing.admission);
             await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: result.reason });
             return result;
           }
           await this.billingService.commitSuccessfulInitiation({ admission: billing.admission, recoveryId, occurredAt: new Date() });
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "WAITING_FOR_RESPONSE", { sentAt: new Date(), outboundMessageId: result.messageId });
+          const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
+          await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(attempt.id, { sentAt: persistedMessage?.sentAt ?? new Date(), outboundMessageId: result.messageId });
           return { kind: "sent", attemptId: attempt.id } as const;
         } catch (error) {
           await this.billingService.handleProviderFailure({ admission: billing.admission, error });
