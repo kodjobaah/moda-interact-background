@@ -50,7 +50,7 @@ void startReadyWorkerProcess({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
       leaseName: "BILLING_RECONCILIATION",
-      intervalMs: 60_000,
+      intervalMs: 0,
       runImmediately: true,
       getIntervalMs: (runtimeConfig) => runtimeConfig.billingReconciliationIntervalSeconds * 1000,
       run: runBillingCycle,

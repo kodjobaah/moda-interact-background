@@ -70,9 +70,13 @@ export class BillingReconciliationService {
     private readonly subscriptionQueue?: SubscriptionQueue,
   ) {}
 
-  async reconcileOnce(runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingReconciliationShopBatchSize" | "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds" | "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">): Promise<BillingReconciliationResult> {
+  async reconcileOnce(runtimeConfigOrShopBatchSize?: Pick<BackgroundRuntimeConfigSnapshot, "billingReconciliationShopBatchSize" | "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds" | "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds"> | number): Promise<BillingReconciliationResult> {
+    const runtimeConfig = typeof runtimeConfigOrShopBatchSize === "number" ? undefined : runtimeConfigOrShopBatchSize;
+    const shopBatchSize = typeof runtimeConfigOrShopBatchSize === "number"
+      ? runtimeConfigOrShopBatchSize
+      : runtimeConfig?.billingReconciliationShopBatchSize ?? 50;
     const published = await this.publisher.publishDue(runtimeConfig ? { runtimeConfig } : {});
-    const shops = await this.selectRotatingShopPage(boundedLimit(runtimeConfig?.billingReconciliationShopBatchSize ?? 50));
+    const shops = await this.selectRotatingShopPage(boundedLimit(shopBatchSize));
 
     const result: BillingReconciliationResult = {
       published,

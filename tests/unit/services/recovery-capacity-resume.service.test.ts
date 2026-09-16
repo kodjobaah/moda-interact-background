@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("bullmq", () => ({ Queue: class {} }));
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
@@ -14,6 +14,10 @@ vi.mock("../../../src/lib/db.js", () => ({
 import { RecoveryCapacityResumeService } from "../../../src/services/recovery-capacity-resume.service.js";
 
 describe("RecoveryCapacityResumeService", () => {
+  beforeEach(() => {
+    findMany.mockReset();
+  });
+
   it("uses the configured repair shop batch", async () => {
     findMany.mockResolvedValue([{ shopId: "shop-1" }, { shopId: "shop-2" }]);
     const service = new RecoveryCapacityResumeService();
@@ -31,7 +35,7 @@ describe("RecoveryCapacityResumeService", () => {
     const service = new RecoveryCapacityResumeService();
     const schedule = vi.spyOn(service, "schedule").mockResolvedValue("job-id");
 
-    await expect(service.repair(500)).rejects.toThrow(
+    await expect(service.repair(501)).rejects.toThrow(
       "Recovery repair shop batch size is outside the database range.",
     );
     expect(findMany).not.toHaveBeenCalled();

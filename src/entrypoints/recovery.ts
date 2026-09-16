@@ -38,9 +38,9 @@ void startReadyWorkerProcess({
       workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker],
       closeResources: [
         ...closeWorkerResources,
+        closeWorkerObservability,
         stopRepairScheduler,
         () => backgroundRuntimeConfigService.close(),
-        closeWorkerObservability,
         closeQueuePerformanceTelemetry,
         () => recoveryCapacityResumeService.close(),
       ],

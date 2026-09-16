@@ -55,9 +55,8 @@ describe("production worker observability startup", () => {
       );
       expect(preloadSource).not.toMatch(/bullmq|genai/i);
       expect(entrypointSource).toContain("closeWorkerObservability");
-      expect(entrypointSource).toContain(
-        "...closeWorkerResources, closeWorkerObservability",
-      );
+      expect(entrypointSource).toContain("...closeWorkerResources");
+      expect(entrypointSource).toContain("closeWorkerObservability");
       expect(entrypointSource).toContain("await closeWorkerObservability()");
     },
   );
@@ -107,7 +106,7 @@ describe("production worker observability startup", () => {
   it("uses the architect-approved exact shared runtime release", () => {
     expect(
       packageJson.dependencies["@modainteract/moda-interact-shared"],
-    ).toBe("0.9.0");
+    ).toBe("0.11.2");
   });
 
   it("packages every production observability preload", () => {
