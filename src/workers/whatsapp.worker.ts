@@ -158,6 +158,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
       content: `[Unsupported WhatsApp content: ${content.providerType.slice(0, 64)}]`,
+      occurredAt: new Date(event.occurredAt),
     });
     if (!received.duplicate) {
       await prisma.conversationMessage.update({
@@ -176,6 +177,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
       content: content.text,
+      occurredAt: new Date(event.occurredAt),
     });
 
     if (received.duplicate) return;
@@ -193,6 +195,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
       content: content.text,
+      occurredAt: new Date(event.occurredAt),
     });
 
     if (received.duplicate) return;
@@ -214,6 +217,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
     inReplyToProviderId: event.contextMessageId,
 
     content: content.text,
+    occurredAt: new Date(event.occurredAt),
   });
 
   if (received.duplicate) {

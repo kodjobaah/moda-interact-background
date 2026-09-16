@@ -5,6 +5,7 @@ import { connectionRedis } from "../lib/redis.js";
 import { MERCHANT_COMMUNICATIONS_QUEUE_NAME } from "../domain/translation-batch.js";
 import { PENDING_RECOVERY_CANDIDATE_QUEUE } from "../domain/pending-recovery-candidate.js";
 import { RECOVERY_CAPACITY_RESUME_QUEUE } from "../domain/recovery-capacity-resume.js";
+import { RECOVERY_OUTREACH_FOLLOW_UP_QUEUE } from "../domain/recovery-outreach-follow-up.js";
 import { BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME } from "@modainteract/moda-interact-shared/billing";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
 import type { BackgroundRuntimeConfigService, BackgroundRuntimeConfigSnapshot } from "./background-runtime-config.js";
@@ -18,6 +19,7 @@ export const CONTROLLED_QUEUE_DEFINITIONS = [
   [SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.ORDER_EVENTS.queueName, "orderQueueGlobalConcurrency"],
   [PENDING_RECOVERY_CANDIDATE_QUEUE, "pendingRecoveryQueueGlobalConcurrency"],
   [RECOVERY_CAPACITY_RESUME_QUEUE, "recoveryResumeQueueGlobalConcurrency"],
+  [RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, "pendingRecoveryQueueGlobalConcurrency"],
   ["whatsapp-events", "whatsappQueueGlobalConcurrency"],
   [MERCHANT_COMMUNICATIONS_QUEUE_NAME, "merchantCommunicationsQueueGlobalConcurrency"],
   [BILLING_SUBSCRIPTION_RECONCILE_QUEUE_NAME, "billingSubscriptionQueueGlobalConcurrency"],

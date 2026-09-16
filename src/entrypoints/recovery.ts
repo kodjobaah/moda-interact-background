@@ -12,16 +12,18 @@ void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { createShopifyDiscountSyncWorker }, { recoveryCapacityResumeService }] =
+    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { createRecoveryOutreachFollowUpWorker }, { recoveryCapacityResumeService }, { recoveryOutreachFollowUpService }] =
       await Promise.all([
         import("./resources.js"),
         import("../workers/pending-recovery-candidate.worker.js"),
         import("../workers/recovery-capacity-resume.worker.js"),
         import("../workers/shopify-discount-sync.worker.js"),
         import("../services/recovery-capacity-resume.service.js"),
+        import("../services/recovery-outreach-follow-up.service.js"),
       ]);
     const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker();
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
+    const recoveryOutreachFollowUpWorker = createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
@@ -52,11 +54,11 @@ void startReadyWorkerProcess({
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
-      queueNames: ["pending-recovery-candidates", "recovery-capacity-resume"],
+      queueNames: ["pending-recovery-candidates", "recovery-capacity-resume", "recovery-outreach-follow-up"],
     });
 
     return {
-      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, shopifyDiscountSyncWorker],
+      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker, shopifyDiscountSyncWorker],
       closeResources: [
         ...closeWorkerResources,
         stopQueueConcurrencyController,
@@ -66,6 +68,7 @@ void startReadyWorkerProcess({
         () => backgroundRuntimeConfigService.close(),
         closeQueuePerformanceTelemetry,
         () => recoveryCapacityResumeService.close(),
+        () => recoveryOutreachFollowUpService.close(),
       ],
     };
   },

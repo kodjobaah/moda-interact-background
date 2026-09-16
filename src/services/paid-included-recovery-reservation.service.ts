@@ -93,7 +93,8 @@ export class PaidIncludedRecoveryReservationService {
   ) {}
 
   async reserve(
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "recoveryId">> &
+    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId">> &
+      ({ recoveryId: string } | { sourceKey: string }) &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
     const quantity = validateQuantity(input.quantity);
@@ -146,7 +147,8 @@ export class PaidIncludedRecoveryReservationService {
 
   private async reserveInTransaction(
     transaction: ReservationTransaction,
-    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "recoveryId">>,
+    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId">> &
+      ({ recoveryId: string } | { sourceKey: string }),
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const policyResolver = this.createPolicyResolver(transaction);
@@ -155,7 +157,9 @@ export class PaidIncludedRecoveryReservationService {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation requires a paid plan");
     }
     const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, this.now());
-    const sourceKey = `paid-included:${period.id}:${input.recoveryId}`;
+    const sourceKey = "sourceKey" in input
+      ? `paid-included:${period.id}:${input.sourceKey}`
+      : `paid-included:${period.id}:${input.recoveryId}`;
     const existing = await transaction.usageReservation.findUnique({ where: { sourceKey } });
 
     if (existing) {

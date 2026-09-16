@@ -20,12 +20,12 @@ describe("recovery entrypoint capacity-resume wiring", () => {
     expect(source).not.toContain("void recoveryCapacityResumeService.repair();");
   });
 
-  it("starts both recovery workers and observes both queues", () => {
+  it("starts all recovery workers and observes all queues", () => {
     expect(source).toContain(
-      "workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker]",
+      "workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker]",
     );
     expect(source).toContain(
-      'queueNames: ["pending-recovery-candidates", "recovery-capacity-resume"]',
+      'queueNames: ["pending-recovery-candidates", "recovery-capacity-resume", "recovery-outreach-follow-up"]',
     );
   });
 

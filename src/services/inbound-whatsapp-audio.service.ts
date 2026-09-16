@@ -5,6 +5,7 @@ import prisma from "../lib/db.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { whatsappMediaService, WhatsAppMediaError } from "./whatsapp-media.service.js";
 import { groqSpeechTranscriptionService, SpeechTranscriptionError, type SpeechTranscriptionService } from "./speech-transcription.service.js";
+import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 
 const MAX_DURATION_MS = 120_000;
 const TOO_LONG = "Please send a voice note that is 2 minutes or shorter.";
@@ -18,23 +19,27 @@ export class InboundWhatsAppAudioService {
   ) {}
 
   async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
-    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, transcriptionStatus: true } });
+    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true } });
     if (existing) return existing;
     return prisma.conversationMessage.create({ data: {
       conversationId, providerMessageId: event.providerMessageId, inReplyToProviderId: event.contextMessageId,
-      direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", content: "",
+      direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", content: "", createdAt: new Date(event.occurredAt),
       contentType: "AUDIO", providerMediaId: event.content.type === "audio" ? event.content.mediaId : null,
       providerMediaMimeType: event.content.type === "audio" ? event.content.mimeType : null,
       providerMediaSha256: event.content.type === "audio" ? event.content.sha256 : null,
       transcriptionStatus: "PENDING",
     } }).catch((error: unknown) => {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, transcriptionStatus: true } });
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true } });
       throw error;
     });
   }
 
   async process(event: NormalizedWhatsAppInboundMessage, conversationId: string): Promise<{ kind: "completed" | "rejected" | "failed"; fallback?: string }> {
     const reservation = await this.reserve(event, conversationId);
+    await recoveryOutreachAttemptService.markEngagedForConversation(
+      reservation.conversationId,
+      new Date(event.occurredAt),
+    );
     if (reservation.transcriptionStatus === "COMPLETED") return { kind: "completed" };
     if (reservation.transcriptionStatus === "REJECTED" || reservation.transcriptionStatus === "FAILED") return { kind: "failed", fallback: UNREADABLE };
     try {
@@ -59,7 +64,7 @@ export class InboundWhatsAppAudioService {
         await this.reject(reservation.id, "VOICE_UNREADABLE", durationMs);
         return { kind: "rejected", fallback: UNREADABLE };
       }
-      await this.complete(reservation.id, conversationId, transcript.text, transcript.provider, transcript.model, durationMs);
+      await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs);
       this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
       return { kind: "completed" };
     } catch (error) {

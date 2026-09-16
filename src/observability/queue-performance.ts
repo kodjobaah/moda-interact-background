@@ -13,6 +13,7 @@ export type QueueName =
   | "order-events"
   | "pending-recovery-candidates"
   | "recovery-capacity-resume"
+  | "recovery-outreach-follow-up"
   | "whatsapp-events"
   | "merchant-communications"
   | "billing-subscription-reconcile";

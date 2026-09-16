@@ -85,6 +85,18 @@ export class OutboundWhatsAppAdmissionService {
     return this.provider.getProviderAccountId();
   }
 
+  async findExistingAdmission(idempotencyKey: string) {
+    const usage = await this.database.usageEvent.findUnique({
+      where: { idempotencyKey },
+      select: { sourceId: true },
+    });
+    if (!usage?.sourceId) return null;
+    return this.database.conversationMessage.findUnique({
+      where: { id: usage.sourceId },
+      select: { id: true, conversationId: true, status: true, sentAt: true },
+    });
+  }
+
   async reserve(
     input: OutboundAdmissionInput,
   ): Promise<OutboundAdmissionResult> {

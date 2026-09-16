@@ -11,6 +11,7 @@ import {
   ConversationLanguageService,
   conversationLanguageService,
 } from "./conversation-language.service.js";
+import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 
 export interface ResolvedIncomingMessage {
   conversationId: string;
@@ -24,6 +25,7 @@ export interface ResolvedIncomingMessage {
   inReplyToProviderId: string | null;
 
   content: string;
+  occurredAt: Date;
 
   explicitLanguageTag?: string | null;
 }
@@ -50,12 +52,12 @@ export class ConversationService {
    */
   async receiveMessage(
     message: ResolvedIncomingMessage,
-    now: Date = new Date(),
   ): Promise<{
     conversationId: string;
     version: number;
     duplicate: boolean;
   }> {
+    const occurredAt = message.occurredAt ?? new Date();
     /*
      * First protect against Meta delivering the
      * same message more than once.
@@ -77,6 +79,10 @@ export class ConversationService {
     });
 
     if (existing) {
+      await recoveryOutreachAttemptService.markEngagedForConversation(
+        existing.conversationId,
+        occurredAt,
+      );
       return {
         conversationId: existing.conversationId,
 
@@ -131,7 +137,7 @@ export class ConversationService {
           status: "DELIVERED",
 
           content: message.content,
-          createdAt: now,
+          createdAt: occurredAt,
         },
       });
 
@@ -147,7 +153,7 @@ export class ConversationService {
             lastProcessedVersion: currentConversation.lastProcessedVersion,
             pendingTurnStartedAt: null,
           },
-          data: { pendingTurnStartedAt: now },
+          data: { pendingTurnStartedAt: occurredAt },
         });
       }
 
@@ -155,8 +161,8 @@ export class ConversationService {
         where: { id: message.conversationId },
         data: {
           inboundVersion: { increment: 1 },
-          lastInboundAt: now,
-          lastMessageAt: now,
+          lastInboundAt: occurredAt,
+          lastMessageAt: occurredAt,
           languageTag: language.languageTag,
           languageSource: toPrismaLanguageSource(language.languageSource),
         },
@@ -168,6 +174,11 @@ export class ConversationService {
 
       return conversation;
     });
+
+    await recoveryOutreachAttemptService.markEngagedForConversation(
+      result.id,
+      occurredAt,
+    );
 
     return {
       conversationId: result.id,

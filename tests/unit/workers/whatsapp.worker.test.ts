@@ -133,6 +133,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
       content: event.content.text,
+      occurredAt: new Date(event.occurredAt),
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
   });

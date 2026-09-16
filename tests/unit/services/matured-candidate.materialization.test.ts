@@ -56,6 +56,12 @@ const hoisted = vi.hoisted(() => {
     },
     outboundWhatsAppAdmissionServiceMock: {
       getProviderAccountId: vi.fn(() => "provider-account-1"),
+      findExistingAdmission: vi.fn(async () => ({
+        id: "message-1",
+        conversationId: "conversation-recovery-1",
+        status: "SENT",
+        sentAt: new Date("2026-09-16T10:00:00Z"),
+      })),
       sendTemplate: vi.fn(async (input: { conversationId: string; content: string; to: string; templateName: string; languageCode: string }) => {
         const message = await hoisted.conversationMessageServiceMock.createPendingRecoveryMessage(
           input.conversationId,
