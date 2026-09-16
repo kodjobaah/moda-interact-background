@@ -9,6 +9,7 @@ import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { runCommerceAgent } from "../agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../agents/types.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
+import { inboundWhatsAppAudioService } from "../services/inbound-whatsapp-audio.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
@@ -122,6 +123,45 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   if (route.kind === "shop-unavailable") return;
 
+  const content = inboundContent(event);
+  if (content.type === "audio") {
+    if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
+    const result = await inboundWhatsAppAudioService.process(event, route.conversationId);
+    if (result.kind === "completed") {
+      const state = await conversationService.getTurnState(route.conversationId);
+      await conversationTurnProcessor.enqueue(route.conversationId, state.inboundVersion);
+    } else if (result.fallback) {
+      await outboundWhatsAppAdmissionService.sendText({
+        shopId: route.shopId,
+        conversationId: route.conversationId,
+        idempotencyKey: `voice-fallback:${event.providerMessageId}`,
+        senderType: "AUTOMATION",
+        to: event.customerPhone,
+        text: result.fallback,
+      });
+    }
+    return;
+  }
+
+  if (content.type === "unsupported") {
+    if (!("conversationId" in route)) return;
+    const conversationId = route.conversationId;
+    if (!conversationId) return;
+    const received = await conversationService.receiveMessage({
+      conversationId,
+      providerMessageId: event.providerMessageId,
+      inReplyToProviderId: event.contextMessageId,
+      content: `[Unsupported WhatsApp content: ${content.providerType.slice(0, 64)}]`,
+    });
+    if (!received.duplicate) {
+      await prisma.conversationMessage.update({
+        where: { providerMessageId: event.providerMessageId },
+        data: { contentType: "UNSUPPORTED" },
+      });
+    }
+    return;
+  }
+
   if (route.kind === "product-only" || route.kind === "standalone") {
     if (!route.shopId || !route.conversationId) return;
 
@@ -129,7 +169,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       conversationId: route.conversationId,
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
-      content: event.text ?? "",
+      content: content.text,
     });
 
     if (received.duplicate) return;
@@ -146,7 +186,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       conversationId: route.conversationId,
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
-      content: event.text ?? "",
+      content: content.text,
     });
 
     if (received.duplicate) return;
@@ -167,7 +207,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
     inReplyToProviderId: event.contextMessageId,
 
-    content: event.text ?? "",
+    content: content.text,
   });
 
   if (received.duplicate) {
@@ -376,11 +416,25 @@ function buildProductOnlyContext(
       messages: [
         {
           role: "user",
-          content: event.text ?? "",
+          content: inboundText(event),
         },
       ],
     },
   };
+}
+
+function inboundContent(event: WhatsAppInboundEvent):
+  | { type: "text"; text: string }
+  | { type: "audio"; mediaId: string; mimeType: string | null; sha256: string | null; voice: boolean | null }
+  | { type: "unsupported"; providerType: string } {
+  if ("content" in event && event.content) return event.content;
+  const legacy = event as unknown as { text?: string | null };
+  return { type: "text", text: legacy.text ?? "" };
+}
+
+function inboundText(event: WhatsAppInboundEvent): string {
+  const content = inboundContent(event);
+  return content.type === "text" ? content.text : "";
 }
 
 export {};
