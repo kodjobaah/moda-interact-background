@@ -1,29 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { BackgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../../../src/runtime/background-runtime-config.js";
-
-const numericFields = [
-  "billingReconciliationIntervalSeconds", "billingReconciliationShopBatchSize", "shopifyUsagePublishBatchSize",
-  "recoveryRepairIntervalSeconds", "recoveryRepairShopBatchSize", "recoveryResumeBatchSize",
-  "translationReconciliationIntervalSeconds", "translationBatchMaxRequests", "conversationQuietWindowMs",
-  "conversationMaxSettleWindowMs", "billingFrozenRecheckSeconds", "billingProviderRetrySeconds",
-  "shopifyUsageRetryBaseSeconds", "shopifyUsageRetryMaxSeconds", "translationReconciliationPageSize",
-  "translationClaimTimeoutSeconds", "translationSubmitRetrySeconds", "translationInitialPollSeconds",
-  "translationPollIntervalSeconds", "translationResultRetrySeconds", "translationSubmitMaxAttempts",
-  "translationMaxAutoRetries", "rawSenderLimitPerMinute", "rawGlobalLimitPerMinute", "turnSenderLimitPerMinute",
-  "turnSenderLimitPerTenMinutes", "turnConversationLimitPerMinute", "turnConversationLimitPerTenMinutes",
-  "turnShopLimitPerMinute", "turnGlobalLimitPerMinute", "discoverySenderLimitPerMinute",
-  "discoverySenderLimitPerTenMinutes", "discoveryConversationLimitPerMinute", "discoveryConversationLimitPerTenMinutes",
-  "checkoutQueueGlobalConcurrency", "orderQueueGlobalConcurrency", "pendingRecoveryQueueGlobalConcurrency",
-  "recoveryResumeQueueGlobalConcurrency", "whatsappQueueGlobalConcurrency", "merchantCommunicationsQueueGlobalConcurrency",
-  "billingSubscriptionQueueGlobalConcurrency",
-] as const;
+import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
 
 function config(version = 1): BackgroundRuntimeConfigSnapshot {
-  return Object.freeze({
-    id: "default", version, createdAt: new Date(1), updatedAt: new Date(version),
-    ...Object.fromEntries(numericFields.map((field) => [field, 1])),
-  }) as BackgroundRuntimeConfigSnapshot;
+  return Object.freeze(backgroundRuntimeConfig({ version, createdAt: new Date(1), updatedAt: new Date(version) }));
 }
 
 function database(row: BackgroundRuntimeConfigSnapshot | null) {
@@ -32,7 +13,7 @@ function database(row: BackgroundRuntimeConfigSnapshot | null) {
 
 describe("BackgroundRuntimeConfigService", () => {
   it("rejects a usage retry maximum below its base", async () => {
-    const invalid = { ...config(), shopifyUsageRetryBaseSeconds: 10, shopifyUsageRetryMaxSeconds: 5 };
+    const invalid = { ...config(), shopifyUsageRetryBaseSeconds: 61, shopifyUsageRetryMaxSeconds: 60 };
     await expect(new BackgroundRuntimeConfigService(database(invalid)).start()).rejects.toThrow(
       "usage retry max must be at least the base",
     );

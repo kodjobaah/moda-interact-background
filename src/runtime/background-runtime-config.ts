@@ -12,6 +12,37 @@ export type RuntimeConfigListener = (
 type ConfigDatabase = Pick<PrismaClient, "backgroundRuntimeConfig">;
 
 const REFRESH_INTERVAL_MS = 5_000;
+const NUMERIC_BOUNDS: Record<string, readonly [number, number]> = {
+  billingReconciliationIntervalSeconds: [10, 3600], billingReconciliationShopBatchSize: [1, 200],
+  shopifyUsagePublishBatchSize: [1, 200], recoveryRepairIntervalSeconds: [30, 3600], recoveryRepairShopBatchSize: [1, 500],
+  recoveryResumeBatchSize: [1, 100], translationReconciliationIntervalSeconds: [30, 3600], translationBatchMaxRequests: [1, 500],
+  conversationQuietWindowMs: [250, 10000], conversationMaxSettleWindowMs: [1000, 30000], billingFrozenRecheckSeconds: [300, 86400],
+  billingProviderRetrySeconds: [30, 3600], shopifyUsageRetryBaseSeconds: [10, 3600], shopifyUsageRetryMaxSeconds: [60, 86400],
+  translationReconciliationPageSize: [1, 500], translationClaimTimeoutSeconds: [60, 86400], translationSubmitRetrySeconds: [30, 86400],
+  translationInitialPollSeconds: [30, 86400], translationPollIntervalSeconds: [30, 86400], translationResultRetrySeconds: [30, 86400],
+  translationSubmitMaxAttempts: [1, 10], translationMaxAutoRetries: [0, 10], checkoutQueueGlobalConcurrency: [1, 100],
+  orderQueueGlobalConcurrency: [1, 100], pendingRecoveryQueueGlobalConcurrency: [1, 100], recoveryResumeQueueGlobalConcurrency: [1, 100],
+  whatsappQueueGlobalConcurrency: [1, 100], merchantCommunicationsQueueGlobalConcurrency: [1, 100], billingSubscriptionQueueGlobalConcurrency: [1, 100],
+  rawSenderLimitPerMinute: [1, 10000], rawGlobalLimitPerMinute: [1, 1000000], turnSenderLimitPerMinute: [1, 10000],
+  turnSenderLimitPerTenMinutes: [1, 100000], turnConversationLimitPerMinute: [1, 10000], turnConversationLimitPerTenMinutes: [1, 100000],
+  turnShopLimitPerMinute: [1, 100000], turnGlobalLimitPerMinute: [1, 1000000], discoverySenderLimitPerMinute: [1, 10000],
+  discoverySenderLimitPerTenMinutes: [1, 100000], discoveryConversationLimitPerMinute: [1, 10000], discoveryConversationLimitPerTenMinutes: [1, 100000],
+};
+const CROSS_FIELD_RULES: readonly [string, string, string, "gte" | "lte"][] = [
+  ["conversationMaxSettleWindowMs", "conversationQuietWindowMs", "must be at least the quiet window", "gte"],
+  ["shopifyUsageRetryMaxSeconds", "shopifyUsageRetryBaseSeconds", "usage retry max must be at least the base", "gte"],
+  ["rawGlobalLimitPerMinute", "rawSenderLimitPerMinute", "must be at least the sender limit", "gte"],
+  ["turnSenderLimitPerTenMinutes", "turnSenderLimitPerMinute", "10-minute sender limit must be at least the 1-minute limit", "gte"],
+  ["turnConversationLimitPerTenMinutes", "turnConversationLimitPerMinute", "10-minute conversation limit must be at least the 1-minute limit", "gte"],
+  ["turnGlobalLimitPerMinute", "turnShopLimitPerMinute", "global turn limit must be at least the shop limit", "gte"],
+  ["turnShopLimitPerMinute", "turnSenderLimitPerMinute", "shop turn limit must be at least the sender limit", "gte"],
+  ["discoverySenderLimitPerTenMinutes", "discoverySenderLimitPerMinute", "10-minute discovery sender limit must be at least the 1-minute limit", "gte"],
+  ["discoveryConversationLimitPerTenMinutes", "discoveryConversationLimitPerMinute", "10-minute discovery conversation limit must be at least the 1-minute limit", "gte"],
+  ["discoverySenderLimitPerMinute", "turnSenderLimitPerMinute", "discovery sender limit must not exceed the turn sender limit", "lte"],
+  ["discoverySenderLimitPerTenMinutes", "turnSenderLimitPerTenMinutes", "10-minute discovery sender limit must not exceed the turn sender limit", "lte"],
+  ["discoveryConversationLimitPerMinute", "turnConversationLimitPerMinute", "discovery conversation limit must not exceed the turn conversation limit", "lte"],
+  ["discoveryConversationLimitPerTenMinutes", "turnConversationLimitPerTenMinutes", "discovery conversation limit must not exceed the turn conversation limit", "lte"],
+];
 const CONFIG_FIELDS = [
   "id", "version", "billingReconciliationIntervalSeconds", "billingReconciliationShopBatchSize",
   "shopifyUsagePublishBatchSize", "recoveryRepairIntervalSeconds", "recoveryRepairShopBatchSize",
@@ -64,9 +95,8 @@ function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
   if (value.id !== "default" || !Number.isSafeInteger(value.version) || (value.version as number) < 0) {
     throw new Error("Invalid background runtime configuration.");
   }
-  for (const field of CONFIG_FIELDS) {
-    if (["id", "version", "createdAt", "updatedAt"].includes(field)) continue;
-    if (!Number.isSafeInteger(value[field]) || (value[field] as number) < 0) {
+  for (const [field, [minimum, maximum]] of Object.entries(NUMERIC_BOUNDS)) {
+    if (!Number.isSafeInteger(value[field]) || (value[field] as number) < minimum || (value[field] as number) > maximum) {
       throw new Error(`Invalid background runtime configuration: invalid ${field}.`);
     }
   }
@@ -75,8 +105,13 @@ function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
       throw new Error(`Invalid background runtime configuration: invalid ${field}.`);
     }
   }
-  if ((value.shopifyUsageRetryMaxSeconds as number) < (value.shopifyUsageRetryBaseSeconds as number)) {
-    throw new Error("Invalid background runtime configuration: usage retry max must be at least the base.");
+  for (const [firstField, secondField, message, relation] of CROSS_FIELD_RULES) {
+    const invalid = relation === "gte"
+      ? (value[firstField] as number) < (value[secondField] as number)
+      : (value[firstField] as number) > (value[secondField] as number);
+    if (invalid) {
+      throw new Error(`Invalid background runtime configuration: ${message}.`);
+    }
   }
   return Object.freeze({
     ...value,

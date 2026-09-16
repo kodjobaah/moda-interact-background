@@ -111,6 +111,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     const results = await Promise.all([
@@ -176,6 +177,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
@@ -228,6 +230,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toEqual({
@@ -251,6 +254,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow("timeout");
@@ -289,6 +293,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => { throw new Error("Redis unavailable"); }) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).resolves.toMatchObject({
@@ -312,6 +317,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       providerFactory,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await service.submit({ translationBatchId: "batch-1" });
@@ -330,6 +336,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await service.submit({ translationBatchId: "batch-1" });
@@ -349,6 +356,7 @@ describe("TranslationBatchSubmitService", () => {
       database: database.database,
       provider,
       queue: { add: vi.fn(async () => undefined) },
+      runtimeConfig: runtimeConfig(),
     });
 
     await expect(service.submit({ translationBatchId: "batch-1" })).rejects.toThrow(

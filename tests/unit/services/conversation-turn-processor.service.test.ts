@@ -453,6 +453,7 @@ describe("ConversationTurnProcessor", () => {
       runAgent: test.runAgent,
       getResult: (result: any) => result,
       now: () => new Date(first.getTime() + 20_000),
+      runtimeConfig: test.runtimeConfig,
     });
 
     await test.processor.process({

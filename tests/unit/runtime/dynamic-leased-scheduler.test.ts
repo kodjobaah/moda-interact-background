@@ -121,6 +121,57 @@ describe("dynamic leased scheduler", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("allows at most one completed run in each shared cadence window with skewed wakes", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = harness();
+      const second = harness();
+      const cadenceMs = 100;
+      let nextDueAt = 0;
+      const completedAt: number[] = [];
+      const sharedLease = {
+        runWithLease: vi.fn(async (_name: any, work: any) => {
+          if (Date.now() < nextDueAt) return { kind: "skipped" as const };
+          nextDueAt = Date.now() + cadenceMs;
+          const value = await work({
+            name: "TRANSLATION_RECONCILIATION",
+            ownerToken: `owner-${Date.now()}`,
+            generation: completedAt.length + 1,
+          });
+          return { kind: "completed" as const, value, leaseLost: false };
+        }),
+      };
+      const run = vi.fn(async () => {
+        completedAt.push(Date.now());
+      });
+      const stopFirst = await startDynamicLeasedScheduler({
+        config: first.config as any,
+        lease: sharedLease as any,
+        leaseName: "TRANSLATION_RECONCILIATION" as any,
+        intervalMs: 10,
+        run,
+      });
+      const stopSecond = await startDynamicLeasedScheduler({
+        config: second.config as any,
+        lease: sharedLease as any,
+        leaseName: "TRANSLATION_RECONCILIATION" as any,
+        intervalMs: 13,
+        run,
+      });
+
+      await vi.advanceTimersByTimeAsync(350);
+
+      expect(completedAt.length).toBeGreaterThanOrEqual(3);
+      expect(new Set(completedAt.map((time) => Math.floor(time / cadenceMs))).size).toBe(
+        completedAt.length,
+      );
+      await stopFirst();
+      await stopSecond();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applies a 300-to-60-second translation interval update without restart", async () => {
     vi.useFakeTimers();
     try {

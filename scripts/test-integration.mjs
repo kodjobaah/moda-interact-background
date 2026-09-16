@@ -8,6 +8,7 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const prismaSchemaPath = path.join(repositoryRoot, "database", "prisma", "schema.prisma");
 const vitestBinary = path.join(repositoryRoot, "node_modules", "vitest", "vitest.mjs");
 const defaultTests = [
+  "tests/integration/background-runtime-lease-cadence.concurrency.integration.test.ts",
   "tests/integration/translation-batch-assembly.concurrency.integration.test.ts",
   "tests/integration/bullmq-telemetry.integration.test.ts",
 ];
