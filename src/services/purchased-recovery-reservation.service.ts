@@ -481,21 +481,7 @@ async function selectOldestSpendableLot(
     }),
   ]);
 
-  const currentContext = subscription?.status === "ACTIVE"
-    ? subscription.plan?.active && subscription.observedShopifyPlanHandle && subscription.billingPeriodId
-      && isValidCurrentPeriod(subscription.currentPeriodStart, subscription.currentPeriodEnd)
-      ? {
-          providerContextIdentity: deriveShopifyProviderContextIdentity({
-            providerSubscriptionId: subscription.providerSubscriptionId,
-            planHandle: subscription.observedShopifyPlanHandle,
-            currentPeriodStart: subscription.currentPeriodStart,
-            currentPeriodEnd: subscription.currentPeriodEnd,
-          }),
-          shopifyPlanHandle: subscription.observedShopifyPlanHandle,
-          billingPeriodId: subscription.billingPeriodId,
-        }
-      : null
-    : null;
+  const currentContext = deriveCurrentConsumptionContext(subscription);
   const historical = [] as NonNullable<PurchaseLot>[];
   const current = [] as NonNullable<PurchaseLot>[];
   for (const lot of lots) {
@@ -516,6 +502,47 @@ async function selectOldestSpendableLot(
     }
   }
   return [...historical, ...current].find((lot) => spendableLotQuantity(lot) >= quantity) ?? null;
+}
+
+type ConsumptionContext = {
+  providerContextIdentity: string;
+  shopifyPlanHandle: string;
+  billingPeriodId: string;
+};
+
+function deriveCurrentConsumptionContext(
+  subscription: {
+    status: string;
+    providerSubscriptionId: string | null;
+    observedShopifyPlanHandle: string | null;
+    currentPeriodStart: Date | null;
+    currentPeriodEnd: Date | null;
+    billingPeriodId: string | null;
+    plan: { active: boolean } | null;
+  } | null,
+): ConsumptionContext | null {
+  if (!subscription || subscription.status !== "ACTIVE" || !subscription.plan?.active) return null;
+
+  const planHandle = subscription.observedShopifyPlanHandle?.trim() ?? "";
+  const billingPeriodId = subscription.billingPeriodId?.trim() ?? "";
+  if (!planHandle || !billingPeriodId || !isValidCurrentPeriod(subscription.currentPeriodStart, subscription.currentPeriodEnd)) {
+    return null;
+  }
+
+  try {
+    return {
+      providerContextIdentity: deriveShopifyProviderContextIdentity({
+        providerSubscriptionId: subscription.providerSubscriptionId,
+        planHandle,
+        currentPeriodStart: subscription.currentPeriodStart,
+        currentPeriodEnd: subscription.currentPeriodEnd,
+      }),
+      shopifyPlanHandle: planHandle,
+      billingPeriodId,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function isValidCurrentPeriod(start: Date | null, end: Date | null): boolean {

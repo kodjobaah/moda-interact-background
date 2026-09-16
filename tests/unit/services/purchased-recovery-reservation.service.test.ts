@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { deriveShopifyProviderContextIdentity } from "@modainteract/moda-interact-shared/billing";
 
 import { PurchasedRecoveryReservationService } from "../../../src/services/purchased-recovery-reservation.service.js";
 
@@ -223,6 +224,49 @@ describe("PurchasedRecoveryReservationService", () => {
     ]));
   });
 
+  it("derives native App Pricing context with a nullable legacy provider id", async () => {
+    const currentPeriodStart = new Date("2026-09-01T00:00:00.000Z");
+    const currentPeriodEnd = new Date("2026-10-01T00:00:00.000Z");
+    const providerContextIdentity = deriveShopifyProviderContextIdentity({
+      providerSubscriptionId: null,
+      planHandle: "growth",
+      currentPeriodStart,
+      currentPeriodEnd,
+    });
+    const { service } = createHarness(2, [
+      {
+        id: "growth-current",
+        creditsGranted: 1,
+        activatedAt: currentPeriodStart,
+        createdAt: currentPeriodStart,
+        providerSubscriptionIdSnapshot: providerContextIdentity,
+        shopifyPlanHandleSnapshot: "growth",
+        billingPeriodId: "period-current",
+      },
+      {
+        id: "starter-historical",
+        creditsGranted: 1,
+        activatedAt: new Date("2026-09-02T00:00:00.000Z"),
+        createdAt: new Date("2026-09-02T00:00:00.000Z"),
+        providerSubscriptionIdSnapshot: "provider-starter",
+        shopifyPlanHandleSnapshot: "starter",
+        billingPeriodId: "period-starter",
+      },
+    ], {
+      status: "ACTIVE",
+      providerSubscriptionId: null,
+      observedShopifyPlanHandle: "growth",
+      currentPeriodStart,
+      currentPeriodEnd,
+      billingPeriodId: "period-current",
+      plan: { active: true },
+    });
+
+    const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:native-app-pricing" });
+
+    expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "starter-historical" } });
+  });
+
   it("orders each historical and current group oldest-first", async () => {
     const { service } = createHarness(4, [
       { id: "current-new", creditsGranted: 1, activatedAt: new Date("2026-09-04T00:00:00.000Z"), createdAt: new Date("2026-09-04T00:00:00.000Z"), providerSubscriptionIdSnapshot: "provider-current", shopifyPlanHandleSnapshot: "growth", billingPeriodId: "period-current" },
@@ -279,6 +323,44 @@ describe("PurchasedRecoveryReservationService", () => {
     const result = await service.reserve({ shopId: "shop-1", sourceKey: "purchased:invalid-period" });
 
     expect(result).toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "old-lot" } });
+  });
+
+  it.each([
+    ["whitespace-only plan handle", { observedShopifyPlanHandle: "   " }],
+    ["blank billing period", { billingPeriodId: "   " }],
+  ])("fails closed for a %s ordering hint", async (_label, overrides) => {
+    const { service } = createHarness(2, [
+      {
+        id: "old-lot",
+        creditsGranted: 1,
+        activatedAt: new Date("2026-09-01T00:00:00.000Z"),
+        createdAt: new Date("2026-09-01T00:00:00.000Z"),
+        providerSubscriptionIdSnapshot: "provider-old",
+        shopifyPlanHandleSnapshot: "starter",
+        billingPeriodId: "period-old",
+      },
+      {
+        id: "new-lot",
+        creditsGranted: 1,
+        activatedAt: new Date("2026-09-02T00:00:00.000Z"),
+        createdAt: new Date("2026-09-02T00:00:00.000Z"),
+        providerSubscriptionIdSnapshot: "provider-current",
+        shopifyPlanHandleSnapshot: "growth",
+        billingPeriodId: "period-current",
+      },
+    ], {
+      status: "ACTIVE",
+      providerSubscriptionId: null,
+      observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      billingPeriodId: "period-current",
+      plan: { active: true },
+      ...overrides,
+    });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: `purchased:malformed-${_label}` }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "old-lot" } });
   });
 
   it("classifies all lots as historical while the subscription is TRIALING", async () => {
