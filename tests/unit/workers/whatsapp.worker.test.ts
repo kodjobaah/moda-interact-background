@@ -66,18 +66,20 @@ vi.mock(
 
 import {
   loadConversationTurn,
+  processInboundJobData,
   processInboundMessage,
 } from "../../../src/workers/whatsapp.worker.js";
 
 const event = {
+  schemaVersion: 1 as const,
   provider: "whatsapp" as const,
+  providerAccountId: "waba-1",
+  providerPhoneNumberId: "phone-1",
   providerMessageId: "inbound-1",
   customerPhone: "+447700900000",
   contextMessageId: "outbound-1",
-  phoneNumberId: "phone-1",
-  timestamp: Date.now(),
-  type: "text" as const,
-  text: "Can you help?",
+  occurredAt: "2026-09-16T12:00:00.000Z",
+  content: { type: "text" as const, text: "Can you help?" },
 };
 
 describe("WhatsApp worker inbound execution gate", () => {
@@ -124,9 +126,24 @@ describe("WhatsApp worker inbound execution gate", () => {
       conversationId: "conversation-1",
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
-      content: event.text,
+      content: event.content.text,
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+  });
+
+  it("ignores a legacy payload before admission, routing, or persistence", async () => {
+    await processInboundJobData({
+      provider: "whatsapp",
+      providerMessageId: "legacy-1",
+      customerPhone: event.customerPhone,
+      type: "audio",
+      mediaId: "media-1",
+      text: "",
+    });
+
+    expect(mocks.abuse.admitRaw).not.toHaveBeenCalled();
+    expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
   });
 
   it.each(["UNINSTALLED", "SUSPENDED"])(

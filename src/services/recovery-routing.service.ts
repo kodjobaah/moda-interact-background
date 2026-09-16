@@ -237,6 +237,7 @@ export class RecoveryRoutingService {
         },
 
         select: {
+          direction: true,
           conversationId: true,
 
           conversation: {
@@ -252,7 +253,7 @@ export class RecoveryRoutingService {
         },
       });
 
-      if (originalMessage) {
+      if (originalMessage?.direction === "OUTBOUND") {
         const shopId =
           originalMessage.conversation.checkoutRecovery?.shopId ??
           originalMessage.conversation.shopId;

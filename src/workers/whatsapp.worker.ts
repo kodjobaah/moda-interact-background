@@ -1,6 +1,9 @@
 import { Queue, Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
+import {
+  safeParseNormalizedWhatsAppInboundMessage,
+} from "@modainteract/moda-interact-shared/whatsapp";
 
 import { connectionRedis } from "../lib/redis.js";
 import prisma from "../lib/db.js";
@@ -9,6 +12,7 @@ import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { runCommerceAgent } from "../agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../agents/types.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
+import { inboundWhatsAppAudioService } from "../services/inbound-whatsapp-audio.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
@@ -66,11 +70,7 @@ export function createWhatsappWorker() {
     observeWorkerJob(workerMetricDefinition, job, async () => {
       switch (job.name) {
         case "message-received":
-          await observeConversationTurn(
-            "whatsapp",
-            () => processInboundMessage(job.data as WhatsAppInboundEvent),
-            conversationTurnObservation,
-          );
+          await processInboundJobData(job.data, job.id);
           return;
 
         case "process-conversation-turn":
@@ -122,6 +122,45 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   if (route.kind === "shop-unavailable") return;
 
+  const content = event.content;
+  if (content.type === "audio") {
+    if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
+    const result = await inboundWhatsAppAudioService.process(event, route.conversationId);
+    if (result.kind === "completed") {
+      const state = await conversationService.getTurnState(route.conversationId);
+      await conversationTurnProcessor.enqueue(route.conversationId, state.inboundVersion);
+    } else if (result.fallback) {
+      await outboundWhatsAppAdmissionService.sendText({
+        shopId: route.shopId,
+        conversationId: route.conversationId,
+        idempotencyKey: `voice-fallback:${event.providerMessageId}`,
+        senderType: "AUTOMATION",
+        to: event.customerPhone,
+        text: result.fallback,
+      });
+    }
+    return;
+  }
+
+  if (content.type === "unsupported") {
+    if (!("conversationId" in route)) return;
+    const conversationId = route.conversationId;
+    if (!conversationId) return;
+    const received = await conversationService.receiveMessage({
+      conversationId,
+      providerMessageId: event.providerMessageId,
+      inReplyToProviderId: event.contextMessageId,
+      content: `[Unsupported WhatsApp content: ${content.providerType.slice(0, 64)}]`,
+    });
+    if (!received.duplicate) {
+      await prisma.conversationMessage.update({
+        where: { providerMessageId: event.providerMessageId },
+        data: { contentType: "UNSUPPORTED" },
+      });
+    }
+    return;
+  }
+
   if (route.kind === "product-only" || route.kind === "standalone") {
     if (!route.shopId || !route.conversationId) return;
 
@@ -129,7 +168,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       conversationId: route.conversationId,
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
-      content: event.text ?? "",
+      content: content.text,
     });
 
     if (received.duplicate) return;
@@ -146,7 +185,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
       conversationId: route.conversationId,
       providerMessageId: event.providerMessageId,
       inReplyToProviderId: event.contextMessageId,
-      content: event.text ?? "",
+      content: content.text,
     });
 
     if (received.duplicate) return;
@@ -167,7 +206,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
     inReplyToProviderId: event.contextMessageId,
 
-    content: event.text ?? "",
+    content: content.text,
   });
 
   if (received.duplicate) {
@@ -179,6 +218,19 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
   await conversationTurnProcessor.enqueue(
     route.conversationId,
     received.version,
+  );
+}
+
+export async function processInboundJobData(input: unknown, jobId?: string) {
+  const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
+  if (!parsed.success) {
+    console.warn("Ignoring non-canonical WhatsApp inbound job", { jobId });
+    return;
+  }
+  await observeConversationTurn(
+    "whatsapp",
+    () => processInboundMessage(parsed.data),
+    conversationTurnObservation,
   );
 }
 export async function loadConversationTurn(
@@ -376,11 +428,15 @@ function buildProductOnlyContext(
       messages: [
         {
           role: "user",
-          content: event.text ?? "",
+          content: inboundText(event),
         },
       ],
     },
   };
+}
+
+function inboundText(event: WhatsAppInboundEvent): string {
+  return event.content.type === "text" ? event.content.text : "";
 }
 
 export {};
