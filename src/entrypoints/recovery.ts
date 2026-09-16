@@ -17,13 +17,14 @@ void startReadyWorkerProcess({
         import("./resources.js"),
         import("../workers/pending-recovery-candidate.worker.js"),
         import("../workers/recovery-capacity-resume.worker.js"),
-        import("../workers/recovery-outreach-follow-up.worker.js"),
+        import("../workers/shopify-discount-sync.worker.js"),
         import("../services/recovery-capacity-resume.service.js"),
         import("../services/recovery-outreach-follow-up.service.js"),
       ]);
     const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker();
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
     const recoveryOutreachFollowUpWorker = createRecoveryOutreachFollowUpWorker();
+    const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -57,7 +58,7 @@ void startReadyWorkerProcess({
     });
 
     return {
-      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker],
+      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker, shopifyDiscountSyncWorker],
       closeResources: [
         ...closeWorkerResources,
         stopQueueConcurrencyController,

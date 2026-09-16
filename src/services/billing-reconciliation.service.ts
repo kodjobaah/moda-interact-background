@@ -68,6 +68,7 @@ export class BillingReconciliationService {
     }),
     private readonly now: () => Date = () => new Date(),
     private readonly subscriptionQueue?: SubscriptionQueue,
+    private readonly discountQueue?: SubscriptionQueue,
   ) {}
 
   async reconcileOnce(runtimeConfigOrShopBatchSize?: Pick<BackgroundRuntimeConfigSnapshot, "billingReconciliationShopBatchSize" | "shopifyUsagePublishBatchSize" | "shopifyUsageRetryBaseSeconds" | "shopifyUsageRetryMaxSeconds" | "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds"> | number): Promise<BillingReconciliationResult> {
@@ -367,6 +368,8 @@ export class BillingReconciliationService {
           this.subscriptionQueue,
           this.logger,
           this.now,
+          undefined,
+          this.discountQueue,
         ).activateInitialPaid(
           shopId,
           existing.id,
@@ -771,7 +774,7 @@ export class BillingReconciliationService {
   }
 }
 
-export function createBillingReconciliationService(subscriptionQueue?: SubscriptionQueue): BillingReconciliationService {
+export function createBillingReconciliationService(subscriptionQueue?: SubscriptionQueue, discountQueue?: SubscriptionQueue): BillingReconciliationService {
   return new BillingReconciliationService(
     undefined,
     undefined,
@@ -780,6 +783,7 @@ export function createBillingReconciliationService(subscriptionQueue?: Subscript
     undefined,
     undefined,
     subscriptionQueue,
+    discountQueue,
   );
 }
 

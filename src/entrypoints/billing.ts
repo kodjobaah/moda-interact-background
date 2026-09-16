@@ -28,7 +28,7 @@ void startReadyWorkerProcess({
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
     const [
-      { closeBillingResources, billingSubscriptionQueue },
+      { closeBillingResources, billingSubscriptionQueue, shopifyDiscountSyncQueue },
       { createBillingReconciliationService },
       { RecoveryCreditRefundCorrectionService },
     ] = await Promise.all([
@@ -41,9 +41,9 @@ void startReadyWorkerProcess({
       import("../services/billing-subscription-reconciliation.service.js"),
       import("../workers/billing-subscription-reconciliation.worker.js"),
     ]);
-    const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue);
+    const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue);
     const recoveryCreditRefundCorrectionService = new RecoveryCreditRefundCorrectionService();
-    const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue);
+    const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue);
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
