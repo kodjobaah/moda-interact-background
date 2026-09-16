@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     getTurnState: vi.fn(),
   },
   routing: { resolveInboundMessage: vi.fn() },
+  recovery: { recordExternalActivity: vi.fn() },
   processor: { enqueue: vi.fn() },
   database: { conversation: { findUniqueOrThrow: vi.fn() } },
 }));
@@ -38,7 +39,7 @@ vi.mock("../../../src/agents/commerce.agent.js", () => ({
   runCommerceAgent: vi.fn(),
 }));
 vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
-  checkoutRecoveryService: {},
+  checkoutRecoveryService: mocks.recovery,
 }));
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: mocks.conversation,
@@ -94,6 +95,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       pendingTurnStartedAt: new Date(),
       lastInboundAt: new Date(),
     });
+    mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
   });
 
   it.each(["UNINSTALLED", "SUSPENDED"])(
@@ -122,6 +124,10 @@ describe("WhatsApp worker inbound execution gate", () => {
 
     await processInboundMessage(event);
 
+    expect(mocks.recovery.recordExternalActivity).toHaveBeenCalledWith(
+      "recovery-1",
+      new Date(event.occurredAt),
+    );
     expect(mocks.conversation.receiveMessage).toHaveBeenCalledWith({
       conversationId: "conversation-1",
       providerMessageId: event.providerMessageId,

@@ -21,6 +21,7 @@ export class BackgroundRuntimeLeaseService {
         SELECT CASE ${name}::"BackgroundRuntimeLeaseName"
           WHEN 'BILLING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "billingReconciliationIntervalSeconds"
           WHEN 'RECOVERY_CAPACITY_REPAIR'::"BackgroundRuntimeLeaseName" THEN "recoveryRepairIntervalSeconds"
+          WHEN 'CHECKOUT_RECOVERY_EXPIRY'::"BackgroundRuntimeLeaseName" THEN 3600
           WHEN 'TRANSLATION_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "translationReconciliationIntervalSeconds"
           WHEN 'QUEUE_CONCURRENCY_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 0
         END AS "cadenceSeconds"
