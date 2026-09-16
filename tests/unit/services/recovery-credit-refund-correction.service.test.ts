@@ -60,6 +60,8 @@ function harness(row = refundRow(), providerResult = provider) {
     usageEvent: { upsert: usageUpsert },
     recoveryCreditPurchase: { findUnique: vi.fn(), updateMany: vi.fn() },
     shopEntitlementCounter: { findUnique: vi.fn(), updateMany: vi.fn() },
+    merchantSupportThread: { upsert: vi.fn().mockResolvedValue({ id: "thread-1" }), update: vi.fn() },
+    merchantSupportMessage: { upsert: vi.fn() },
     $transaction: vi.fn().mockImplementation(async (callback: (transaction: unknown) => unknown) => callback(database)),
   };
   const partner = { getSubscriptionReconciliationSnapshot: vi.fn().mockResolvedValue({ activeSubscription: providerResult, latestLifecycleEvent: null }) };
@@ -104,6 +106,7 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     const test = harness(row, {
       ...provider,
       providerUsageSnapshot: [{ handle: "pack-meter", quantity: "0", costAmount: "0.00", costCurrency: "USD" }],
+      providerUsagePricingSnapshot: [],
     });
     test.database.recoveryCreditPurchase.findUnique.mockResolvedValue({ status: "WITHDRAWN", currentAmount: 1, reservedAmount: 0, version: 3 });
     test.database.shopEntitlementCounter.findUnique.mockResolvedValue({ id: "counter-1", version: 4, refundingQuantity: 1, grantedQuantity: 1 });
@@ -113,6 +116,46 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, completed: 1 });
     expect(test.database.shopEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ refundingQuantity: { decrement: 1 }, grantedQuantity: { decrement: 1 } }) }));
     expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 0, automaticCorrectionUsageEventId: "correction-event-1" }), data: expect.objectContaining({ status: "COMPLETED", providerConfirmedByPlatformAdminId: null, providerActionKind: null }) }));
+    expect(test.database.merchantSupportMessage.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ systemCode: "BILLING_REFUND_COMPLETED", sourceLanguageTag: "en-GB", kind: "SYSTEM", state: "AVAILABLE" }) }));
+    expect(test.database.merchantSupportMessage.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps native App Pricing eligible when the legacy provider id is null", async () => {
+    const nativeProvider = { ...provider, providerSubscriptionId: null };
+    const context = deriveShopifyProviderContextIdentity({ providerSubscriptionId: null, planHandle: "pro-2026", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd });
+    const test = harness(refundRow({ providerSubscriptionIdSnapshot: context }), nativeProvider);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ prepared: 1, providerActionRequired: 0 });
+    expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles frozen evidence without requiring live pricing", async () => {
+    const row = refundRow({
+      automaticCorrectionUsageEventId: "correction-event-1",
+      finalCreditQuantity: 1,
+      expectedProviderAmount: new Prisma.Decimal("1.00"),
+      expectedProviderCurrency: "USD",
+      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
+      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
+      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
+      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
+      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
+    });
+    const test = harness(row, { ...provider, providerUsageSnapshot: [{ handle: "pack-meter", quantity: "0", costAmount: "0.00", costCurrency: "USD" }], providerUsagePricingSnapshot: [] });
+    test.database.recoveryCreditPurchase.findUnique.mockResolvedValue({ status: "WITHDRAWN", currentAmount: 1, reservedAmount: 0, version: 3 });
+    test.database.shopEntitlementCounter.findUnique.mockResolvedValue({ id: "counter-1", version: 4, refundingQuantity: 1, grantedQuantity: 1 });
+    test.database.recoveryCreditPurchase.updateMany.mockResolvedValue({ count: 1 });
+    test.database.shopEntitlementCounter.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ completed: 1 });
+  });
+
+  it("freezes a proportional amount for an unsafe partial-pack fallback", async () => {
+    const test = harness(refundRow({ purchase: { usageEventId: "purchase-event-1", status: "WITHDRAWN", currentAmount: 1, reservedAmount: 0, creditsGranted: 4 }, purchaseProviderAmountSnapshot: new Prisma.Decimal("20.00") }), { ...provider, providerUsagePricingSnapshot: [] });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ providerActionRequired: 1 });
+    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ finalCreditQuantity: 1, expectedProviderAmount: new Prisma.Decimal("5.00"), expectedProviderCurrency: "USD", status: "PROVIDER_ACTION_REQUIRED" }) }));
+    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
   it("leaves a reported correction requested when the provider has not caught up", async () => {
@@ -171,5 +214,14 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, reconciled: 1, prepared: 0 });
     expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(1);
     expect(test.database.recoveryCreditRefund.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "refund-1" } }));
+  });
+
+  it("does not transition a safe prepare race into a publishable fallback event", async () => {
+    const test = harness(refundRow());
+    test.database.recoveryCreditRefund.updateMany.mockResolvedValueOnce({ count: 0 });
+    test.database.recoveryCreditRefund.findUnique.mockResolvedValue(refundRow({ status: "PROVIDER_ACTION_REQUIRED" }));
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, prepared: 0, reconciled: 1, providerActionRequired: 0 });
+    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledTimes(1);
   });
 });

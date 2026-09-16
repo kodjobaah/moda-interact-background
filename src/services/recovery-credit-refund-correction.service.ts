@@ -7,9 +7,16 @@ import {
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import {
+  ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
+  BILLING_SYSTEM_MESSAGE_CODES,
+  createMerchantBillingSystemSourceKey,
   createShopifyUsageIdempotencyKey,
   deriveShopifyProviderContextIdentity,
 } from "@modainteract/moda-interact-shared/billing";
+import {
+  MerchantSupportMessageKind,
+  MerchantSupportMessageState,
+} from "@prisma/client";
 
 import prisma from "../lib/db.js";
 import {
@@ -130,48 +137,52 @@ export class RecoveryCreditRefundCorrectionService {
     }
 
     const correctionIdempotencyKey = `recovery-credit-refund:${refund.id}`;
-    const prepared = await this.database.$transaction(async (transaction) => {
-      const correction = await transaction.usageEvent.upsert({
-        where: { idempotencyKey: correctionIdempotencyKey },
-        update: {},
-        create: {
-          shopId: refund.shopId,
-          billingPeriodId: refund.billingPeriodIdSnapshot,
-          metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
-          quantity: proof.correctionValue,
-          correctionOfUsageEventId: refund.purchase.usageEventId,
-          sourceType: "RECOVERY_CREDIT_REFUND",
-          sourceId: refund.id,
-          shopifyEventHandle: refund.eventHandleSnapshot,
-          shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(
-            refund.shopId,
-            correctionIdempotencyKey,
-          ),
-          idempotencyKey: correctionIdempotencyKey,
-          occurredAt: this.now(),
-          shopifyReportState: ShopifyReportState.PENDING,
-        },
+    try {
+      await this.database.$transaction(async (transaction) => {
+        const correction = await transaction.usageEvent.upsert({
+          where: { idempotencyKey: correctionIdempotencyKey },
+          update: {},
+          create: {
+            shopId: refund.shopId,
+            billingPeriodId: refund.billingPeriodIdSnapshot,
+            metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
+            quantity: proof.correctionValue,
+            correctionOfUsageEventId: refund.purchase.usageEventId,
+            sourceType: "RECOVERY_CREDIT_REFUND",
+            sourceId: refund.id,
+            shopifyEventHandle: refund.eventHandleSnapshot,
+            shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(
+              refund.shopId,
+              correctionIdempotencyKey,
+            ),
+            idempotencyKey: correctionIdempotencyKey,
+            occurredAt: this.now(),
+            shopifyReportState: ShopifyReportState.PENDING,
+          },
+        });
+        const linked = await transaction.recoveryCreditRefund.updateMany({
+          where: {
+            id: refund.id,
+            status: RecoveryCreditRefundStatus.REQUESTED,
+            automaticCorrectionUsageEventId: null,
+          },
+          data: {
+            finalCreditQuantity: proof.finalCreditQuantity,
+            expectedProviderAmount: proof.expectedProviderAmount,
+            expectedProviderCurrency: proof.currency,
+            providerUsageQuantityBeforeCorrection: proof.quantityBefore,
+            providerUsageCostBeforeCorrection: proof.costBefore,
+            expectedProviderUsageQuantityAfterCorrection: proof.quantityAfter,
+            expectedProviderUsageCostAfterCorrection: proof.costAfter,
+            automaticCorrectionUsageEventId: correction.id,
+          },
+        });
+        if (linked.count !== 1) throw new PrepareRaceError();
       });
-      const linked = await transaction.recoveryCreditRefund.updateMany({
-        where: {
-          id: refund.id,
-          status: RecoveryCreditRefundStatus.REQUESTED,
-          automaticCorrectionUsageEventId: null,
-        },
-        data: {
-          finalCreditQuantity: proof.finalCreditQuantity,
-          expectedProviderAmount: proof.expectedProviderAmount,
-          expectedProviderCurrency: proof.currency,
-          providerUsageQuantityBeforeCorrection: proof.quantityBefore,
-          providerUsageCostBeforeCorrection: proof.costBefore,
-          expectedProviderUsageQuantityAfterCorrection: proof.quantityAfter,
-          expectedProviderUsageCostAfterCorrection: proof.costAfter,
-          automaticCorrectionUsageEventId: correction.id,
-        },
-      });
-      return { correction, linked: linked.count === 1 };
-    });
-    if (prepared.linked) return "prepared";
+      return "prepared";
+    } catch (error) {
+      if (!(error instanceof PrepareRaceError)) throw error;
+    }
 
     const current = await this.database.recoveryCreditRefund.findUnique({
       where: { id: refund.id },
@@ -222,7 +233,7 @@ export class RecoveryCreditRefundCorrectionService {
     const finalCreditQuantity = refund.purchase.currentAmount;
     const ratio = new Prisma.Decimal(finalCreditQuantity).div(refund.purchase.creditsGranted);
     if (ratio.lte(0) || ratio.gt(1)) return unsafe("refund ratio is outside (0, 1]");
-    const provider = await this.readProvider(refund);
+    const provider = await this.readProviderForPrepare(refund);
     if (!provider.safe) return provider;
     const quantityBefore = provider.quantity;
     const costBefore = provider.cost;
@@ -247,7 +258,7 @@ export class RecoveryCreditRefundCorrectionService {
     };
   }
 
-  private async readProvider(refund: RefundRow): Promise<ProviderProof> {
+  private async readProviderState(refund: RefundRow): Promise<ProviderStateProof> {
     const shopifyShopId = refund.shop.shopifyShopId;
     if (!shopifyShopId) return unsafe("shop has no Shopify identifier");
     const snapshot = await getSubscriptionReconciliationSnapshot(this.partner, shopifyShopId);
@@ -257,35 +268,51 @@ export class RecoveryCreditRefundCorrectionService {
       where: { id: refund.billingPeriodIdSnapshot },
       select: { periodStart: true, periodEnd: true },
     });
-    const context = provider.providerSubscriptionId && provider.currentPeriodStart && provider.currentPeriodEnd
-      ? deriveShopifyProviderContextIdentity({
-          providerSubscriptionId: provider.providerSubscriptionId,
-          planHandle: provider.planHandle,
-          currentPeriodStart: provider.currentPeriodStart,
-          currentPeriodEnd: provider.currentPeriodEnd,
-        })
-      : null;
+    if (!period || !provider.currentPeriodStart || !provider.currentPeriodEnd) {
+      return unsafe("Shopify provider period is unavailable");
+    }
+    let context: string;
+    try {
+      context = deriveShopifyProviderContextIdentity({
+        providerSubscriptionId: provider.providerSubscriptionId,
+        planHandle: provider.planHandle,
+        currentPeriodStart: provider.currentPeriodStart,
+        currentPeriodEnd: provider.currentPeriodEnd,
+      });
+    } catch {
+      return unsafe("Shopify provider context identity is unavailable");
+    }
     if (
       context !== refund.providerSubscriptionIdSnapshot
       || provider.planHandle !== refund.planHandleSnapshot
-      || !period
-      || provider.currentPeriodStart?.getTime() !== period.periodStart.getTime()
-      || provider.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
+      || provider.currentPeriodStart.getTime() !== period.periodStart.getTime()
+      || provider.currentPeriodEnd.getTime() !== period.periodEnd.getTime()
       || !provider.usageEventHandles.includes(refund.eventHandleSnapshot)
     ) return unsafe("Shopify provider context does not match frozen refund provenance");
     const usage = provider.providerUsageSnapshot.find((item) => item.handle === refund.eventHandleSnapshot);
-    const pricing = provider.providerUsagePricingSnapshot?.find((item) => item.handle === refund.eventHandleSnapshot);
     const quantity = parseDecimal(usage?.quantity);
     const cost = parseDecimal(usage?.costAmount);
     const currency = usage?.costCurrency?.trim().toUpperCase();
-    if (!quantity || !cost || cost.lt(0) || !currency || currency !== refund.purchaseProviderCurrencySnapshot.toUpperCase() || !pricing || pricing.currency?.toUpperCase() !== currency) {
-      return unsafe("Shopify provider quantity, cost, currency, or pricing is unavailable");
+    if (!quantity || !cost || cost.lt(0) || !currency || currency !== refund.purchaseProviderCurrencySnapshot.toUpperCase()) {
+      return unsafe("Shopify provider quantity, cost, or currency is unavailable");
     }
-    return { safe: true, quantity, cost, currency, pricing };
+    const pricing = provider.providerUsagePricingSnapshot?.find((item) => item.handle === refund.eventHandleSnapshot);
+    return {
+      safe: true,
+      quantity,
+      cost,
+      currency,
+      ...(pricing ? { pricing } : {}),
+    };
   }
 
-  private async readProviderState(refund: RefundRow): Promise<ProviderProof> {
-    return this.readProvider(refund);
+  private async readProviderForPrepare(refund: RefundRow): Promise<ProviderProof> {
+    const state = await this.readProviderState(refund);
+    if (!state.safe) return state;
+    if (!state.pricing || state.pricing.currency?.toUpperCase() !== state.currency) {
+      return unsafe("Shopify provider pricing is unavailable or ambiguous");
+    }
+    return { ...state, pricing: state.pricing };
   }
 
   private async complete(refund: RefundRow, providerCost: Prisma.Decimal, currency: string): Promise<boolean> {
@@ -314,14 +341,47 @@ export class RecoveryCreditRefundCorrectionService {
         data: { providerAmount: refund.expectedProviderAmount, providerCurrency: currency, providerConfirmedAt: this.now(), providerConfirmedByPlatformAdminId: null, providerActionKind: null, status: RecoveryCreditRefundStatus.COMPLETED, completedAt: this.now(), version: { increment: 1 } },
       });
       if (updatedPurchase.count !== 1 || updatedCounter.count !== 1 || updatedRefund.count !== 1) throw new Error("automatic refund completion CAS failed");
+      const completionTime = this.now();
+      const systemCode = BILLING_SYSTEM_MESSAGE_CODES.REFUND_COMPLETED;
+      const sourceKey = createMerchantBillingSystemSourceKey(
+        refund.shopId,
+        systemCode,
+        refund.id,
+        ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
+      );
+      const thread = await transaction.merchantSupportThread.upsert({
+        where: { shopId: refund.shopId },
+        create: { shopId: refund.shopId },
+        update: {},
+      });
+      await transaction.merchantSupportMessage.upsert({
+        where: { sourceKey },
+        create: {
+          threadId: thread.id,
+          kind: MerchantSupportMessageKind.SYSTEM,
+          state: MerchantSupportMessageState.AVAILABLE,
+          originalBody: "Your recovery-credit refund has completed. The refundable purchased credits have been removed and Shopify provider reconciliation is complete.",
+          sourceLanguageTag: "en-GB",
+          systemCode,
+          systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
+          sourceKey,
+          availableAt: completionTime,
+        },
+        update: {},
+      });
+      await transaction.merchantSupportThread.update({
+        where: { id: thread.id },
+        data: { lastMessageAt: completionTime },
+      });
       return true;
     });
   }
 
   private async markProviderActionRequired(refund: RefundRow, reason: string): Promise<void> {
+    const evidence = localRefundEvidence(refund);
     await this.database.recoveryCreditRefund.updateMany({
       where: { id: refund.id, status: RecoveryCreditRefundStatus.REQUESTED, automaticCorrectionUsageEventId: null },
-      data: { finalCreditQuantity: refund.purchase.currentAmount > 0 ? refund.purchase.currentAmount : null, expectedProviderAmount: refund.purchaseProviderAmountSnapshot, expectedProviderCurrency: refund.purchaseProviderCurrencySnapshot, status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED, reason: boundedReason(reason) },
+      data: { finalCreditQuantity: evidence?.finalCreditQuantity ?? null, expectedProviderAmount: evidence?.expectedProviderAmount ?? null, expectedProviderCurrency: evidence?.currency ?? null, status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED, reason: boundedReason(reason) },
     });
   }
 
@@ -335,8 +395,16 @@ export class RecoveryCreditRefundCorrectionService {
 
 type CorrectionOutcome = "prepared" | "reconciled" | "completed" | "provider-action-required" | "needs-attention";
 type UnsafeProof = { safe: false; reason: string };
+type ProviderStateProof = { safe: true; quantity: Prisma.Decimal; cost: Prisma.Decimal; currency: string; pricing?: PartnerUsagePricingSnapshot } | UnsafeProof;
 type ProviderProof = { safe: true; quantity: Prisma.Decimal; cost: Prisma.Decimal; currency: string; pricing: PartnerUsagePricingSnapshot } | UnsafeProof;
 type PreparationProof = { safe: true; finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string; quantityBefore: Prisma.Decimal; costBefore: Prisma.Decimal; quantityAfter: Prisma.Decimal; costAfter: Prisma.Decimal; correctionValue: Prisma.Decimal } | UnsafeProof;
+
+class PrepareRaceError extends Error {
+  constructor() {
+    super("recovery-credit refund preparation lost its refund-link race");
+    this.name = "PrepareRaceError";
+  }
+}
 
 const refundSelect = {
   id: true, shopId: true, status: true, reason: true, purchaseId: true,
@@ -393,3 +461,14 @@ function unsafe(reason: string): { safe: false; reason: string } { return { safe
 function nonNegative(value: Prisma.Decimal): Prisma.Decimal { return value.lt(0) ? new Prisma.Decimal(0) : value; }
 function boundedReason(reason: string): string { return reason.slice(0, MAX_REASON_LENGTH); }
 function boundedPageSize(value: number): number { return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE; }
+
+function localRefundEvidence(refund: RefundRow): { finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string } | null {
+  if (refund.purchase.currentAmount <= 0 || refund.purchase.creditsGranted <= 0 || !refund.purchaseProviderAmountSnapshot.gt(0)) return null;
+  const ratio = new Prisma.Decimal(refund.purchase.currentAmount).div(refund.purchase.creditsGranted);
+  if (ratio.lte(0) || ratio.gt(1)) return null;
+  return {
+    finalCreditQuantity: refund.purchase.currentAmount,
+    expectedProviderAmount: refund.purchaseProviderAmountSnapshot.mul(ratio).toDecimalPlaces(2),
+    currency: refund.purchaseProviderCurrencySnapshot,
+  };
+}
