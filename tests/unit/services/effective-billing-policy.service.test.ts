@@ -7,17 +7,27 @@ import {
 const now = new Date("2026-09-07T20:00:00.000Z");
 
 function client(overrides: Record<string, unknown> = {}) {
+  const defaultPlatformPolicy = {
+    absoluteOutboundHardLimit: 15,
+    defaultOutboundSoftLimit: 10,
+    defaultOutboundHardLimit: 20,
+    terminalMessageReservedSlots: 1,
+    globalPauseNewRecoveries: false,
+    globalPauseAutomatedWhatsapp: false,
+    version: 3,
+  };
+  const customPlatformPolicy = overrides.platformBillingPolicy as
+    | { findUnique?: () => Promise<Record<string, unknown>> }
+    | undefined;
+  const planFeatures = overrides.planFeatures as unknown[] | undefined;
   const plan = {
     id: "plan-free",
     shopifyPlanHandle: "free",
     kind: "FREE",
     active: true,
     shopifyUsageEventHandle: null,
-    defaultOutboundSoftLimit: 10,
-    defaultOutboundHardLimit: 20,
-    terminalMessageReservedSlots: 1,
     updatedAt: now,
-    features: [{ feature: "CHECKOUT_RECOVERY", enabled: true }],
+    features: planFeatures ?? [{ feature: { key: "checkout_recovery", active: true, activationMode: "ALWAYS_ENABLED" }, enabled: true }],
   };
 
   return {
@@ -32,10 +42,7 @@ function client(overrides: Record<string, unknown> = {}) {
     },
     platformBillingPolicy: {
       findUnique: async () => ({
-        absoluteOutboundHardLimit: 15,
-        globalPauseNewRecoveries: false,
-        globalPauseAutomatedWhatsapp: false,
-        version: 3,
+        ...defaultPlatformPolicy,
       }),
     },
     shopBillingPolicyOverride: { findUnique: async () => null },
@@ -54,10 +61,26 @@ function client(overrides: Record<string, unknown> = {}) {
       }),
     },
     ...overrides,
+    platformBillingPolicy: {
+      findUnique: async () => ({
+        ...defaultPlatformPolicy,
+        ...(customPlatformPolicy?.findUnique
+          ? await customPlatformPolicy.findUnique()
+          : {}),
+      }),
+    },
+    shopFeaturePreference: overrides.shopFeaturePreference ?? {
+      findMany: async () => [],
+    },
   } as never;
 }
 
 describe("EffectiveBillingPolicyResolver", () => {
+  const mappedFeature = (key: string, activationMode = "ALWAYS_ENABLED", active = true, enabled = true) => ({
+    feature: { key, active, activationMode },
+    enabled,
+  });
+
   it("resolves the plan-independent lifetime Free grant from the durable counter", async () => {
     const policy = await new EffectiveBillingPolicyResolver(client()).resolve("shop-1", now);
 
@@ -69,7 +92,7 @@ describe("EffectiveBillingPolicyResolver", () => {
       remaining: 2,
     });
     expect(policy.outboundHardLimit).toBe(15);
-    expect(policy.features.CHECKOUT_RECOVERY).toBe(true);
+    expect(policy.features.has("checkout_recovery")).toBe(true);
   });
 
   it("does not impose a local hard stop on paid metered plans", async () => {
@@ -111,6 +134,42 @@ describe("EffectiveBillingPolicyResolver", () => {
     expect(policy.billingPeriod?.start).toEqual(new Date("2026-09-01T00:00:00.000Z"));
     expect(policy.billingPeriod?.status).toBe("OPEN");
     expect(policy.billingPeriod?.includedCounter.grantedQuantity).toBe(10);
+  });
+
+  it("resolves dynamic feature activation from plan mappings and preferences", async () => {
+    const optional = mappedFeature("future_feature", "MERCHANT_OPT_IN");
+    const fake = client({
+      planFeatures: [
+        mappedFeature("always_feature"),
+        optional,
+        mappedFeature("inactive_feature", "ALWAYS_ENABLED", false),
+        mappedFeature("disabled_feature", "ALWAYS_ENABLED", true, false),
+      ],
+      shopFeaturePreference: {
+        findMany: async () => [
+          { enabled: true, feature: { key: "future_feature" } },
+          { enabled: true, feature: { key: "unmapped_feature" } },
+        ],
+      },
+    });
+
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+
+    expect(policy.features.has("always_feature")).toBe(true);
+    expect(policy.features.has("future_feature")).toBe(true);
+    expect(policy.features.has("inactive_feature")).toBe(false);
+    expect(policy.features.has("disabled_feature")).toBe(false);
+    expect(policy.features.has("unmapped_feature")).toBe(false);
+  });
+
+  it("does not enable an optional feature without an enabled preference", async () => {
+    const fake = client({
+      planFeatures: [mappedFeature("optional_feature", "MERCHANT_OPT_IN")],
+    });
+
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+
+    expect(policy.features.has("optional_feature")).toBe(false);
   });
 
   it("fails closed when the lifetime Free counter is missing", async () => {
@@ -355,15 +414,15 @@ describe("EffectiveBillingPolicyResolver", () => {
               kind: "FREE",
               active: true,
               shopifyUsageEventHandle: null,
-              defaultOutboundSoftLimit: 10,
-              defaultOutboundHardLimit: 20,
-              terminalMessageReservedSlots,
               updatedAt: now,
               features: [],
             },
             billingPeriod: null,
             shop: { status: "ACTIVE" },
           }),
+        },
+        platformBillingPolicy: {
+          findUnique: async () => ({ terminalMessageReservedSlots }),
         },
       });
       await expect(

@@ -33,6 +33,8 @@ import {
   type PromotionalReservationOutcome,
 } from "./promotional-recovery-reservation.service.js";
 
+const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
+
 type RecoveryBillingDatabase = Pick<
   PrismaClient,
   "$transaction" | "merchantSupportThread" | "merchantSupportMessage"
@@ -104,7 +106,8 @@ export type RecoveryBillingAdmissionResult =
         | "billing-period-closing"
         | "billing-period-reconciliation"
         | "contract-required"
-        | "subscription-frozen";
+        | "subscription-frozen"
+        | "feature-unavailable";
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
@@ -137,6 +140,9 @@ export class RecoveryBillingService {
         }
       }
       throw error;
+    }
+    if (!policy.features.has(CHECKOUT_RECOVERY_FEATURE_KEY)) {
+      return { kind: "blocked", reason: "feature-unavailable" };
     }
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,

@@ -647,7 +647,6 @@ export class BillingSubscriptionReconciliationService {
         pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: null, lastSyncedAt: now,
         lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
-      await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: false } });
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
         const catalogue = await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null } });

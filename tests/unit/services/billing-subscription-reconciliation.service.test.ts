@@ -2247,7 +2247,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "NO_CONTRACT", planId: null, billingPeriodId: null, pendingPlanId: null, nextReconcileAt: null }),
     }));
-    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: false } });
+    expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
     expectNoModelMutations(test.transaction.billingPeriod);
     expectNoModelMutations(test.transaction.billingPeriodEntitlementCounter);

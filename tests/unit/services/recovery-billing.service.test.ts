@@ -76,6 +76,7 @@ function freePolicy() {
     shopId: "shop-1",
     subscriptionId: "subscription-1",
     planKind: "FREE" as const,
+    features: new Set(["checkout_recovery"]),
     newRecoveriesPaused: false,
     freeAllowance: {
       grant: 5,
@@ -94,6 +95,7 @@ function paidPolicy(
   return {
     shopId: "shop-1",
     planKind: "PAID_METERED" as const,
+    features: new Set(["checkout_recovery"]),
     planId: "plan-1",
     newRecoveriesPaused: false,
     shopifyUsageEventHandle: "basic-recovery-conversation",
@@ -143,6 +145,24 @@ function purchasedPack(overrides: Record<string, unknown> = {}) {
 }
 
 describe("RecoveryBillingService", () => {
+  it("denies checkout recovery before any reservation when the feature is absent", async () => {
+    const database = createDatabase();
+    const reservation = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+    const service = new RecoveryBillingService(
+      database as never,
+      { resolve: vi.fn(async () => ({ ...freePolicy(), features: new Set<string>() })) } as never,
+      reservation as never,
+      reservation as never,
+      reservation as never,
+      reservation as never,
+    );
+
+    await expect(service.admit({ shopId: "shop-1", recoveryId: "feature-disabled" }))
+      .resolves.toEqual({ kind: "blocked", reason: "feature-unavailable" });
+    expect(reservation.reserve).not.toHaveBeenCalled();
+    expect(database.usageEvent.upsert).not.toHaveBeenCalled();
+  });
+
   it("does not reserve paid included capacity while the billing period is draining", async () => {
     const purchasedReservationService = {
       reserve: vi.fn(async () => ({ kind: "reserved" as const, reservation: {} })),
