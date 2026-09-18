@@ -8,7 +8,10 @@ import { describe, expect, it } from "vitest";
 import { TranslationBatchAssemblyService } from "../../src/services/translation-batch-assembly.service.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-const describeWithDatabase = testDatabaseUrl ? describe : describe.skip;
+const describeWithDatabase =
+  testDatabaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
+    ? describe
+    : describe.skip;
 
 describeWithDatabase(
   "translation batch assembly PostgreSQL concurrency",

@@ -629,6 +629,20 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   it("allows paid recovery beyond included units and does not repeat a duplicate send", async () => {
     prismaMock.checkoutRecovery.findUnique
       .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "recovery-1",
+        status: "MESSAGE_SENT",
+        outreachAttempts: [
+          {
+            id: "recovery-outreach:recovery-1:1",
+            sequence: 1,
+            status: "WAITING_FOR_RESPONSE",
+            sentAt: new Date("2026-09-16T10:00:00Z"),
+            followUpDueAt: null,
+            customerRespondedAt: null,
+          },
+        ],
+      })
       .mockResolvedValueOnce({ status: "MESSAGE_SENT" });
 
     const first = await service.materializeMaturedCandidate({

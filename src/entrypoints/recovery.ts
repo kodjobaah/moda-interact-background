@@ -12,23 +12,34 @@ void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createPendingRecoveryCandidateWorker }, { createRecoveryCapacityResumeWorker }, { createRecoveryOutreachFollowUpWorker }, { recoveryCapacityResumeService }, { recoveryOutreachFollowUpService }] =
-      await Promise.all([
-        import("./resources.js"),
-        import("../workers/pending-recovery-candidate.worker.js"),
-        import("../workers/recovery-capacity-resume.worker.js"),
-        import("../workers/shopify-discount-sync.worker.js"),
-        import("../services/recovery-capacity-resume.service.js"),
-        import("../services/recovery-outreach-follow-up.service.js"),
-      ]);
-    const pendingRecoveryCandidateWorker = createPendingRecoveryCandidateWorker();
+    const [
+      { closeWorkerResources },
+      { createPendingRecoveryCandidateWorker },
+      { createRecoveryCapacityResumeWorker },
+      { createRecoveryOutreachFollowUpWorker },
+      { createShopifyDiscountSyncWorker },
+      { recoveryCapacityResumeService },
+      { recoveryOutreachFollowUpService },
+    ] = await Promise.all([
+      import("./resources.js"),
+      import("../workers/pending-recovery-candidate.worker.js"),
+      import("../workers/recovery-capacity-resume.worker.js"),
+      import("../workers/recovery-outreach-follow-up.worker.js"),
+      import("../workers/shopify-discount-sync.worker.js"),
+      import("../services/recovery-capacity-resume.service.js"),
+      import("../services/recovery-outreach-follow-up.service.js"),
+    ]);
+    const pendingRecoveryCandidateWorker =
+      createPendingRecoveryCandidateWorker();
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
-    const recoveryOutreachFollowUpWorker = createRecoveryOutreachFollowUpWorker();
+    const recoveryOutreachFollowUpWorker =
+      createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
-    const stopQueueConcurrencyController = await startQueueConcurrencyController({
-      config: backgroundRuntimeConfigService,
-      lease: backgroundRuntimeLeaseService,
-    });
+    const stopQueueConcurrencyController =
+      await startQueueConcurrencyController({
+        config: backgroundRuntimeConfigService,
+        lease: backgroundRuntimeLeaseService,
+      });
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -36,9 +47,14 @@ void startReadyWorkerProcess({
       leaseName: "RECOVERY_CAPACITY_REPAIR",
       intervalMs: 5 * 60 * 1000,
       runImmediately: true,
-      getIntervalMs: (runtimeConfig) => runtimeConfig.recoveryRepairIntervalSeconds * 1000,
-      run: async (runtimeConfig) => { await recoveryCapacityResumeService.repair(runtimeConfig); },
-      onError: (error) => { console.error("Recovery capacity repair failed", error); },
+      getIntervalMs: (runtimeConfig) =>
+        runtimeConfig.recoveryRepairIntervalSeconds * 1000,
+      run: async (runtimeConfig) => {
+        await recoveryCapacityResumeService.repair(runtimeConfig);
+      },
+      onError: (error) => {
+        console.error("Recovery capacity repair failed", error);
+      },
     });
     const stopExpiryScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -49,16 +65,28 @@ void startReadyWorkerProcess({
       run: async (runtimeConfig) => {
         await checkoutRecoveryExpiryService.expireInactive(runtimeConfig);
       },
-      onError: (error) => { console.error("Checkout recovery expiry failed", error); },
+      onError: (error) => {
+        console.error("Checkout recovery expiry failed", error);
+      },
     });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
-      queueNames: ["pending-recovery-candidates", "recovery-capacity-resume", "recovery-outreach-follow-up"],
+      queueNames: [
+        "pending-recovery-candidates",
+        "recovery-capacity-resume",
+        "recovery-outreach-follow-up",
+        "shopify-discount-sync",
+      ],
     });
 
     return {
-      workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker, shopifyDiscountSyncWorker],
+      workers: [
+        pendingRecoveryCandidateWorker,
+        recoveryCapacityResumeWorker,
+        recoveryOutreachFollowUpWorker,
+        shopifyDiscountSyncWorker,
+      ],
       closeResources: [
         ...closeWorkerResources,
         stopQueueConcurrencyController,
@@ -75,7 +103,9 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(error instanceof Error ? error.message : "worker readiness failed");
+  console.error(
+    error instanceof Error ? error.message : "worker readiness failed",
+  );
   await closeWorkerObservability();
   process.exitCode = 1;
 }

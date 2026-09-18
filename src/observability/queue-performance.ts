@@ -14,6 +14,7 @@ export type QueueName =
   | "pending-recovery-candidates"
   | "recovery-capacity-resume"
   | "recovery-outreach-follow-up"
+  | "shopify-discount-sync"
   | "whatsapp-events"
   | "merchant-communications"
   | "billing-subscription-reconcile";

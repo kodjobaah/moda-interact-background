@@ -21,12 +21,22 @@ describe("recovery entrypoint capacity-resume wiring", () => {
   });
 
   it("starts all recovery workers and observes all queues", () => {
-    expect(source).toContain(
-      "workers: [pendingRecoveryCandidateWorker, recoveryCapacityResumeWorker, recoveryOutreachFollowUpWorker]",
-    );
-    expect(source).toContain(
-      'queueNames: ["pending-recovery-candidates", "recovery-capacity-resume", "recovery-outreach-follow-up"]',
-    );
+    for (const worker of [
+      "pendingRecoveryCandidateWorker",
+      "recoveryCapacityResumeWorker",
+      "recoveryOutreachFollowUpWorker",
+      "shopifyDiscountSyncWorker",
+    ]) {
+      expect(source).toContain(worker);
+    }
+    for (const queueName of [
+      "pending-recovery-candidates",
+      "recovery-capacity-resume",
+      "recovery-outreach-follow-up",
+      "shopify-discount-sync",
+    ]) {
+      expect(source).toContain(`"${queueName}"`);
+    }
   });
 
   it("stops the repair scheduler and closes the resume queue on shutdown", () => {

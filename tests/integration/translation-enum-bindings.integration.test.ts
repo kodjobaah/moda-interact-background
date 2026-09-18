@@ -12,9 +12,16 @@ import {
 import { TranslationBatchPollService } from "../../src/services/translation-batch-poll.service.js";
 import { TranslationBatchResultsService } from "../../src/services/translation-batch-results.service.js";
 import { TranslationReconciliationService } from "../../src/services/translation-reconciliation.service.js";
+import { backgroundRuntimeConfig } from "../helpers/background-runtime-config.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = testDatabaseUrl ? describe : describe.skip;
+const runtimeConfig = {
+  current: () =>
+    backgroundRuntimeConfig({
+      translationMaxAutoRetries: 0,
+    }),
+};
 
 type Fixture = {
   shopId: string;
@@ -115,6 +122,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
           },
         } as never,
         queue: { add: async () => undefined },
+        runtimeConfig,
       });
 
       await service.submit({ translationBatchId: fixture.batchId });
@@ -127,7 +135,6 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
 
   it("persists terminal poll Batch and translation statuses through real enum columns", async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "0";
     const database = new PrismaClient();
     const fixture = await seedBatch(database, "SUBMITTED", { withTranslation: true });
     try {
@@ -148,6 +155,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
           }),
         }) as never,
         queue: { add: async () => undefined },
+        runtimeConfig,
       });
 
       await service.poll({ schemaVersion: 1, translationBatchId: fixture.batchId, pollSequence: 1 });
@@ -161,7 +169,6 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
 
   it("persists failed provider results through the real translation enum column", async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
-    process.env.TRANSLATION_MAX_AUTO_RETRIES = "0";
     const database = new PrismaClient();
     const fixture = await seedBatch(database, "PROVIDER_COMPLETED", { withTranslation: true });
     try {
@@ -175,6 +182,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
             failureCode: "invalid_request",
           }],
         }) as never,
+        runtimeConfig,
       });
 
       await service.apply({ translationBatchId: fixture.batchId });
@@ -213,6 +221,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
             },
           }),
         }) as never,
+        runtimeConfig,
       });
 
       await service.reconcile();
