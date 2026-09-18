@@ -1,7 +1,6 @@
 import {
   BillingPeriodEntitlementCounterKind,
   BillingPeriodStatus,
-  BillingPlanFeatureIdentifier,
   BillingPlanKind,
   SubscriptionProjectionStatus,
 } from "@prisma/client";
@@ -74,7 +73,7 @@ export type EffectiveBillingPolicy = {
   planId: string;
   planHandle: string;
   planKind: BillingPlanKind;
-  features: Record<BillingPlanFeatureIdentifier, boolean>;
+  features: ReadonlySet<string>;
   freeAllowance: FreeAllowancePolicy | null;
   shopifyUsageEventHandle: string | null;
   billingPeriod: PaidBillingPeriodProjection | null;
@@ -99,6 +98,7 @@ export type BillingPolicyClient = Pick<
   | "platformBillingPolicy"
   | "shopBillingPolicyOverride"
   | "shopEntitlementCounter"
+  | "shopFeaturePreference"
   | "billingPeriodEntitlementCounter"
 >;
 
@@ -106,8 +106,6 @@ const activeSubscriptionStatuses: SubscriptionProjectionStatus[] = [
   SubscriptionProjectionStatus.ACTIVE,
   SubscriptionProjectionStatus.TRIALING,
 ];
-
-const featureIdentifiers = Object.values(BillingPlanFeatureIdentifier);
 
 export class EffectiveBillingPolicyResolver {
   constructor(private readonly client: BillingPolicyClient = prisma) {}
@@ -119,7 +117,7 @@ export class EffectiveBillingPolicyResolver {
     const subscription = await this.client.subscription.findUnique({
       where: { shopId },
       include: {
-        plan: { include: { features: true } },
+        plan: { include: { features: { include: { feature: true } } } },
         billingPeriod: true,
         shop: { select: { status: true } },
       },
@@ -167,7 +165,7 @@ export class EffectiveBillingPolicyResolver {
 
     const plan = subscription.plan;
 
-    const [platformPolicy, override, counter] = await Promise.all([
+    const [platformPolicy, override, counter, shopFeaturePreferences] = await Promise.all([
       this.client.platformBillingPolicy.findUnique({ where: { id: "default" } }),
       this.client.shopBillingPolicyOverride.findUnique({ where: { shopId } }),
       this.client.shopEntitlementCounter.findUnique({
@@ -175,6 +173,10 @@ export class EffectiveBillingPolicyResolver {
           shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
         },
         select: { grantedQuantity: true, committedQuantity: true, reservedQuantity: true },
+      }),
+      this.client.shopFeaturePreference.findMany({
+        where: { shopId },
+        include: { feature: true },
       }),
     ]);
 
@@ -208,20 +210,31 @@ export class EffectiveBillingPolicyResolver {
 
     const limits = resolveOutboundLimits(
       shopId,
-      plan.defaultOutboundSoftLimit,
-      plan.defaultOutboundHardLimit,
+      platformPolicy.defaultOutboundSoftLimit,
+      platformPolicy.defaultOutboundHardLimit,
       platformPolicy.absoluteOutboundHardLimit,
       activeOverride,
     );
 
-    const features = Object.fromEntries(
-      featureIdentifiers.map((feature) => [
-        feature,
-        plan.features.some(
-          (mapping) => mapping.feature === feature && mapping.enabled,
-        ),
-      ]),
-    ) as Record<BillingPlanFeatureIdentifier, boolean>;
+    const optedInFeatureKeys = new Set(
+      shopFeaturePreferences
+        .filter((preference) => preference.enabled)
+        .map((preference) => preference.feature.key),
+    );
+    const features = new Set<string>();
+    for (const mapping of plan.features) {
+      if (!mapping.enabled || !mapping.feature.active) continue;
+      if (mapping.feature.activationMode === "ALWAYS_ENABLED") {
+        features.add(mapping.feature.key);
+        continue;
+      }
+      if (
+        mapping.feature.activationMode === "MERCHANT_OPT_IN" &&
+        optedInFeatureKeys.has(mapping.feature.key)
+      ) {
+        features.add(mapping.feature.key);
+      }
+    }
 
     const freeAllowance = resolveFreeAllowance(
       shopId,
@@ -264,7 +277,8 @@ export class EffectiveBillingPolicyResolver {
 
     const terminalMessageReservedSlots = validateTerminalMessageReservedSlots(
       shopId,
-      plan.terminalMessageReservedSlots,
+      activeOverride?.terminalMessageReservedSlots ??
+        platformPolicy.terminalMessageReservedSlots,
       limits.hard,
     );
 
@@ -455,30 +469,40 @@ function getBillingPeriodPhase(
 
 function resolveOutboundLimits(
   shopId: string,
-  planSoft: number,
-  planHard: number,
-  platformHard: number,
+  platformSoft: number,
+  platformDefaultHard: number,
+  absoluteHard: number,
   override: { outboundSoftLimit: number | null; outboundHardLimit: number | null } | null,
 ): { soft: number; hard: number } {
-  const validatedPlanSoft = validatePositiveInteger(shopId, "plan soft limit", planSoft);
-  const validatedPlanHard = validatePositiveInteger(shopId, "plan hard limit", planHard);
-  const validatedPlatformHard = validatePositiveInteger(
+  const validatedPlatformSoft = validateMinimumInteger(
     shopId,
-    "platform hard limit",
-    platformHard,
+    "platform soft limit",
+    platformSoft,
+    1,
   );
-
-  if (validatedPlanSoft > validatedPlanHard) {
-    throw invalidConfiguration(shopId, "plan soft limit exceeds plan hard limit");
+  const validatedPlatformHard = validateMinimumInteger(
+    shopId,
+    "platform default hard limit",
+    platformDefaultHard,
+    2,
+  );
+  const validatedAbsoluteHard = validateMinimumInteger(
+    shopId,
+    "platform absolute hard limit",
+    absoluteHard,
+    2,
+  );
+  if (validatedPlatformSoft > validatedPlatformHard) {
+    throw invalidConfiguration(shopId, "platform soft limit exceeds platform hard limit");
   }
 
   const overrideHard = override?.outboundHardLimit;
   const overrideSoft = override?.outboundSoftLimit;
   if (overrideHard !== null && overrideHard !== undefined) {
-    validatePositiveInteger(shopId, "shop hard limit", overrideHard);
+    validateMinimumInteger(shopId, "shop hard limit", overrideHard, 2);
   }
   if (overrideSoft !== null && overrideSoft !== undefined) {
-    validatePositiveInteger(shopId, "shop soft limit", overrideSoft);
+    validateMinimumInteger(shopId, "shop soft limit", overrideSoft, 1);
   }
   if (
     overrideSoft !== null &&
@@ -490,14 +514,31 @@ function resolveOutboundLimits(
     throw invalidConfiguration(shopId, "shop soft limit exceeds shop hard limit");
   }
 
-  const hard = Math.min(validatedPlatformHard, overrideHard ?? validatedPlanHard);
-  const soft = Math.min(hard, overrideSoft ?? validatedPlanSoft);
+  const requestedHardLimit = overrideHard ?? validatedPlatformHard;
+  const hard = Math.min(requestedHardLimit, validatedAbsoluteHard);
+  const requestedSoftLimit = overrideSoft ?? validatedPlatformSoft;
+  const soft = Math.min(requestedSoftLimit, hard);
+  if (soft < 1 || hard < 2 || soft > hard) {
+    throw invalidConfiguration(shopId, "effective outbound limits are invalid");
+  }
   return { soft, hard };
 }
 
 function validatePositiveInteger(shopId: string, label: string, value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw invalidConfiguration(shopId, `${label} must be a finite positive integer`);
+  }
+  return value;
+}
+
+function validateMinimumInteger(
+  shopId: string,
+  label: string,
+  value: number,
+  minimum: number,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw invalidConfiguration(shopId, `${label} must be a finite integer of at least ${minimum}`);
   }
   return value;
 }

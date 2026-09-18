@@ -337,12 +337,12 @@ describe("BillingReconciliationService", () => {
     }));
   });
 
-  it("does not consume an unresolved initial activation when rotation sees it current", async () => {
+  it.each([false, true])("does not consume an unresolved initial activation when rotation sees it current with onboardingCompleted=%s", async (onboardingCompleted) => {
     const test = harness({
       partnerResult: { ...providerSubscription, planHandle: "free-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
       plan: { id: "plan-free", active: true, kind: "FREE", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null },
     });
-    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted });
     test.database.subscription.findUnique.mockResolvedValue({
       status: "NO_CONTRACT",
       planId: null,
@@ -353,9 +353,11 @@ describe("BillingReconciliationService", () => {
     await test.service.reconcileOnce();
 
     expect(test.database.subscription.upsert).not.toHaveBeenCalled();
+    expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
+    expect(test.database.shopSettings.findUnique).not.toHaveBeenCalled();
   });
 
-  it("uses canonical paid activation for a pending initial target during rotation", async () => {
+  it.each([false, true])("uses canonical paid activation for a pending initial target during rotation with onboardingCompleted=%s", async (onboardingCompleted) => {
     const test = harness({
       partnerResult: { ...providerSubscription, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
       plan: {
@@ -371,7 +373,6 @@ describe("BillingReconciliationService", () => {
       },
       queue: { add: vi.fn().mockResolvedValue({}) },
     });
-    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
     test.database.subscription.findUnique.mockResolvedValue({
       id: "subscription-1",
       status: "NO_CONTRACT",
@@ -384,7 +385,7 @@ describe("BillingReconciliationService", () => {
     });
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
-      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: false }), update: vi.fn() },
+      shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted }), update: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") }), update: vi.fn() },
       billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
       billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-paid" }) },
@@ -402,9 +403,10 @@ describe("BillingReconciliationService", () => {
       create: expect.objectContaining({ grantedQuantity: 100 }),
     }));
     expect(transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.database.shopSettings.findUnique).not.toHaveBeenCalled();
   });
 
-  it("leaves a same-local-plan handle drift pending during rotation", async () => {
+  it.each([false, true])("leaves a same-local-plan handle drift pending during rotation with onboardingCompleted=%s", async (onboardingCompleted) => {
     const test = harness({
       partnerResult: { ...providerSubscription, planHandle: "paid-new", pendingPlanHandle: null, pendingEffectiveAt: null },
       plan: {
@@ -419,7 +421,7 @@ describe("BillingReconciliationService", () => {
         includedRecoveryConversationAllowance: 100,
       },
     });
-    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
+    test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted });
     test.database.subscription.findUnique.mockResolvedValue({
       id: "subscription-1",
       status: "NO_CONTRACT",
@@ -436,6 +438,7 @@ describe("BillingReconciliationService", () => {
     expect(test.database.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.database.subscription.upsert).not.toHaveBeenCalled();
     expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.database.shopSettings.findUnique).not.toHaveBeenCalled();
   });
 
   it("re-observes an unsupported paid trial with a null schedule and later activates its exact cycle", async () => {

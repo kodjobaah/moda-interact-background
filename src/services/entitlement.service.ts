@@ -1,18 +1,8 @@
-import type { EntitlementFeature, UsageMetric } from "../domain/types.js";
+import type { UsageMetric } from "../domain/types.js";
 import {
   EffectiveBillingPolicyError,
   effectiveBillingPolicyResolver,
 } from "./effective-billing-policy.service.js";
-
-const featureMap: Record<
-  EntitlementFeature,
-  "CHECKOUT_RECOVERY" | "ORDER_SUPPORT" | "PRODUCT_SEARCH" | "AI_CONVERSATIONS"
-> = {
-  checkout_recovery: "CHECKOUT_RECOVERY",
-  order_support: "ORDER_SUPPORT",
-  product_search: "PRODUCT_SEARCH",
-  ai_conversations: "AI_CONVERSATIONS",
-};
 
 export class EntitlementError extends Error {
   constructor(
@@ -28,17 +18,17 @@ export class EntitlementError extends Error {
 }
 
 class EntitlementService {
-  async hasFeature(shopId: string, feature: EntitlementFeature): Promise<boolean> {
+  async hasFeature(shopId: string, featureKey: string): Promise<boolean> {
     try {
       const policy = await effectiveBillingPolicyResolver.resolve(shopId);
-      return policy.features[featureMap[feature]] === true;
+      return policy.features.has(featureKey);
     } catch (error) {
       if (error instanceof EffectiveBillingPolicyError) return false;
       throw error;
     }
   }
 
-  async assertFeature(shopId: string, feature: EntitlementFeature): Promise<void> {
+  async assertFeature(shopId: string, featureKey: string): Promise<void> {
     let policy;
     try {
       policy = await effectiveBillingPolicyResolver.resolve(shopId);
@@ -52,10 +42,10 @@ class EntitlementService {
       throw error;
     }
 
-    if (!policy.features[featureMap[feature]]) {
+    if (!policy.features.has(featureKey)) {
       throw new EntitlementError(
         "FEATURE_NOT_AVAILABLE",
-        `Feature '${feature}' is not available for shop ${shopId}`,
+        `Feature '${featureKey}' is not available for shop ${shopId}`,
       );
     }
   }
