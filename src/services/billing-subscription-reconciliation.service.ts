@@ -289,8 +289,7 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
     if (row.status !== "ACTIVE") return;
-    const isInitialActivation = row.settings?.onboardingCompleted === false
-      && row.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
+    const isInitialActivation = row.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
       && row.subscription.planId === null
       && row.subscription.pendingPlanId !== null
       && row.subscription.pendingShopifyPlanHandle !== null
@@ -1390,14 +1389,12 @@ export class BillingSubscriptionReconciliationService {
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, subscriptionId);
-      const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({
         where: { id: subscriptionId },
         select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
       });
       if (
         !current
-        || settings?.onboardingCompleted !== false
         || current.status !== SubscriptionProjectionStatus.NO_CONTRACT
         || current.planId !== null
         || current.pendingPlanId !== expected.pendingPlanId
@@ -1497,14 +1494,12 @@ export class BillingSubscriptionReconciliationService {
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, subscriptionId);
-      const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({
         where: { id: subscriptionId },
         select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
       });
       if (
         !current
-        || settings?.onboardingCompleted !== false
         || current.status !== SubscriptionProjectionStatus.NO_CONTRACT
         || current.planId !== null
         || current.pendingPlanId !== expected.pendingPlanId
@@ -1685,9 +1680,8 @@ export class BillingSubscriptionReconciliationService {
     await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, subscriptionId);
-      const settings = await transaction.shopSettings.findUnique({ where: { shopId }, select: { onboardingCompleted: true } });
       const current = await transaction.subscription.findUnique({ where: { id: subscriptionId }, select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true } });
-      if (!current || settings?.onboardingCompleted !== false || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return;
+      if (!current || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return;
       const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
         ? await transaction.billingPeriod.upsert({
             where: { shopId_periodStart_periodEnd: { shopId, periodStart: provider.currentPeriodStart, periodEnd: provider.currentPeriodEnd } },

@@ -1078,7 +1078,7 @@ describe("BillingSubscriptionReconciliationService", () => {
   });
 
   it("keeps NO_CONTRACT pending intent and schedules the next retry on null provider truth", async () => {
-    const test = harness({ row: pendingRow(), providerResult: null });
+    const test = harness({ row: pendingRow({ settings: { onboardingCompleted: true } }), providerResult: null });
     await test.service.reconcileJob(payload);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "NO_CONTRACT", nextReconcileAt: expect.any(Date) }),
@@ -1152,7 +1152,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("verifies Free activation transactionally and schedules the period drain", async () => {
     const test = harness({
-      row: pendingRow(),
+      row: pendingRow({ settings: { onboardingCompleted: true } }),
       providerResult: freeProvider,
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true },
     });
@@ -1174,7 +1174,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("activates a matching paid target with a period snapshot, included counter, lifetime grant, and drain schedule", async () => {
     const test = harness({
-      row: pendingRow({ subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
+      row: pendingRow({ settings: { onboardingCompleted: true }, subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
       providerResult: paidProvider,
       plan: paidPlan,
     });
@@ -1536,7 +1536,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("applies another provider plan as authoritative current truth without activating the pending target", async () => {
     const test = harness({
-      row: pendingRow(),
+      row: pendingRow({ settings: { onboardingCompleted: true } }),
       providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"] },
       plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
     });
