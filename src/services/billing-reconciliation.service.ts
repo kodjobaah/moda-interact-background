@@ -777,8 +777,7 @@ export class BillingReconciliationService {
       if (failed.kind === "failed") await this.enqueueSubscriptionReconcile(shopId, failed.subscriptionId, failed.nextReconcileAt, now);
       return { billingPeriodId: existing?.billingPeriodId ?? null, packMeterHandle: null };
     }
-    if (planUsable && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING)
-      && plan && provider.currentPeriodStart && provider.currentPeriodEnd) {
+    if (executableMapped && hasValidProviderCycle) {
       const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
         const current = await readLockedGenericSubscription(transaction);
         if (!current) return { kind: "stale" as const };
