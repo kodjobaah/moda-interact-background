@@ -56,6 +56,66 @@ export type UsageDiscrepancy = {
   detail?: string;
 };
 
+type LifetimeFreeCounterRepair =
+  | { kind: "present" | "created" }
+  | { kind: "history-conflict" };
+
+async function ensureLifetimeFreeCounterForMappedSubscription(
+  transaction: Prisma.TransactionClient,
+  shopId: string,
+): Promise<LifetimeFreeCounterRepair> {
+  const existing = await transaction.shopEntitlementCounter.findUnique({
+    where: {
+      shopId_counter: {
+        shopId,
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      },
+    },
+    select: { id: true },
+  });
+  if (existing) return { kind: "present" };
+
+  // A missing counter can be repaired automatically only while there is no
+  // historical recovery usage. Once a recovery conversation has been recorded,
+  // recreating the counter from the platform default could silently re-grant
+  // lifetime capacity that was already consumed before the counter disappeared.
+  const historicalRecoveryUsage = await transaction.usageEvent.count({
+    where: { shopId, metric: UsageMetric.RECOVERY_CONVERSATION },
+  });
+  if (historicalRecoveryUsage > 0) return { kind: "history-conflict" };
+
+  const policy = await transaction.platformBillingPolicy.findUnique({
+    where: { id: "default" },
+    select: { lifetimeFreeRecoveryAllowance: true },
+  });
+  if (
+    !policy ||
+    !Number.isSafeInteger(policy.lifetimeFreeRecoveryAllowance) ||
+    policy.lifetimeFreeRecoveryAllowance < 0
+  ) {
+    throw new Error("PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance");
+  }
+
+  await transaction.shopEntitlementCounter.upsert({
+    where: {
+      shopId_counter: {
+        shopId,
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      },
+    },
+    update: {},
+    create: {
+      shopId,
+      counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+      grantedQuantity: policy.lifetimeFreeRecoveryAllowance,
+      committedQuantity: 0,
+      reservedQuantity: 0,
+      refundingQuantity: 0,
+    },
+  });
+  return { kind: "created" };
+}
+
 export class BillingReconciliationService {
   private lastScannedShopId: string | undefined;
 
@@ -555,6 +615,20 @@ export class BillingReconciliationService {
             || current.nextReconcileAt?.getTime() !== existing.nextReconcileAt?.getTime()) {
             return { kind: "stale" as const };
           }
+          const lifetimeCounter = await ensureLifetimeFreeCounterForMappedSubscription(transaction, shopId);
+          if (lifetimeCounter.kind === "history-conflict") {
+            await transaction.subscription.update({
+              where: { id: existing.id },
+              data: {
+                status: SubscriptionProjectionStatus.SYNC_ERROR,
+                lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+                lastSyncErrorAt: now,
+                lastSyncedAt: now,
+                nextReconcileAt: null,
+              },
+            });
+            return { kind: "lifetime-counter-conflict" as const };
+          }
           const result = await ensureCurrentBillingPeriodProjection(transaction, {
             shopId,
             subscriptionId: existing.id,
@@ -590,6 +664,10 @@ export class BillingReconciliationService {
         });
         if (projection.kind === "conflict") {
           await this.enqueueSubscriptionReconcile(shopId, existing.id, projection.nextReconcileAt, now);
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (projection.kind === "lifetime-counter-conflict") {
+          this.logger.warn("billing.subscription_reconciliation.lifetime_free_counter_history_conflict", { shopId });
           return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
         }
         if (projection.kind === "stale") return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
@@ -798,6 +876,20 @@ export class BillingReconciliationService {
       const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
         const current = await readLockedGenericSubscription(transaction);
         if (!current) return { kind: "stale" as const };
+        const lifetimeCounter = await ensureLifetimeFreeCounterForMappedSubscription(transaction, shopId);
+        if (lifetimeCounter.kind === "history-conflict") {
+          await transaction.subscription.update({
+            where: { id: current.id },
+            data: {
+              status: SubscriptionProjectionStatus.SYNC_ERROR,
+              lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+              lastSyncErrorAt: now,
+              lastSyncedAt: now,
+              nextReconcileAt: null,
+            },
+          });
+          return { kind: "lifetime-counter-conflict" as const };
+        }
         const result = await ensureCurrentBillingPeriodProjection(transaction, {
           shopId,
           subscriptionId: current.id,
@@ -838,6 +930,9 @@ export class BillingReconciliationService {
       });
       if (projection.kind === "conflict") {
           projectionConflict = { subscriptionId: projection.subscriptionId, nextReconcileAt: projection.nextReconcileAt };
+      } else if (projection.kind === "lifetime-counter-conflict") {
+        this.logger.warn("billing.subscription_reconciliation.lifetime_free_counter_history_conflict", { shopId });
+        return { billingPeriodId: existing?.billingPeriodId ?? null, packMeterHandle: null };
       } else if (projection.kind === "ready") {
         billingPeriodId = projection.billingPeriodId;
       }

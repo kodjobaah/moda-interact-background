@@ -56,6 +56,16 @@ function harness({
       upsert: vi.fn().mockResolvedValue({ id: "subscription-1" }),
       update: vi.fn(),
     },
+    shopEntitlementCounter: {
+      findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }),
+      upsert: vi.fn(),
+    },
+    platformBillingPolicy: {
+      findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
+    },
+    usageEvent: {
+      count: vi.fn().mockResolvedValue(0),
+    },
   };
   const database = {
     shop: {
@@ -511,6 +521,9 @@ describe("BillingReconciliationService", () => {
       partnerResult: { ...providerSubscription, planHandle: plan.shopifyPlanHandle, usageEventHandles: plan.kind === "PAID_METERED" ? ["recovery-meter"] : [], pendingPlanHandle: null, pendingEffectiveAt: null },
     });
     test.database.subscription.findUnique.mockResolvedValue(null);
+    if (plan.kind === "FREE") {
+      test.transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
+    }
     test.transaction.subscription.findUnique.mockResolvedValue({
       id: "subscription-1",
       status: "NO_CONTRACT",
@@ -534,8 +547,89 @@ describe("BillingReconciliationService", () => {
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ planId: plan.id, status: "ACTIVE", billingPeriodId: "period-1" }),
     }));
-    if (plan.kind === "FREE") expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
-    else expect(test.transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledOnce();
+    if (plan.kind === "FREE") {
+      expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
+      expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith({
+        where: { shopId_counter: { shopId: "shop-1", counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+        update: {},
+        create: {
+          shopId: "shop-1",
+          counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+          grantedQuantity: 5,
+          committedQuantity: 0,
+          reservedQuantity: 0,
+          refundingQuantity: 0,
+        },
+      });
+    } else {
+      expect(test.transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledOnce();
+      expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    }
+  });
+
+  it("repairs a missing lifetime Free counter for an already-active mapped subscription with no recovery history", async () => {
+    const cycleStart = new Date("2026-09-01T00:00:00.000Z");
+    const cycleEnd = new Date("2026-10-01T00:00:00.000Z");
+    const plan = { id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "free-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null };
+    const test = harness({
+      plan,
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd },
+    });
+    const active = {
+      id: "subscription-1", status: "ACTIVE", planId: plan.id, billingPeriodId: "period-1",
+      currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd, cancelAtPeriodEnd: false,
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: null,
+    };
+    test.database.subscription.findUnique.mockResolvedValue(active);
+    test.transaction.subscription.findUnique.mockResolvedValue(active);
+    test.transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
+    test.transaction.usageEvent.count.mockResolvedValue(0);
+    test.transaction.billingPeriod.findUnique.mockResolvedValue({
+      id: "period-1", shopId: "shop-1", subscriptionId: "subscription-1", planId: plan.id,
+      shopifyPlanHandleSnapshot: "free-2026", planNameSnapshot: "Free", planKindSnapshot: "FREE",
+      includedRecoveryCreditsGranted: null, periodStart: cycleStart, periodEnd: cycleEnd, status: "OPEN",
+    });
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.transaction.shopEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 5 }),
+    }));
+  });
+
+  it("does not recreate a missing lifetime Free counter when recovery history makes the grant ambiguous", async () => {
+    const cycleStart = new Date("2026-09-01T00:00:00.000Z");
+    const cycleEnd = new Date("2026-10-01T00:00:00.000Z");
+    const plan = { id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "free-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null };
+    const test = harness({
+      plan,
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd },
+    });
+    const active = {
+      id: "subscription-1", status: "ACTIVE", planId: plan.id, billingPeriodId: "period-1",
+      currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd, cancelAtPeriodEnd: false,
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: null,
+    };
+    test.database.subscription.findUnique.mockResolvedValue(active);
+    test.transaction.subscription.findUnique.mockResolvedValue(active);
+    test.transaction.shopEntitlementCounter.findUnique.mockResolvedValue(null);
+    test.transaction.usageEvent.count.mockResolvedValue(1);
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith({
+      where: { id: "subscription-1" },
+      data: expect.objectContaining({
+        status: "SYNC_ERROR",
+        lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+        nextReconcileAt: null,
+      }),
+    });
+    expect(test.logger.warn).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.lifetime_free_counter_history_conflict",
+      { shopId: "shop-1" },
+    );
   });
 
   it("fails closed for a missing-cycle mapped provider without creating a period", async () => {
