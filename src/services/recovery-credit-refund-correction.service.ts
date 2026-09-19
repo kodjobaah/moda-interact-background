@@ -49,6 +49,7 @@ type RefundRow = {
   providerSubscriptionIdSnapshot: string;
   planHandleSnapshot: string;
   eventHandleSnapshot: string;
+  shopifyPartnerDevelopmentSnapshot: boolean;
   purchaseProviderAmountSnapshot: Prisma.Decimal;
   purchaseProviderCurrencySnapshot: string;
   finalCreditQuantity: number | null;
@@ -274,7 +275,10 @@ export class RecoveryCreditRefundCorrectionService {
       || refund.purchase.currentAmount <= 0
       || refund.purchase.reservedAmount !== 0
       || refund.purchase.creditsGranted <= 0
-      || !refund.purchaseProviderAmountSnapshot.gt(0)
+      || !eligibleProviderAmount(
+        refund.purchaseProviderAmountSnapshot,
+        refund.shopifyPartnerDevelopmentSnapshot,
+      )
     ) return unsafe("refund purchase is not eligible for automatic correction");
     const finalCreditQuantity = refund.purchase.currentAmount;
     const ratio = new Prisma.Decimal(finalCreditQuantity).div(refund.purchase.creditsGranted);
@@ -459,7 +463,7 @@ const refundSelect = {
   id: true, shopId: true, status: true, reason: true, purchaseId: true,
   createdAt: true,
   billingPeriodIdSnapshot: true, providerSubscriptionIdSnapshot: true, planHandleSnapshot: true,
-  eventHandleSnapshot: true, purchaseProviderAmountSnapshot: true, purchaseProviderCurrencySnapshot: true,
+  eventHandleSnapshot: true, shopifyPartnerDevelopmentSnapshot: true, purchaseProviderAmountSnapshot: true, purchaseProviderCurrencySnapshot: true,
   finalCreditQuantity: true, expectedProviderAmount: true, expectedProviderCurrency: true,
   automaticCorrectionUsageEventId: true, providerUsageQuantityBeforeCorrection: true,
   providerUsageCostBeforeCorrection: true, expectedProviderUsageQuantityAfterCorrection: true,
@@ -516,8 +520,28 @@ function nonNegative(value: Prisma.Decimal): Prisma.Decimal { return value.lt(0)
 function boundedReason(reason: string): string { return reason.slice(0, MAX_REASON_LENGTH); }
 function boundedPageSize(value: number): number { return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE; }
 
+function eligibleProviderAmount(
+  amount: Prisma.Decimal,
+  shopifyPartnerDevelopmentSnapshot: boolean,
+): boolean {
+  return (
+    amount.isFinite()
+    && (
+      amount.gt(0)
+      || (shopifyPartnerDevelopmentSnapshot && amount.isZero())
+    )
+  );
+}
+
 function localRefundEvidence(refund: RefundRow): { finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string } | null {
-  if (refund.purchase.currentAmount <= 0 || refund.purchase.creditsGranted <= 0 || !refund.purchaseProviderAmountSnapshot.gt(0)) return null;
+  if (
+    refund.purchase.currentAmount <= 0
+    || refund.purchase.creditsGranted <= 0
+    || !eligibleProviderAmount(
+      refund.purchaseProviderAmountSnapshot,
+      refund.shopifyPartnerDevelopmentSnapshot,
+    )
+  ) return null;
   const ratio = new Prisma.Decimal(refund.purchase.currentAmount).div(refund.purchase.creditsGranted);
   if (ratio.lte(0) || ratio.gt(1)) return null;
   return {

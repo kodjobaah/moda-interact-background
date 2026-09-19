@@ -34,6 +34,7 @@ function refundRow(overrides: Record<string, unknown> = {}) {
     providerSubscriptionIdSnapshot: context,
     planHandleSnapshot: "pro-2026",
     eventHandleSnapshot: "pack-meter",
+    shopifyPartnerDevelopmentSnapshot: false,
     purchaseProviderAmountSnapshot: new Prisma.Decimal("1.00"),
     purchaseProviderCurrencySnapshot: "USD",
     finalCreditQuantity: null,
@@ -80,6 +81,93 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ finalCreditQuantity: 1, expectedProviderAmount: new Prisma.Decimal("1.00"), expectedProviderCurrency: "USD", providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"), expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0") }),
     }));
+  });
+
+  it("prepares a zero-value negative correction only for a verified partner-development refund snapshot", async () => {
+    const zeroProvider = {
+      ...provider,
+      providerUsageSnapshot: [
+        {
+          handle: "pack-meter",
+          quantity: "1",
+          costAmount: "0.00",
+          costCurrency: "USD",
+        },
+      ],
+      providerUsagePricingSnapshot: [
+        {
+          handle: "pack-meter",
+          currency: "USD",
+          tiersMode: "VOLUME",
+          tiers: [{ upTo: null, amountPerUnit: "0.00", amount: "0.00" }],
+        },
+      ],
+    };
+    const test = harness(
+      refundRow({
+        shopifyPartnerDevelopmentSnapshot: true,
+        purchaseProviderAmountSnapshot: new Prisma.Decimal("0.00"),
+      }),
+      zeroProvider,
+    );
+
+    await expect(test.service.processDue()).resolves.toMatchObject({
+      selected: 1,
+      prepared: 1,
+      providerActionRequired: 0,
+    });
+    expect(test.database.usageEvent.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          quantity: new Prisma.Decimal("-1"),
+        }),
+      }),
+    );
+    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          expectedProviderAmount: new Prisma.Decimal("0.00"),
+          providerUsageCostBeforeCorrection: new Prisma.Decimal("0.00"),
+          expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
+        }),
+      }),
+    );
+  });
+
+  it("does not prepare a zero-value production refund even if one reaches Background", async () => {
+    const zeroProvider = {
+      ...provider,
+      providerUsageSnapshot: [
+        {
+          handle: "pack-meter",
+          quantity: "1",
+          costAmount: "0.00",
+          costCurrency: "USD",
+        },
+      ],
+      providerUsagePricingSnapshot: [
+        {
+          handle: "pack-meter",
+          currency: "USD",
+          tiersMode: "VOLUME",
+          tiers: [{ upTo: null, amountPerUnit: "0.00", amount: "0.00" }],
+        },
+      ],
+    };
+    const test = harness(
+      refundRow({
+        shopifyPartnerDevelopmentSnapshot: false,
+        purchaseProviderAmountSnapshot: new Prisma.Decimal("0.00"),
+      }),
+      zeroProvider,
+    );
+
+    await expect(test.service.processDue()).resolves.toMatchObject({
+      selected: 1,
+      prepared: 0,
+      providerActionRequired: 1,
+    });
+    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
   it("routes ambiguous live pricing to provider action before creating an event", async () => {
