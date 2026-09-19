@@ -304,7 +304,7 @@ export class BillingReconciliationService {
         includedRecoveryConversationAllowance: true,
       },
     });
-    const existing = await this.database.subscription.findUnique({
+    let existing = await this.database.subscription.findUnique({
       where: { shopId },
       select: {
         id: true,
@@ -328,13 +328,30 @@ export class BillingReconciliationService {
         snapshot,
         now,
       );
-      if (lifecycleResult === "handled" || lifecycleResult === "restored") {
+      if (lifecycleResult === "handled") {
         await this.publishCommittedLifecycleSchedule(shopId, existing.id);
-        if (lifecycleResult === "restored") {
-          const restored = await this.database.subscription.findUnique({ where: { id: existing.id }, select: { billingPeriodId: true } });
-          return { billingPeriodId: restored?.billingPeriodId ?? null, packMeterHandle: null };
-        }
         return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      }
+      if (lifecycleResult === "restored") {
+        await this.publishCommittedLifecycleSchedule(shopId, existing.id);
+        const restored = await this.database.subscription.findUnique({
+          where: { shopId },
+          select: {
+            id: true,
+            status: true,
+            planId: true,
+            pendingPlanId: true,
+            pendingShopifyPlanHandle: true,
+            pendingEffectiveAt: true,
+            billingPeriodId: true,
+            currentPeriodStart: true,
+            currentPeriodEnd: true,
+            cancelAtPeriodEnd: true,
+            nextReconcileAt: true,
+          },
+        });
+        if (!restored) return { billingPeriodId: null, packMeterHandle: null };
+        existing = restored;
       }
     }
     if (
