@@ -23,6 +23,7 @@ import { recoveryCreditPurchaseService } from "./recovery-credit-purchase.servic
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transition.service.js";
+import { ensureCurrentBillingPeriodProjection } from "./current-billing-period-projection.service.js";
 import { shopifyUsageEventPublisherService } from "./shopify-usage-event-publisher.service.js";
 import { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation.service.js";
 import { BillingSubscriptionReconciliationService } from "./billing-subscription-reconciliation.service.js";
@@ -497,6 +498,82 @@ export class BillingReconciliationService {
       return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
     }
     if (existing?.id && plan?.active && existing.planId === plan.id) {
+      const providerMatchesCurrentCycle = Boolean(
+        provider.currentPeriodStart
+        && provider.currentPeriodEnd
+        && existing.currentPeriodStart
+        && existing.currentPeriodEnd
+        && provider.currentPeriodStart.getTime() === existing.currentPeriodStart.getTime()
+        && provider.currentPeriodEnd.getTime() === existing.currentPeriodEnd.getTime(),
+      );
+      if (providerMatchesCurrentCycle && provider.currentPeriodEnd! > now) {
+        const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+          await transaction.$queryRaw(Prisma.sql`
+            SELECT "id"
+            FROM "billing"."Subscription"
+            WHERE "id" = ${existing.id}
+            FOR UPDATE
+          `);
+          const current = await transaction.subscription.findUnique({
+            where: { id: existing.id },
+            select: {
+              id: true,
+              status: true,
+              planId: true,
+              billingPeriodId: true,
+              currentPeriodStart: true,
+              currentPeriodEnd: true,
+              nextReconcileAt: true,
+            },
+          });
+          if (!current
+            || current.status !== existing.status
+            || current.planId !== existing.planId
+            || current.billingPeriodId !== existing.billingPeriodId
+            || current.currentPeriodStart?.getTime() !== existing.currentPeriodStart?.getTime()
+            || current.currentPeriodEnd?.getTime() !== existing.currentPeriodEnd?.getTime()
+            || current.nextReconcileAt?.getTime() !== existing.nextReconcileAt?.getTime()) {
+            return { kind: "stale" as const };
+          }
+          const result = await ensureCurrentBillingPeriodProjection(transaction, {
+            shopId,
+            subscriptionId: existing.id,
+            periodStart: provider.currentPeriodStart!,
+            periodEnd: provider.currentPeriodEnd!,
+            providerPlanHandle: provider.planHandle,
+            plan,
+          });
+          if (result.kind === "CONFLICT") {
+            const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+            await transaction.subscription.update({
+              where: { id: existing.id },
+              data: {
+                status: SubscriptionProjectionStatus.SYNC_ERROR,
+                lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
+                lastSyncErrorAt: now,
+                lastSyncedAt: now,
+                nextReconcileAt,
+              },
+            });
+            return { kind: "conflict" as const, nextReconcileAt };
+          }
+          await transaction.subscription.update({
+            where: { id: existing.id },
+            data: {
+              billingPeriodId: result.billingPeriodId,
+              currentPeriodStart: provider.currentPeriodStart,
+              currentPeriodEnd: provider.currentPeriodEnd,
+              lastSyncedAt: now,
+            },
+          });
+          return { kind: "ready" as const };
+        });
+        if (projection.kind === "conflict") {
+          await this.enqueueSubscriptionReconcile(shopId, existing.id, projection.nextReconcileAt, now);
+          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        }
+        if (projection.kind === "stale") return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      }
       if ((provider.pendingPlanHandle !== null || provider.cancelAtPeriodEnd || existing.cancelAtPeriodEnd)
         && provider.currentPeriodEnd
         && provider.currentPeriodEnd > now
@@ -607,71 +684,108 @@ export class BillingReconciliationService {
         packMeterHandle: plan.shopifyRecoveryCreditPackEventHandle ?? null,
       };
     }
-    const billingPeriod = provider.currentPeriodStart && provider.currentPeriodEnd
-      ? await this.database.billingPeriod.upsert({
-          where: {
-            shopId_periodStart_periodEnd: {
-              shopId,
-              periodStart: provider.currentPeriodStart,
-              periodEnd: provider.currentPeriodEnd,
-            },
-          },
-          update: { status: BillingPeriodStatus.OPEN },
-          create: {
-            shopId,
-            subscriptionId: (await this.database.subscription.findUniqueOrThrow({ where: { shopId }, select: { id: true } })).id,
-            periodStart: provider.currentPeriodStart,
-            periodEnd: provider.currentPeriodEnd,
-            status: BillingPeriodStatus.OPEN,
-          },
-        })
-      : null;
     const pendingPlan = provider.pendingPlanHandle
       ? await this.database.billingPlan.findUnique({
           where: { shopifyPlanHandle: provider.pendingPlanHandle },
           select: { id: true, active: true },
         })
       : null;
-    await this.database.subscription.upsert({
-      where: { shopId },
-      update: {
-        planId: planUsable ? plan?.id ?? null : null,
-        observedShopifyPlanHandle: provider.planHandle,
-        status,
-        billingPeriodId: billingPeriod?.id ?? null,
-        currentPeriodStart: provider.currentPeriodStart,
-        currentPeriodEnd: provider.currentPeriodEnd,
-        trialEndsAt: provider.trialEndsAt,
-        cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
-        providerSubscriptionId: provider.providerSubscriptionId,
-        lastSyncedAt: now,
-        lastSyncErrorCode: syncErrorCode,
-        lastSyncErrorAt: syncErrorCode ? now : null,
-        pendingShopifyPlanHandle: provider.pendingPlanHandle,
-        pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
-        pendingEffectiveAt: provider.pendingEffectiveAt,
-      },
-      create: {
-        shopId,
-        planId: planUsable ? plan?.id ?? null : null,
-        observedShopifyPlanHandle: provider.planHandle,
-        status,
-        billingPeriodId: billingPeriod?.id ?? null,
-        currentPeriodStart: provider.currentPeriodStart,
-        currentPeriodEnd: provider.currentPeriodEnd,
-        trialEndsAt: provider.trialEndsAt,
-        cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
-        providerSubscriptionId: provider.providerSubscriptionId,
-        lastSyncedAt: now,
-        lastSyncErrorCode: syncErrorCode,
-        lastSyncErrorAt: syncErrorCode ? now : null,
-        pendingShopifyPlanHandle: provider.pendingPlanHandle,
-        pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
-        pendingEffectiveAt: provider.pendingEffectiveAt,
-      },
-    });
+    let billingPeriodId: string | null = null;
+    let projectionConflict: { subscriptionId: string; nextReconcileAt: Date } | null = null;
+    if (planUsable && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING)
+      && plan && provider.currentPeriodStart && provider.currentPeriodEnd) {
+      const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+        const current = await transaction.subscription.findUnique({ where: { shopId }, select: { id: true } });
+        if (!current) return { kind: "stale" as const };
+        const result = await ensureCurrentBillingPeriodProjection(transaction, {
+          shopId,
+          subscriptionId: current.id,
+          periodStart: provider.currentPeriodStart!,
+          periodEnd: provider.currentPeriodEnd!,
+          providerPlanHandle: provider.planHandle,
+          plan,
+        });
+        if (result.kind === "CONFLICT") {
+          const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+          await transaction.subscription.update({
+            where: { id: current.id },
+            data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt },
+          });
+          return { kind: "conflict" as const, subscriptionId: current.id, nextReconcileAt };
+        }
+        await transaction.subscription.update({
+          where: { id: current.id },
+          data: {
+            planId: plan.id,
+            observedShopifyPlanHandle: provider.planHandle,
+            status,
+            billingPeriodId: result.billingPeriodId,
+            currentPeriodStart: provider.currentPeriodStart,
+            currentPeriodEnd: provider.currentPeriodEnd,
+            trialEndsAt: provider.trialEndsAt,
+            cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
+            providerSubscriptionId: provider.providerSubscriptionId,
+            lastSyncedAt: now,
+            lastSyncErrorCode: null,
+            lastSyncErrorAt: null,
+            pendingShopifyPlanHandle: provider.pendingPlanHandle,
+            pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+            pendingEffectiveAt: provider.pendingEffectiveAt,
+          },
+        });
+        return { kind: "ready" as const, billingPeriodId: result.billingPeriodId };
+      });
+      if (projection.kind === "conflict") {
+          projectionConflict = { subscriptionId: projection.subscriptionId, nextReconcileAt: projection.nextReconcileAt };
+      } else if (projection.kind === "ready") {
+        billingPeriodId = projection.billingPeriodId;
+      }
+    } else {
+      await this.database.subscription.upsert({
+        where: { shopId },
+        update: {
+          planId: planUsable ? plan?.id ?? null : null,
+          observedShopifyPlanHandle: provider.planHandle,
+          status,
+          billingPeriodId: null,
+          currentPeriodStart: provider.currentPeriodStart,
+          currentPeriodEnd: provider.currentPeriodEnd,
+          trialEndsAt: provider.trialEndsAt,
+          cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
+          providerSubscriptionId: provider.providerSubscriptionId,
+          lastSyncedAt: now,
+          lastSyncErrorCode: syncErrorCode,
+          lastSyncErrorAt: syncErrorCode ? now : null,
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
+        },
+        create: {
+          shopId,
+          planId: planUsable ? plan?.id ?? null : null,
+          observedShopifyPlanHandle: provider.planHandle,
+          status,
+          billingPeriodId: null,
+          currentPeriodStart: provider.currentPeriodStart,
+          currentPeriodEnd: provider.currentPeriodEnd,
+          trialEndsAt: provider.trialEndsAt,
+          cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
+          providerSubscriptionId: provider.providerSubscriptionId,
+          lastSyncedAt: now,
+          lastSyncErrorCode: syncErrorCode,
+          lastSyncErrorAt: syncErrorCode ? now : null,
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
+        },
+      });
+    }
+    if (projectionConflict) {
+      await this.enqueueSubscriptionReconcile(shopId, projectionConflict.subscriptionId, projectionConflict.nextReconcileAt, now);
+      return { billingPeriodId: null, packMeterHandle: null };
+    }
     return {
-      billingPeriodId: billingPeriod?.id ?? null,
+      billingPeriodId,
       packMeterHandle: plan?.active ? plan.shopifyRecoveryCreditPackEventHandle ?? null : null,
     };
   }
