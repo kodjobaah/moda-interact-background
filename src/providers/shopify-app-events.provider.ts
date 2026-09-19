@@ -178,9 +178,26 @@ export class ShopifyAppEventsClient {
     }
 
     const body = await this.readJson(response, "token");
+    if (typeof body.access_token !== "string" || !body.access_token) {
+      throw new ShopifyAppEventsError(
+        "authentication-refreshable",
+        "Shopify App Events token response is invalid",
+      );
+    }
+
+    // Shopify's client-credentials response does not always include expires_in.
+    // When it is absent, keep the token until Shopify rejects it with 401; the
+    // existing controlled refresh path will then obtain a replacement token.
+    // If Shopify does provide expires_in, preserve the proactive refresh margin.
+    if (body.expires_in === undefined || body.expires_in === null) {
+      this.cachedToken = {
+        value: body.access_token,
+        expiresAt: Number.POSITIVE_INFINITY,
+      };
+      return body.access_token;
+    }
+
     if (
-      typeof body.access_token !== "string" ||
-      !body.access_token ||
       typeof body.expires_in !== "number" ||
       !Number.isFinite(body.expires_in) ||
       body.expires_in <= 0

@@ -24,6 +24,10 @@ function tokenResponse(accessToken = "token-1", expiresIn = 3599): Response {
   return response(200, { access_token: accessToken, expires_in: expiresIn });
 }
 
+function tokenResponseWithoutExpiry(accessToken = "token-1"): Response {
+  return response(200, { access_token: accessToken, token_type: "Bearer" });
+}
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -77,6 +81,43 @@ describe("ShopifyAppEventsClient", () => {
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
       "https://api.shopify.com/auth/access_token",
     );
+  });
+
+  it("accepts Shopify token responses without expires_in and reuses the token until 401", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponseWithoutExpiry("token-1"))
+      .mockResolvedValueOnce(response(202))
+      .mockResolvedValueOnce(response(202));
+    const client = createClient(fetchImpl);
+
+    await client.createBillingEvent(event);
+    await client.createBillingEvent(event);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls[1]?.[1]).toMatchObject({
+      headers: { Authorization: "Bearer token-1" },
+    });
+    expect(fetchImpl.mock.calls[2]?.[1]).toMatchObject({
+      headers: { Authorization: "Bearer token-1" },
+    });
+  });
+
+  it("refreshes a no-expiry token after Shopify returns 401", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponseWithoutExpiry("token-1"))
+      .mockResolvedValueOnce(response(401))
+      .mockResolvedValueOnce(tokenResponseWithoutExpiry("token-2"))
+      .mockResolvedValueOnce(response(202));
+    const client = createClient(fetchImpl);
+
+    await client.createBillingEvent(event);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(fetchImpl.mock.calls[3]?.[1]).toMatchObject({
+      headers: { Authorization: "Bearer token-2" },
+    });
   });
 
   it("refreshes at the configured expiry safety margin", async () => {
