@@ -1800,11 +1800,25 @@ export class BillingSubscriptionReconciliationService {
     const planUsable = Boolean(plan?.active);
     const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
       || Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
+    const hasValidProviderCycle = provider.currentPeriodStart !== null
+      && provider.currentPeriodEnd !== null
+      && provider.currentPeriodStart < provider.currentPeriodEnd;
     const status = !planUsable
       ? SubscriptionProjectionStatus.UNMAPPED
       : !meterUsable
         ? SubscriptionProjectionStatus.SYNC_ERROR
         : provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE;
+    if (planUsable && meterUsable && !hasValidProviderCycle) {
+      const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
+      const updated = await this.casPendingUpdate(expected, {
+        lastSyncedAt: now,
+        lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+        lastSyncErrorAt: now,
+        nextReconcileAt,
+      });
+      if (updated) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+      return;
+    }
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await this.lockShopSettings(transaction, shopId);
       await this.lockSubscription(transaction, subscriptionId);

@@ -51,6 +51,7 @@ function harness({
     },
     subscription: {
       findUnique: vi.fn(),
+      upsert: vi.fn().mockResolvedValue({ id: "subscription-1" }),
       update: vi.fn(),
     },
   };
@@ -361,6 +362,62 @@ describe("BillingReconciliationService", () => {
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "ACTIVE", planId: "plan-new" }),
     }));
+  });
+
+  it.each([
+    ["Free", { id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "free-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null }],
+    ["Paid", { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 }],
+  ] as const)("reconstructs a missing local Subscription and complete %s projection in one transaction", async (_label, plan) => {
+    const test = harness({
+      plan,
+      partnerResult: { ...providerSubscription, planHandle: plan.shopifyPlanHandle, usageEventHandles: plan.kind === "PAID_METERED" ? ["recovery-meter"] : [], pendingPlanHandle: null, pendingEffectiveAt: null },
+    });
+    test.database.subscription.findUnique.mockResolvedValue(null);
+    test.transaction.subscription.findUnique.mockResolvedValue({
+      id: "subscription-1",
+      status: "NO_CONTRACT",
+      planId: null,
+      billingPeriodId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      pendingPlanId: null,
+      pendingShopifyPlanHandle: null,
+      pendingEffectiveAt: null,
+      nextReconcileAt: null,
+    });
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.transaction.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { shopId: "shop-1" },
+      create: { shopId: "shop-1", status: "NO_CONTRACT" },
+    }));
+    expect(test.transaction.billingPeriod.create).toHaveBeenCalledOnce();
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ planId: plan.id, status: "ACTIVE", billingPeriodId: "period-1" }),
+    }));
+    if (plan.kind === "FREE") expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
+    else expect(test.transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed for a missing-cycle mapped provider without creating a period", async () => {
+    const queue = { add: vi.fn().mockResolvedValue({}) };
+    const test = harness({
+      queue,
+      plan: { id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "free-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null },
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: null, currentPeriodEnd: null },
+    });
+    test.database.subscription.findUnique.mockResolvedValue(null);
+    test.transaction.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "NO_CONTRACT", planId: null, billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null, pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: null });
+
+    await test.service.reconcileOnce();
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_BILLING_CYCLE", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
+    }));
+    expect(test.transaction.billingPeriod.create).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledOnce();
   });
 
   it("B008-R3 projects a genuine no-contract response without downgrading to Free", async () => {
@@ -789,6 +846,7 @@ describe("BillingReconciliationService", () => {
         currentPeriodEnd: boundary,
       },
     });
+    test.logger.error.mockImplementation((_event, fields) => { throw fields.error; });
     test.database.subscription.findUnique.mockResolvedValue({
       id: "subscription-1",
           shopId: "shop-1",
@@ -813,14 +871,15 @@ describe("BillingReconciliationService", () => {
           billingPeriodId: "period-old",
           currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
           currentPeriodEnd: boundary,
-          nextReconcileAt: boundary,
+          nextReconcileAt: null,
           billingPeriod: { id: "period-old", periodStart: new Date("2026-09-01T00:00:00.000Z"), periodEnd: boundary, status: "OPEN" },
         }),
+        update: vi.fn(),
       },
-      billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-old" }), updateMany: vi.fn() },
+      billingPeriod: { findUnique: vi.fn().mockResolvedValue({ id: "period-old", subscriptionId: "subscription-1", planId: null, shopifyPlanHandleSnapshot: null, planNameSnapshot: null, planKindSnapshot: null, includedRecoveryCreditsGranted: null, status: "OPEN" }), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
       usageEvent: { updateMany: vi.fn() },
       usageReservation: { aggregate: vi.fn() },
-      billingPeriodEntitlementCounter: { findUnique: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+      billingPeriodEntitlementCounter: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
     };
     test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
 
@@ -842,6 +901,14 @@ describe("BillingReconciliationService", () => {
       expect.objectContaining({ expectedNextReconcileAt: "2026-10-01T00:01:01.000Z" }),
       expect.objectContaining({ jobId: expect.any(String), delay: 60_000 }),
     );
+    expect(transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledOnce();
+    expect(transaction.billingPeriodEntitlementCounter.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        committedQuantity: 0,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+      }),
+    }));
   });
 
   it("repairs a missing pack-enabled Free cycle schedule during rotating provider-cycle lag", async () => {
@@ -864,7 +931,13 @@ describe("BillingReconciliationService", () => {
       },
       partnerResult: {
         ...providerSubscription,
-        usageEventHandles: ["recovery-meter", "pack-meter"],
+        usageEventHandles: ["pack-meter"],
+        providerUsageSnapshot: [{
+          handle: "pack-meter",
+          quantity: 2,
+          costAmount: "20.00",
+          costCurrency: "USD",
+        }],
         currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
         currentPeriodEnd: boundary,
       },
@@ -893,14 +966,15 @@ describe("BillingReconciliationService", () => {
           billingPeriodId: "period-old",
           currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
           currentPeriodEnd: boundary,
-          nextReconcileAt: boundary,
+          nextReconcileAt: null,
           billingPeriod: { id: "period-old", periodStart: new Date("2026-09-01T00:00:00.000Z"), periodEnd: boundary, status: "OPEN" },
         }),
+        update: vi.fn(),
       },
-      billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-old" }), updateMany: vi.fn() },
+      billingPeriod: { findUnique: vi.fn().mockResolvedValue({ id: "period-old", subscriptionId: "subscription-1", planId: null, shopifyPlanHandleSnapshot: null, planNameSnapshot: null, planKindSnapshot: null, includedRecoveryCreditsGranted: null, status: "OPEN" }), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
       usageEvent: { updateMany: vi.fn() },
       usageReservation: { aggregate: vi.fn() },
-      billingPeriodEntitlementCounter: { findUnique: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+      billingPeriodEntitlementCounter: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
     };
     test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
 

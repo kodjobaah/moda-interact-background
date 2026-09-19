@@ -392,6 +392,9 @@ export class BillingReconciliationService {
         : provider.status === "TRIALING"
           ? SubscriptionProjectionStatus.TRIALING
           : SubscriptionProjectionStatus.ACTIVE;
+    const hasValidProviderCycle = provider.currentPeriodStart !== null
+      && provider.currentPeriodEnd !== null
+      && provider.currentPeriodStart < provider.currentPeriodEnd;
     const syncErrorCode = status === SubscriptionProjectionStatus.UNMAPPED
       ? "UNMAPPED_PLAN_HANDLE"
       : status === SubscriptionProjectionStatus.SYNC_ERROR
@@ -506,7 +509,7 @@ export class BillingReconciliationService {
         && provider.currentPeriodStart.getTime() === existing.currentPeriodStart.getTime()
         && provider.currentPeriodEnd.getTime() === existing.currentPeriodEnd.getTime(),
       );
-      if (providerMatchesCurrentCycle && provider.currentPeriodEnd! > now) {
+      if (providerMatchesCurrentCycle) {
         const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
           await transaction.$queryRaw(Prisma.sql`
             SELECT "id"
@@ -692,10 +695,92 @@ export class BillingReconciliationService {
       : null;
     let billingPeriodId: string | null = null;
     let projectionConflict: { subscriptionId: string; nextReconcileAt: Date } | null = null;
+    const readLockedGenericSubscription = async (transaction: Prisma.TransactionClient) => {
+      if (existing) {
+        await transaction.$queryRaw(Prisma.sql`
+          SELECT "id"
+          FROM "billing"."Subscription"
+          WHERE "id" = ${existing.id}
+          FOR UPDATE
+        `);
+      } else {
+        await transaction.subscription.upsert({
+          where: { shopId },
+          update: {},
+          create: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT },
+        });
+        const shell = await transaction.subscription.findUnique({ where: { shopId }, select: { id: true } });
+        if (!shell) return null;
+        await transaction.$queryRaw(Prisma.sql`
+          SELECT "id"
+          FROM "billing"."Subscription"
+          WHERE "id" = ${shell.id}
+          FOR UPDATE
+        `);
+      }
+      const current = await transaction.subscription.findUnique({
+        where: { shopId },
+        select: {
+          id: true,
+          status: true,
+          planId: true,
+          billingPeriodId: true,
+          currentPeriodStart: true,
+          currentPeriodEnd: true,
+          pendingPlanId: true,
+          pendingShopifyPlanHandle: true,
+          pendingEffectiveAt: true,
+          nextReconcileAt: true,
+        },
+      });
+      if (!current) return null;
+      if (existing) {
+        const unchanged = current.id === existing.id
+          && current.status === existing.status
+          && current.planId === existing.planId
+          && current.billingPeriodId === existing.billingPeriodId
+          && sameDate(current.currentPeriodStart ?? null, existing.currentPeriodStart ?? null)
+          && sameDate(current.currentPeriodEnd ?? null, existing.currentPeriodEnd ?? null)
+          && current.pendingPlanId === existing.pendingPlanId
+          && current.pendingShopifyPlanHandle === existing.pendingShopifyPlanHandle
+          && sameDate(current.pendingEffectiveAt ?? null, existing.pendingEffectiveAt ?? null)
+          && sameDate(current.nextReconcileAt ?? null, existing.nextReconcileAt ?? null);
+        return unchanged ? current : null;
+      }
+      const emptyShell = current.status === SubscriptionProjectionStatus.NO_CONTRACT
+        && current.planId === null
+        && current.billingPeriodId === null
+        && current.pendingPlanId === null
+        && current.pendingShopifyPlanHandle === null
+        && current.pendingEffectiveAt === null;
+      return emptyShell ? current : null;
+    };
+    const executableMapped = planUsable && meterUsable && plan
+      && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING);
+    if (executableMapped && !hasValidProviderCycle) {
+      const failed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+        const current = await readLockedGenericSubscription(transaction);
+        if (!current) return { kind: "stale" as const };
+        const nextReconcileAt = new Date(now.getTime() + 60 * 1000);
+        await transaction.subscription.update({
+          where: { id: current.id },
+          data: {
+            status: SubscriptionProjectionStatus.SYNC_ERROR,
+            lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+            lastSyncErrorAt: now,
+            lastSyncedAt: now,
+            nextReconcileAt,
+          },
+        });
+        return { kind: "failed" as const, subscriptionId: current.id, nextReconcileAt };
+      });
+      if (failed.kind === "failed") await this.enqueueSubscriptionReconcile(shopId, failed.subscriptionId, failed.nextReconcileAt, now);
+      return { billingPeriodId: existing?.billingPeriodId ?? null, packMeterHandle: null };
+    }
     if (planUsable && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING)
       && plan && provider.currentPeriodStart && provider.currentPeriodEnd) {
       const projection = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-        const current = await transaction.subscription.findUnique({ where: { shopId }, select: { id: true } });
+        const current = await readLockedGenericSubscription(transaction);
         if (!current) return { kind: "stale" as const };
         const result = await ensureCurrentBillingPeriodProjection(transaction, {
           shopId,
@@ -901,6 +986,11 @@ function boundedLimit(value: number): number {
     throw new Error("Billing reconciliation shop batch size is outside the database range.");
   }
   return value;
+}
+
+function sameDate(left: Date | null, right: Date | null): boolean {
+  return left === null && right === null
+    || left !== null && right !== null && left.getTime() === right.getTime();
 }
 
 export const billingReconciliationService = createBillingReconciliationService();
