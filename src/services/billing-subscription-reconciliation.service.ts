@@ -13,6 +13,7 @@ import type { Queue } from "bullmq";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS, type ShopifyDiscountSyncJob } from "@modainteract/moda-interact-shared/shopify";
 import { createShopifyDiscountSyncJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 import prisma from "../lib/db.js";
 import { getSubscriptionReconciliationSnapshot, shopifyPartnerBillingApi, type PartnerSubscription, type PartnerSubscriptionReconciliationSnapshot, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
@@ -120,7 +121,7 @@ export class BillingSubscriptionReconciliationService {
     private readonly queue?: SubscriptionQueue,
     private readonly logger: StructuredLogger = createLogger({
       serviceName: "moda-billing-worker",
-      environment: process.env.NODE_ENV ?? "development",
+      environment: resolveDeploymentEnvironmentName(),
     }),
     private readonly now: () => Date = () => new Date(),
     private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,

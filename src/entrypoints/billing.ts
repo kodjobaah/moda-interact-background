@@ -1,4 +1,5 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
@@ -12,7 +13,7 @@ import { startQueueConcurrencyController } from "../runtime/queue-concurrency-co
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
-  environment: process.env.NODE_ENV ?? "development",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 function reportBillingReconciliationFailure(error: unknown): void {

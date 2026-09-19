@@ -1,5 +1,6 @@
 import { Queue, type Worker } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "./deployment-environment.js";
 
 import { connectionRedis } from "../lib/redis.js";
 import { MERCHANT_COMMUNICATIONS_QUEUE_NAME } from "../domain/translation-batch.js";
@@ -12,7 +13,7 @@ import type { BackgroundRuntimeConfigService, BackgroundRuntimeConfigSnapshot } 
 import type { BackgroundRuntimeLeaseService } from "./background-runtime-lease.js";
 
 const RECONCILIATION_INTERVAL_MS = 30_000;
-const logger = createLogger({ serviceName: "moda-background-queue-concurrency", environment: process.env.NODE_ENV ?? "development" });
+const logger = createLogger({ serviceName: "moda-background-queue-concurrency", environment: resolveDeploymentEnvironmentName() });
 
 export const CONTROLLED_QUEUE_DEFINITIONS = [
   [SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName, "checkoutQueueGlobalConcurrency"],

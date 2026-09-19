@@ -4,6 +4,7 @@ import {
   UsageMetric,
 } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
@@ -20,7 +21,7 @@ const IN_FLIGHT_RECOVERY_MS = 15 * 60_000;
 const MAX_RESPONSE_SUMMARY_LENGTH = 2000;
 const logger = createLogger({
   serviceName: "moda-shopify-event-worker",
-  environment: process.env.NODE_ENV ?? "development",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 type UsageEventRecord = {

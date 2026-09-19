@@ -18,6 +18,7 @@ import type {
   PartnerSubscriptionReconciliationSnapshot,
 } from "../providers/shopify-partner-billing.provider.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { recoveryCapacityResumeService } from "./recovery-capacity-resume.service.js";
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
@@ -33,7 +34,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
   constructor(
     private readonly database: LifecycleDatabase,
     private readonly resumeService: ResumeService = recoveryCapacityResumeService,
-    private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-billing-worker", environment: process.env.NODE_ENV ?? "development" }),
+    private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-billing-worker", environment: resolveDeploymentEnvironmentName() }),
     private readonly runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">,
   ) {}
 

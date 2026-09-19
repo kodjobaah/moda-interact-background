@@ -6,6 +6,7 @@ import {
   createLogger,
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
 
 import prisma from "../lib/db.js";
@@ -23,7 +24,7 @@ const STATUS_RANK: Record<MessageStatus, number> = {
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
-  environment: process.env.NODE_ENV ?? "development",
+  environment: resolveDeploymentEnvironmentName(),
 });
 
 export type ProviderStatusOutcome =

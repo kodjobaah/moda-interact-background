@@ -4,6 +4,7 @@ import {
   createLogger,
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 import { connectionRedis } from "../lib/redis.js";
 import {
@@ -127,7 +128,7 @@ export class InboundWhatsAppAbuseAdmissionService {
     private readonly redis: RedisLike = connectionRedis,
     private readonly logger: StructuredLogger = createLogger({
       serviceName: "moda-messaging-worker",
-      environment: process.env.NODE_ENV ?? "development",
+      environment: resolveDeploymentEnvironmentName(),
     }),
     private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
   ) {}

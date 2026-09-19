@@ -15,6 +15,7 @@ import {
   deriveShopifyProviderContextIdentity,
 } from "@modainteract/moda-interact-shared/billing";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 import prisma from "../lib/db.js";
 import { getSubscriptionReconciliationSnapshot, shopifyPartnerBillingApi, type PartnerSubscription, type PartnerSubscriptionReconciliationSnapshot, type ShopifyPartnerBillingProvider } from "../providers/shopify-partner-billing.provider.js";
@@ -64,7 +65,7 @@ export class BillingReconciliationService {
     private readonly purchases: PurchaseReconciler = recoveryCreditPurchaseService,
     private readonly logger: StructuredLogger = createLogger({
       serviceName: "moda-billing-worker",
-      environment: process.env.NODE_ENV ?? "development",
+      environment: resolveDeploymentEnvironmentName(),
     }),
     private readonly now: () => Date = () => new Date(),
     private readonly subscriptionQueue?: SubscriptionQueue,

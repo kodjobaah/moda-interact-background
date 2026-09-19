@@ -1,5 +1,6 @@
 import type { BackgroundRuntimeConfig, PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "./deployment-environment.js";
 
 import prisma from "../lib/db.js";
 
@@ -63,7 +64,7 @@ const CONFIG_FIELDS = [
   "checkoutRecoveryLifetimeDays",
 ] as const;
 
-const logger = createLogger({ serviceName: "moda-background-runtime", environment: process.env.NODE_ENV ?? "development" });
+const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 class ImmutableDate extends Date {
   override setDate(): number { throw new TypeError("Immutable runtime configuration date."); }

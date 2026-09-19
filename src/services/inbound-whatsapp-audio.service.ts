@@ -3,6 +3,7 @@ import { parseBuffer } from "music-metadata";
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
 import prisma from "../lib/db.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { whatsappMediaService, WhatsAppMediaError } from "./whatsapp-media.service.js";
 import { groqSpeechTranscriptionService, SpeechTranscriptionError, type SpeechTranscriptionService } from "./speech-transcription.service.js";
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
@@ -15,7 +16,7 @@ export class InboundWhatsAppAudioService {
   constructor(
     private readonly media = whatsappMediaService,
     private readonly transcription: SpeechTranscriptionService = groqSpeechTranscriptionService,
-    private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-messaging-worker", environment: process.env.NODE_ENV ?? "development" }),
+    private readonly logger: StructuredLogger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() }),
   ) {}
 
   async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
