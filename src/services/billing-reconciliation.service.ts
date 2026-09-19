@@ -335,13 +335,8 @@ export class BillingReconciliationService {
         return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
       }
     }
-    const settings = await this.database.shopSettings.findUnique({
-      where: { shopId },
-      select: { onboardingCompleted: true },
-    });
     if (
-      settings?.onboardingCompleted === false
-      && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
+      existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
       && existing.planId === null
       && existing.pendingPlanId !== null
       && plan?.active
@@ -355,8 +350,7 @@ export class BillingReconciliationService {
       return { billingPeriodId: null, packMeterHandle: null };
     }
     if (
-      settings?.onboardingCompleted === false
-      && existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
+      existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
       && existing.planId === null
       && existing.pendingPlanId !== null
       && existing.pendingShopifyPlanHandle === provider.planHandle
