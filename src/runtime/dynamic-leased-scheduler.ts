@@ -9,6 +9,7 @@ export type DynamicLeasedSchedulerOptions = {
   runImmediately?: boolean;
   getIntervalMs?: (snapshot: BackgroundRuntimeConfigSnapshot) => number;
   run: (snapshot: BackgroundRuntimeConfigSnapshot, handle: BackgroundLeaseHandle) => Promise<void>;
+  onLeaseSkipped?: () => void;
   onError?: (error: unknown) => void;
 };
 
@@ -29,10 +30,11 @@ export async function startDynamicLeasedScheduler(options: DynamicLeasedSchedule
   const cycle = async (): Promise<void> => {
     if (stopped) return;
     running = (async () => {
-      await options.lease.runWithLease(options.leaseName, async (handle) => {
+      const result = await options.lease.runWithLease(options.leaseName, async (handle) => {
         const snapshot = await options.config.getFresh();
         await options.run(snapshot, handle);
       });
+      if (result.kind === "skipped") options.onLeaseSkipped?.();
     })().catch((error) => options.onError?.(error)).finally(() => {
       running = undefined;
       if (stopped) resolveStop();

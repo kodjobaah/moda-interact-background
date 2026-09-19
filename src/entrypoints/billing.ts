@@ -27,6 +27,13 @@ void startReadyWorkerProcess({
   serviceName: "moda-billing-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
+    const startupConfig = backgroundRuntimeConfigService.current();
+    logger.info("billing.worker.started", {
+      configVersion: startupConfig.version,
+      reconciliationIntervalSeconds: startupConfig.billingReconciliationIntervalSeconds,
+      reconciliationShopBatchSize: startupConfig.billingReconciliationShopBatchSize,
+      subscriptionQueueGlobalConcurrency: startupConfig.billingSubscriptionQueueGlobalConcurrency,
+    });
     const [
       { closeBillingResources, billingSubscriptionQueue, shopifyDiscountSyncQueue },
       { createBillingReconciliationService },
@@ -53,10 +60,54 @@ void startReadyWorkerProcess({
       connection: connectionRedis,
       queueNames: [billingSubscriptionQueue.name as QueueName],
     });
-    const runBillingCycle = async (runtimeConfig: BackgroundRuntimeConfigSnapshot) => {
-      await billingReconciliationService.reconcileOnce(runtimeConfig);
-  await recoveryCreditRefundCorrectionService.processDue();
-      await subscriptionReconciliation.reconstruct();
+    const runBillingCycle = async (
+      runtimeConfig: BackgroundRuntimeConfigSnapshot,
+      leaseHandle: { generation: number },
+    ) => {
+      const startedAt = Date.now();
+      logger.info("billing.reconciliation.cycle_started", {
+        leaseGeneration: leaseHandle.generation,
+        configVersion: runtimeConfig.version,
+        intervalSeconds: runtimeConfig.billingReconciliationIntervalSeconds,
+        shopBatchSize: runtimeConfig.billingReconciliationShopBatchSize,
+      });
+
+      const reconciliation = await billingReconciliationService.reconcileOnce(runtimeConfig);
+      logger.info("billing.reconciliation.global_scan_completed", {
+        leaseGeneration: leaseHandle.generation,
+        subscriptionsScanned: reconciliation.subscriptionsScanned,
+        subscriptionsSynced: reconciliation.subscriptionsSynced,
+        subscriptionErrors: reconciliation.subscriptionErrors,
+        purchasesActivated: reconciliation.purchasesActivated,
+        discrepancies: reconciliation.discrepancies.length,
+        usageSelected: reconciliation.published.selected,
+        usageClaimed: reconciliation.published.claimed,
+        usageReported: reconciliation.published.reported,
+        usageRetryable: reconciliation.published.retryable,
+        usageNeedsAttention: reconciliation.published.needsAttention,
+      });
+
+      const refundCorrection = await recoveryCreditRefundCorrectionService.processDue();
+      logger.info("billing.reconciliation.refund_correction_completed", {
+        leaseGeneration: leaseHandle.generation,
+        selected: refundCorrection.selected,
+        prepared: refundCorrection.prepared,
+        reconciled: refundCorrection.reconciled,
+        completed: refundCorrection.completed,
+        providerActionRequired: refundCorrection.providerActionRequired,
+        needsAttention: refundCorrection.needsAttention,
+      });
+
+      const reconstructed = await subscriptionReconciliation.reconstruct();
+      logger.info("billing.subscription_reconciliation.reconstruction_completed", {
+        leaseGeneration: leaseHandle.generation,
+        enqueued: reconstructed,
+      });
+
+      logger.info("billing.reconciliation.cycle_completed", {
+        leaseGeneration: leaseHandle.generation,
+        durationMs: Date.now() - startedAt,
+      });
     };
     const stopScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -66,6 +117,14 @@ void startReadyWorkerProcess({
       runImmediately: true,
       getIntervalMs: (runtimeConfig) => runtimeConfig.billingReconciliationIntervalSeconds * 1000,
       run: runBillingCycle,
+      onLeaseSkipped: () => {
+        const current = backgroundRuntimeConfigService.current();
+        logger.info("billing.reconciliation.cycle_skipped", {
+          reason: "lease-unavailable-or-cadence-not-due",
+          configVersion: current.version,
+          intervalSeconds: current.billingReconciliationIntervalSeconds,
+        });
+      },
       onError: reportBillingReconciliationFailure,
     });
 

@@ -104,7 +104,7 @@ function harness({
       return { activeSubscription: await partner.getActiveSubscription("gid://shopify/Shop/1"), latestLifecycleEvent: null };
     }),
   };
-  const logger = { error: vi.fn(), warn: vi.fn() };
+  const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
   const service = new BillingSubscriptionReconciliationService(
     database as never,
     partner,

@@ -232,6 +232,9 @@ export class BillingSubscriptionReconciliationService {
         subscription: { select: { id: true, nextReconcileAt: true } },
       },
     });
+    this.logger.info("billing.subscription_reconciliation.reconstruction_started", {
+      eligibleShops: rows.length,
+    });
     let enqueued = 0;
     for (const row of rows) {
       if (!row.subscription?.nextReconcileAt) continue;
@@ -247,12 +250,29 @@ export class BillingSubscriptionReconciliationService {
         });
       }
     }
+    this.logger.info("billing.subscription_reconciliation.reconstruction_finished", {
+      eligibleShops: rows.length,
+      enqueued,
+    });
     return enqueued;
   }
 
   async reconcileJob(input: unknown): Promise<void> {
     const job = parseBillingSubscriptionReconcileJob(input);
     const runtimeConfig = this.runtimeConfig.current();
+    this.logger.info("billing.subscription_reconciliation.job_received", {
+      shopId: job.shopId,
+      subscriptionId: job.subscriptionId,
+      expectedNextReconcileAt: job.expectedNextReconcileAt,
+    });
+    const logSkip = (reason: string, fields: Record<string, unknown> = {}): void => {
+      this.logger.info("billing.subscription_reconciliation.job_skipped", {
+        shopId: job.shopId,
+        subscriptionId: job.subscriptionId,
+        reason,
+        ...fields,
+      });
+    };
     const rowResult = await this.database.shop.findUnique({
       where: { id: job.shopId },
       select: {
@@ -280,15 +300,35 @@ export class BillingSubscriptionReconciliationService {
       },
     });
     const row = rowResult;
-    if (!row || !row.subscription || !row.shopifyShopId) return;
+    if (!row || !row.subscription || !row.shopifyShopId) {
+      logSkip("missing-shop-subscription-or-shopify-id");
+      return;
+    }
     if (row.status === "UNINSTALLED") {
-      if (row.reinstallPendingAt == null || row.subscription.nextReconcileAt === null) return;
-      if (row.subscription.id !== job.subscriptionId) return;
-      if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) return;
+      if (row.reinstallPendingAt == null || row.subscription.nextReconcileAt === null) {
+        logSkip("uninstalled-reconciliation-not-due");
+        return;
+      }
+      if (row.subscription.id !== job.subscriptionId) {
+        logSkip("subscription-id-mismatch", { currentSubscriptionId: row.subscription.id });
+        return;
+      }
+      if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
+        logSkip("stale-next-reconcile-at", { currentNextReconcileAt: row.subscription.nextReconcileAt.toISOString() });
+        return;
+      }
+      this.logger.info("billing.subscription_reconciliation.job_accepted", {
+        shopId: row.id,
+        subscriptionId: row.subscription.id,
+        kind: "reinstall",
+      });
       await this.reconcileReinstall(row.id, row.subscription.id, row.reinstallPendingAt, row.subscription.nextReconcileAt, row.shopifyShopId);
       return;
     }
-    if (row.status !== "ACTIVE") return;
+    if (row.status !== "ACTIVE") {
+      logSkip("shop-not-active", { shopStatus: row.status });
+      return;
+    }
     const isInitialActivation = row.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
       && row.subscription.planId === null
       && row.subscription.pendingPlanId !== null
@@ -326,12 +366,48 @@ export class BillingSubscriptionReconciliationService {
       && row.subscription.pendingShopifyPlanHandle !== null
       && row.subscription.pendingEffectiveAt !== null
       && row.subscription.nextReconcileAt !== null;
-    if (
-      row.subscription.id !== job.subscriptionId
-      || (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation)
-      || !row.subscription.nextReconcileAt
-      || row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt
-    ) return;
+    if (row.subscription.id !== job.subscriptionId) {
+      logSkip("subscription-id-mismatch", { currentSubscriptionId: row.subscription.id });
+      return;
+    }
+    if (!row.subscription.nextReconcileAt) {
+      logSkip("next-reconcile-at-cleared");
+      return;
+    }
+    if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
+      logSkip("stale-next-reconcile-at", { currentNextReconcileAt: row.subscription.nextReconcileAt.toISOString() });
+      return;
+    }
+    if (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation) {
+      logSkip("subscription-state-ineligible", {
+        shopStatus: row.status,
+        subscriptionStatus: row.subscription.status,
+        onboardingCompleted: row.settings?.onboardingCompleted ?? null,
+        hasPlan: row.subscription.planId !== null,
+        hasBillingPeriod: row.subscription.billingPeriodId !== null,
+        hasPendingPlan: row.subscription.pendingPlanId !== null,
+        hasPendingPlanHandle: row.subscription.pendingShopifyPlanHandle !== null,
+        hasPendingEffectiveAt: row.subscription.pendingEffectiveAt !== null,
+      });
+      return;
+    }
+
+    const reconciliationKind = isInitialActivation
+      ? "initial-activation"
+      : isCycleDiscovery
+        ? "cycle-discovery"
+        : isRollover
+          ? "rollover"
+          : isEstablishedPlanChange
+            ? "established-plan-change"
+            : "frozen-reconciliation";
+    this.logger.info("billing.subscription_reconciliation.job_accepted", {
+      shopId: row.id,
+      subscriptionId: row.subscription.id,
+      kind: reconciliationKind,
+      onboardingCompleted: row.settings?.onboardingCompleted ?? null,
+      nextReconcileAt: row.subscription.nextReconcileAt.toISOString(),
+    });
 
     const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover || isFrozenReconciliation
       ? {
@@ -367,11 +443,30 @@ export class BillingSubscriptionReconciliationService {
           select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, recoveryCreditPackEnabled: true, shopifyUsageEventHandle: true, shopifyRecoveryCreditPackEventHandle: true, includedRecoveryConversationAllowance: true },
         })
       : null;
-    if (isCycleDiscovery && (!currentPlan || !currentPlan.active || currentPlan.kind !== BillingPlanKind.FREE || !currentPlan.recoveryCreditPackEnabled)) return;
-    if (isRollover && (!currentPlan || !currentPlan.active || (currentPlan.kind === BillingPlanKind.FREE && !currentPlan.recoveryCreditPackEnabled))) return;
+    if (isCycleDiscovery && (!currentPlan || !currentPlan.active || currentPlan.kind !== BillingPlanKind.FREE || !currentPlan.recoveryCreditPackEnabled)) {
+      logSkip("cycle-discovery-plan-ineligible", { currentPlanKind: currentPlan?.kind ?? null, currentPlanActive: currentPlan?.active ?? null });
+      return;
+    }
+    if (isRollover && (!currentPlan || !currentPlan.active || (currentPlan.kind === BillingPlanKind.FREE && !currentPlan.recoveryCreditPackEnabled))) {
+      logSkip("rollover-plan-ineligible", { currentPlanKind: currentPlan?.kind ?? null, currentPlanActive: currentPlan?.active ?? null });
+      return;
+    }
     let snapshot: PartnerSubscriptionReconciliationSnapshot;
     try {
+      this.logger.info("billing.subscription_reconciliation.provider_snapshot_requested", {
+        shopId: row.id,
+        subscriptionId: row.subscription.id,
+        kind: reconciliationKind,
+      });
       snapshot = await getSubscriptionReconciliationSnapshot(this.partner, row.shopifyShopId);
+      this.logger.info("billing.subscription_reconciliation.provider_snapshot_received", {
+        shopId: row.id,
+        subscriptionId: row.subscription.id,
+        kind: reconciliationKind,
+        hasActiveSubscription: snapshot.activeSubscription !== null,
+        providerPlanHandle: snapshot.activeSubscription?.planHandle ?? null,
+        hasLifecycleEvent: snapshot.latestLifecycleEvent !== null,
+      });
     } catch (error) {
       if (isCycleDiscovery && currentPlan) {
         await this.recordCycleDiscoveryFailure(row.id, expected as FreeCycleExpected, error);

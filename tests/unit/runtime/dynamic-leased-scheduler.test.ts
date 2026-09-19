@@ -77,6 +77,28 @@ describe("dynamic leased scheduler", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("reports lease skips without executing work", async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, lease } = harness();
+      lease.tryAcquire.mockResolvedValue(null);
+      const run = vi.fn().mockResolvedValue(undefined);
+      const onLeaseSkipped = vi.fn();
+      const stop = await startDynamicLeasedScheduler({
+        config: config as any,
+        lease: lease as any,
+        leaseName: "BILLING_RECONCILIATION" as any,
+        intervalMs: 10,
+        run,
+        onLeaseSkipped,
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(run).not.toHaveBeenCalled();
+      expect(onLeaseSkipped).toHaveBeenCalledOnce();
+      await stop();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("uses the lease lifecycle for completed cycles and reads fresh config after acquisition", async () => {
     vi.useFakeTimers();
     try {
