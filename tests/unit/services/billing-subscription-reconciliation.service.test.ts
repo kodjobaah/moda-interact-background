@@ -44,8 +44,14 @@ function harness({
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
     billingPeriod: {
+      findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn().mockResolvedValue({ id: "period-1" }),
-      create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+      create: vi.fn().mockResolvedValue({ id: "period-1" }),
+      update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+    },
+    billingPeriodEntitlementCounter: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn(), upsert: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
     subscription: {
@@ -427,7 +433,8 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cancelAtPeriodEnd: true, currentPeriodEnd: provider.currentPeriodEnd }) }));
     expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("planId");
     expect(test.transaction.billingPeriod.update).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter).toBeUndefined();
+    expect(test.transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
   });
 
   it("clears reversed scheduled cancellation without granting entitlement", async () => {
@@ -1157,7 +1164,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true },
     });
     await test.service.reconcileJob(payload);
-    expect(test.transaction.billingPeriod.upsert).toHaveBeenCalled();
+    expect(test.transaction.billingPeriod.create).toHaveBeenCalled();
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ planId: "plan-free", pendingPlanId: null, nextReconcileAt: new Date("2026-09-30T23:55:00.000Z") }),
     }));
@@ -1257,7 +1264,8 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter).toBeUndefined();
+    expect(test.transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
     expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingPlanId");
     expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingShopifyPlanHandle");
     expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingEffectiveAt");
@@ -1538,7 +1546,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow({ settings: { onboardingCompleted: true } }),
       providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"] },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
+      plan: { ...paidPlan, id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
     });
     await test.service.reconcileJob(payload);
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -1564,10 +1572,11 @@ describe("BillingSubscriptionReconciliationService", () => {
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: false },
     });
     await test.service.reconcileJob(payload);
-    expect(test.transaction.billingPeriod.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ planId: "plan-free", shopifyPlanHandleSnapshot: "free-2026", planNameSnapshot: "Free", planKindSnapshot: "FREE", includedRecoveryCreditsGranted: null }),
+    expect(test.transaction.billingPeriod.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ planId: "plan-free", shopifyPlanHandleSnapshot: "free-2026", planNameSnapshot: "Free", planKindSnapshot: "FREE", includedRecoveryCreditsGranted: null }),
     }));
-    expect(test.transaction).not.toHaveProperty("billingPeriodEntitlementCounter");
+    expect(test.transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
   });
 
   it("preserves an existing lifetime counter and exact period replay state", async () => {
@@ -1587,7 +1596,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     });
     await test.service.reconcileJob(payload);
     expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriod.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
+    expect(test.transaction.billingPeriod.findUnique).toHaveBeenCalled();
     expect(existingCounter).toEqual({
       id: "lifetime-1",
       grantedQuantity: 5,
@@ -1643,7 +1652,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true },
     });
     await test.service.reconcileJob(payload);
-    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-12T12:05:00.000Z") }) }));
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-12T12:05:00.000Z") }) }));
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: "2026-09-12T12:05:00.000Z" }), expect.any(Object));
     expect(test.queue.add).toHaveBeenCalled();
   });
@@ -2016,7 +2025,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     test.database.billingPlan.findUnique.mockResolvedValue(cyclePlan);
     test.transaction.subscription.findUnique.mockResolvedValue({ status: "ACTIVE", planId: "plan-free", billingPeriodId: null, pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") });
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: "2026-09-12T12:00:00.000Z" });
-    expect(test.transaction.billingPeriod.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {}, create: expect.objectContaining({ includedRecoveryCreditsGranted: null }) }));
+    expect(test.transaction.billingPeriod.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ includedRecoveryCreditsGranted: null }) }));
     expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
   });
 
@@ -2412,7 +2421,8 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.update).not.toHaveBeenCalled();
-    expect(test.transaction.billingPeriodEntitlementCounter).toBeUndefined();
+    expect(test.transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
     expect(test.queue.add).not.toHaveBeenCalled();
     transition.mockRestore();
   });
