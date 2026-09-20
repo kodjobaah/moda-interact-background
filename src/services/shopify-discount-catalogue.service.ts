@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
 import { shopifyDiscountProvider, type ShopifyDiscountRecord } from "../providers/shopify-discount.provider.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 const ACTIVE = ["ACTIVE", "TRIALING"] as const;
+const logger = createLogger({
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 export class ShopifyDiscountCatalogueService {
   async requestSync(shopId: string, requestedAt: Date): Promise<"requested" | "unavailable"> {
@@ -48,10 +54,30 @@ export class ShopifyDiscountCatalogueService {
     });
     if (!claimed) return "unavailable";
 
+    logger.info("shopify.discount_sync.started", {
+      shopId,
+      generation: claimed.generation,
+      requestedAt: requestedAt.toISOString(),
+    });
+
     let observed: ShopifyDiscountRecord[];
     try {
       observed = await shopifyDiscountProvider.listDiscounts(claimed.domain);
+      logger.info("shopify.discount_sync.provider_received", {
+        shopId,
+        generation: claimed.generation,
+        observedCount: observed.length,
+        activeCount: observed.filter((discount) => discount.providerStatus === "ACTIVE").length,
+        fixedSelectableActiveCount: observed.filter(
+          (discount) => discount.providerStatus === "ACTIVE" && discount.fixedSelectable,
+        ).length,
+      });
     } catch (error) {
+      logger.error("shopify.discount_sync.provider_failed", {
+        shopId,
+        generation: claimed.generation,
+        ...boundedError(error),
+      });
       await prisma.$transaction(async (transaction) => {
         const catalogue = await this.lockCatalogue(transaction, shopId);
         if (catalogue?.activeSyncToken !== claimed.activeSyncToken) return;
@@ -106,6 +132,20 @@ export class ShopifyDiscountCatalogueService {
     await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
     await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
   }
+}
+
+function boundedError(error: unknown): { errorName: string; errorMessage: string } {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name.slice(0, 64),
+      errorMessage: error.message.slice(0, 256),
+    };
+  }
+
+  return {
+    errorName: "UnknownError",
+    errorMessage: String(error).slice(0, 256),
+  };
 }
 
 function maxDate(left: Date | null, right: Date): Date {

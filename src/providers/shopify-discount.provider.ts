@@ -10,11 +10,11 @@ query DiscountNodes($first: Int!, $after: String) {
       id
       discount {
         __typename
-        ... on DiscountAutomaticApp { title summary status startsAt endsAt }
+        ... on DiscountAutomaticApp { title status startsAt endsAt }
         ... on DiscountAutomaticBasic { title summary status startsAt endsAt }
         ... on DiscountAutomaticBxgy { title summary status startsAt endsAt }
         ... on DiscountAutomaticFreeShipping { title summary status startsAt endsAt }
-        ... on DiscountCodeApp { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
+        ... on DiscountCodeApp { title status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
         ... on DiscountCodeBasic { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
         ... on DiscountCodeBxgy { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
         ... on DiscountCodeFreeShipping { title summary status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }

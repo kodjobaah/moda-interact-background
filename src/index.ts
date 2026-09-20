@@ -37,17 +37,25 @@ server.listen(port, "0.0.0.0", () => {
 
 async function startDevelopmentWorker(): Promise<void> {
   await backgroundRuntimeConfigService.start();
-  const [{ createCheckoutWorker }, { createOrderWorker }, { createPendingRecoveryCandidateWorker }, { createWhatsappWorker }] = await Promise.all([
+  const [
+    { createCheckoutWorker },
+    { createOrderWorker },
+    { createPendingRecoveryCandidateWorker },
+    { createWhatsappWorker },
+    { createShopifyDiscountSyncWorker },
+  ] = await Promise.all([
     import("./workers/checkout.worker.js"),
     import("./workers/orders.worker.js"),
     import("./workers/pending-recovery-candidate.worker.js"),
     import("./workers/whatsapp.worker.js"),
+    import("./workers/shopify-discount-sync.worker.js"),
   ]);
   const workers = [
     createCheckoutWorker(),
     createOrderWorker(),
     createPendingRecoveryCandidateWorker(),
     createWhatsappWorker(),
+    createShopifyDiscountSyncWorker(),
   ];
   const stopQueueConcurrencyController = await startQueueConcurrencyController({
     config: backgroundRuntimeConfigService,

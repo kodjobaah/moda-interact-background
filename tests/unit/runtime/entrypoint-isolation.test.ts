@@ -22,7 +22,10 @@ const entrypoints = [
     readinessScript: "readiness:recovery-worker",
     readinessCommand: "node dist/readiness.js moda-recovery-worker",
     serviceName: "moda-recovery-worker",
-    ownedWorkers: ["pending-recovery-candidate.worker.js"],
+    ownedWorkers: [
+      "pending-recovery-candidate.worker.js",
+      "shopify-discount-sync.worker.js",
+    ],
     excludedWorkers: ["checkout.worker.js", "orders.worker.js", "whatsapp.worker.js"],
   },
   {
@@ -66,6 +69,13 @@ describe("production worker entrypoints", () => {
     expect(source).not.toContain("node:http");
     expect(source).toContain("startReadyWorkerProcess");
     expect(source).toContain("loadWorkerProcess: async");
+  });
+
+  it("keeps the combined local-development worker able to reconcile Shopify discounts", async () => {
+    const source = await readFile("src/index.ts", "utf8");
+
+    expect(source).toContain('import("./workers/shopify-discount-sync.worker.js")');
+    expect(source).toContain("createShopifyDiscountSyncWorker()");
   });
 
   it("maps each logical service to a deterministic production command", async () => {
