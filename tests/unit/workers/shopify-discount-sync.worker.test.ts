@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { id?: string; data: unknown }) => Promise<unknown>),
+  listeners: new Map<string, (...args: unknown[]) => void>(),
   reconcile: vi.fn(),
   info: vi.fn(),
   warn: vi.fn(),
@@ -12,6 +13,11 @@ vi.mock("bullmq", () => ({
   Worker: class {
     constructor(_queue: string, processor: typeof hoisted.processor) {
       hoisted.processor = processor ?? undefined;
+    }
+
+    on(event: string, listener: (...args: unknown[]) => void) {
+      hoisted.listeners.set(event, listener);
+      return this;
     }
   },
 }));
@@ -55,6 +61,31 @@ describe("Shopify discount sync worker logging", () => {
     hoisted.info.mockReset();
     hoisted.warn.mockReset();
     hoisted.error.mockReset();
+  });
+
+  it("logs worker readiness", () => {
+    const listener = hoisted.listeners.get("ready");
+
+    expect(listener).toBeTypeOf("function");
+    listener?.();
+
+    expect(hoisted.info).toHaveBeenCalledWith("shopify.discount_sync.worker_ready", {
+      queueName: "shopify-discount-sync",
+      concurrency: 4,
+    });
+  });
+
+  it("logs bounded worker-level errors", () => {
+    const listener = hoisted.listeners.get("error");
+
+    expect(listener).toBeTypeOf("function");
+    listener?.(new Error("Redis connection failed"));
+
+    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.worker_error", {
+      queueName: "shopify-discount-sync",
+      errorName: "Error",
+      errorMessage: "Redis connection failed",
+    });
   });
 
   it("logs receipt and successful completion", async () => {

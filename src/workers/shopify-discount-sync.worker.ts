@@ -11,7 +11,7 @@ const logger = createLogger({
 });
 
 export function createShopifyDiscountSyncWorker() {
-  return new Worker(
+  const worker = new Worker(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
     async (job) => {
       const payload = parseShopifyDiscountSyncJob(job.data);
@@ -49,6 +49,22 @@ export function createShopifyDiscountSyncWorker() {
     },
     { connection: connectionRedis, concurrency: 4 },
   );
+
+  worker.on("ready", () => {
+    logger.info("shopify.discount_sync.worker_ready", {
+      queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
+      concurrency: 4,
+    });
+  });
+
+  worker.on("error", (error) => {
+    logger.error("shopify.discount_sync.worker_error", {
+      queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
+      ...boundedError(error),
+    });
+  });
+
+  return worker;
 }
 
 function boundedError(error: unknown): { errorName: string; errorMessage: string } {
