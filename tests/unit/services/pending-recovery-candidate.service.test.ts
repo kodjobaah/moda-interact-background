@@ -115,6 +115,10 @@ const prismaMock = {
   },
 };
 
+const recoveryPolicyMocks = vi.hoisted(() => ({
+  resolve: vi.fn(),
+}));
+
 vi.mock("bullmq", () => ({
   Queue: class {
     constructor(_name: string, options: Record<string, unknown>) {
@@ -130,6 +134,12 @@ vi.mock("../../../src/lib/redis.js", () => ({
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: prismaMock,
+}));
+
+vi.mock("../../../src/services/recovery-policy.service.js", () => ({
+  recoveryPolicyService: {
+    resolve: recoveryPolicyMocks.resolve,
+  },
 }));
 
 const serviceModule = await import(
@@ -152,10 +162,20 @@ describe("pending recovery candidate service", () => {
     redisMock.zadd.mockClear();
     redisMock.zrem.mockClear();
     prismaMock.shop.findUnique.mockClear();
+    recoveryPolicyMocks.resolve.mockReset();
+    recoveryPolicyMocks.resolve.mockResolvedValue({
+      recoveryDelayMinutes: 45,
+      recoveryOfferMode: "NONE",
+      fixedShopifyDiscountId: null,
+      followUpEnabled: false,
+      followUpDelayMinutes: null,
+      source: "MERCHANT",
+      offerSnapshot: null,
+    });
     await serviceModule.resetPendingCandidateQueueForTests();
   });
 
-  it("schedules a delayed candidate using recovery delay from shop settings", async () => {
+  it("schedules a delayed candidate using the effective recovery-policy delay", async () => {
     const before = Date.now();
     const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
       shopDomain: "shop.myshopify.com",
@@ -167,6 +187,7 @@ describe("pending recovery candidate service", () => {
 
     expect(result.outcome).toBe("enqueued");
     expect(result.delayMinutes).toBe(45);
+    expect(recoveryPolicyMocks.resolve).toHaveBeenCalledWith("shop_1");
     expect(queueInstance.addCalls).toHaveLength(1);
     expect(queueInstance.addCalls[0].opts.delay).toBe(45 * 60 * 1000);
     expect(queueInstance.addCalls[0].data).toBe(result.candidate);
@@ -197,6 +218,37 @@ describe("pending recovery candidate service", () => {
       checkoutCreatedAt: "2026-08-28T00:00:00Z",
       lastActivityAt: expect.any(String),
     }));
+  });
+
+  it("uses an active Admin override delay for initial scheduling", async () => {
+    recoveryPolicyMocks.resolve.mockResolvedValueOnce({
+      recoveryDelayMinutes: 120,
+      recoveryOfferMode: "NONE",
+      fixedShopifyDiscountId: null,
+      followUpEnabled: false,
+      followUpDelayMinutes: null,
+      source: "ADMIN_OVERRIDE",
+      offerSnapshot: null,
+    });
+
+    const lastActivityAt = "2026-12-28T00:00:00.000Z";
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.parse(lastActivityAt));
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_admin_override",
+      cartToken: "cart_admin_override",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: lastActivityAt,
+    });
+    nowSpy.mockRestore();
+
+    expect(result.outcome).toBe("enqueued");
+    expect(result.delayMinutes).toBe(120);
+    expect(queueInstance.addCalls[0].opts.delay).toBe(120 * 60 * 1000);
+    expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.get(result.jobId)).toBe(
+      Date.parse(lastActivityAt) + 120 * 60 * 1000,
+    );
   });
 
   it.each(["UNINSTALLED", "SUSPENDED"] as const)(
@@ -786,6 +838,40 @@ describe("pending recovery candidate service", () => {
     });
     expect(stale).toMatchObject({ outcome: "stale", jobId: result.jobId });
     expect(job.delayChanges).toHaveLength(1);
+  });
+
+  it("re-resolves the effective recovery-policy delay for activity rescheduling", async () => {
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_policy_refresh",
+      cartToken: "cart_policy_refresh",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+      activityAt: "2026-08-28T00:00:00.000Z",
+    });
+    recoveryPolicyMocks.resolve.mockResolvedValueOnce({
+      recoveryDelayMinutes: 120,
+      recoveryOfferMode: "NONE",
+      fixedShopifyDiscountId: null,
+      followUpEnabled: false,
+      followUpDelayMinutes: null,
+      source: "ADMIN_OVERRIDE",
+      offerSnapshot: null,
+    });
+
+    const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
+      shopId: "shop_1",
+      checkoutToken: "checkout_policy_refresh",
+      cartToken: null,
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+    });
+
+    expect(refreshed.outcome).toBe("rescheduled");
+    expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.get(result.jobId)).toBe(
+      Date.parse("2026-08-28T01:00:00.000Z") + 120 * 60 * 1000,
+    );
+    expect(recoveryPolicyMocks.resolve).toHaveBeenLastCalledWith("shop_1");
   });
 
   it("does not let a stale empty-cart event cancel newer activity", async () => {

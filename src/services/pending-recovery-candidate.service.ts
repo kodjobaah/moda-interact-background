@@ -1,5 +1,4 @@
 import {
-  DEFAULT_RECOVERY_DELAY_MINUTES,
   EVALUATE_PENDING_RECOVERY_JOB,
   PENDING_RECOVERY_CANDIDATE_QUEUE,
   checkoutOrderCompletedKey,
@@ -23,7 +22,6 @@ function sleep(ms: number) {
 import { Queue } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
-import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
@@ -31,6 +29,7 @@ import type { InternationalContext } from "@modainteract/moda-interact-shared/in
 import {
   shopExecutionEligibilityService,
 } from "./shop-execution-eligibility.service.js";
+import { recoveryPolicyService } from "./recovery-policy.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
@@ -119,8 +118,8 @@ export class PendingRecoveryCandidateService {
       };
     }
 
-    const delayMinutes =
-      shop.settings?.recoveryDelayMinutes ?? DEFAULT_RECOVERY_DELAY_MINUTES;
+    const policy = await recoveryPolicyService.resolve(shop.id);
+    const delayMinutes = policy.recoveryDelayMinutes;
     const schedulingNow = Date.now();
 
     const candidate: PendingRecoveryCandidate = {
@@ -617,11 +616,8 @@ export class PendingRecoveryCandidateService {
   }
 
   private async getRecoveryDelayMinutes(shopId: string) {
-    const shop = await prisma.shop.findUnique({
-      where: { id: shopId },
-      select: { settings: { select: { recoveryDelayMinutes: true } } },
-    });
-    return shop?.settings?.recoveryDelayMinutes ?? DEFAULT_RECOVERY_DELAY_MINUTES;
+    const policy = await recoveryPolicyService.resolve(shopId);
+    return policy.recoveryDelayMinutes;
   }
 
   private async removeIndexes(
