@@ -10,6 +10,7 @@ import {
 import {
   canonicalJson,
   CommerceTurnIdentitySchema,
+  type CommerceToolResult,
 } from "@modainteract/moda-interact-shared/commerce";
 import {
   runCommerceTurn,
@@ -35,6 +36,7 @@ import {
   manifestMatchesGrant,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
+import { TurnEvidenceRegistry, type EvidenceExtractor } from "./evidence.js";
 
 export function modelAdapter(model: LanguageModel) {
   return {
@@ -85,6 +87,7 @@ export type HostDependencies = {
   };
   config?: McpConfiguration;
   signal?: AbortSignal;
+  extractEvidence?: EvidenceExtractor;
 };
 export async function executeCommerceHost(
   context: RecoveryAgentContext,
@@ -154,6 +157,7 @@ async function execute(
     }
   }
   const client = new CommerceMcpClient(config, turn, signal, grant);
+  const evidence = new TurnEvidenceRegistry();
   try {
     await client.connect();
     const manifest = await client.manifest();
@@ -264,11 +268,17 @@ async function execute(
             toolSignal.throwIfAborted();
             return (await available(toolSignal)).has(descriptor.name);
           },
-          execute: async (args, toolSignal) => {
+          execute: async (args, toolSignal): Promise<CommerceToolResult> => {
             toolSignal.throwIfAborted();
             await assertCurrent();
-            return client.call(descriptor.name, args, toolSignal);
+            const result = await client.call(descriptor.name, args, toolSignal);
+            if (deps.extractEvidence)
+              evidence.record(descriptor, args, result, deps.extractEvidence);
+            return result;
           },
+          ...(deps.extractEvidence
+            ? { extractEvidence: deps.extractEvidence }
+            : {}),
         })),
       },
     });
@@ -298,7 +308,28 @@ async function execute(
       Date.now() - latest.processingStartedAt.getTime() >= 120_000
     )
       throw new CommerceHostError("STALE_TURN");
-    const envelope = result.result;
+    let envelope = result.result;
+    if (
+      envelope.answerKind === "ANSWER" &&
+      envelope.evidenceIds.length > 0 &&
+      (!deps.extractEvidence ||
+        !(await evidence.refresh(envelope.evidenceIds, {
+          remoteCalls: result.usage.remoteCalls,
+          maxRemoteCalls: 10,
+          now: Date.now,
+          assertCurrent,
+          replay: ({ name, arguments: args }) => client.call(name, args, signal),
+          extractEvidence: deps.extractEvidence,
+        })))
+    ) {
+      envelope = {
+        ...envelope,
+        answerKind: "REFER_TO_STORE",
+        referralReason: "UNVERIFIABLE_FACTS",
+        evidenceIds: [],
+        details: {},
+      };
+    }
     // Recovery has no customer-preference setting. Preserve legacy storage values,
     // but do not impose their old precedence on this recovery-only runner.
     if (!isStableLanguageSignal(context.conversation.messages.map((m) => m.content).join("\n"))) {
