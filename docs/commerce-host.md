@@ -86,9 +86,13 @@ exhaustion produces the existing request-to-type response. No cross-provider ret
 Provider/model metadata is saved with the successful transcript. Raw provider
 errors, credentials, audio and transcript contents are not logged.
 
-Transcript completion and inbound-version advancement share a transaction guarded
-by the pre-transcription inbound/processed versions. A newer turn makes completion
-stale; a losing duplicate cannot increment another turn. The original event time is
+Transcript completion and inbound-version advancement share a transaction locking
+the conversation row and checking durable inbound event order (createdAt, then id
+for equal timestamps). A newer persisted inbound message makes an older transcription
+stale; finishing the prior reply or processing an older note does not. The ordering
+check is repeated after acquiring the row lock. A losing duplicate cannot increment
+another turn. Completion-time lastInboundAt is used for batching, not compared with
+a new message’s provider timestamp to decide whether it is stale. The original event time is
 preserved. History/current-fragment selection uses `transcriptionCompletedAt` for
 audio, so delayed transcription remains current input. Pending, rejected and failed
 audio stays excluded. A replay may recover an interrupted enqueue only while that

@@ -20,7 +20,7 @@ export class InboundWhatsAppAudioService {
   ) {}
 
   async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
-    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true } });
+    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
     if (existing) return existing;
     return prisma.conversationMessage.create({ data: {
       conversationId, providerMessageId: event.providerMessageId, inReplyToProviderId: event.contextMessageId,
@@ -30,7 +30,7 @@ export class InboundWhatsAppAudioService {
       providerMediaSha256: event.content.type === "audio" ? event.content.sha256 : null,
       transcriptionStatus: "PENDING",
     } }).catch((error: unknown) => {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true } });
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
       throw error;
     });
   }
@@ -48,11 +48,10 @@ export class InboundWhatsAppAudioService {
       // Recover an interrupted enqueue only while this remains the pending turn.
       return { kind: state.inboundVersion > state.lastProcessedVersion && state.lastInboundAt?.getTime() === reservation.transcriptionCompletedAt?.getTime() ? "completed" : "ignored" };
     }
-    const baseline = await prisma.conversation.findUniqueOrThrow({
-      where: { id: conversationId },
-      select: { inboundVersion: true, lastInboundAt: true, lastProcessedVersion: true },
-    });
-    if (baseline.lastInboundAt && baseline.lastInboundAt > new Date(event.occurredAt)) {
+    // Compare provider-event order with persisted inbound rows, never with the
+    // completion-time lastInboundAt used for transcript batching.
+    const eventTime = reservation.createdAt ?? new Date(event.occurredAt);
+    if (await this.isStale(conversationId, reservation.id, eventTime)) {
       await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
       return { kind: "ignored" };
     }
@@ -65,7 +64,7 @@ export class InboundWhatsAppAudioService {
       try {
         metadata = await parseBuffer(downloaded.bytes, { mimeType: downloaded.mimeType });
       } catch {
-        if (await this.isStale(conversationId, baseline.inboundVersion, baseline.lastProcessedVersion)) {
+        if (await this.isStale(conversationId, reservation.id, eventTime)) {
           await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
           return { kind: "ignored" };
         }
@@ -73,7 +72,7 @@ export class InboundWhatsAppAudioService {
         this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId, reason: "media-parse-failed" });
         return { kind: "failed", fallback: UNREADABLE };
       }
-      if (await this.isStale(conversationId, baseline.inboundVersion, baseline.lastProcessedVersion)) {
+      if (await this.isStale(conversationId, reservation.id, eventTime)) {
         await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
         return { kind: "ignored" };
       }
@@ -84,7 +83,7 @@ export class InboundWhatsAppAudioService {
         return { kind: "rejected", fallback: durationMs > MAX_DURATION_MS ? TOO_LONG : UNREADABLE };
       }
       const transcript = await this.transcription.transcribe(downloaded);
-      if (await this.isStale(conversationId, baseline.inboundVersion, baseline.lastProcessedVersion)) {
+      if (await this.isStale(conversationId, reservation.id, eventTime)) {
         await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
         return { kind: "ignored" };
       }
@@ -92,13 +91,13 @@ export class InboundWhatsAppAudioService {
         await this.reject(reservation.id, "VOICE_UNREADABLE", durationMs);
         return { kind: "rejected", fallback: UNREADABLE };
       }
-      const completed = await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs, baseline.inboundVersion, baseline.lastProcessedVersion);
+      const completed = await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs, reservation.id, eventTime);
       if (!completed) return { kind: "ignored" };
       this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
       return { kind: "completed" };
     } catch (error) {
       if (isTerminalAudioError(error) || options.finalAttempt !== false) {
-        if (await this.isStale(conversationId, baseline.inboundVersion, baseline.lastProcessedVersion)) {
+        if (await this.isStale(conversationId, reservation.id, eventTime)) {
           await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
           return { kind: "ignored" };
         }
@@ -112,27 +111,33 @@ export class InboundWhatsAppAudioService {
     }
   }
 
-  private async isStale(conversationId: string, inboundVersion: number, lastProcessedVersion: number) {
-    const state = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { inboundVersion: true, lastProcessedVersion: true } });
-    return state.inboundVersion !== inboundVersion || state.lastProcessedVersion !== lastProcessedVersion;
+  private async isStale(conversationId: string, messageId: string, eventTime: Date, database: Pick<Prisma.TransactionClient, "conversationMessage"> = prisma) {
+    return (await database.conversationMessage.findFirst({
+      where: {
+        conversationId, direction: "INBOUND", senderType: "CUSTOMER",
+        OR: [{ createdAt: { gt: eventTime } }, { createdAt: eventTime, id: { gt: messageId } }],
+      },
+      select: { id: true },
+    })) !== null;
   }
-  private async complete(id: string, conversationId: string, text: string, provider: string, model: string, durationMs: number, inboundVersion: number, lastProcessedVersion: number) {
+  private async complete(id: string, conversationId: string, text: string, provider: string, model: string, durationMs: number, messageId: string, eventTime: Date) {
     const duplicate = new Error("transcription-already-completed");
     try {
       return await prisma.$transaction(async (tx) => {
         const now = new Date();
-        // This CAS locks the conversation against a newer inbound/processed turn.
-        // A losing duplicate rolls back its version increment in the same transaction.
-        const admitted = await tx.conversation.updateMany({
-          where: { id: conversationId, inboundVersion, lastProcessedVersion },
-          data: { inboundVersion: { increment: 1 }, lastInboundAt: now, lastMessageAt: now },
-        });
-        if (admitted.count !== 1) {
+        // Serialize completion against inbound and prior-turn state writes, then
+        // recheck durable event order. Finishing a reply is not a newer message.
+        await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id" = ${conversationId} FOR UPDATE`);
+        if (await this.isStale(conversationId, messageId, eventTime, tx)) {
           await tx.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { transcriptionStatus: "REJECTED", transcriptionFailureCode: "STALE_TRANSCRIPTION" } });
           return false;
         }
         const updated = await tx.conversationMessage.updateMany({ where: { id, transcriptionStatus: "PENDING" }, data: { content: text, mediaDurationMs: durationMs, transcriptionProvider: provider, transcriptionModel: model, transcriptionStatus: "COMPLETED", transcriptionCompletedAt: now } });
         if (updated.count !== 1) throw duplicate;
+        await tx.conversation.updateMany({
+          where: { id: conversationId },
+          data: { inboundVersion: { increment: 1 }, lastInboundAt: now, lastMessageAt: now },
+        });
         await tx.conversation.updateMany({ where: { id: conversationId, pendingTurnStartedAt: null }, data: { pendingTurnStartedAt: now } });
         return true;
       });

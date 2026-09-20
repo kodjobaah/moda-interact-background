@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   steps: [] as string[], row: null as any, version: 0, processed: 0, language: "en-GB", jobs: [] as any[], handler: null as any,
   state: { pendingTurnStartedAt: null, lastInboundAt: null } as any,
-  database: { conversationMessage: {findUnique:vi.fn(),create:vi.fn(),updateMany:vi.fn()},conversation:{findUniqueOrThrow:vi.fn(),updateMany:vi.fn()},$transaction:vi.fn() },
+  database: { conversationMessage: {findFirst:vi.fn(),findUnique:vi.fn(),create:vi.fn(),updateMany:vi.fn()},conversation:{findUniqueOrThrow:vi.fn(),updateMany:vi.fn()},$queryRaw:vi.fn(),$transaction:vi.fn() },
   transcript: vi.fn(), agent: vi.fn(), reserve: vi.fn(), send: vi.fn(), fallback:vi.fn(),
   conversation: {getTurnState:vi.fn(),claimTurn:vi.fn(),completeTurn:vi.fn(),releaseTurn:vi.fn(),hasChanged:vi.fn(),applyDetectedLanguage:vi.fn()},
 }));
@@ -31,6 +31,8 @@ import { createWhatsappWorker, processInboundMessage } from "../../../src/worker
 const event={schemaVersion:1 as const,provider:"whatsapp" as const,providerAccountId:"waba",providerPhoneNumberId:"phone",providerMessageId:"voice-1",customerPhone:"+33123456789",contextMessageId:"outbound",occurredAt:new Date().toISOString(),content:{type:"audio" as const,mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}};
 beforeEach(()=>{
  vi.clearAllMocks();h.steps=[];h.jobs=[];h.row=null;h.version=0;h.processed=0;h.language="en-GB";h.state={pendingTurnStartedAt:null,lastInboundAt:null};
+ h.database.conversationMessage.findFirst.mockResolvedValue(null);
+ h.database.$queryRaw.mockResolvedValue([{id:"c"}]);
  h.database.conversationMessage.findUnique.mockImplementation(async()=>h.row);
  h.database.conversationMessage.create.mockImplementation(async({data})=>h.row={id:"m",...data});
  h.database.conversationMessage.updateMany.mockImplementation(async({where,data})=>{if(h.row.transcriptionStatus!==where.transcriptionStatus)return{count:0};Object.assign(h.row,data);if(data.transcriptionStatus==="COMPLETED")h.steps.push("persist");return{count:1};});
@@ -61,8 +63,22 @@ it("A2-V02/V06 persists once, admits once, runs once, sends text once across rep
 it.each(["empty","failure","stale"])("A2-V04/V05/V07 %s has no agent admission/reply",async(kind)=>{
  if(kind==="empty")h.transcript.mockResolvedValue({text:"",provider:"openai",model:"gpt-4o-mini-transcribe"});
  if(kind==="failure")h.transcript.mockRejectedValue(new Error("private provider error"));
- if(kind==="stale")h.transcript.mockImplementation(async()=>{h.version++;h.language="de";return{text:"Bonjour tout le monde",provider:"openai",model:"gpt-4o-mini-transcribe"};});
+ if(kind==="stale")h.transcript.mockImplementation(async()=>{h.version++;h.language="de";h.database.conversationMessage.findFirst.mockResolvedValue({id:"newer"});return{text:"Bonjour tout le monde",provider:"openai",model:"gpt-4o-mini-transcribe"};});
  await processInboundMessage(event);
  expect(h.jobs).toHaveLength(0);expect(h.agent).not.toHaveBeenCalled();expect(h.reserve).not.toHaveBeenCalled();expect(h.send).not.toHaveBeenCalled();
  if(kind==="stale"){expect(h.language).toBe("de");expect(h.fallback).not.toHaveBeenCalled();}else expect(h.fallback).toHaveBeenCalledTimes(1);
+});
+
+it.each(["provider","transaction"])("R2 preceding reply completes at %s; new voice is admitted and delivered once",async(timing)=>{
+ h.version=2;h.processed=1;
+ const completePrior=()=>{h.processed=2;h.state.pendingTurnStartedAt=null;};
+ if(timing==="provider")h.transcript.mockImplementation(async()=>{h.steps.push("transcribe");completePrior();return{text:"Bonjour pouvez-vous vérifier ma commande",provider:"openai",model:"gpt-4o-mini-transcribe"};});
+ else h.database.$queryRaw.mockImplementation(async()=>{completePrior();return[{id:"c"}];});
+ await processInboundMessage(event);
+ expect(h.version).toBe(3);expect(h.jobs).toHaveLength(1);
+ await h.handler({name:"process-conversation-turn",data:h.jobs[0]});
+ await processInboundMessage(event);
+ expect(h.processed).toBe(3);expect(h.language).toBe("fr");
+ for(const fn of [h.transcript,h.reserve,h.agent,h.send])expect(fn).toHaveBeenCalledTimes(1);
+ expect(h.jobs).toHaveLength(1);expect(h.fallback).not.toHaveBeenCalled();
 });
