@@ -15,7 +15,9 @@ const { prismaMock, txConversationUpdate, txConversationUpdateMany } =
         create: vi.fn(),
         findMany: vi.fn(),
       },
+      checkoutRecovery: { findUniqueOrThrow: vi.fn() },
       conversation: {
+        upsert: vi.fn(),
         findUniqueOrThrow: vi.fn(),
         update: vi.fn(),
         updateMany: vi.fn(),
@@ -96,6 +98,7 @@ describe("ConversationService language persistence", () => {
         pendingTurnStartedAt: true,
         languageTag: true,
         languageSource: true,
+        checkoutRecoveryId: true,
         checkoutRecoveryId: true,
       },
     });
@@ -341,4 +344,21 @@ describe("ConversationService turn state", () => {
       data: { processingInboundVersion: null, processingStartedAt: null },
     });
   });
+});
+
+describe("A1 shop language recovery initialization", () => {
+ it.each(["en-GB", "fr"])("L01/L02 initializes %s from shop regardless of checkout locale", async (languageTag) => {
+  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{settings:{defaultLanguageTag:languageTag}}});
+  prismaMock.conversation.upsert.mockClear();
+  await new ConversationService().getOrCreateRecoveryConversation("recovery-1",{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"});
+  expect(prismaMock.conversation.upsert).toHaveBeenCalledWith({where:{checkoutRecoveryId:"recovery-1"},create:{checkoutRecoveryId:"recovery-1",type:"RECOVERY",languageTag,languageSource:"MERCHANT_DEFAULT",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"},update:{}});
+ });
+ it.each([null,"invalid_@@"])("L02 missing/invalid shop has no invented locale (%s)", async(defaultLanguageTag)=>{
+  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{settings:{defaultLanguageTag}}});
+  await new ConversationService().getOrCreateRecoveryConversation("recovery-1");
+  expect(prismaMock.conversation.upsert).toHaveBeenLastCalledWith(expect.objectContaining({create:expect.objectContaining({languageTag:null,languageSource:null}),update:{}}));
+ });
+ it("L03 preserves established French on the next initial-resolution pass",async()=>{
+  expect(await new ConversationLanguageService().resolveInitial({currentLanguageTag:"fr",currentLanguageSource:"detected",merchantLanguageTag:"en-GB"})).toMatchObject({languageTag:"fr",languageSource:"detected",changed:false});
+ });
 });

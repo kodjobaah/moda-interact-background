@@ -1,3 +1,4 @@
+import { isStableLanguageSignal } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
 import {
   generateText,
@@ -219,6 +220,7 @@ async function execute(
     const language = {
       tag: current.languageTag,
       source:
+        current.languageSource === "CUSTOMER_EXPLICIT" ? null :
         current.languageSource?.toLowerCase().replaceAll("_", "-") ?? null,
     };
     const result = await runCommerceTurn({
@@ -238,11 +240,14 @@ async function execute(
         },
         customer: { firstName: recovery.customer?.firstName ?? null },
         conversationType: current.type,
+        resolvedConversationLanguage: language.tag,
         verifiedStoreDomain: recovery.shop.domain,
         currentMessages: context.conversation.messages,
       },
       history: context.conversation.history ?? [],
-      language,
+      // Legacy explicit-source rows remain readable, without imposing preference
+      // precedence on recovery. Supply their retained tag as context instead.
+      language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
       budgets: { deadlineMs: Math.max(1, 90_000 - (Date.now() - started)) },
       dependencies: {
         model: {
@@ -294,6 +299,12 @@ async function execute(
     )
       throw new CommerceHostError("STALE_TURN");
     const envelope = result.result;
+    // Recovery has no customer-preference setting. Preserve legacy storage values,
+    // but do not impose their old precedence on this recovery-only runner.
+    if (!isStableLanguageSignal(context.conversation.messages.map((m) => m.content).join("\n"))) {
+      envelope.detectedLanguageTag = null;
+      envelope.detectedLanguageConfidence = null;
+    }
     // Custom details are intentionally not returned to the delivery adapter.
     return {
       answerKind: envelope.answerKind,

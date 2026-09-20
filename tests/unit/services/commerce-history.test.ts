@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
-vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
-import { boundHistory } from "../../../src/commerce/history.js";
+const findMany = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+vi.mock("../../../src/lib/db.js", () => ({ default: {conversationMessage:{findMany}} }));
+import { boundHistory, loadCommerceHistory } from "../../../src/commerce/history.js";
 const row = (
   id: string,
   content: string,
@@ -35,4 +36,11 @@ it("does not present stored template descriptors as actual delivered copy", () =
       [],
     ).history[0]?.content,
   ).toContain("not a verbatim");
+});
+
+it("uses transcript completion rather than original event time to select current audio",async()=>{
+ const boundary=new Date(); await loadCommerceHistory("c",boundary);
+ const current=findMany.mock.calls.at(-1)?.[0];
+ expect(current.where.AND[1].OR).toContainEqual({contentType:"AUDIO",transcriptionCompletedAt:{gte:boundary}});
+ expect(current.where.AND[0].transcriptionStatus.in).toEqual(["NOT_REQUIRED","COMPLETED"]);
 });

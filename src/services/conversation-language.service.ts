@@ -29,6 +29,7 @@ export type ConversationLanguageResolution = {
 };
 
 export type DetectedLanguageInput = {
+  recoveryConversation?: boolean;
   message: string;
   currentLanguageTag: string | null;
   currentLanguageSource: InternationalContext["languageSource"];
@@ -50,7 +51,7 @@ function normalizeLanguageTag(value: string | null | undefined): string | null {
   }
 }
 
-function isStableLanguageSignal(message: string): boolean {
+export function isStableLanguageSignal(message: string): boolean {
   const value = message.trim();
   if (!value || /^https?:\/\/\S+$/i.test(value) || /^[\d\s.,!?+\-()/#%]+$/.test(value)) {
     return false;
@@ -109,7 +110,7 @@ export class ConversationLanguageService {
     const currentLanguageTag = normalizeLanguageTag(input.currentLanguageTag);
     const detectedLanguageTag = normalizeLanguageTag(input.detectedLanguageTag);
 
-    if (input.currentLanguageSource === "customer-explicit") {
+    if (!input.recoveryConversation && input.currentLanguageSource === "customer-explicit") {
       return this.result(
         currentLanguageTag,
         input.currentLanguageSource,
@@ -121,6 +122,7 @@ export class ConversationLanguageService {
       !isStableLanguageSignal(input.message) ||
       !detectedLanguageTag ||
       typeof input.detectedLanguageConfidence !== "number" ||
+      !Number.isFinite(input.detectedLanguageConfidence) ||
       input.detectedLanguageConfidence < DETECTION_CONFIDENCE_THRESHOLD ||
       input.detectedLanguageConfidence > 1
     ) {

@@ -356,8 +356,6 @@ export class CheckoutRecoveryService {
     };
     const merchantContext = shop?.settings;
     const languageTag =
-      eventContext?.languageTag ??
-      currentContext.languageTag ??
       safelyNormalize(
         merchantContext?.defaultLanguageTag,
         canonicaliseLanguageTag,
@@ -378,9 +376,7 @@ export class CheckoutRecoveryService {
     return {
       languageTag,
       languageSource: languageTag
-        ? eventContext?.languageTag || currentContext.languageTag
-          ? "shopify"
-          : "merchant-default"
+        ? "merchant-default"
         : null,
       countryCode,
       currencyCode:
@@ -874,7 +870,7 @@ export class CheckoutRecoveryService {
       providerAccountId:
         outboundWhatsAppAdmissionService.getProviderAccountId(),
       purpose: "checkout-recovery",
-      languageTag: event.internationalContext?.languageTag ?? null,
+      languageTag: null, // Initial outreach selects the approved shop-language variant.
       countryCode: event.internationalContext?.countryCode ?? null,
       resolveMarketCapability: async () => "unknown" as const,
     });

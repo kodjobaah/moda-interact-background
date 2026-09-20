@@ -53,7 +53,10 @@ export async function loadCommerceHistory(
       where: {
         AND: [
           visible,
-          { conversationId, createdAt: { lt: pendingTurnStartedAt } },
+          { conversationId, OR: [
+            { contentType: { not: "AUDIO" }, createdAt: { lt: pendingTurnStartedAt } },
+            { contentType: "AUDIO", transcriptionCompletedAt: { lt: pendingTurnStartedAt } },
+          ] },
         ],
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -66,7 +69,10 @@ export async function loadCommerceHistory(
           visible,
           {
             conversationId,
-            createdAt: { gte: pendingTurnStartedAt },
+            OR: [
+              { contentType: { not: "AUDIO" }, createdAt: { gte: pendingTurnStartedAt } },
+              { contentType: "AUDIO", transcriptionCompletedAt: { gte: pendingTurnStartedAt } },
+            ],
             direction: "INBOUND",
             senderType: "CUSTOMER",
           },

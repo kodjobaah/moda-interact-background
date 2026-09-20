@@ -71,7 +71,7 @@ export function createWhatsappWorker() {
     observeWorkerJob(workerMetricDefinition, job, async () => {
       switch (job.name) {
         case "message-received":
-          await processInboundJobData(job.data, job.id);
+          await processInboundJobData(job.data, job.id, { finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1) });
           return;
 
         case "process-conversation-turn":
@@ -110,7 +110,7 @@ export function createWhatsappWorker() {
 }
 
 export {};
-export async function processInboundMessage(event: WhatsAppInboundEvent) {
+export async function processInboundMessage(event: WhatsAppInboundEvent, audioOptions: { finalAttempt?: boolean } = {}) {
   console.log("Processing WhatsApp message", event.providerMessageId);
 
   const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
@@ -137,7 +137,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
   const content = event.content;
   if (content.type === "audio") {
     if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
-    const result = await inboundWhatsAppAudioService.process(event, route.conversationId);
+    const result = await inboundWhatsAppAudioService.process(event, route.conversationId, audioOptions);
     if (result.kind === "completed") {
       const state = await conversationService.getTurnState(route.conversationId);
       await conversationTurnProcessor.enqueue(route.conversationId, state.inboundVersion);
@@ -197,7 +197,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
   );
 }
 
-export async function processInboundJobData(input: unknown, jobId?: string) {
+export async function processInboundJobData(input: unknown, jobId?: string, audioOptions: { finalAttempt?: boolean } = {}) {
   const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
   if (!parsed.success) {
     console.warn("Ignoring non-canonical WhatsApp inbound job", { jobId });
@@ -205,7 +205,7 @@ export async function processInboundJobData(input: unknown, jobId?: string) {
   }
   await observeConversationTurn(
     "whatsapp",
-    () => processInboundMessage(parsed.data),
+    () => processInboundMessage(parsed.data, audioOptions),
     conversationTurnObservation,
   );
 }
@@ -232,7 +232,10 @@ export async function loadConversationTurn(
       },
       messages: {
         where: {
-          createdAt: { gte: pendingTurnStartedAt },
+          OR: [
+            { contentType: { not: "AUDIO" }, createdAt: { gte: pendingTurnStartedAt } },
+            { contentType: "AUDIO", transcriptionCompletedAt: { gte: pendingTurnStartedAt } },
+          ],
           direction: "INBOUND",
           senderType: "CUSTOMER",
         },

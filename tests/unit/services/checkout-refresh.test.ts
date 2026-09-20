@@ -646,3 +646,12 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
     expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] }));
   });
 });
+
+it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout",async()=>{
+ const recovery={id:"recovery-initial",shopId:"shop_1",status:"DETECTED",customerId:null};
+ vi.spyOn(service as any,"upsertRecovery").mockResolvedValueOnce(recovery);
+ hoisted.whatsappTemplateSelectorMock.select.mockClear();
+ hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({outcome:"template-unavailable"} as any);
+ await service.handleCheckoutCreated({shopId:"shop_1",checkoutToken:"initial",customer:{phone:"+33123456789"},internationalContext:{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"}} as any);
+ expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({shopId:"shop_1",languageTag:null,countryCode:"FR"}));
+});

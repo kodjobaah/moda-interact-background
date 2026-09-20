@@ -471,14 +471,14 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
       });
     },
   );
-  it("P06 explicit French rejects model language replacement", async () => {
+  it("A1 legacy preference does not block substantive recovery language detection", async () => {
     state.languageTag = "fr";
     state.languageSource = "CUSTOMER_EXPLICIT";
     await expect(
       run(async () =>
         final({ detectedLanguageTag: "en", detectedLanguageConfidence: 0.99 }),
       ),
-    ).rejects.toMatchObject({ code: "INVALID_FINAL" });
+    ).resolves.toMatchObject({ detectedLanguageTag: "en" });
   });
   it("P07/P08/P09/P12 preserves validated language metadata and null fallback", async () => {
     state.languageTag = "fr";
@@ -640,4 +640,12 @@ it("uses a concurrently persisted different release instead of its losing resolv
           o.claims.grantId === "winner-grant",
       ),
   ).toBe(true);
+});
+
+it.each(["ok", "12345", "https://example.com", "👍"])("A1-L06 ambiguous %s returns null detection despite model guess",async(content)=>{
+ state.languageTag="fr";state.languageSource="DETECTED";
+ const altered=structuredClone(context); altered.conversation.messages=[{role:"user",content}];
+ const result=await run(async()=>final({detectedLanguageTag:"en",detectedLanguageConfidence:0.99}),altered);
+ expect(result).toMatchObject({detectedLanguageTag:null,detectedLanguageConfidence:null});
+ expect(result.replyText).toContain("Veuillez contacter");
 });
