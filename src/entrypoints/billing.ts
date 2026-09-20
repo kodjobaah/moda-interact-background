@@ -39,10 +39,12 @@ void startReadyWorkerProcess({
       { closeBillingResources, billingSubscriptionQueue, shopifyDiscountSyncQueue },
       { createBillingReconciliationService },
       { RecoveryCreditRefundCorrectionService },
+      { PromotionSelectionExpiryReconciliationService },
     ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
       import("../services/recovery-credit-refund-correction.service.js"),
+      import("../services/promotion-selection-expiry-reconciliation.service.js"),
     ]);
     const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
@@ -51,6 +53,8 @@ void startReadyWorkerProcess({
     ]);
     const billingReconciliationService = createBillingReconciliationService(billingSubscriptionQueue, shopifyDiscountSyncQueue);
     const recoveryCreditRefundCorrectionService = new RecoveryCreditRefundCorrectionService();
+    const promotionSelectionExpiryReconciliationService =
+      new PromotionSelectionExpiryReconciliationService();
     const subscriptionReconciliation = new BillingSubscriptionReconciliationService(undefined, undefined, billingSubscriptionQueue, undefined, undefined, backgroundRuntimeConfigService, shopifyDiscountSyncQueue);
     const billingSubscriptionReconciliationWorker = createBillingSubscriptionReconciliationWorker(subscriptionReconciliation);
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
@@ -87,6 +91,30 @@ void startReadyWorkerProcess({
         usageRetryable: reconciliation.published.retryable,
         usageNeedsAttention: reconciliation.published.needsAttention,
       });
+
+      try {
+        const promotionExpiry =
+          await promotionSelectionExpiryReconciliationService.reconcileOnce(runtimeConfig);
+
+        logger.info("billing.reconciliation.promotion_selection_expiry_completed", {
+          leaseGeneration: leaseHandle.generation,
+          configVersion: runtimeConfig.version,
+          selected: promotionExpiry.selected,
+          released: promotionExpiry.released,
+          raced: promotionExpiry.raced,
+        });
+      } catch (error) {
+        logger.error("billing.reconciliation.promotion_selection_expiry_failed", {
+          leaseGeneration: leaseHandle.generation,
+          configVersion: runtimeConfig.version,
+          errorName:
+            error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+          errorMessage:
+            error instanceof Error
+              ? error.message.slice(0, 256)
+              : "unknown failure",
+        });
+      }
 
       const refundCorrection = await recoveryCreditRefundCorrectionService.processDue();
       logger.info("billing.reconciliation.refund_correction_completed", {
