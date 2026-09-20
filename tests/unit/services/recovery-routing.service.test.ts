@@ -1,1048 +1,202 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Prisma } from "@prisma/client";
-
-import prisma from "../../../src/lib/db.js";
-import { ConversationService } from "../../../src/services/conversation.service.js";
-import { RecoveryRoutingService } from "../../../src/services/recovery-routing.service.js";
-
-vi.mock("../../../src/lib/db.js", () => ({
-  default: {
-    conversationMessage: {
-      findUnique: vi.fn(),
-      create: vi.fn(),
-    },
-    conversation: {
-      findUnique: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
-      findMany: vi.fn(),
-    },
-    shop: {
-      findUnique: vi.fn().mockResolvedValue({ status: "ACTIVE" }),
-    },
-    customerPhone: {
-      findMany: vi.fn(),
-    },
-    $transaction: vi.fn(),
+const db = vi.hoisted(() => ({
+  conversationMessage: { findUnique: vi.fn() },
+  conversation: { findUnique: vi.fn() },
+  $queryRaw: vi.fn(),
+}));
+const active = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/lib/db.js", () => ({ default: db }));
+vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
+  shopExecutionEligibilityService: { isShopExecutionActive: active },
+}));
+vi.mock("../../../src/services/whatsapp.service.js", () => ({
+  whatsAppService: {
+    resolveSender: () => ({
+      providerAccountId: "waba",
+      providerPhoneNumberId: "phone",
+    }),
   },
 }));
-
-describe("RecoveryRoutingService", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(prisma.shop.findUnique).mockResolvedValue({ status: "ACTIVE" } as any);
-  });
-
-  it("returns product-only when the customer has no active checkout recoveries", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([]);
-
-    const service = new RecoveryRoutingService();
-    const route = await service.resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "msg-1",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Do you have this in black?",
-    });
-
-    expect(route).toMatchObject({
-      kind: "product-only",
-      customerPhone: "+447700900000",
-    });
-  });
-
-  it.each(["UNINSTALLED", "SUSPENDED"] as const)(
-    "returns a terminal route for a %s context-linked recovery",
-    async (status) => {
-      vi.mocked(prisma.conversationMessage.findUnique).mockResolvedValue({
-        direction: "OUTBOUND",
-        conversationId: "conversation-1",
-        conversation: {
-          checkoutRecoveryId: "recovery-1",
-          shopId: null,
-          customerId: "customer-1",
-          type: "RECOVERY",
-          shop: null,
-          checkoutRecovery: { shopId: "shop-1" },
-        },
-      } as any);
-      vi.mocked(prisma.shop.findUnique).mockResolvedValue({ status } as any);
-
-      const route = await new RecoveryRoutingService().resolveInboundMessage({
-        provider: "whatsapp",
-        providerMessageId: `inactive-${status}`,
-        customerPhone: "+447700900000",
-        contextMessageId: "outbound-1",
-        phoneNumberId: "phone-1",
-        timestamp: Date.now(),
-        type: "text",
-        text: "Can you help?",
+import { RecoveryRoutingService } from "../../../src/services/recovery-routing.service.js";
+const event = {
+  schemaVersion: 1,
+  provider: "whatsapp",
+  providerAccountId: "waba",
+  providerPhoneNumberId: "phone",
+  providerMessageId: "incoming",
+  customerPhone: "+4477",
+  contextMessageId: null,
+  occurredAt: "2026-09-20T12:00:00Z",
+  content: { type: "text", text: "help" },
+} as const;
+const recovery = { id: "r1", shopId: "shop1", customer: { phone: "  +4477 " } };
+beforeEach(() => {
+  vi.resetAllMocks();
+  active.mockResolvedValue(true);
+  db.conversationMessage.findUnique.mockResolvedValue(null);
+  db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: recovery });
+});
+describe("C2 strict recovery routing", () => {
+  it.each([1, 10])(
+    "retains explicit outreach ownership after %i hours, including later FAILED status",
+    async (hours) => {
+      db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+        where.providerMessageId === "old"
+          ? {
+              direction: "OUTBOUND",
+              sentAt: new Date(Date.now() - hours * 3600000),
+              status: "FAILED",
+              conversationId: "c1",
+              conversation: { checkoutRecovery: recovery },
+            }
+          : null,
+      );
+      expect(
+        await new RecoveryRoutingService().resolveInboundMessage({
+          ...event,
+          contextMessageId: "old",
+        }),
+      ).toEqual({
+        kind: "resolved",
+        conversationId: "c1",
+        checkoutRecoveryId: "r1",
+        shopId: "shop1",
       });
-
-      expect(route).toEqual({
-        kind: "shop-unavailable",
-        customerPhone: "+447700900000",
-      });
+      expect(db.$queryRaw).not.toHaveBeenCalled();
     },
   );
-
-  it("does not create a standalone conversation for an inactive product owner", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: {
-          shopId: "shop-1",
-          shop: { domain: "example.myshopify.com" },
-        },
-      },
-    ] as any);
-    vi.mocked(prisma.shop.findUnique).mockResolvedValue({
-      status: "UNINSTALLED",
-    } as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "inactive-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toEqual({
-      kind: "shop-unavailable",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("falls through to contextless routing for an inbound referenced message", async () => {
-    vi.mocked(prisma.conversationMessage.findUnique).mockResolvedValue({
-      direction: "INBOUND",
-      conversationId: "wrong-conversation",
-      conversation: {
-        checkoutRecoveryId: "wrong-recovery",
-        shopId: "wrong-shop",
-        customerId: "wrong-customer",
-        type: "RECOVERY",
-        shop: { domain: "wrong.myshopify.com" },
-        checkoutRecovery: { shopId: "wrong-shop" },
-      },
-    } as any);
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([]);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      schemaVersion: 1,
-      provider: "whatsapp",
-      providerAccountId: "waba-1",
-      providerPhoneNumberId: "phone-1",
-      providerMessageId: "inbound-1",
-      customerPhone: "+447700900000",
-      contextMessageId: "inbound-reference",
-      occurredAt: "2026-09-16T12:00:00.000Z",
-      content: { type: "text", text: "Can you help?" },
-    });
-
-    expect(route).toMatchObject({ kind: "product-only" });
-    expect(route).not.toMatchObject({ conversationId: "wrong-conversation" });
-  });
-
-  it("returns a terminal route when all recovery ownership is inactive", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        id: "conversation-1",
-        checkoutRecoveryId: "recovery-1",
-        checkoutRecovery: {
-          shopId: "shop-1",
-          id: "recovery-1",
-          status: "ENGAGED",
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-          customer: { id: "customer-1", phone: "+447700900000" },
-        },
-      },
-    ] as any);
-    vi.mocked(prisma.shop.findUnique).mockResolvedValue({
-      status: "UNINSTALLED",
-    } as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "inactive-recovery",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Can you help with my order?",
-    });
-
-    expect(route).toEqual({
-      kind: "shop-unavailable",
-      customerPhone: "+447700900000",
-    });
-  });
-
-  it("reuses an active standalone conversation for product turns", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: {
-          shopId: "shop-1",
-          shop: { domain: "example.myshopify.com" },
-        },
-      },
-    ] as any);
-    const findUnique = vi
-      .fn()
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "standalone-1",
-        outcome: "IN_PROGRESS",
-        createdAt: new Date(),
-        lastMessageAt: new Date(),
-      });
-    const create = vi.fn().mockResolvedValue({ id: "standalone-1" });
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: { findUnique, create, updateMany: vi.fn() },
-      }),
-    );
-
-    const service = new RecoveryRoutingService();
-    const first = await service.resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "product-1",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-    const second = await service.resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "product-2",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "In black",
-    });
-
-    expect(first).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-1",
-    });
-    expect(second).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-1",
-    });
-    expect(create).toHaveBeenCalledTimes(1);
-  });
-
-  it("expires an inactive standalone scope before creating a new lifecycle", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      },
-    ] as any);
-    const updateMany = vi.fn();
-    const create = vi.fn().mockResolvedValue({ id: "standalone-new" });
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: {
-          findUnique: vi.fn().mockResolvedValue({
-            id: "standalone-old",
-            outcome: "IN_PROGRESS",
-            createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
-            lastMessageAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
-          }),
-          create,
-          updateMany,
-        },
-      }),
-    );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "expired-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-new",
-    });
-    expect(updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "standalone-old",
-        standaloneScopeKey: "standalone:shop-1:customer-1:PRODUCT_DISCOVERY",
-      },
-      data: { outcome: "EXPIRED", standaloneScopeKey: null },
-    });
-  });
-
-  it("re-reads and reuses the winner after a standalone uniqueness race", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      },
-    ] as any);
-    const findUniqueFirst = vi.fn().mockResolvedValue(null);
-    const findUniqueWinner = vi.fn().mockResolvedValue({
-      id: "standalone-winner",
-      outcome: "IN_PROGRESS",
-      createdAt: new Date(),
-      lastMessageAt: new Date(),
-    });
-    const create = vi.fn().mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError("duplicate", {
-        code: "P2002",
-        clientVersion: "6.19.3",
-      }),
-    );
-    vi.mocked(prisma.$transaction)
-      .mockImplementationOnce(async (callback: any) =>
-        callback({
-          conversation: {
-            findUnique: findUniqueFirst,
-            create,
-            updateMany: vi.fn(),
-          },
-        }),
-      )
-      .mockImplementationOnce(async (callback: any) =>
-        callback({
-          conversation: {
-            findUnique: findUniqueWinner,
-            create,
-            updateMany: vi.fn(),
-          },
-        }),
+  it.each([0, 1, 2])(
+    "counts %i distinct recoveries before checking shop eligibility",
+    async (count) => {
+      db.$queryRaw.mockResolvedValue(
+        Array.from({ length: count }, (_, i) => ({
+          conversationId: `c${i + 1}`,
+        })),
       );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "race-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-winner",
-    });
-  });
-
-  it("fails closed when a phone belongs to multiple merchant ownership pairs", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      },
-      {
-        customerId: "customer-2",
-        customer: { shopId: "shop-2", shop: { domain: "two.myshopify.com" } },
-      },
-    ] as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "ambiguous-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("keeps mixed inactive and active ownership ambiguous when two active owners remain", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-inactive",
-        customer: {
-          shopId: "shop-inactive",
-          shop: { domain: "inactive.myshopify.com" },
-        },
-      },
-      {
-        customerId: "customer-active-1",
-        customer: {
-          shopId: "shop-active-1",
-          shop: { domain: "active-one.myshopify.com" },
-        },
-      },
-      {
-        customerId: "customer-active-2",
-        customer: {
-          shopId: "shop-active-2",
-          shop: { domain: "active-two.myshopify.com" },
-        },
-      },
-    ] as any);
-    vi.mocked(prisma.shop.findUnique)
-      .mockResolvedValueOnce({ status: "UNINSTALLED" } as any)
-      .mockResolvedValueOnce({ status: "ACTIVE" } as any)
-      .mockResolvedValueOnce({ status: "ACTIVE" } as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "mixed-ambiguous-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when the product phone lookup reaches its overflow sentinel", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      ...Array.from({ length: 10 }, (_, index) => ({
-        customerId: `customer-${index}`,
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      })),
-      {
-        customerId: "customer-other",
-        customer: { shopId: "shop-2", shop: { domain: "two.myshopify.com" } },
-      },
-    ] as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "overflow-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.customerPhone.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 11 }),
+      const result = await new RecoveryRoutingService().resolveInboundMessage(
+        event,
+      );
+      expect(result.kind).toBe(count === 1 ? "resolved" : "guidance");
+      if (count !== 1) expect(active).not.toHaveBeenCalled();
+      const query = db.$queryRaw.mock.calls[0][0].strings.join("?");
+      expect(query).toContain("SELECT DISTINCT");
+      expect(query).toContain("LIMIT 2");
+      expect(query).not.toContain("status");
+      expect(query).not.toContain("ORDER BY");
+      expect(query).toContain('commerce."Customer"');
+      expect(query).toContain('"sentAt" IS NOT NULL');
+    },
+  );
+  it.each([
+    null,
+    { direction: "OUTBOUND", sentAt: null },
+    { direction: "INBOUND", sentAt: new Date() },
+    {
+      direction: "OUTBOUND",
+      sentAt: new Date(),
+      conversation: { checkoutRecovery: { customer: { phone: "999" } } },
+    },
+  ])("never falls back from invalid explicit reference", async (original) => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "bad" ? original : null,
     );
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("deduplicates duplicate active phone rows for one ownership pair", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue([
-      {
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      },
-      {
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      },
-    ] as any);
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: {
-          findUnique: vi.fn().mockResolvedValue(null),
-          create: vi.fn().mockResolvedValue({ id: "standalone-1" }),
-          updateMany: vi.fn(),
-        },
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage({
+        ...event,
+        contextMessageId: "bad",
       }),
-    );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "duplicate-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-1",
-    });
+    ).toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(active).not.toHaveBeenCalled();
   });
-
-  it("returns the only active recovery when there is exactly one match", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        id: "conversation-1",
-        checkoutRecoveryId: "recovery-1",
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          status: "ENGAGED",
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-          customer: {
-            id: "customer-1",
-            phone: "+447700900000",
-          },
-        },
-      },
-    ] as any);
-
-    const service = new RecoveryRoutingService();
-    const route = await service.resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "msg-2",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Can you tell me if the red one is still available?",
+  it("rejects wrong provider before database access", async () => {
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage({
+        ...event,
+        providerAccountId: "other",
+      }),
+    ).toEqual({ kind: "ignored" });
+    expect(db.conversationMessage.findUnique).not.toHaveBeenCalled();
+  });
+  it("reuses the stored inbound conversation despite newer ambiguous outreach", async () => {
+    db.conversationMessage.findUnique.mockResolvedValue({
+      direction: "INBOUND",
+      conversationId: "original",
     });
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage(event),
+    ).toMatchObject({ kind: "resolved", conversationId: "original" });
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+  });
+  it("rejects reference disagreement with stored inbound ownership", async () => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "incoming"
+        ? { direction: "INBOUND", conversationId: "other" }
+        : {
+            direction: "OUTBOUND",
+            sentAt: new Date(),
+            conversationId: "c1",
+            conversation: { checkoutRecovery: recovery },
+          },
+    );
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage({
+        ...event,
+        contextMessageId: "old",
+      }),
+    ).toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
+  });
+  it("does not manufacture ownership from a missing recovery", async () => {
+    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+    db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: null });
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage(event),
+    ).toMatchObject({ reason: "INVALID_REFERENCE" });
+  });
+  it("checks availability only after selecting the one recovery", async () => {
+    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+    active.mockResolvedValue(false);
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage(event),
+    ).toEqual({ kind: "guidance", reason: "SHOP_UNAVAILABLE" });
+  });
+});
 
-    expect(route).toMatchObject({
+it.each(["initial template", "follow-up template", "later agent reply"])(
+  "C13 routes a reply to the %s into the same recovery conversation",
+  async (category) => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === category
+        ? {
+            direction: "OUTBOUND",
+            sentAt: new Date(),
+            conversationId: "one-recovery-conversation",
+            conversation: { checkoutRecovery: recovery },
+          }
+        : null,
+    );
+    expect(
+      await new RecoveryRoutingService().resolveInboundMessage({
+        ...event,
+        contextMessageId: category,
+      }),
+    ).toMatchObject({
       kind: "resolved",
-      conversationId: "conversation-1",
-      checkoutRecoveryId: "recovery-1",
+      conversationId: "one-recovery-conversation",
+      checkoutRecoveryId: "r1",
     });
-  });
-
-  it("asks for clarification when the customer has multiple active recoveries", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        id: "conversation-1",
-        checkoutRecoveryId: "recovery-1",
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          status: "ENGAGED",
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-          customer: {
-            id: "customer-1",
-            phone: "+447700900000",
-          },
-        },
-      },
-      {
-        id: "conversation-2",
-        checkoutRecoveryId: "recovery-2",
-        checkoutRecovery: {
-          id: "recovery-2",
-          shopId: "shop-1",
-          status: "MESSAGE_SENT",
-          checkoutToken: "checkout-2",
-          totalPrice: "18.00",
-          customer: {
-            id: "customer-1",
-            phone: "+447700900000",
-          },
-        },
-      },
-    ] as any);
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: {
-          findUnique: vi.fn().mockResolvedValue(null),
-          create: vi.fn().mockResolvedValue({ id: "standalone-1" }),
-          updateMany: vi.fn(),
-        },
-      }),
-    );
-
-    const service = new RecoveryRoutingService();
-    const route = await service.resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "msg-3",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "I want to know more about the basket?",
-    });
-
-    expect(route).toMatchObject({
-      kind: "clarify",
-      conversationId: "standalone-1",
-      customerPhone: "+447700900000",
-    });
-    expect((route as any).recoveries).toHaveLength(2);
-  });
-
-  it("fails closed when the active recovery lookup reaches its overflow sentinel", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
-      Array.from({ length: 11 }, (_, index) => ({
-        id: `conversation-${index}`,
-        checkoutRecoveryId: `recovery-${index}`,
-        checkoutRecovery: {
-          id: `recovery-${index}`,
-          shopId: index === 10 ? "shop-2" : "shop-1",
-          status: "ENGAGED",
-          checkoutToken: `checkout-${index}`,
-          totalPrice: "42.00",
-          customer: {
-            id: index === 10 ? "customer-2" : "customer-1",
-            phone: "+447700900000",
-          },
-        },
-      })) as any,
-    );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "overflow-recovery",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Which basket?",
-    });
-
-    expect(route).toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.conversation.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 11 }),
-    );
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("allows exactly ten same-owner product phone rows", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([]);
-    vi.mocked(prisma.customerPhone.findMany).mockResolvedValue(
-      Array.from({ length: 10 }, () => ({
-        customerId: "customer-1",
-        customer: { shopId: "shop-1", shop: { domain: "one.myshopify.com" } },
-      })) as any,
-    );
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: {
-          findUnique: vi.fn().mockResolvedValue(null),
-          create: vi.fn().mockResolvedValue({ id: "standalone-10" }),
-          updateMany: vi.fn(),
-        },
-      }),
-    );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "ten-product",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Show me shirts",
-    });
-
-    expect(route).toMatchObject({
-      kind: "product-only",
-      conversationId: "standalone-10",
-    });
-    expect(prisma.customerPhone.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 11 }),
-    );
-  });
-
-  it("allows exactly ten same-owner active recoveries", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
-      Array.from({ length: 10 }, (_, index) => ({
-        id: `conversation-${index}`,
-        checkoutRecoveryId: `recovery-${index}`,
-        checkoutRecovery: {
-          id: `recovery-${index}`,
-          shopId: "shop-1",
-          status: "ENGAGED",
-          checkoutToken: `checkout-${index}`,
-          totalPrice: "42.00",
-          customer: { id: "customer-1", phone: "+447700900000" },
-        },
-      })) as any,
-    );
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversation: {
-          findUnique: vi.fn().mockResolvedValue(null),
-          create: vi.fn().mockResolvedValue({ id: "clarification-10" }),
-          updateMany: vi.fn(),
-        },
-      }),
-    );
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "ten-recoveries",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Which basket?",
-    });
-
-    expect(route).toMatchObject({
-      kind: "clarify",
-      conversationId: "clarification-10",
-    });
-    expect((route as any).recoveries).toHaveLength(10);
-    expect(prisma.conversation.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 11 }),
-    );
-  });
-
-  it("fails closed when active recoveries span merchant ownership pairs", async () => {
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        id: "conversation-1",
-        checkoutRecoveryId: "recovery-1",
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          status: "ENGAGED",
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-          customer: { id: "customer-1", phone: "+447700900000" },
-        },
-      },
-      {
-        id: "conversation-2",
-        checkoutRecoveryId: "recovery-2",
-        checkoutRecovery: {
-          id: "recovery-2",
-          shopId: "shop-2",
-          status: "MESSAGE_SENT",
-          checkoutToken: "checkout-2",
-          totalPrice: "18.00",
-          customer: { id: "customer-2", phone: "+447700900000" },
-        },
-      },
-    ] as any);
-
-    const route = await new RecoveryRoutingService().resolveInboundMessage({
-      provider: "whatsapp",
-      providerMessageId: "ambiguous-recovery",
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text",
-      text: "Which basket?",
-    });
-
-    expect(route).toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
-  });
-
-  it("reuses the same clarification conversation for one owner within 24 hours", async () => {
-    const recoveries = [
-      {
-        id: "conversation-1",
-        checkoutRecoveryId: "recovery-1",
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          status: "ENGAGED",
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-          customer: { id: "customer-1", phone: "+447700900000" },
-        },
-      },
-      {
-        id: "conversation-2",
-        checkoutRecoveryId: "recovery-2",
-        checkoutRecovery: {
-          id: "recovery-2",
-          shopId: "shop-1",
-          status: "MESSAGE_SENT",
-          checkoutToken: "checkout-2",
-          totalPrice: "18.00",
-          customer: { id: "customer-1", phone: "+447700900000" },
-        },
-      },
-    ];
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
-      recoveries as any,
-    );
-    const findUnique = vi
-      .fn()
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "clarification-1",
-        outcome: "IN_PROGRESS",
-        createdAt: new Date(),
-        lastMessageAt: new Date(),
-      });
-    const create = vi.fn().mockResolvedValue({ id: "clarification-1" });
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({ conversation: { findUnique, create, updateMany: vi.fn() } }),
-    );
-
-    const service = new RecoveryRoutingService();
-    const input = {
-      provider: "whatsapp" as const,
-      customerPhone: "+447700900000",
-      contextMessageId: null,
-      phoneNumberId: "phone-1",
-      timestamp: Date.now(),
-      type: "text" as const,
-      text: "Which basket?",
-    };
-    const first = await service.resolveInboundMessage({
-      ...input,
-      providerMessageId: "clarify-1",
-    });
-    const second = await service.resolveInboundMessage({
-      ...input,
-      providerMessageId: "clarify-2",
-    });
-
-    expect(first).toMatchObject({
-      kind: "clarify",
-      conversationId: "clarification-1",
-    });
-    expect(second).toMatchObject({
-      kind: "clarify",
-      conversationId: "clarification-1",
-    });
-    expect(create).toHaveBeenCalledTimes(1);
-  });
-
-  it("reconstructs one current recovery for a settled clarification conversation", async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
-      type: "PRODUCT_SUPPORT",
-      shopId: "shop-1",
-      customerId: "customer-1",
-      customer: { phone: "+447700900000" },
-    } as any);
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        checkoutRecovery: {
-          id: "recovery-current",
-          shopId: "shop-1",
-          customer: { id: "customer-1", phone: "+447700900000" },
-          checkoutToken: "checkout-current",
-          totalPrice: "42.00",
-        },
-      },
-    ] as any);
-
-    await expect(
-      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
-    ).resolves.toEqual({
-      kind: "resolved",
-      shopId: "shop-1",
-      customerPhone: "+447700900000",
-      checkoutRecoveryId: "recovery-current",
-    });
-  });
-
-  it("fails closed when a resolved recovery does not match the clarification owner", async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
-      type: "PRODUCT_SUPPORT",
-      shopId: "shop-1",
-      customerId: "customer-1",
-      customer: { phone: "+447700900000" },
-    } as any);
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        checkoutRecovery: {
-          id: "recovery-other-tenant",
-          shopId: "shop-2",
-          customer: { id: "customer-2", phone: "+447700900000" },
-          checkoutToken: "checkout-other-tenant",
-          totalPrice: "42.00",
-        },
-      },
-    ] as any);
-
-    await expect(
-      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
-    ).resolves.toEqual({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-      customerPhone: "+447700900000",
-    });
-  });
-
-  it("persists three clarification fragments before reconstructing one current turn", async () => {
-    const persisted = vi.fn();
-    vi.mocked(prisma.conversation.findUniqueOrThrow).mockResolvedValue({
-      inboundVersion: 0,
-      lastProcessedVersion: 0,
-      pendingTurnStartedAt: null,
-      languageTag: null,
-      languageSource: null,
-    } as any);
-    vi.mocked(prisma.conversationMessage.findUnique)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null);
-    vi.mocked(prisma.$transaction).mockImplementation(async (callback: any) =>
-      callback({
-        conversationMessage: { create: persisted },
-        conversation: {
-          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-          update: vi
-            .fn()
-            .mockResolvedValueOnce({ id: "clarification-1", inboundVersion: 1 })
-            .mockResolvedValueOnce({ id: "clarification-1", inboundVersion: 2 })
-            .mockResolvedValueOnce({
-              id: "clarification-1",
-              inboundVersion: 3,
-            }),
-        },
-      }),
-    );
-    const conversationService = new ConversationService();
-    for (const [index, content] of [
-      "Which basket?",
-      "The jacket one",
-      "The blue one",
-    ].entries()) {
-      await conversationService.receiveMessage({
-        conversationId: "clarification-1",
-        providerMessageId: `clarification-${index}`,
-        inReplyToProviderId: null,
-        content,
-      });
-    }
-
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
-      type: "PRODUCT_SUPPORT",
-      shopId: "shop-1",
-      customerId: "customer-1",
-      customer: { phone: "+447700900000" },
-    } as any);
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          customer: { id: "customer-1", phone: "+447700900000" },
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-        },
-      },
-      {
-        checkoutRecovery: {
-          id: "recovery-2",
-          shopId: "shop-1",
-          customer: { id: "customer-1", phone: "+447700900000" },
-          checkoutToken: "checkout-2",
-          totalPrice: "18.00",
-        },
-      },
-    ] as any);
-
-    const route = await new RecoveryRoutingService().getCurrentClarification(
-      "clarification-1",
-    );
-
-    expect(persisted).toHaveBeenCalledTimes(3);
-    expect(route).toMatchObject({ kind: "clarify" });
-  });
-
-  it("fails closed for current recovery overflow and mixed ownership", async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({
-      type: "PRODUCT_SUPPORT",
-      shopId: "shop-1",
-      customerId: "customer-1",
-      customer: { phone: "+447700900000" },
-    } as any);
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue(
-      Array.from({ length: 11 }, (_, index) => ({
-        checkoutRecovery: {
-          id: `recovery-${index}`,
-          shopId: "shop-1",
-          customer: { id: "customer-1", phone: "+447700900000" },
-          checkoutToken: `checkout-${index}`,
-          totalPrice: "42.00",
-        },
-      })) as any,
-    );
-
-    await expect(
-      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
-    ).resolves.toMatchObject({ kind: "unresolved", reason: "overflow" });
-
-    vi.mocked(prisma.conversation.findMany).mockResolvedValue([
-      {
-        checkoutRecovery: {
-          id: "recovery-1",
-          shopId: "shop-1",
-          customer: { id: "customer-1", phone: "+447700900000" },
-          checkoutToken: "checkout-1",
-          totalPrice: "42.00",
-        },
-      },
-      {
-        checkoutRecovery: {
-          id: "recovery-2",
-          shopId: "shop-2",
-          customer: { id: "customer-2", phone: "+447700900000" },
-          checkoutToken: "checkout-2",
-          totalPrice: "18.00",
-        },
-      },
-    ] as any);
-
-    await expect(
-      new RecoveryRoutingService().getCurrentClarification("clarification-1"),
-    ).resolves.toMatchObject({
-      kind: "unresolved",
-      reason: "ambiguous-tenant",
-    });
-  });
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+  },
+);
+it("terminal candidates in different shops remain ambiguous before eligibility", async () => {
+  db.$queryRaw.mockResolvedValue([
+    { conversationId: "completed-shop-a" },
+    { conversationId: "expired-shop-b" },
+  ]);
+  active.mockResolvedValue(false);
+  expect(
+    await new RecoveryRoutingService().resolveInboundMessage(event),
+  ).toEqual({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
+  expect(active).not.toHaveBeenCalled();
+  expect(db.conversation.findUnique).not.toHaveBeenCalled();
 });

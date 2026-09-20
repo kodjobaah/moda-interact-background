@@ -1,3 +1,4 @@
+import { loadCommerceHistory } from "../commerce/history.js";
 // src/services/checkout-recovery.service.ts
 
 import prisma from "../lib/db.js";
@@ -1418,21 +1419,6 @@ export class CheckoutRecoveryService {
             inboundVersion: true,
             languageTag: true,
             languageSource: true,
-
-            messages: {
-              ...(pendingTurnStartedAt
-                ? {
-                    where: {
-                      createdAt: { gte: pendingTurnStartedAt },
-                      direction: "INBOUND",
-                      senderType: "CUSTOMER",
-                    },
-                  }
-                : {}),
-              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-              ...(pendingTurnStartedAt ? {} : { take: 20 }),
-              select: { id: true, direction: true, content: true },
-            },
           },
         },
       },
@@ -1450,17 +1436,8 @@ export class CheckoutRecoveryService {
       );
     }
 
-    /*
-     * We queried newest-first for efficiency.
-     * Reverse them before passing them to the LLM.
-     */
-    const messages: AgentMessage[] = conversation.messages
-      .reverse()
-      .map((message) => ({
-        role: message.direction === "INBOUND" ? "user" : "assistant",
-
-        content: message.content,
-      }));
+    const bounded = await loadCommerceHistory(conversationId, pendingTurnStartedAt ?? new Date());
+    const messages = bounded.currentMessages;
 
     return {
       shop: recovery.shop.domain,
@@ -1509,6 +1486,8 @@ export class CheckoutRecoveryService {
           : null,
 
         messages,
+        history: bounded.history,
+        oversized: bounded.oversized,
       },
     };
   }

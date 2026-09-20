@@ -1,3 +1,4 @@
+import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type {
   CheckoutRecoveryStatus,
   ConversationType,
@@ -18,6 +19,8 @@ export interface AgentConversationContext {
   languageTag: string | null;
   languageSource: InternationalContext["languageSource"];
   messages: AgentMessage[];
+  history?: AgentMessage[];
+  oversized?: boolean;
 }
 
 export interface RecoveryAgentContext {
@@ -40,8 +43,4 @@ export interface RecoveryAgentContext {
   conversation: AgentConversationContext;
 }
 
-export interface CommerceAgentResult {
-  replyText: string;
-  detectedLanguageTag: string | null;
-  detectedLanguageConfidence: number | null;
-}
+export type CommerceAgentResult = Omit<CommerceFinalResponse, "details">;

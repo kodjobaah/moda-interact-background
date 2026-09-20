@@ -118,7 +118,7 @@ describe("ConversationService language persistence", () => {
       }),
     ).resolves.toBe(true);
     expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith({
-      where: { id: "conversation-1", inboundVersion: 2 },
+      where: { id: "conversation-1", inboundVersion: 2, processingInboundVersion: 2, processingStartedAt: { gt: expect.any(Date) } },
       data: { languageTag: "fr", languageSource: "DETECTED" },
     });
   });

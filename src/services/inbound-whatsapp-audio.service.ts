@@ -37,6 +37,7 @@ export class InboundWhatsAppAudioService {
 
   async process(event: NormalizedWhatsAppInboundMessage, conversationId: string): Promise<{ kind: "completed" | "rejected" | "failed"; fallback?: string }> {
     const reservation = await this.reserve(event, conversationId);
+    if (reservation.conversationId !== conversationId) throw new Error("Inbound message ownership mismatch");
     await recoveryOutreachAttemptService.markEngagedForConversation(
       reservation.conversationId,
       new Date(event.occurredAt),

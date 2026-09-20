@@ -17,6 +17,7 @@ import { checkoutRecoveryService } from "../services/checkout-recovery.service.j
 import { conversationService } from "../services/conversation.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
+import { sendRoutingGuidance } from "../services/routing-guidance.service.js";
 import { recoveryRoutingService } from "../services/recovery-routing.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
 import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
@@ -120,7 +121,11 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
 
   const route = await recoveryRoutingService.resolveInboundMessage(event);
 
-  if (route.kind === "shop-unavailable") return;
+  if (route.kind === "ignored") return;
+  if (route.kind === "guidance") {
+    await sendRoutingGuidance(event, route.reason);
+    return;
+  }
 
   if (route.kind === "resolved") {
     await checkoutRecoveryService.recordExternalActivity(
@@ -168,46 +173,6 @@ export async function processInboundMessage(event: WhatsAppInboundEvent) {
     }
     return;
   }
-
-  if (route.kind === "product-only" || route.kind === "standalone") {
-    if (!route.shopId || !route.conversationId) return;
-
-    const received = await conversationService.receiveMessage({
-      conversationId: route.conversationId,
-      providerMessageId: event.providerMessageId,
-      inReplyToProviderId: event.contextMessageId,
-      content: content.text,
-      occurredAt: new Date(event.occurredAt),
-    });
-
-    if (received.duplicate) return;
-
-    await conversationTurnProcessor.enqueue(
-      route.conversationId,
-      received.version,
-    );
-    return;
-  }
-
-  if (route.kind === "clarify") {
-    const received = await conversationService.receiveMessage({
-      conversationId: route.conversationId,
-      providerMessageId: event.providerMessageId,
-      inReplyToProviderId: event.contextMessageId,
-      content: content.text,
-      occurredAt: new Date(event.occurredAt),
-    });
-
-    if (received.duplicate) return;
-
-    await conversationTurnProcessor.enqueue(
-      route.conversationId,
-      received.version,
-    );
-    return;
-  }
-
-  if (route.kind === "unresolved") return;
 
   const received = await conversationService.receiveMessage({
     conversationId: route.conversationId,
@@ -275,12 +240,11 @@ export async function loadConversationTurn(
       },
     },
   });
-  const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
+  const shopId = conversation.checkoutRecovery?.shopId;
   const to =
-    conversation.checkoutRecovery?.customer?.phone ??
-    conversation.customer?.phone;
+    conversation.checkoutRecovery?.customer?.phone;
   const shopStatus =
-    conversation.checkoutRecovery?.shop?.status ?? conversation.shop?.status;
+    conversation.checkoutRecovery?.shop?.status;
   if (
     shopId &&
     (shopStatus !== "ACTIVE" ||
@@ -310,144 +274,20 @@ export async function loadConversationTurn(
     ),
   } as const;
 
-  const clarification =
-    await recoveryRoutingService.getCurrentClarification(conversationId);
-  if (clarification?.kind === "unresolved") {
-    return {
-      shopId,
-      to,
-      ...settledMetadata,
-      context: null,
-      languageMessage: "",
-      handledWithoutAgent: true,
-    };
-  }
-  if (clarification?.kind === "clarify") {
-    return {
-      shopId,
-      to,
-      ...settledMetadata,
-      context: null,
-      languageMessage: "",
-      clarificationText: formatClarification(clarification.recoveries),
-    };
-  }
-
-  const context =
-    clarification?.kind === "resolved"
-      ? await checkoutRecoveryService.getAgentContextForStandaloneConversation({
-          checkoutRecoveryId: clarification.checkoutRecoveryId,
-          conversationId,
-          pendingTurnStartedAt,
-        })
-      : conversation.checkoutRecoveryId
-        ? await checkoutRecoveryService.getAgentContext({
-            checkoutRecoveryId: conversation.checkoutRecoveryId,
-            conversationId,
-            pendingTurnStartedAt,
-          })
-        : await buildStandaloneAgentContext(conversation, pendingTurnStartedAt);
+  if (!conversation.checkoutRecoveryId) throw new Error("Recovery ownership is required");
+  const context = await checkoutRecoveryService.getAgentContext({
+    checkoutRecoveryId: conversation.checkoutRecoveryId, conversationId, pendingTurnStartedAt,
+  });
 
   return {
     shopId,
     to,
     ...settledMetadata,
     context,
+    ...(context.conversation.oversized ? { clarificationText: "Please send a shorter question so I can help with your basket." } : {}),
     languageMessage: context.conversation.messages
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n"),
   };
 }
-function formatClarification(
-  recoveries: Array<{ checkoutToken: string; totalPrice: string | null }>,
-): string {
-  const options = recoveries
-    .map(
-      ({ checkoutToken, totalPrice }) =>
-        `- ${checkoutToken}${totalPrice ? ` (${totalPrice})` : ""}`,
-    )
-    .join("\n");
-  return `I found more than one recent basket. Which one would you like help with?\n${options}`;
-}
-
-async function buildStandaloneAgentContext(
-  conversation: {
-    id: string;
-    shop: { domain: string } | null;
-    customer: {
-      id: string;
-      phone: string | null;
-      firstName: string | null;
-    } | null;
-  },
-  pendingTurnStartedAt: Date,
-): Promise<RecoveryAgentContext> {
-  const snapshot = await conversationService.getAgentSnapshot(
-    conversation.id,
-    pendingTurnStartedAt,
-  );
-  return {
-    shop: conversation.shop?.domain ?? snapshot.shop,
-    recovery: {
-      id: "standalone",
-      status: "ENGAGED",
-      checkoutToken: "standalone",
-      completedAt: null,
-      totalPrice: null,
-    },
-    customer: conversation.customer,
-    conversation: snapshot,
-  };
-}
-
-function buildProductOnlyContext(
-  route: {
-    kind: "product-only" | "standalone";
-    customerPhone: string;
-    shop?: string;
-    customerId?: string;
-    type: "PRODUCT_DISCOVERY" | "PRODUCT_SUPPORT";
-  },
-  event: WhatsAppInboundEvent,
-  conversationId: string,
-): RecoveryAgentContext {
-  return {
-    shop: route.shop ?? "unknown-shop",
-    recovery: {
-      id: "product-only",
-      status: "ENGAGED",
-      checkoutToken: "product-only",
-      completedAt: null,
-      totalPrice: null,
-    },
-    customer: route.customerId
-      ? {
-          id: route.customerId,
-          phone: route.customerPhone,
-          firstName: null,
-        }
-      : null,
-    conversation: {
-      conversationId,
-      shop: route.shop ?? "unknown-shop",
-      type: route.type,
-      summary: null,
-      version: 0,
-      languageTag: null,
-      languageSource: null,
-      messages: [
-        {
-          role: "user",
-          content: inboundText(event),
-        },
-      ],
-    },
-  };
-}
-
-function inboundText(event: WhatsAppInboundEvent): string {
-  return event.content.type === "text" ? event.content.text : "";
-}
-
-export {};

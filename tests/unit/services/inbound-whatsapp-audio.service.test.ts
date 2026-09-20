@@ -35,7 +35,7 @@ describe("InboundWhatsAppAudioService", () => {
     vi.clearAllMocks();
     process.env.WHATSAPP_ACCESS_TOKEN = "test-token";
     mocks.database.conversationMessage.findUnique.mockResolvedValue(null);
-    mocks.database.conversationMessage.create.mockResolvedValue({ id: "message-row", transcriptionStatus: "PENDING" });
+    mocks.database.conversationMessage.create.mockResolvedValue({ id: "message-row", conversationId: "conversation-1", transcriptionStatus: "PENDING" });
     mocks.database.conversationMessage.updateMany.mockResolvedValue({ count: 1 });
     mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({ inboundVersion: 2, lastProcessedVersion: 2, pendingTurnStartedAt: null });
     mocks.database.$transaction.mockImplementation((callback: (tx: typeof mocks.database) => unknown) => callback(mocks.database));
@@ -66,7 +66,7 @@ describe("InboundWhatsAppAudioService", () => {
   });
 
   it("does not call STT when a completed reservation is replayed", async () => {
-    mocks.database.conversationMessage.findUnique.mockResolvedValue({ id: "message-row", transcriptionStatus: "COMPLETED" });
+    mocks.database.conversationMessage.findUnique.mockResolvedValue({ id: "message-row", conversationId: "conversation-1", transcriptionStatus: "COMPLETED" });
     const result = await new InboundWhatsAppAudioService(mocks.media, mocks.transcription).process(event, "conversation-1");
     expect(result).toEqual({ kind: "completed" });
     expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
@@ -93,4 +93,10 @@ describe("InboundWhatsAppAudioService", () => {
     }));
     expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
   });
+});
+it("rejects a stored inbound ownership race before media download",async()=>{
+ mocks.database.conversationMessage.findUnique.mockResolvedValue({id:"message-row",conversationId:"other",transcriptionStatus:"PENDING"});
+ mocks.media.downloadAudio.mockClear();
+ await expect(new InboundWhatsAppAudioService(mocks.media,mocks.transcription).process(event,"conversation-1")).rejects.toThrow("ownership mismatch");
+ expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
 });

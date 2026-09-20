@@ -287,13 +287,6 @@ export class ConversationTurnProcessor<TContext, TResult> {
       }
 
       const agentResult = this.dependencies.getResult(result);
-      await this.dependencies.conversation.applyDetectedLanguage({
-        conversationId,
-        version: observedVersion,
-        message: loaded.languageMessage,
-        detectedLanguageTag: agentResult.detectedLanguageTag,
-        detectedLanguageConfidence: agentResult.detectedLanguageConfidence,
-      });
 
       if (
         await this.dependencies.conversation.hasChanged(
@@ -311,6 +304,14 @@ export class ConversationTurnProcessor<TContext, TResult> {
         await this.enqueue(conversationId, latest.inboundVersion);
         return;
       }
+
+      await this.dependencies.conversation.applyDetectedLanguage({
+        conversationId,
+        version: observedVersion,
+        message: loaded.languageMessage,
+        detectedLanguageTag: agentResult.detectedLanguageTag,
+        detectedLanguageConfidence: agentResult.detectedLanguageConfidence,
+      });
 
       await sendPreparedText({
         ...reserved,
