@@ -28,24 +28,18 @@ import { observeConversationTurn } from "@modainteract/moda-interact-shared/obse
 
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
-import { searchProducts } from "../../../src/services/shopify.service.js";
+
 
 vi.mock("../../../src/providers/groq.provider.js", () => ({
   groq: vi.fn(),
 }));
 
-vi.mock("../../../src/services/shopify.service.js", () => ({
-  searchProducts: vi.fn(),
+const hostOperation = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/commerce/host.js", () => ({
+  modelAdapter: () => ({}),
+  executeCommerceHost: async () => observeCommerceTool(hostOperation),
 }));
-
-vi.mock("ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("ai")>();
-
-  return {
-    ...actual,
-    generateText: vi.fn(),
-  };
-});
+import { observeCommerceTool } from "../../../src/commerce/observe-tool.js";
 
 const exporter = new InMemorySpanExporter();
 const provider = new NodeTracerProvider({
@@ -137,17 +131,7 @@ function serializeTelemetry(
 
 describe.sequential("CommerceAgent GenAI observability", () => {
   it("nests one successful turn, agent and tool under the active Worker span", async () => {
-    vi.mocked(searchProducts).mockResolvedValue([]);
-    vi.mocked(generateText).mockImplementation(async (options: any) => {
-      await options.tools.searchProducts.execute({ query: "boots" });
-      await options.tools.finalResponse.execute({
-          replyText: "No matching products found.",
-          detectedLanguageTag: null,
-          detectedLanguageConfidence: null,
-      });
-
-      return {} as any;
-    });
+    hostOperation.mockResolvedValue({replyText:"No matching products found.",detectedLanguageTag:null,detectedLanguageConfidence:null});
 
     await expect(runObservedTurn()).resolves.toEqual({
       replyText: "No matching products found.",
@@ -159,7 +143,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     const worker = spans.find((span) => span.name === "process whatsapp-events");
     const turn = spans.find((span) => span.name === "conversation.turn whatsapp");
     const agent = spans.find((span) => span.name === "invoke_agent commerce-agent");
-    const tool = spans.find((span) => span.name === "execute_tool search-products");
+    const tool = spans.find((span) => span.name === "execute_tool commerce-mcp");
 
     expect(worker).toBeDefined();
     expect(turn?.parentSpanContext?.spanId).toBe(worker?.spanContext().spanId);
@@ -175,7 +159,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     });
     expect(tool?.attributes).toMatchObject({
       "gen_ai.operation.name": "execute_tool",
-      "gen_ai.tool.name": "search-products",
+      "gen_ai.tool.name": "commerce-mcp",
     });
 
     const telemetry = serializeTelemetry(spans);
@@ -189,11 +173,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
       "Shopify response contained bearer-secret and private customer message",
     );
 
-    vi.mocked(searchProducts).mockRejectedValue(providerError);
-    vi.mocked(generateText).mockImplementation(async (options: any) => {
-      await options.tools.searchProducts.execute({ query: "boots" });
-      return { text: "unreachable" } as any;
-    });
+    hostOperation.mockRejectedValue(providerError);
 
     let thrown: unknown;
     try {
@@ -209,7 +189,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
       [
         "conversation.turn whatsapp",
         "invoke_agent commerce-agent",
-        "execute_tool search-products",
+        "execute_tool commerce-mcp",
       ].includes(span.name),
     );
 
@@ -223,7 +203,7 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     ).toEqual(expect.arrayContaining([
       "Inbound conversation turn failed",
       "Commerce agent invocation failed",
-      "Shopify product search failed",
+      "Commerce MCP tool failed",
     ]));
 
     const telemetry = serializeTelemetry(observed);
@@ -234,11 +214,11 @@ describe.sequential("CommerceAgent GenAI observability", () => {
     const sources = [
       "src/workers/whatsapp.worker.ts",
       "src/agents/commerce.agent.ts",
-      "src/tools/search-product.ts",
+      "src/commerce/observe-tool.ts",
     ].map((path) => readFileSync(path, "utf8"));
 
     expect(sources[0]).toContain("observeConversationTurn(");
-    expect(sources[1]).toContain("observeAgentInvocation<CommerceAgentResult>(");
+    expect(sources[1]).toContain("observeAgentInvocation(");
     expect(sources[2]).toContain("observeAgentTool(");
     for (const source of sources) {
       expect(source).not.toContain("recordMetrics: false");

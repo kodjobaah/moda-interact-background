@@ -32,7 +32,8 @@
     "@ai-sdk/groq": "^4.0.30",
     "@ai-sdk/openai": "^4.0.46",
     "@langchain/langgraph": "^1.4.12",
-    "@modainteract/moda-interact-shared": "0.12.2",
+    "@modainteract/moda-interact-shared": "0.13.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",
     "ai": "^7.0.77",
@@ -40,6 +41,7 @@
     "ioredis": "^6.0.0",
     "music-metadata": "^11.15.0",
     "openai": "^7.10.0",
+    "semver": "7.8.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -47,6 +49,7 @@
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@types/node": "^26.2.0",
+    "@types/semver": "7.7.1",
     "dotenv": "^17.4.2",
     "prisma": "^6.19.3",
     "prisma-generator-plantuml-erd": "^1.7.1",

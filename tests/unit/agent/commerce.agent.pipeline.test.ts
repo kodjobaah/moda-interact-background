@@ -1,118 +1,18 @@
-import {
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
-
-import {
-  generateText,
-  type LanguageModel,
-} from "ai";
-
-import {
-  createCommerceAgentPipeline,
-} from "../../../src/agents/commerce.agent.pipeline.js";
-
-import type {
-  RecoveryAgentContext,
-} from "../../../src/agents/types.js";
-
-vi.mock("../../../src/providers/groq.provider.js", () => ({
-  groq: vi.fn(),
+import { expect, it, vi } from "vitest";
+const run = vi.hoisted(() =>
+  vi.fn(async () => ({
+    replyText: "From the MCP host",
+    detectedLanguageTag: null,
+    detectedLanguageConfidence: null,
+  })),
+);
+vi.mock("../../../src/agents/commerce.agent.js", () => ({
+  runCommerceAgent: run,
 }));
-
-vi.mock("ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("ai")>();
-
-  return {
-    ...actual,
-    generateText: vi.fn(),
-  };
-});
-
-describe("commerce agent LangGraph pipeline", () => {
-  it("runs the agent node and mocked product tool without external calls", async () => {
-    const context: RecoveryAgentContext = {
-      shop: "test-shop.myshopify.com",
-      recovery: {
-        id: "recovery-1",
-        status: "ENGAGED",
-        checkoutToken: "checkout-token",
-        completedAt: null,
-        totalPrice: "24.95",
-      },
-      customer: {
-        id: "customer-1",
-        phone: "+447700900000",
-        firstName: "Kwadwo",
-      },
-      conversation: {
-        conversationId: "conversation-1",
-        shop: "test-shop.myshopify.com",
-        type: "PRODUCT_DISCOVERY",
-        summary: null,
-        version: 1,
-        languageTag: "fr-FR",
-        languageSource: "detected",
-        messages: [
-          {
-            role: "user",
-            content: "Do you have ski wax?",
-          },
-        ],
-      },
-    };
-
-    const model = {} as LanguageModel;
-    const searchProducts = vi.fn(async ({ query }: { query: string }) => ({
-      products: [
-        {
-          id: "product-1",
-          title: "Selling Plans Ski Wax",
-          price: "24.95",
-          currency: "USD",
-          available: true,
-          query,
-        },
-      ],
-    }));
-    const createSearchProductsTool = vi.fn(() => ({
-      execute: searchProducts,
-    }));
-
-    vi.mocked(generateText).mockImplementation(async (options: any) => {
-      const products = await options.tools.searchProducts.execute({
-        query: "ski wax",
-      });
-
-      await options.tools.finalResponse.execute({
-          replyText: `${products.products[0].title} costs ${products.products[0].price}.`,
-          detectedLanguageTag: null,
-          detectedLanguageConfidence: null,
-      });
-
-      return {} as any;
-    });
-
-    const pipeline = createCommerceAgentPipeline({
-      model,
-      createSearchProductsTool: createSearchProductsTool as any,
-    });
-
-    const result = await pipeline.invoke({ context });
-
-    expect(result.result.replyText).toContain("Ski Wax");
-    expect(result.result.replyText).toContain("24.95");
-    expect(createSearchProductsTool).toHaveBeenCalledWith(
-      "test-shop.myshopify.com",
-    );
-    expect(searchProducts).toHaveBeenCalledWith({
-      query: "ski wax",
-    });
-    expect(generateText).toHaveBeenCalledOnce();
-    expect(vi.mocked(generateText).mock.calls[0]?.[0].system).toContain(
-      "Resolved customer language: fr-FR",
-    );
-  });
+import { createCommerceAgentPipeline } from "../../../src/agents/commerce.agent.pipeline.js";
+it("the optional pipeline delegates to the same generic host", async () => {
+  const context = { recovery: { id: "real-recovery" } } as any;
+  const result = await createCommerceAgentPipeline().invoke({ context });
+  expect(result.result.replyText).toBe("From the MCP host");
+  expect(run).toHaveBeenCalledWith(context, {});
 });

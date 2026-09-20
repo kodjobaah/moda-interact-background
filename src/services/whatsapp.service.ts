@@ -54,7 +54,7 @@ export class WhatsAppService {
     text,
     previewUrl,
     replyToProviderMessageId,
-  }: SendTextInput): Promise<SendMessageResult> {
+  }: SendTextInput, signal?: AbortSignal): Promise<SendMessageResult> {
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
     const sender = this.resolveSender();
@@ -96,7 +96,7 @@ export class WhatsAppService {
             ...(previewUrl ? { preview_url: true } : {}),
           },
         }),
-        signal: AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS)]) : AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
       },
     );
 

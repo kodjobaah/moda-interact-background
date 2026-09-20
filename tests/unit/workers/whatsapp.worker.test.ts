@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  guidance: vi.fn(),
+  audio: vi.fn(),
   abuse: { admitRaw: vi.fn() },
   conversation: {
     receiveMessage: vi.fn(),
@@ -12,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   database: { conversation: { findUniqueOrThrow: vi.fn() } },
 }));
 
+vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
+vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { process: mocks.audio } }));
 vi.mock("bullmq", () => ({
   Queue: class {
     add() {
@@ -102,7 +106,8 @@ describe("WhatsApp worker inbound execution gate", () => {
     "does not persist or enqueue a context-linked %s inbound message",
     async (status) => {
       mocks.routing.resolveInboundMessage.mockResolvedValue({
-        kind: "shop-unavailable",
+        kind: "guidance",
+        reason: "SHOP_UNAVAILABLE",
         customerPhone: event.customerPhone,
       });
 
@@ -177,4 +182,12 @@ describe("WhatsApp worker inbound execution gate", () => {
       expect(mocks.database.conversation.findUniqueOrThrow).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+it("routes ambiguous voice to guidance before downloading or recording engagement", async () => {
+ mocks.abuse.admitRaw.mockResolvedValue({kind:"allowed"});
+ mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"guidance",reason:"MULTIPLE_RECOVERIES"});
+ mocks.audio.mockClear(); mocks.recovery.recordExternalActivity.mockClear();
+ await processInboundMessage({...event,content:{type:"audio",mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}} as any);
+ expect(mocks.audio).not.toHaveBeenCalled(); expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled(); expect(mocks.guidance).toHaveBeenCalled();
 });

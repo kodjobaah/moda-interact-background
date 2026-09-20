@@ -813,3 +813,9 @@ describe("ConversationTurnProcessor", () => {
     );
   });
 });
+
+it("does not persist model language or send when the version/lease is stale", async () => {
+ const test = harness();test.conversation.hasChanged.mockResolvedValue(true);
+ await test.processor.process({conversationId:"conversation-1",observedVersion:3});
+ expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+});

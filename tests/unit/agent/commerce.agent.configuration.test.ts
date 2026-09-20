@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-import { generateText } from "ai";
+
 
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
 
@@ -14,10 +14,8 @@ vi.mock("../../../src/providers/groq.provider.js", () => ({
   groq,
 }));
 
-vi.mock("ai", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("ai")>()),
-  generateText: vi.fn(),
-}));
+const host = vi.hoisted(() => vi.fn(async () => ({replyText:"Hello",detectedLanguageTag:null,detectedLanguageConfidence:null})));
+vi.mock("../../../src/commerce/host.js", () => ({executeCommerceHost:host,modelAdapter:(model:unknown)=>model}));
 
 const context: RecoveryAgentContext = {
   shop: "test-shop.myshopify.com",
@@ -42,15 +40,7 @@ const context: RecoveryAgentContext = {
 const originalModel = process.env.GROQ_COMMERCE_MODEL;
 
 beforeEach(() => {
-  vi.mocked(generateText).mockClear();
-  vi.mocked(generateText).mockImplementation(async (options: any) => {
-    await options.tools.finalResponse.execute({
-      replyText: "Hello",
-      detectedLanguageTag: null,
-      detectedLanguageConfidence: null,
-    });
-    return {} as any;
-  });
+  host.mockClear();
   groq.mockClear();
 });
 
@@ -71,7 +61,7 @@ describe("CommerceAgent model configuration", () => {
     });
 
     expect(groq).toHaveBeenCalledWith("llama-3.3-70b-versatile");
-    expect(vi.mocked(generateText)).toHaveBeenCalledOnce();
+    expect(host).toHaveBeenCalledOnce();
   });
 
   it.each([undefined, "", "   "])(
@@ -88,7 +78,7 @@ describe("CommerceAgent model configuration", () => {
         message: "GROQ_COMMERCE_MODEL environment variable is not set",
       });
       expect(groq).not.toHaveBeenCalled();
-      expect(vi.mocked(generateText)).not.toHaveBeenCalled();
+      expect(host).not.toHaveBeenCalled();
     },
   );
 });

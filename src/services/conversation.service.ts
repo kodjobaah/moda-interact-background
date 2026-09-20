@@ -79,6 +79,7 @@ export class ConversationService {
     });
 
     if (existing) {
+      if (existing.conversationId !== message.conversationId) throw new Error("Inbound message ownership mismatch");
       await recoveryOutreachAttemptService.markEngagedForConversation(
         existing.conversationId,
         occurredAt,
@@ -109,7 +110,7 @@ export class ConversationService {
       currentLanguageSource: fromPrismaLanguageSource(
         currentConversation.languageSource,
       ),
-      ...(message.explicitLanguageTag !== undefined
+      ...(!currentConversation.checkoutRecoveryId && message.explicitLanguageTag !== undefined
         ? { explicitLanguageTag: message.explicitLanguageTag }
         : {}),
       shopifyLanguageTag: null,
@@ -362,10 +363,15 @@ export class ConversationService {
 
       select: {
         inboundVersion: true,
+        processingInboundVersion: true,
+        processingStartedAt: true,
       },
     });
 
-    return conversation.inboundVersion !== version;
+    return conversation.inboundVersion !== version ||
+      conversation.processingInboundVersion !== version ||
+      !conversation.processingStartedAt ||
+      Date.now() - conversation.processingStartedAt.getTime() >= 120_000;
   }
 
   async applyDetectedLanguage({
@@ -383,7 +389,7 @@ export class ConversationService {
   }): Promise<boolean> {
     const conversation = await prisma.conversation.findUniqueOrThrow({
       where: { id: conversationId },
-      select: { inboundVersion: true, languageTag: true, languageSource: true },
+      select: { inboundVersion: true, languageTag: true, languageSource: true, checkoutRecoveryId: true },
     });
 
     if (conversation.inboundVersion !== version) {
@@ -391,6 +397,7 @@ export class ConversationService {
     }
 
     const language = this.languageService.acceptDetectedLanguage({
+      recoveryConversation: !!conversation.checkoutRecoveryId,
       message,
       currentLanguageTag: conversation.languageTag,
       currentLanguageSource: fromPrismaLanguageSource(
@@ -405,7 +412,7 @@ export class ConversationService {
     }
 
     const updated = await prisma.conversation.updateMany({
-      where: { id: conversationId, inboundVersion: version },
+      where: { id: conversationId, inboundVersion: version, processingInboundVersion: version, processingStartedAt: { gt: new Date(Date.now() - 120_000) } },
       data: {
         languageTag: language.languageTag,
         languageSource: toPrismaLanguageSource(language.languageSource),
@@ -427,18 +434,25 @@ export class ConversationService {
     checkoutRecoveryId: string,
     internationalContext?: InternationalContext,
   ) {
+    const recovery = await prisma.checkoutRecovery.findUniqueOrThrow({
+      where: { id: checkoutRecoveryId },
+      select: { shop: { select: { settings: { select: { defaultLanguageTag: true } } } } },
+    });
+    const language = await this.languageService.resolveInitial({
+      currentLanguageTag: null, currentLanguageSource: null,
+      merchantLanguageTag: recovery.shop.settings?.defaultLanguageTag ?? null,
+    });
     return prisma.conversation.upsert({
       where: { checkoutRecoveryId },
 
       create: {
         checkoutRecoveryId,
         type: "RECOVERY",
+        languageTag: language.languageTag,
+        languageSource: toPrismaLanguageSource(language.languageSource),
         ...(internationalContext
           ? {
-              languageTag: internationalContext.languageTag,
-              languageSource: toPrismaLanguageSource(
-                internationalContext.languageSource,
-              ),
+
               countryCode: internationalContext.countryCode,
               currencyCode: internationalContext.currencyCode,
               timeZone: internationalContext.timeZone,

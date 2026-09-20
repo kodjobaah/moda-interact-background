@@ -160,3 +160,11 @@ describe("WhatsAppTemplateSelectorService", () => {
     });
   });
 });
+it("A1-L04 approved shop fallback reports its actual language without replacing detected French",async()=>{
+ const conversation=Object.freeze({languageTag:"fr",languageSource:"DETECTED"});
+ const {selector}=createSelector([variant({languageTag:"en-GB",providerLanguageCode:"en_GB",providerTemplateName:"shop_english"})]);
+ const selected=await selector.select(input({languageTag:conversation.languageTag}));
+ expect(selected).toMatchObject({canonicalLanguageTag:"en-GB",providerLanguageCode:"en_GB",providerTemplateName:"shop_english",selectionSource:"merchant-fallback"});
+ expect(conversation).toEqual({languageTag:"fr",languageSource:"DETECTED"});
+ expect(await createSelector([]).selector.select(input({languageTag:"fr"}))).toMatchObject({outcome:"template-unavailable"});
+});

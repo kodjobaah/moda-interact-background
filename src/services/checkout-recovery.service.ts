@@ -1,3 +1,4 @@
+import { loadCommerceHistory } from "../commerce/history.js";
 // src/services/checkout-recovery.service.ts
 
 import prisma from "../lib/db.js";
@@ -355,8 +356,6 @@ export class CheckoutRecoveryService {
     };
     const merchantContext = shop?.settings;
     const languageTag =
-      eventContext?.languageTag ??
-      currentContext.languageTag ??
       safelyNormalize(
         merchantContext?.defaultLanguageTag,
         canonicaliseLanguageTag,
@@ -377,9 +376,7 @@ export class CheckoutRecoveryService {
     return {
       languageTag,
       languageSource: languageTag
-        ? eventContext?.languageTag || currentContext.languageTag
-          ? "shopify"
-          : "merchant-default"
+        ? "merchant-default"
         : null,
       countryCode,
       currencyCode:
@@ -873,7 +870,7 @@ export class CheckoutRecoveryService {
       providerAccountId:
         outboundWhatsAppAdmissionService.getProviderAccountId(),
       purpose: "checkout-recovery",
-      languageTag: event.internationalContext?.languageTag ?? null,
+      languageTag: null, // Initial outreach selects the approved shop-language variant.
       countryCode: event.internationalContext?.countryCode ?? null,
       resolveMarketCapability: async () => "unknown" as const,
     });
@@ -1418,21 +1415,6 @@ export class CheckoutRecoveryService {
             inboundVersion: true,
             languageTag: true,
             languageSource: true,
-
-            messages: {
-              ...(pendingTurnStartedAt
-                ? {
-                    where: {
-                      createdAt: { gte: pendingTurnStartedAt },
-                      direction: "INBOUND",
-                      senderType: "CUSTOMER",
-                    },
-                  }
-                : {}),
-              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-              ...(pendingTurnStartedAt ? {} : { take: 20 }),
-              select: { id: true, direction: true, content: true },
-            },
           },
         },
       },
@@ -1450,17 +1432,8 @@ export class CheckoutRecoveryService {
       );
     }
 
-    /*
-     * We queried newest-first for efficiency.
-     * Reverse them before passing them to the LLM.
-     */
-    const messages: AgentMessage[] = conversation.messages
-      .reverse()
-      .map((message) => ({
-        role: message.direction === "INBOUND" ? "user" : "assistant",
-
-        content: message.content,
-      }));
+    const bounded = await loadCommerceHistory(conversationId, pendingTurnStartedAt ?? new Date());
+    const messages = bounded.currentMessages;
 
     return {
       shop: recovery.shop.domain,
@@ -1509,6 +1482,8 @@ export class CheckoutRecoveryService {
           : null,
 
         messages,
+        history: bounded.history,
+        oversized: bounded.oversized,
       },
     };
   }

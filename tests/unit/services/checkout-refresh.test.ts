@@ -20,6 +20,7 @@ const hoisted = vi.hoisted(() => {
         update: vi.fn(),
       },
       conversationMessage: {
+        findMany: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
       },
@@ -605,7 +606,7 @@ describe("CheckoutRecoveryService clarification context", () => {
 });
 
 describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
-  it("orders equal-timestamp recovery fragments by descending id before reversing", async () => {
+  it("orders equal-timestamp current fragments by ascending id separately from prior history", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
       id: "recovery-1",
       shop: { domain: "shop.myshopify.com" },
@@ -628,6 +629,10 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
       },
     } as any);
 
+    prismaMock.conversationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { id: "message-1", direction: "INBOUND", senderType: "CUSTOMER", content: "first" },
+      { id: "message-2", direction: "INBOUND", senderType: "CUSTOMER", content: "second" },
+    ]);
     const context = await service.getAgentContext({
       checkoutRecoveryId: "recovery-1",
       conversationId: "conversation-1",
@@ -638,18 +643,15 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
       { role: "user", content: "first" },
       { role: "user", content: "second" },
     ]);
-    expect(prismaMock.checkoutRecovery.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({
-        select: expect.objectContaining({
-          conversation: expect.objectContaining({
-            select: expect.objectContaining({
-              messages: expect.objectContaining({
-                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-              }),
-            }),
-          }),
-        }),
-      }),
-    );
+    expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] }));
   });
+});
+
+it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout",async()=>{
+ const recovery={id:"recovery-initial",shopId:"shop_1",status:"DETECTED",customerId:null};
+ vi.spyOn(service as any,"upsertRecovery").mockResolvedValueOnce(recovery);
+ hoisted.whatsappTemplateSelectorMock.select.mockClear();
+ hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({outcome:"template-unavailable"} as any);
+ await service.handleCheckoutCreated({shopId:"shop_1",checkoutToken:"initial",customer:{phone:"+33123456789"},internationalContext:{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"}} as any);
+ expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({shopId:"shop_1",languageTag:null,countryCode:"FR"}));
 });
