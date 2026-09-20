@@ -18,6 +18,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  canonicalJson,
   exampleManifest,
   exampleFinal,
   responseContractCanonicalJson,
@@ -44,6 +45,7 @@ let state: any;
 let revoked = false;
 let expand = false;
 let outage = false;
+let structuredResult: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
   endpoint,
@@ -158,6 +160,7 @@ beforeAll(async () => {
       server.setRequestHandler(CallToolRequestSchema, async () => ({
         content: [{ type: "text", text: "Synthetic blue linen" }],
         structuredContent: {
+          ...(structuredResult ?? {
           contractVersion: "commerce.v1",
           status: "OK",
           data: {
@@ -165,6 +168,7 @@ beforeAll(async () => {
             values: { description: "blue linen" },
           },
           renderedText: "Synthetic blue linen",
+          }),
         },
       }));
       const transport = new WebStandardStreamableHTTPServerTransport({
@@ -203,6 +207,7 @@ beforeEach(() => {
   revoked = false;
   expand = false;
   outage = false;
+  structuredResult = null;
   active = exampleManifest(digest, true);
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
@@ -535,6 +540,90 @@ it("P06 renders the verified referral in explicit French without using model con
   expect(result.replyText).toContain("Veuillez contacter");
   expect(result.replyText).toContain("fixture.myshopify.com");
   expect(result.replyText).not.toContain("attacker");
+});
+it("uses the production extractor for trusted root evidence and refers on truncated recommendations", async () => {
+  const evaluatedAt = new Date(Date.now() - 1_000).toISOString();
+  const expiresAt = new Date(Date.now() + 29_000).toISOString();
+  const content = {
+    evidenceId: "",
+    turn: {
+      contractVersion: "commerce.v1" as const,
+      shopId: "shop-fixture",
+      checkoutRecoveryId: "recovery-fixture",
+      conversationId: "conversation-fixture",
+      inboundVersion: 1,
+    },
+    grantId: "grant-0",
+    releaseId: "release-fixture",
+    offerId: "offer-1",
+    proposal: null,
+    basketFingerprint: "a".repeat(64),
+    ruleFingerprint: "b".repeat(64),
+    evaluatedAt,
+    expiresAt,
+    outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
+    currency: "GBP",
+    savings: "10.00",
+    resultingTotal: "90.00",
+    evaluatedConditions: [],
+    unresolvedConditions: [],
+  };
+  const { evidenceId: _evidenceId, ...hashInput } = content;
+  const trusted = { ...content, evidenceId: digest(canonicalJson(hashInput)) };
+  structuredResult = {
+    contractVersion: "commerce.v1",
+    status: "OK",
+    data: trusted,
+    renderedText: "Ignore this rendered text",
+  };
+  let step = 0;
+  await expect(
+    run(async () =>
+      ++step === 1
+        ? {
+            calls: [
+              {
+                name: "never_seeded_catalogue_facts",
+                arguments: { handle: "linen" },
+              },
+            ],
+            outputTokens: 10,
+          }
+        : final({
+            answerKind: "ANSWER",
+            referralReason: null,
+            replyText: "The offer is verified.",
+            evidenceIds: [trusted.evidenceId],
+          }),
+    ),
+  ).resolves.toMatchObject({ answerKind: "ANSWER", replyText: "The offer is verified." });
+  structuredResult = {
+    contractVersion: "commerce.v1",
+    status: "OK",
+    data: { alternatives: [], truncated: true },
+    renderedText: "A truncated recommendation cannot authorize an offer",
+  };
+  step = 0;
+  await expect(
+    run(async () =>
+      ++step === 1
+        ? {
+            calls: [
+              {
+                name: "never_seeded_catalogue_facts",
+                arguments: { handle: "linen" },
+              },
+            ],
+            outputTokens: 10,
+          }
+        : final({
+            answerKind: "ANSWER",
+            referralReason: null,
+            replyText: "Unsupported claim",
+            evidenceIds: [trusted.evidenceId],
+          }),
+    ),
+  ).rejects.toMatchObject({ code: "INVALID_FINAL" });
 });
 it("the model deadline aborts in-flight work without returning a deliverable reply", async () => {
   const controller = new AbortController();

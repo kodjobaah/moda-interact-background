@@ -36,7 +36,12 @@ import {
   manifestMatchesGrant,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
-import { TurnEvidenceRegistry, type EvidenceExtractor } from "./evidence.js";
+import {
+  extractTrustedEvidence,
+  recordEvidenceRefreshOutcome,
+  TurnEvidenceRegistry,
+  type EvidenceExtractor,
+} from "./evidence.js";
 
 export function modelAdapter(model: LanguageModel) {
   return {
@@ -48,19 +53,7 @@ export function modelAdapter(model: LanguageModel) {
         model,
         abortSignal: signal,
         maxRetries: 0,
-        maxOutputTokens: request.maxOutputTokens,
-        system: request.instructions.join("\n\n"),
-        // Serialize tool output and context as data, never as a system instruction.
-        messages: [
-          {
-            role: "user",
-            content: JSON.stringify({
-              trustedContext: request.context,
-              conversationHistory: request.history,
-              turnToolResults: request.messages,
-            }),
-          },
-        ],
+        messages: request.messages as any,
         tools: Object.fromEntries(
           request.tools.map((t) => [
             t.name,
@@ -157,7 +150,12 @@ async function execute(
     }
   }
   const client = new CommerceMcpClient(config, turn, signal, grant);
-  const evidence = new TurnEvidenceRegistry();
+  const evidence = new TurnEvidenceRegistry({
+    turn,
+    grantId: grant.id,
+    releaseId: grant.releaseId,
+  });
+  const extractEvidence = deps.extractEvidence ?? extractTrustedEvidence;
   try {
     await client.connect();
     const manifest = await client.manifest();
@@ -272,13 +270,10 @@ async function execute(
             toolSignal.throwIfAborted();
             await assertCurrent();
             const result = await client.call(descriptor.name, args, toolSignal);
-            if (deps.extractEvidence)
-              evidence.record(descriptor, args, result, deps.extractEvidence);
+            evidence.record(descriptor, args, result, extractEvidence);
             return result;
           },
-          ...(deps.extractEvidence
-            ? { extractEvidence: deps.extractEvidence }
-            : {}),
+          extractEvidence,
         })),
       },
     });
@@ -309,26 +304,26 @@ async function execute(
     )
       throw new CommerceHostError("STALE_TURN");
     let envelope = result.result;
-    if (
-      envelope.answerKind === "ANSWER" &&
-      envelope.evidenceIds.length > 0 &&
-      (!deps.extractEvidence ||
-        !(await evidence.refresh(envelope.evidenceIds, {
-          remoteCalls: result.usage.remoteCalls,
-          maxRemoteCalls: 10,
-          now: Date.now,
-          assertCurrent,
-          replay: ({ name, arguments: args }) => client.call(name, args, signal),
-          extractEvidence: deps.extractEvidence,
-        })))
-    ) {
-      envelope = {
-        ...envelope,
-        answerKind: "REFER_TO_STORE",
-        referralReason: "UNVERIFIABLE_FACTS",
-        evidenceIds: [],
-        details: {},
-      };
+    if (envelope.answerKind === "ANSWER" && envelope.evidenceIds.length > 0) {
+      const refresh = await evidence.refresh(envelope.evidenceIds, {
+        remoteCalls: result.usage.remoteCalls,
+        maxRemoteCalls: 10,
+        now: Date.now,
+        assertCurrent,
+        replay: ({ name, arguments: args }) => client.call(name, args, signal),
+        extractEvidence,
+      });
+      recordEvidenceRefreshOutcome(refresh);
+      if (refresh.kind === "suppress")
+        throw new CommerceHostError(refresh.reason);
+      if (refresh.kind === "refer")
+        envelope = {
+          ...envelope,
+          answerKind: "REFER_TO_STORE",
+          referralReason: "UNVERIFIABLE_FACTS",
+          evidenceIds: [],
+          details: {},
+        };
     }
     // Recovery has no customer-preference setting. Preserve legacy storage values,
     // but do not impose their old precedence on this recovery-only runner.
