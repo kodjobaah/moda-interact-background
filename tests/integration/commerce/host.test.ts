@@ -18,6 +18,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  canonicalJson,
   exampleManifest,
   exampleFinal,
   responseContractCanonicalJson,
@@ -44,6 +45,8 @@ let state: any;
 let revoked = false;
 let expand = false;
 let outage = false;
+let boundaryFailure: "401" | "403" | "MALFORMED" | "TRANSPORT" | null = null;
+let structuredResult: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
   endpoint,
@@ -108,6 +111,19 @@ beforeAll(async () => {
       }
       const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
       observations.push({ method: body.method, params: body.params, claims });
+      if (body.method === "tools/call" && boundaryFailure) {
+        if (boundaryFailure === "401" || boundaryFailure === "403") {
+          res.writeHead(Number(boundaryFailure));
+          res.end();
+          return;
+        }
+        if (boundaryFailure === "MALFORMED") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{malformed");
+          return;
+        }
+        throw new Error("transport failure");
+      }
       if (outage) {
         res.writeHead(503);
         res.end();
@@ -158,6 +174,7 @@ beforeAll(async () => {
       server.setRequestHandler(CallToolRequestSchema, async () => ({
         content: [{ type: "text", text: "Synthetic blue linen" }],
         structuredContent: {
+          ...(structuredResult ?? {
           contractVersion: "commerce.v1",
           status: "OK",
           data: {
@@ -165,6 +182,7 @@ beforeAll(async () => {
             values: { description: "blue linen" },
           },
           renderedText: "Synthetic blue linen",
+          }),
         },
       }));
       const transport = new WebStandardStreamableHTTPServerTransport({
@@ -203,6 +221,8 @@ beforeEach(() => {
   revoked = false;
   expand = false;
   outage = false;
+  boundaryFailure = null;
+  structuredResult = null;
   active = exampleManifest(digest, true);
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
@@ -535,6 +555,194 @@ it("P06 renders the verified referral in explicit French without using model con
   expect(result.replyText).toContain("Veuillez contacter");
   expect(result.replyText).toContain("fixture.myshopify.com");
   expect(result.replyText).not.toContain("attacker");
+});
+
+it.each([
+  ["401", "UNAVAILABLE"],
+  ["403", "UNAVAILABLE"],
+  ["MALFORMED", "UNAVAILABLE"],
+  ["TRANSPORT", "UNAVAILABLE"],
+] as const)("EC09 performs one MCP call for a real host boundary %s failure", async (failure, code) => {
+  boundaryFailure = failure;
+  const model = vi.fn(async (request: ModelRequest) =>
+    request.tools.some((tool) => tool.name === "never_seeded_catalogue_facts")
+      ? {
+          calls: [
+            {
+              name: "never_seeded_catalogue_facts",
+              arguments: { handle: "linen" },
+            },
+          ],
+          outputTokens: 10,
+        }
+      : final(),
+  );
+
+  await expect(run(model)).rejects.toMatchObject({ code });
+  expect(model).toHaveBeenCalledTimes(1);
+  expect(observations.filter((observation) => observation.method === "tools/call")).toHaveLength(1);
+});
+
+it("uses the production extractor for trusted root evidence and refers on truncated recommendations", async () => {
+  const evaluatedAt = new Date(Date.now() - 1_000).toISOString();
+  const expiresAt = new Date(Date.now() + 29_000).toISOString();
+  const content = {
+    evidenceId: "",
+    turn: {
+      contractVersion: "commerce.v1" as const,
+      shopId: "shop-fixture",
+      checkoutRecoveryId: "recovery-fixture",
+      conversationId: "conversation-fixture",
+      inboundVersion: 1,
+    },
+    grantId: "grant-0",
+    releaseId: "release-fixture",
+    offerId: "offer-1",
+    proposal: null,
+    basketFingerprint: "a".repeat(64),
+    ruleFingerprint: "b".repeat(64),
+    evaluatedAt,
+    expiresAt,
+    outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
+    currency: "GBP",
+    savings: "10.00",
+    resultingTotal: "90.00",
+    evaluatedConditions: [],
+    unresolvedConditions: [],
+  };
+  const { evidenceId: _evidenceId, ...hashInput } = content;
+  const trusted = { ...content, evidenceId: digest(canonicalJson(hashInput)) };
+  structuredResult = {
+    contractVersion: "commerce.v1",
+    status: "OK",
+    data: trusted,
+    renderedText: "Ignore this rendered text",
+  };
+  let step = 0;
+  await expect(
+    run(async () =>
+      ++step === 1
+        ? {
+            calls: [
+              {
+                name: "never_seeded_catalogue_facts",
+                arguments: { handle: "linen" },
+              },
+            ],
+            outputTokens: 10,
+          }
+        : final({
+            answerKind: "ANSWER",
+            referralReason: null,
+            replyText: "The offer is verified.",
+            evidenceIds: [trusted.evidenceId],
+          }),
+    ),
+  ).resolves.toMatchObject({ answerKind: "ANSWER", replyText: "The offer is verified." });
+  structuredResult = {
+    contractVersion: "commerce.v1",
+    status: "OK",
+    data: { alternatives: [], truncated: true },
+    renderedText: "A truncated recommendation cannot authorize an offer",
+  };
+  step = 0;
+  await expect(
+    run(async () =>
+      ++step === 1
+        ? {
+            calls: [
+              {
+                name: "never_seeded_catalogue_facts",
+                arguments: { handle: "linen" },
+              },
+            ],
+            outputTokens: 10,
+          }
+        : final({
+            answerKind: "ANSWER",
+            referralReason: null,
+            replyText: "Unsupported claim",
+            evidenceIds: [trusted.evidenceId],
+          }),
+    ),
+  ).resolves.toMatchObject({
+    answerKind: "REFER_TO_STORE",
+    referralReason: "UNVERIFIABLE_FACTS",
+    evidenceIds: [],
+  });
+});
+it.each(["unknown", "expired"])(
+  "converts %s final evidence to one admitted referral before Shared validation",
+  async (kind) => {
+    let evidenceId = "f".repeat(64);
+    let step = 0;
+    if (kind === "expired") {
+      const expired = {
+        turn: {
+          contractVersion: "commerce.v1" as const,
+          shopId: "shop-fixture",
+          checkoutRecoveryId: "recovery-fixture",
+          conversationId: "conversation-fixture",
+          inboundVersion: 1,
+        },
+        grantId: "grant-0",
+        releaseId: "release-fixture",
+        offerId: "offer-expired",
+        proposal: null,
+        basketFingerprint: "a".repeat(64),
+        ruleFingerprint: "b".repeat(64),
+        evaluatedAt: "2026-09-20T23:59:00.000Z",
+        expiresAt: "2026-09-20T23:59:30.000Z",
+        outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
+        currency: "GBP",
+        savings: "1.00",
+        resultingTotal: "9.00",
+        evaluatedConditions: [],
+        unresolvedConditions: [],
+      };
+      evidenceId = digest(canonicalJson(expired));
+      structuredResult = {
+        contractVersion: "commerce.v1",
+        status: "OK",
+        data: { ...expired, evidenceId },
+        renderedText: "expired evidence",
+      };
+    }
+    const result = await run(async () => {
+      if (kind === "expired" && step++ === 0)
+        return {
+          calls: [
+            {
+              name: active.capabilities[0]!.toolDescriptors[0]!.name,
+              arguments: { handle: "linen" },
+            },
+          ],
+          outputTokens: 10,
+        };
+      return final({
+        answerKind: "ANSWER",
+        referralReason: null,
+        evidenceIds: [evidenceId],
+      });
+    });
+    expect(result).toMatchObject({
+      answerKind: "REFER_TO_STORE",
+      referralReason: "UNVERIFIABLE_FACTS",
+      evidenceIds: [],
+    });
+  },
+);
+it("still rejects a structurally malformed final envelope", async () => {
+  await expect(
+    run(async () =>
+      final({
+        answerKind: "ANSWER",
+        referralReason: null,
+        evidenceIds: ["not-a-valid-evidence-id"],
+        details: { malformed: true },
+      }),
+    ),
+  ).rejects.toMatchObject({ code: "INVALID_FINAL" });
 });
 it("the model deadline aborts in-flight work without returning a deliverable reply", async () => {
   const controller = new AbortController();

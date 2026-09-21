@@ -10,6 +10,9 @@ import {
 import {
   canonicalJson,
   CommerceTurnIdentitySchema,
+  finalResponseSchema,
+  type CommerceToolResult,
+  verifyResponseContract,
 } from "@modainteract/moda-interact-shared/commerce";
 import {
   runCommerceTurn,
@@ -35,6 +38,12 @@ import {
   manifestMatchesGrant,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
+import {
+  extractTrustedEvidence,
+  recordEvidenceRefreshOutcome,
+  TurnEvidenceRegistry,
+  type EvidenceExtractor,
+} from "./evidence.js";
 
 export function modelAdapter(model: LanguageModel) {
   return {
@@ -46,19 +55,7 @@ export function modelAdapter(model: LanguageModel) {
         model,
         abortSignal: signal,
         maxRetries: 0,
-        maxOutputTokens: request.maxOutputTokens,
-        system: request.instructions.join("\n\n"),
-        // Serialize tool output and context as data, never as a system instruction.
-        messages: [
-          {
-            role: "user",
-            content: JSON.stringify({
-              trustedContext: request.context,
-              conversationHistory: request.history,
-              turnToolResults: request.messages,
-            }),
-          },
-        ],
+        messages: request.messages as any,
         tools: Object.fromEntries(
           request.tools.map((t) => [
             t.name,
@@ -85,6 +82,7 @@ export type HostDependencies = {
   };
   config?: McpConfiguration;
   signal?: AbortSignal;
+  extractEvidence?: EvidenceExtractor;
 };
 export async function executeCommerceHost(
   context: RecoveryAgentContext,
@@ -154,6 +152,12 @@ async function execute(
     }
   }
   const client = new CommerceMcpClient(config, turn, signal, grant);
+  const evidence = new TurnEvidenceRegistry({
+    turn,
+    grantId: grant.id,
+    releaseId: grant.releaseId,
+  });
+  const extractEvidence = deps.extractEvidence ?? extractTrustedEvidence;
   try {
     await client.connect();
     const manifest = await client.manifest();
@@ -168,6 +172,7 @@ async function execute(
       ).values(),
     ];
     const assertCurrent = async () => {
+      if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
       signal.throwIfAborted();
       const state = await prisma.conversation.findUnique({
         where: { id: current.id },
@@ -253,7 +258,40 @@ async function execute(
         model: {
           invoke: async (request, modelSignal) => {
             await assertCurrent();
-            return deps.model.invoke(request, modelSignal);
+            const step = await deps.model.invoke(request, modelSignal);
+            if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
+              return step;
+            const responseContract = verifyResponseContract(
+              manifest.responseContract,
+              manifest.responseContractHash,
+              digest,
+            );
+            const parsed = finalResponseSchema(responseContract).safeParse(
+              step.calls[0].arguments,
+            );
+            if (
+              parsed.success &&
+              parsed.data.answerKind === "ANSWER" &&
+              parsed.data.evidenceIds.length > 0 &&
+              !evidence.hasEligibleEvidence(parsed.data.evidenceIds, Date.now())
+            ) {
+              return {
+                ...step,
+                calls: [
+                  {
+                    name: "finalResponse",
+                    arguments: {
+                      ...parsed.data,
+                      answerKind: "REFER_TO_STORE",
+                      referralReason: "UNVERIFIABLE_FACTS",
+                      evidenceIds: [],
+                      details: {},
+                    },
+                  },
+                ],
+              };
+            }
+            return step;
           },
         },
         now: Date.now,
@@ -264,11 +302,14 @@ async function execute(
             toolSignal.throwIfAborted();
             return (await available(toolSignal)).has(descriptor.name);
           },
-          execute: async (args, toolSignal) => {
+          execute: async (args, toolSignal): Promise<CommerceToolResult> => {
             toolSignal.throwIfAborted();
             await assertCurrent();
-            return client.call(descriptor.name, args, toolSignal);
+            const result = await client.call(descriptor.name, args, toolSignal);
+            evidence.record(descriptor, args, result, extractEvidence);
+            return result;
           },
+          extractEvidence,
         })),
       },
     });
@@ -298,7 +339,31 @@ async function execute(
       Date.now() - latest.processingStartedAt.getTime() >= 120_000
     )
       throw new CommerceHostError("STALE_TURN");
-    const envelope = result.result;
+    let envelope = result.result;
+    if (envelope.answerKind === "ANSWER" && envelope.evidenceIds.length > 0) {
+      const refresh = await evidence.refresh(envelope.evidenceIds, {
+        remoteCalls: result.usage.remoteCalls,
+        maxRemoteCalls: 10,
+        now: Date.now,
+        assertCurrent,
+        isCancelled: () => deps.signal?.aborted === true,
+        replay: ({ name, arguments: args }) => client.call(name, args, signal),
+        extractEvidence,
+      });
+      recordEvidenceRefreshOutcome(refresh);
+      if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
+      await assertCurrent();
+      if (refresh.kind === "suppress")
+        throw new CommerceHostError(refresh.reason);
+      if (refresh.kind === "refer")
+        envelope = {
+          ...envelope,
+          answerKind: "REFER_TO_STORE",
+          referralReason: "UNVERIFIABLE_FACTS",
+          evidenceIds: [],
+          details: {},
+        };
+    }
     // Recovery has no customer-preference setting. Preserve legacy storage values,
     // but do not impose their old precedence on this recovery-only runner.
     if (!isStableLanguageSignal(context.conversation.messages.map((m) => m.content).join("\n"))) {
