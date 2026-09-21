@@ -45,6 +45,7 @@ let state: any;
 let revoked = false;
 let expand = false;
 let outage = false;
+let boundaryFailure: "401" | "403" | "MALFORMED" | "TRANSPORT" | null = null;
 let structuredResult: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
@@ -110,6 +111,19 @@ beforeAll(async () => {
       }
       const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
       observations.push({ method: body.method, params: body.params, claims });
+      if (body.method === "tools/call" && boundaryFailure) {
+        if (boundaryFailure === "401" || boundaryFailure === "403") {
+          res.writeHead(Number(boundaryFailure));
+          res.end();
+          return;
+        }
+        if (boundaryFailure === "MALFORMED") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{malformed");
+          return;
+        }
+        throw new Error("transport failure");
+      }
       if (outage) {
         res.writeHead(503);
         res.end();
@@ -207,6 +221,7 @@ beforeEach(() => {
   revoked = false;
   expand = false;
   outage = false;
+  boundaryFailure = null;
   structuredResult = null;
   active = exampleManifest(digest, true);
   releases = new Map([[active.releaseId, active]]);
@@ -541,6 +556,33 @@ it("P06 renders the verified referral in explicit French without using model con
   expect(result.replyText).toContain("fixture.myshopify.com");
   expect(result.replyText).not.toContain("attacker");
 });
+
+it.each([
+  ["401", "UNAVAILABLE"],
+  ["403", "UNAVAILABLE"],
+  ["MALFORMED", "UNAVAILABLE"],
+  ["TRANSPORT", "UNAVAILABLE"],
+] as const)("EC09 performs one MCP call for a real host boundary %s failure", async (failure, code) => {
+  boundaryFailure = failure;
+  const model = vi.fn(async (request: ModelRequest) =>
+    request.tools.some((tool) => tool.name === "never_seeded_catalogue_facts")
+      ? {
+          calls: [
+            {
+              name: "never_seeded_catalogue_facts",
+              arguments: { handle: "linen" },
+            },
+          ],
+          outputTokens: 10,
+        }
+      : final(),
+  );
+
+  await expect(run(model)).rejects.toMatchObject({ code });
+  expect(model).toHaveBeenCalledTimes(1);
+  expect(observations.filter((observation) => observation.method === "tools/call")).toHaveLength(1);
+});
+
 it("uses the production extractor for trusted root evidence and refers on truncated recommendations", async () => {
   const evaluatedAt = new Date(Date.now() - 1_000).toISOString();
   const expiresAt = new Date(Date.now() + 29_000).toISOString();
