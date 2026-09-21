@@ -623,6 +623,83 @@ it("uses the production extractor for trusted root evidence and refers on trunca
             evidenceIds: [trusted.evidenceId],
           }),
     ),
+  ).resolves.toMatchObject({
+    answerKind: "REFER_TO_STORE",
+    referralReason: "UNVERIFIABLE_FACTS",
+    evidenceIds: [],
+  });
+});
+it.each(["unknown", "expired"])(
+  "converts %s final evidence to one admitted referral before Shared validation",
+  async (kind) => {
+    let evidenceId = "f".repeat(64);
+    let step = 0;
+    if (kind === "expired") {
+      const expired = {
+        turn: {
+          contractVersion: "commerce.v1" as const,
+          shopId: "shop-fixture",
+          checkoutRecoveryId: "recovery-fixture",
+          conversationId: "conversation-fixture",
+          inboundVersion: 1,
+        },
+        grantId: "grant-0",
+        releaseId: "release-fixture",
+        offerId: "offer-expired",
+        proposal: null,
+        basketFingerprint: "a".repeat(64),
+        ruleFingerprint: "b".repeat(64),
+        evaluatedAt: "2026-09-20T23:59:00.000Z",
+        expiresAt: "2026-09-20T23:59:30.000Z",
+        outcome: "QUALIFIES_FOR_KNOWN_RULES" as const,
+        currency: "GBP",
+        savings: "1.00",
+        resultingTotal: "9.00",
+        evaluatedConditions: [],
+        unresolvedConditions: [],
+      };
+      evidenceId = digest(canonicalJson(expired));
+      structuredResult = {
+        contractVersion: "commerce.v1",
+        status: "OK",
+        data: { ...expired, evidenceId },
+        renderedText: "expired evidence",
+      };
+    }
+    const result = await run(async () => {
+      if (kind === "expired" && step++ === 0)
+        return {
+          calls: [
+            {
+              name: active.capabilities[0]!.toolDescriptors[0]!.name,
+              arguments: { handle: "linen" },
+            },
+          ],
+          outputTokens: 10,
+        };
+      return final({
+        answerKind: "ANSWER",
+        referralReason: null,
+        evidenceIds: [evidenceId],
+      });
+    });
+    expect(result).toMatchObject({
+      answerKind: "REFER_TO_STORE",
+      referralReason: "UNVERIFIABLE_FACTS",
+      evidenceIds: [],
+    });
+  },
+);
+it("still rejects a structurally malformed final envelope", async () => {
+  await expect(
+    run(async () =>
+      final({
+        answerKind: "ANSWER",
+        referralReason: null,
+        evidenceIds: ["not-a-valid-evidence-id"],
+        details: { malformed: true },
+      }),
+    ),
   ).rejects.toMatchObject({ code: "INVALID_FINAL" });
 });
 it("the model deadline aborts in-flight work without returning a deliverable reply", async () => {

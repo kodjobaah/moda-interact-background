@@ -318,6 +318,27 @@ describe("turn-local offer evidence", () => {
     }
   });
 
+  it.each([
+    new DOMException("cancelled", "AbortError"),
+    new Error("operator cancellation"),
+    "operator cancellation",
+  ])("suppresses every external cancellation reason: %s", async (failure) => {
+    const registry = new TurnEvidenceRegistry();
+    const original = evidence();
+    registry.record(descriptor, {}, result(original), extractTrustedEvidence);
+    await expect(
+      registry.refresh([original.evidenceId], {
+        remoteCalls: 0,
+        maxRemoteCalls: 10,
+        now: () => Date.parse("2026-09-21T00:00:10.000Z"),
+        assertCurrent: vi.fn().mockResolvedValue(undefined),
+        isCancelled: () => true,
+        replay: vi.fn().mockRejectedValue(failure),
+        extractEvidence: extractTrustedEvidence,
+      }),
+    ).resolves.toEqual({ kind: "suppress", reason: "CANCELLED" });
+  });
+
   it("extracts only strict evaluator and non-truncated recommendation evidence", () => {
     const original = evidence({
       proposal: {

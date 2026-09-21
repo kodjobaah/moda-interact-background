@@ -164,6 +164,21 @@ export class TurnEvidenceRegistry {
     },
   ) {}
 
+  hasEligibleEvidence(evidenceIds: readonly string[], now: number): boolean {
+    const records = evidenceIds.map((id) => this.byId.get(id));
+    return (
+      records.length > 0 &&
+      records.every(
+        (record, index) =>
+          Boolean(record) &&
+          !this.invalidIds.has(evidenceIds[index]!) &&
+          evidenceDigest(record!.evidence) === record!.evidence.evidenceId &&
+          isFresh(record!.evidence, now) &&
+          isQualifying(record!.evidence),
+      )
+    );
+  }
+
   record(
     descriptor: {
       name: string;
@@ -225,6 +240,7 @@ export class TurnEvidenceRegistry {
       maxRemoteCalls: number;
       now: () => number;
       assertCurrent: () => Promise<void>;
+      isCancelled?: () => boolean;
       replay: (provenance: Provenance) => Promise<CommerceToolResult>;
       extractEvidence: EvidenceExtractor;
     },
@@ -292,6 +308,8 @@ export class TurnEvidenceRegistry {
         )
           return { kind: "refer" };
       } catch (error) {
+        if (input.isCancelled?.())
+          return { kind: "suppress", reason: "CANCELLED" };
         const reason = suppressionReason(error);
         if (reason) return { kind: "suppress", reason };
         return { kind: "refer" };

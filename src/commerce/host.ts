@@ -10,7 +10,9 @@ import {
 import {
   canonicalJson,
   CommerceTurnIdentitySchema,
+  finalResponseSchema,
   type CommerceToolResult,
+  verifyResponseContract,
 } from "@modainteract/moda-interact-shared/commerce";
 import {
   runCommerceTurn,
@@ -170,6 +172,7 @@ async function execute(
       ).values(),
     ];
     const assertCurrent = async () => {
+      if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
       signal.throwIfAborted();
       const state = await prisma.conversation.findUnique({
         where: { id: current.id },
@@ -255,7 +258,40 @@ async function execute(
         model: {
           invoke: async (request, modelSignal) => {
             await assertCurrent();
-            return deps.model.invoke(request, modelSignal);
+            const step = await deps.model.invoke(request, modelSignal);
+            if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
+              return step;
+            const responseContract = verifyResponseContract(
+              manifest.responseContract,
+              manifest.responseContractHash,
+              digest,
+            );
+            const parsed = finalResponseSchema(responseContract).safeParse(
+              step.calls[0].arguments,
+            );
+            if (
+              parsed.success &&
+              parsed.data.answerKind === "ANSWER" &&
+              parsed.data.evidenceIds.length > 0 &&
+              !evidence.hasEligibleEvidence(parsed.data.evidenceIds, Date.now())
+            ) {
+              return {
+                ...step,
+                calls: [
+                  {
+                    name: "finalResponse",
+                    arguments: {
+                      ...parsed.data,
+                      answerKind: "REFER_TO_STORE",
+                      referralReason: "UNVERIFIABLE_FACTS",
+                      evidenceIds: [],
+                      details: {},
+                    },
+                  },
+                ],
+              };
+            }
+            return step;
           },
         },
         now: Date.now,
@@ -310,10 +346,13 @@ async function execute(
         maxRemoteCalls: 10,
         now: Date.now,
         assertCurrent,
+        isCancelled: () => deps.signal?.aborted === true,
         replay: ({ name, arguments: args }) => client.call(name, args, signal),
         extractEvidence,
       });
       recordEvidenceRefreshOutcome(refresh);
+      if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
+      await assertCurrent();
       if (refresh.kind === "suppress")
         throw new CommerceHostError(refresh.reason);
       if (refresh.kind === "refer")
