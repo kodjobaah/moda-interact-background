@@ -7,12 +7,10 @@ The WhatsApp worker calls the Shared runner after existing turn, abuse and outbo
 Configure these only on the messaging worker:
 
 - `COMMERCE_MCP_URL`: fixed private Commerce URL ending in `/api/mcp`. No credentials, query or fragment. HTTP is supported for the private service network; redirects are rejected.
-- `COMMERCE_ASSERTION_KEY_ID`: the configured Commerce verification-key identifier.
-- `COMMERCE_ASSERTION_PRIVATE_KEY`: PEM RSA private key, at least 2048 bits. Keep this in service secrets, never in Studio, model context or logs.
 - `DEPLOYMENT_ENVIRONMENT_NAME`: existing shared environment identity; match Commerce.
 - Existing `GROQ_COMMERCE_MODEL`/provider credentials and single Moda WhatsApp sender configuration remain required.
 
-Assertions use RS256, `iss=moda-background`, `sub=moda-messaging-worker`, `aud=moda-commerce`, a 120-second expiry and trusted turn identity. Resolve assertions have no grant selector. Execute assertions carry the persisted grant and release IDs. The original grant survives retries and worker restarts; current revocation may only reduce its usable tools. A new release cannot expand it.
+Requests use the bounded `X-Moda-Commerce-Context` header. Resolve requests have no grant selector. Execute requests carry the persisted grant and release IDs. The original grant survives retries and worker restarts; current revocation may only reduce its usable tools. A new release cannot expand it.
 
 Shared is pinned to 0.13.1, runner 1.0.0, MCP SDK client/server to 1.30.0. The local interoperability test uses the Commerce foundation's WebStandard stateless JSON transport profile and verifies protocol 2025-11-25. This proves client/server SDK compatibility, not a deployed Commerce service or live provider.
 

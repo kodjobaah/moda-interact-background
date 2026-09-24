@@ -8,7 +8,6 @@ import {
   vi,
 } from "vitest";
 import { createServer, type Server as HttpServer } from "node:http";
-import { generateKeyPairSync, verify } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
@@ -19,6 +18,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   canonicalJson,
+  CommerceAssertionSchema,
   exampleManifest,
   exampleFinal,
   responseContractCanonicalJson,
@@ -35,7 +35,6 @@ import { executeCommerceHost } from "../../../src/commerce/host.js";
 import { digest } from "../../../src/commerce/grants.js";
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
 import type { ModelRequest } from "@modainteract/moda-interact-shared/commerce/runner";
-const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 let http: HttpServer;
 let endpoint: URL;
 let active: CommerceManifest;
@@ -47,14 +46,10 @@ let expand = false;
 let outage = false;
 let boundaryFailure: "401" | "403" | "MALFORMED" | "TRANSPORT" | null = null;
 let structuredResult: unknown = null;
+let fixtureError: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
   endpoint,
-  keyId: "fixture",
-  privateKey: keys.privateKey
-    .export({ type: "pkcs8", format: "pem" })
-    .toString(),
-  environment: "test",
 });
 const context: RecoveryAgentContext = {
   shop: "fixture.myshopify.com",
@@ -92,24 +87,23 @@ beforeAll(async () => {
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const text = Buffer.concat(chunks).toString();
       const body = JSON.parse(text);
-      const token = req.headers.authorization?.slice(7) ?? "";
-      const [header, payload, signature] = token.split(".");
+      const encodedContext = req.headers["x-moda-commerce-context"];
+      if (typeof encodedContext !== "string") {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      const claims = CommerceAssertionSchema.parse(
+        JSON.parse(Buffer.from(encodedContext, "base64url").toString("utf8")),
+      );
       if (
-        !header ||
-        !payload ||
-        !signature ||
-        !verify(
-          "RSA-SHA256",
-          Buffer.from(`${header}.${payload}`),
-          keys.publicKey,
-          Buffer.from(signature, "base64url"),
-        )
+        req.headers.authorization ||
+        req.headers["content-type"] !== "application/json"
       ) {
         res.writeHead(401);
         res.end();
         return;
       }
-      const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
       observations.push({ method: body.method, params: body.params, claims });
       if (body.method === "tools/call" && boundaryFailure) {
         if (boundaryFailure === "401" || boundaryFailure === "403") {
@@ -199,7 +193,8 @@ beforeAll(async () => {
       );
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(await response.text());
-    } catch {
+    } catch (error) {
+      fixtureError = error;
       res.writeHead(500);
       res.end();
     } finally {
@@ -223,6 +218,7 @@ beforeEach(() => {
   outage = false;
   boundaryFailure = null;
   structuredResult = null;
+  fixtureError = null;
   active = exampleManifest(digest, true);
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
@@ -279,7 +275,7 @@ const run = (
     ...(signal ? { signal } : {}),
   });
 describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
-  it("discovers arbitrary names, retrieves prompts, signs purpose/tenant claims and sends only reply text", async () => {
+  it("discovers arbitrary names, sends bounded context only and sends only reply text", async () => {
     const requests: ModelRequest[] = [];
     const output = await run(async (request) => {
       requests.push(request);
@@ -314,10 +310,6 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     ).toBe("2025-11-25");
     expect(observations[0]?.claims).toMatchObject({
       purpose: "resolve",
-      aud: "moda-commerce",
-      iss: "moda-background",
-      sub: "moda-messaging-worker",
-      environment: "test",
       shopId: "shop-fixture",
       checkoutRecoveryId: "recovery-fixture",
     });
@@ -327,7 +319,6 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
       grantId: "grant-0",
       releaseId: "release-fixture",
     });
-    expect(list[0]!.claims.exp - list[0]!.claims.iat).toBe(120);
   });
   it("R02 validates new bounded details without interpreting them; R08 referral has empty details", async () => {
     active.responseContract = {
@@ -425,7 +416,13 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     expect(grants.size).toBe(2);
   });
   it("first-turn insert races retain the unique winner", async () => {
-    await Promise.all([run(async () => final()), run(async () => final())]);
+    try {
+      await Promise.all([run(async () => final()), run(async () => final())]);
+    } catch (error) {
+      if (fixtureError) throw fixtureError;
+      throw error;
+    }
+    expect(fixtureError).toBeNull();
     expect(grants.size).toBe(1);
     expect(
       observations
@@ -838,7 +835,13 @@ it("uses a concurrently persisted different release instead of its losing resolv
       });
     },
   );
-  await run(async () => final());
+  try {
+    await run(async () => final());
+  } catch (error) {
+    if (fixtureError) throw fixtureError;
+    throw error;
+  }
+  expect(fixtureError).toBeNull();
   expect(
     observations
       .filter((o) => o.method === "tools/list")
