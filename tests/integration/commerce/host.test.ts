@@ -46,6 +46,7 @@ let expand = false;
 let outage = false;
 let boundaryFailure: "401" | "403" | "MALFORMED" | "TRANSPORT" | null = null;
 let structuredResult: unknown = null;
+let fixtureError: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
   endpoint,
@@ -192,7 +193,8 @@ beforeAll(async () => {
       );
       res.writeHead(response.status, Object.fromEntries(response.headers));
       res.end(await response.text());
-    } catch {
+    } catch (error) {
+      fixtureError = error;
       res.writeHead(500);
       res.end();
     } finally {
@@ -216,6 +218,7 @@ beforeEach(() => {
   outage = false;
   boundaryFailure = null;
   structuredResult = null;
+  fixtureError = null;
   active = exampleManifest(digest, true);
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
@@ -413,7 +416,13 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     expect(grants.size).toBe(2);
   });
   it("first-turn insert races retain the unique winner", async () => {
-    await Promise.all([run(async () => final()), run(async () => final())]);
+    try {
+      await Promise.all([run(async () => final()), run(async () => final())]);
+    } catch (error) {
+      if (fixtureError) throw fixtureError;
+      throw error;
+    }
+    expect(fixtureError).toBeNull();
     expect(grants.size).toBe(1);
     expect(
       observations
@@ -826,7 +835,13 @@ it("uses a concurrently persisted different release instead of its losing resolv
       });
     },
   );
-  await run(async () => final());
+  try {
+    await run(async () => final());
+  } catch (error) {
+    if (fixtureError) throw fixtureError;
+    throw error;
+  }
+  expect(fixtureError).toBeNull();
   expect(
     observations
       .filter((o) => o.method === "tools/list")
