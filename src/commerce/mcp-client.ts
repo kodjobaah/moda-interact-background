@@ -149,20 +149,6 @@ export class CommerceMcpClient {
     if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION");
     return parsed.data;
   }
-  async prompt(name: string) {
-    const result = await this.client.getPrompt(
-      { name, arguments: {} },
-      this.options(),
-    );
-    if (result.messages.some((m) => m.content.type !== "text"))
-      throw new CommerceHostError("INVALID_INPUT");
-    return {
-      name,
-      text: result.messages
-        .map((m) => (m.content.type === "text" ? m.content.text : ""))
-        .join("\n"),
-    };
-  }
   async tools(signal = this.signal) {
     const result = await this.client.listTools({}, this.options(signal));
     if (

@@ -166,9 +166,10 @@ async function execute(
     await validateRelease(manifest);
     const descriptors = [
       ...new Map(
-        manifest.capabilities
-          .flatMap((c) => c.toolDescriptors)
-          .map((t) => [t.name, t]),
+        manifest.capabilities.map((capability) => [
+          capability.toolDescriptor.name,
+          capability.toolDescriptor,
+        ]),
       ).values(),
     ];
     const assertCurrent = async () => {
@@ -196,13 +197,16 @@ async function execute(
       const listed = await client.tools(requestSignal);
       for (const entry of listed) {
         const descriptor = descriptors.find((d) => d.name === entry.name);
+        const expectedGrant = descriptor && grant.grantedTools.find(
+          (candidate) =>
+            candidate.toolId === descriptor.toolId &&
+            candidate.toolRevisionId === descriptor.toolRevisionId &&
+            candidate.toolName === descriptor.name &&
+            candidate.definitionVersion === descriptor.definitionVersion,
+        );
         if (
           !descriptor ||
-          !grant.grantedTools.some(
-            (g) =>
-              g.toolName === entry.name &&
-              g.toolRevisionId === descriptor.toolRevisionId,
-          ) ||
+          !expectedGrant ||
           canonicalJson(entry) !==
             canonicalJson({
               name: descriptor.name,
@@ -217,11 +221,6 @@ async function execute(
       return new Set(listed.map((t) => t.name));
     };
     await available();
-    const prompts = [];
-    for (const capability of [...manifest.capabilities].sort(
-      (a, b) => a.position - b.position,
-    ))
-      prompts.push(await client.prompt(capability.promptName));
     const language = {
       tag: current.languageTag,
       source:
@@ -232,7 +231,6 @@ async function execute(
       turn,
       grant,
       manifest,
-      prompts,
       signal,
       hostInstructions: RECOVERY_INSTRUCTIONS,
       context: {
@@ -298,9 +296,22 @@ async function execute(
         digest,
         tools: descriptors.map((descriptor) => ({
           descriptor,
-          isAuthorized: async (_grant, toolSignal) => {
+          isAuthorized: async (authorizedGrant, toolSignal) => {
             toolSignal.throwIfAborted();
-            return (await available(toolSignal)).has(descriptor.name);
+            if (!(await available(toolSignal)).has(descriptor.name)) return false;
+            return grant.grantedTools.some(
+              (candidate) =>
+                candidate.toolId === authorizedGrant.toolId &&
+                candidate.toolRevisionId === authorizedGrant.toolRevisionId &&
+                candidate.toolName === authorizedGrant.toolName &&
+                candidate.definitionVersion === authorizedGrant.definitionVersion &&
+                canonicalJson(candidate.capabilityKeys) ===
+                  canonicalJson(authorizedGrant.capabilityKeys) &&
+                candidate.toolId === descriptor.toolId &&
+                candidate.toolRevisionId === descriptor.toolRevisionId &&
+                candidate.toolName === descriptor.name &&
+                candidate.definitionVersion === descriptor.definitionVersion,
+            );
           },
           execute: async (args, toolSignal): Promise<CommerceToolResult> => {
             toolSignal.throwIfAborted();

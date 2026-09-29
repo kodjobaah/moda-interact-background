@@ -12,7 +12,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
   ReadResourceRequestSchema,
-  GetPromptRequestSchema,
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -132,7 +131,7 @@ beforeAll(async () => {
       }
       server = new Server(
         { name: "commerce-fixture", version: "1.0.0" },
-        { capabilities: { resources: {}, prompts: {}, tools: {} } },
+        { capabilities: { resources: {}, tools: {} } },
       );
       server.setRequestHandler(ReadResourceRequestSchema, async () => ({
         contents: [
@@ -143,23 +142,17 @@ beforeAll(async () => {
           },
         ],
       }));
-      server.setRequestHandler(GetPromptRequestSchema, async (request) => ({
-        messages: [
-          {
-            role: "user",
-            content: {
-              type: "text",
-              text: `Pinned prompt ${request.params.name}`,
-            },
-          },
-        ],
-      }));
       server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: revoked
           ? []
-          : (expand ? active : pinned).capabilities
-              .flatMap((c) => c.toolDescriptors)
-              .map(({ name, description, inputSchema }) => ({
+          : [
+              ...new Map(
+                (expand ? active : pinned).capabilities.map((capability) => [
+                  capability.toolDescriptor.name,
+                  capability.toolDescriptor,
+                ]),
+              ).values(),
+            ].map(({ name, description, inputSchema }) => ({
                 name,
                 description,
                 inputSchema,
@@ -298,6 +291,10 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     expect(output.replyText).toBe("Blue linen");
     expect(output).not.toHaveProperty("details");
     expect(grants.size).toBe(1);
+    expect(requests[0]?.instructions.filter((instruction) =>
+      instruction.includes("Synthetic Feature behavior."),
+    )).toHaveLength(1);
+    expect(observations.some((observation) => observation.method === "prompts/get")).toBe(false);
     expect(requests[1]?.messages).toEqual([
       expect.objectContaining({ tool: "never_seeded_catalogue_facts" }),
     ]);
@@ -319,6 +316,39 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
       grantId: "grant-0",
       releaseId: "release-fixture",
     });
+  });
+  it("applies shared Feature behaviour once and exposes a reused Tool once", async () => {
+    const sibling = structuredClone(active.capabilities[0]!);
+    sibling.capabilityId = "capability-sibling";
+    sibling.key = "feature_product_read_sibling";
+    sibling.position = 1;
+    active.capabilities.push(sibling);
+    active.selectedCapabilityKeys.push(sibling.key);
+    active.grantedTools[0]!.capabilityKeys.push(sibling.key);
+
+    let captured: ModelRequest | undefined;
+    await run(async (request) => {
+      captured = request;
+      return final();
+    });
+
+    expect(active.featureBehaviours).toHaveLength(1);
+    expect(captured?.instructions.filter((instruction) =>
+      instruction.includes("Synthetic Feature behavior."),
+    )).toHaveLength(1);
+    expect(captured?.tools.map((entry) => entry.name)).toEqual([
+      active.capabilities[0]!.toolDescriptor.name,
+      "finalResponse",
+    ]);
+    expect(grants.get(state.id).selectedCapabilityKeys).toEqual([
+      active.capabilities[0]!.key,
+      sibling.key,
+    ]);
+    expect(grants.get(state.id).grantedTools[0].capabilityKeys).toEqual([
+      active.capabilities[0]!.key,
+      sibling.key,
+    ]);
+    expect(observations.some((observation) => observation.method === "prompts/get")).toBe(false);
   });
   it("R02 validates new bounded details without interpreting them; R08 referral has empty details", async () => {
     active.responseContract = {
@@ -353,8 +383,6 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     const old = grants.get(state.id);
     active = structuredClone(active);
     active.releaseId = "release-new";
-    active.capabilities[0]!.promptName =
-      "commerce/release-new/conversation_core/core-revision";
     active.responseContract.instructions = "New definition";
     active.responseContractHash = digest(
       responseContractCanonicalJson(active.responseContract),
@@ -384,12 +412,10 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     await run(async () => final());
     active = structuredClone(active);
     active.releaseId = "new-release";
-    active.capabilities[0]!.promptName =
-      "commerce/new-release/conversation_core/core-revision";
-    active.capabilities[0]!.toolDescriptors[0]!.name = "newly_authored_fabric";
+    active.capabilities[0]!.toolDescriptor.name = "newly_authored_fabric";
     active.grantedTools[0]!.toolName = "newly_authored_fabric";
-    active.capabilities[0]!.toolDescriptors[0]!.toolId = "new-tool";
-    active.capabilities[0]!.toolDescriptors[0]!.toolRevisionId =
+    active.capabilities[0]!.toolDescriptor.toolId = "new-tool";
+    active.capabilities[0]!.toolDescriptor.toolRevisionId =
       "new-tool-revision";
     active.grantedTools[0]!.toolId = "new-tool";
     active.grantedTools[0]!.toolRevisionId = "new-tool-revision";
@@ -453,7 +479,7 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
   it("rejects server expansion beyond the retained grant", async () => {
     await run(async () => final());
     active = structuredClone(active);
-    active.capabilities[0]!.toolDescriptors[0]!.name = "injected_tool";
+    active.capabilities[0]!.toolDescriptor.name = "injected_tool";
     expand = true;
     await expect(run(vi.fn())).rejects.toMatchObject({ code: "DENIED" });
   });
@@ -710,7 +736,7 @@ it.each(["unknown", "expired"])(
         return {
           calls: [
             {
-              name: active.capabilities[0]!.toolDescriptors[0]!.name,
+              name: active.capabilities[0]!.toolDescriptor.name,
               arguments: { handle: "linen" },
             },
           ],
@@ -790,11 +816,14 @@ it("enforces the 90-second turn deadline including discovery (accelerated timer 
 it("a pinned release with genuinely no tools still produces a bounded referral", async () => {
   active = exampleManifest(digest, false);
   releases.set(active.releaseId, active);
+  expect(active.capabilities).toEqual([]);
+  expect(active.selectedCapabilityKeys).toEqual([]);
   const result = await run(async (request) => {
     expect(request.tools.map((t) => t.name)).toEqual(["finalResponse"]);
     return final();
   });
   expect(result.answerKind).toBe("REFER_TO_STORE");
+  expect(grants.get(state.id).selectedCapabilityKeys).toEqual([]);
   expect(grants.get(state.id).grantedTools).toEqual([]);
 });
 it("P10 a model cannot expand authority through tool arguments", async () => {
@@ -817,8 +846,6 @@ it("P10 a model cannot expand authority through tool arguments", async () => {
 it("uses a concurrently persisted different release instead of its losing resolve candidate", async () => {
   const winner = structuredClone(active);
   winner.releaseId = "winner-release";
-  winner.capabilities[0]!.promptName =
-    "commerce/winner-release/conversation_core/core-revision";
   releases.set(winner.releaseId, winner);
   db.commerceConversationGrant.create.mockImplementationOnce(
     async ({ data }) => {
