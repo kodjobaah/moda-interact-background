@@ -25,16 +25,26 @@ async function workbookBytes(): Promise<Uint8Array> {
   const hidden = workbook.addWorksheet("Hidden");
   hidden.state = "hidden";
   hidden.addRows([["Secret"], ["not emitted"]]);
+
+  const sharedFormula = workbook.addWorksheet("Shared formula");
+  sharedFormula.addRow(["Item", "Cached result"]);
+  sharedFormula.addRow(["master", { formula: "1+1", result: 2, shareType: "shared", ref: "B2:B3" }]);
+  sharedFormula.addRow(["follower", { sharedFormula: "B2", result: 3 }]);
   return new Uint8Array(await workbook.xlsx.writeBuffer());
 }
 
 describe("extractMerchantKnowledgeXlsx", () => {
   it("extracts only visible worksheets in order with deterministic scalar values and cached formulas", async () => {
-    await expect(
-      extractMerchantKnowledgeXlsx("catalog.XLSX", await workbookBytes(), 100_000),
-    ).resolves.toBe(
-      "Worksheet: Visible\nName:  Widget \nColumn 2: 12.5\nDetails: Description\nBoolean: false\nDate: 2026-09-30T12:00:00.000Z\nFormula: 2",
+    const extracted = await extractMerchantKnowledgeXlsx(
+      "catalog.XLSX",
+      await workbookBytes(),
+      100_000,
     );
+    expect(extracted).toBe(
+      "Worksheet: Visible\nName:  Widget \nColumn 2: 12.5\nDetails: Description\nBoolean: false\nDate: 2026-09-30T12:00:00.000Z\nFormula: 2\n\nWorksheet: Shared formula\nItem: master\nCached result: 2\n\nWorksheet: Shared formula\nItem: follower\nCached result: 3",
+    );
+    expect(extracted).not.toContain("1+1");
+    expect(extracted).not.toContain("B2");
   });
 
   it("rejects invalid names and malformed ZIP data", async () => {

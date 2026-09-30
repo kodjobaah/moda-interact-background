@@ -104,7 +104,7 @@ function scalar(value: ExcelJS.CellValue | undefined): string | undefined {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (value instanceof Date) return value.toISOString();
 
-  if (typeof value === "object" && "formula" in value) {
+  if (typeof value === "object" && ("formula" in value || "sharedFormula" in value)) {
     return scalar(value.result as ExcelJS.CellValue | undefined);
   }
 
