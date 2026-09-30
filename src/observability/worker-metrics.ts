@@ -14,7 +14,8 @@ type WorkerName =
   | "pending-recovery-candidate"
   | "whatsapp"
   | "merchant-communications"
-  | "billing-subscription-reconciliation";
+  | "billing-subscription-reconciliation"
+  | "merchant-knowledge";
 
 type QueueName =
   | "checkout-events"
@@ -23,7 +24,8 @@ type QueueName =
   | "recovery-capacity-resume"
   | "whatsapp-events"
   | "merchant-communications"
-  | "billing-subscription-reconcile";
+  | "billing-subscription-reconcile"
+  | "merchant-knowledge";
 
 type WorkerMetricDefinition = {
   workerName: WorkerName;
