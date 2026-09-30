@@ -99,6 +99,39 @@ describe("MerchantKnowledgeReconciliationService", () => {
     expect(harness.add.mock.calls[0]?.[2]).toEqual(firstOptions);
   });
 
+  it("leaves PENDING work dormant until opt-in, then uses the existing deterministic job id", async () => {
+    harness.findMany.mockResolvedValue([revision("opt-in-transition", 5)]);
+    harness.resolveSourceEligibility.mockResolvedValueOnce({
+      eligible: false,
+      activationModeEligible: true,
+      merchantEnabled: false,
+    }).mockResolvedValue({
+      eligible: true,
+      activationModeEligible: true,
+      merchantEnabled: true,
+    });
+
+    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject({
+      scanned: 1,
+      enqueued: 0,
+      skippedDormant: 1,
+    });
+    expect(harness.add).not.toHaveBeenCalled();
+
+    await expect(harness.service.reconcilePendingOnce()).resolves.toMatchObject({
+      scanned: 1,
+      enqueued: 1,
+      skippedDormant: 0,
+    });
+    const [name, job, options] = harness.add.mock.calls[0] as [
+      string,
+      MerchantKnowledgeProcessSourceRevisionJob,
+      { jobId: string },
+    ];
+    expect(name).toBe(MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME);
+    expect(options.jobId).toBe(createMerchantKnowledgeProcessJobId(job));
+  });
+
   it.each([0, -1, 501, 1.5])("rejects invalid page size %s", async (pageSize) => {
     await expect(harness.service.reconcilePendingOnce({ pageSize })).rejects.toThrow(RangeError);
     expect(harness.findMany).not.toHaveBeenCalled();
