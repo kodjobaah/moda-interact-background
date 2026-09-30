@@ -106,6 +106,22 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
     ).rejects.toMatchObject({ code: "CONNECTION_PEER_MISMATCH" });
   });
 
+  it("rejects a mixed public and special-use DNS answer before making a request", async () => {
+    const request = vi.fn(async () => response("must not be requested"));
+    const harness = acquirer([], {
+      resolveAll: async () => [
+        { address: "8.8.8.8", family: 4 },
+        { address: "192.31.196.1", family: 4 },
+      ],
+      request,
+    });
+
+    await expect(
+      harness.client.acquire({ requestedUrl: "https://mixed.example/" }),
+    ).rejects.toMatchObject({ code: "DENIED_DESTINATION", retryable: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("resolves each redirect independently and returns the final URL", async () => {
     const resolver = vi.fn(async (hostname: string) =>
       hostname === "first.example"

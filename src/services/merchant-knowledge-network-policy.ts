@@ -1,7 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import type { RequestOptions } from "node:https";
-import { isIP } from "node:net";
-import ipaddr from "ipaddr.js";
+import { BlockList, isIP } from "node:net";
 
 export const MERCHANT_KNOWLEDGE_MAX_URL_LENGTH = 2048;
 export const MERCHANT_KNOWLEDGE_MAX_REDIRECTS = 5;
@@ -49,25 +48,46 @@ export type MerchantKnowledgeResolver = (
   hostname: string,
 ) => Promise<readonly MerchantKnowledgeResolvedAddress[]>;
 
-const NON_PUBLIC_SPECIAL_USE_CIDRS = [
-  "0.0.0.0/8",
-  "192.0.0.0/24",
-  "192.0.2.0/24",
-  "192.88.99.0/24",
-  "198.18.0.0/15",
-  "198.51.100.0/24",
-  "203.0.113.0/24",
-  "224.0.0.0/4",
-  "240.0.0.0/4",
-  "64:ff9b::/96",
-  "64:ff9b:1::/48",
-  "100::/64",
-  "2001::/23",
-  "2001:db8::/32",
-  "2002::/16",
-  "3fff::/20",
-  "5f00::/16",
-].map((cidr) => ipaddr.parseCIDR(cidr));
+const GLOBAL_IPV4 = new BlockList();
+GLOBAL_IPV4.addSubnet("0.0.0.0", 0, "ipv4");
+
+const GLOBAL_IPV6 = new BlockList();
+GLOBAL_IPV6.addSubnet("2000::", 3, "ipv6");
+
+const NON_PUBLIC_SPECIAL_USE_CIDRS: readonly [string, number, "ipv4" | "ipv6"][] = [
+  ["0.0.0.0", 8, "ipv4"],
+  ["10.0.0.0", 8, "ipv4"],
+  ["100.64.0.0", 10, "ipv4"],
+  ["127.0.0.0", 8, "ipv4"],
+  ["169.254.0.0", 16, "ipv4"],
+  ["172.16.0.0", 12, "ipv4"],
+  ["192.0.0.0", 24, "ipv4"],
+  ["192.0.2.0", 24, "ipv4"],
+  ["192.31.196.0", 24, "ipv4"],
+  ["192.52.193.0", 24, "ipv4"],
+  ["192.88.99.0", 24, "ipv4"],
+  ["192.168.0.0", 16, "ipv4"],
+  ["192.175.48.0", 24, "ipv4"],
+  ["198.18.0.0", 15, "ipv4"],
+  ["198.51.100.0", 24, "ipv4"],
+  ["203.0.113.0", 24, "ipv4"],
+  ["224.0.0.0", 4, "ipv4"],
+  ["240.0.0.0", 4, "ipv4"],
+  ["64:ff9b::", 96, "ipv6"],
+  ["64:ff9b:1::", 48, "ipv6"],
+  ["100::", 64, "ipv6"],
+  ["2001::", 23, "ipv6"],
+  ["2001:db8::", 32, "ipv6"],
+  ["2002::", 16, "ipv6"],
+  ["3fff::", 20, "ipv6"],
+  ["5f00::", 16, "ipv6"],
+];
+const NON_PUBLIC_SPECIAL_USE = new BlockList();
+for (const [network, prefix, family] of NON_PUBLIC_SPECIAL_USE_CIDRS) {
+  NON_PUBLIC_SPECIAL_USE.addSubnet(network, prefix, family);
+}
+const IPV4_MAPPED_IPV6 = new BlockList();
+IPV4_MAPPED_IPV6.addSubnet("::ffff:0:0", 96, "ipv6");
 
 const TEMPORARY_DNS_CODES = new Set(["EAI_AGAIN", "ETIMEOUT", "ETIMEDOUT"]);
 
@@ -85,13 +105,17 @@ function hostnameWithoutBrackets(hostname: string): string {
 }
 
 export function normalizeIpAddress(address: string): string | null {
+  const family = isIP(address);
+  if (family === 4) return address;
+  if (family !== 6) return null;
+
   try {
-    const parsed = ipaddr.parse(address);
-    if (parsed.kind() === "ipv6") {
-      const ipv6 = parsed as ipaddr.IPv6;
-      if (ipv6.isIPv4MappedAddress()) return ipv6.toIPv4Address().toString();
-    }
-    return parsed.toString();
+    const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+    if (!IPV4_MAPPED_IPV6.check(canonical, "ipv6")) return canonical;
+    const groups = canonical.split(":");
+    const first = Number.parseInt(groups.at(-2)!, 16);
+    const second = Number.parseInt(groups.at(-1)!, 16);
+    return [first >> 8, first & 255, second >> 8, second & 255].join(".");
   } catch {
     return null;
   }
@@ -99,26 +123,16 @@ export function normalizeIpAddress(address: string): string | null {
 
 export function isPublicIpAddress(address: string): boolean {
   if (address.includes("%")) return false;
-  try {
-    const parsed = ipaddr.parse(address);
-    if (parsed.kind() === "ipv6") {
-      const ipv6 = parsed as ipaddr.IPv6;
-      if (ipv6.isIPv4MappedAddress()) {
-        return isPublicIpAddress(ipv6.toIPv4Address().toString());
-      }
-    }
-    const specialUse = NON_PUBLIC_SPECIAL_USE_CIDRS.some(([network, prefix]) => {
-      if (parsed.kind() !== network.kind()) return false;
-      if (parsed.kind() === "ipv4") {
-        return (parsed as ipaddr.IPv4).match([network as ipaddr.IPv4, prefix]);
-      }
-      return (parsed as ipaddr.IPv6).match([network as ipaddr.IPv6, prefix]);
-    });
-    if (specialUse) return false;
-    return parsed.range() === "unicast";
-  } catch {
-    return false;
+  const family = isIP(address);
+  if (family === 0) return false;
+  if (family === 6 && IPV4_MAPPED_IPV6.check(address, "ipv6")) {
+    const normalized = normalizeIpAddress(address);
+    return normalized !== null && isPublicIpAddress(normalized);
   }
+  const allowed = family === 4
+    ? GLOBAL_IPV4.check(address, "ipv4")
+    : GLOBAL_IPV6.check(address, "ipv6");
+  return allowed && !NON_PUBLIC_SPECIAL_USE.check(address, family === 4 ? "ipv4" : "ipv6");
 }
 
 export async function resolveAllDnsAnswers(
