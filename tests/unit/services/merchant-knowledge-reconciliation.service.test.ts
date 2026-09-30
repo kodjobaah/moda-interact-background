@@ -3,6 +3,7 @@ import type { Queue } from "bullmq";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME,
+  MERCHANT_KNOWLEDGE_PROCESS_SCHEMA_VERSION,
   type MerchantKnowledgeProcessSourceRevisionJob,
 } from "@modainteract/moda-interact-shared/merchant-knowledge";
 import { createMerchantKnowledgeProcessJobId } from "@modainteract/moda-interact-shared/merchant-knowledge/node";
@@ -77,7 +78,7 @@ describe("MerchantKnowledgeReconciliationService", () => {
     ];
     expect(name).toBe(MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME);
     expect(job).toEqual({
-      schemaVersion: 1,
+      schemaVersion: MERCHANT_KNOWLEDGE_PROCESS_SCHEMA_VERSION,
       shopId: "shop-1",
       sourceRevisionId: "eligible",
       generation: 3,

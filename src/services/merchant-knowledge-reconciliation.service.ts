@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import {
   MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME,
+  MERCHANT_KNOWLEDGE_PROCESS_SCHEMA_VERSION,
   type MerchantKnowledgeProcessSourceRevisionJob,
 } from "@modainteract/moda-interact-shared/merchant-knowledge";
 import { createMerchantKnowledgeProcessJobId } from "@modainteract/moda-interact-shared/merchant-knowledge/node";
@@ -74,7 +75,7 @@ export class MerchantKnowledgeReconciliationService {
       }
 
       const job: MerchantKnowledgeProcessSourceRevisionJob = {
-        schemaVersion: 1,
+        schemaVersion: MERCHANT_KNOWLEDGE_PROCESS_SCHEMA_VERSION,
         shopId: revision.source.shopId,
         sourceRevisionId: revision.id,
         generation: revision.generation,
