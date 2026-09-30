@@ -17,7 +17,8 @@ export type QueueName =
   | "shopify-discount-sync"
   | "whatsapp-events"
   | "merchant-communications"
-  | "billing-subscription-reconcile";
+  | "billing-subscription-reconcile"
+  | "merchant-knowledge";
 
 type QueueSnapshot = {
   active: number;
