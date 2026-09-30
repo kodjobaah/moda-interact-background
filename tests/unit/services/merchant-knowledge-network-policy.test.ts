@@ -33,6 +33,11 @@ describe("Merchant Knowledge network policy", () => {
     "6000::1",
     "fe00::1",
     "ff02::1",
+    "2d00::1",
+    "3000::1",
+    "3f00::1",
+    "2004::1",
+    "2620:4f:8000::1",
     "64:ff9b::808:808",
     "2002::1",
     "3fff::1",
@@ -45,6 +50,7 @@ describe("Merchant Knowledge network policy", () => {
     "8.8.8.8",
     "1.1.1.1",
     "2606:4700:4700::1111",
+    "2001:4860:4860::8888",
     "::ffff:8.8.8.8",
   ])(
     "accepts global unicast address %s",
@@ -58,6 +64,15 @@ describe("Merchant Knowledge network policy", () => {
       resolveAndValidateDestination("mixed.example", async () => [
         { address: "8.8.8.8", family: 4 },
         { address: "127.0.0.1", family: 4 },
+      ]),
+    ).rejects.toMatchObject({ code: "DENIED_DESTINATION", retryable: false });
+  });
+
+  it("rejects a mixed public and reserved IPv6 DNS answer", async () => {
+    await expect(
+      resolveAndValidateDestination("mixed-ipv6.example", async () => [
+        { address: "2606:4700:4700::1111", family: 6 },
+        { address: "3000::1", family: 6 },
       ]),
     ).rejects.toMatchObject({ code: "DENIED_DESTINATION", retryable: false });
   });

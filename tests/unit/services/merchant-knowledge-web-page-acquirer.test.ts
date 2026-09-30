@@ -122,6 +122,25 @@ describe("MerchantKnowledgeWebPageAcquirer", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("rejects a mixed public and special-use IPv6 DNS answer before making a request", async () => {
+    const request = vi.fn(async () => response("must not be requested"));
+    const harness = acquirer([], {
+      resolveAll: async () => [
+        { address: "2606:4700:4700::1111", family: 6 },
+        { address: "2620:4f:8000::1", family: 6 },
+      ],
+      request,
+    });
+
+    await expect(
+      harness.client.acquire({ requestedUrl: "https://mixed-ipv6.example/" }),
+    ).rejects.toMatchObject({
+      code: "DENIED_DESTINATION",
+      retryable: false,
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("resolves each redirect independently and returns the final URL", async () => {
     const resolver = vi.fn(async (hostname: string) =>
       hostname === "first.example"

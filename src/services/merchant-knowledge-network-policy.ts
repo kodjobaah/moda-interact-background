@@ -51,8 +51,46 @@ export type MerchantKnowledgeResolver = (
 const GLOBAL_IPV4 = new BlockList();
 GLOBAL_IPV4.addSubnet("0.0.0.0", 0, "ipv4");
 
-const GLOBAL_IPV6 = new BlockList();
-GLOBAL_IPV6.addSubnet("2000::", 3, "ipv6");
+const PUBLIC_IPV6_ALLOCATION_CIDRS: readonly [string, number][] = [
+  ["2001:200::", 23],
+  ["2001:400::", 23],
+  ["2001:600::", 23],
+  ["2001:800::", 22],
+  ["2001:c00::", 23],
+  ["2001:e00::", 23],
+  ["2001:1200::", 23],
+  ["2001:1400::", 22],
+  ["2001:1800::", 23],
+  ["2001:1a00::", 23],
+  ["2001:1c00::", 22],
+  ["2001:2000::", 19],
+  ["2001:4000::", 23],
+  ["2001:4200::", 23],
+  ["2001:4400::", 23],
+  ["2001:4600::", 23],
+  ["2001:4800::", 23],
+  ["2001:4a00::", 23],
+  ["2001:4c00::", 23],
+  ["2001:5000::", 20],
+  ["2001:8000::", 19],
+  ["2001:a000::", 20],
+  ["2001:b000::", 20],
+  ["2003::", 18],
+  ["2400::", 12],
+  ["2410::", 12],
+  ["2600::", 12],
+  ["2610::", 23],
+  ["2620::", 23],
+  ["2630::", 12],
+  ["2800::", 12],
+  ["2a00::", 12],
+  ["2a10::", 12],
+  ["2c00::", 12],
+];
+const PUBLIC_IPV6_ALLOCATIONS = new BlockList();
+for (const [network, prefix] of PUBLIC_IPV6_ALLOCATION_CIDRS) {
+  PUBLIC_IPV6_ALLOCATIONS.addSubnet(network, prefix, "ipv6");
+}
 
 const NON_PUBLIC_SPECIAL_USE_CIDRS: readonly [string, number, "ipv4" | "ipv6"][] = [
   ["0.0.0.0", 8, "ipv4"],
@@ -79,6 +117,7 @@ const NON_PUBLIC_SPECIAL_USE_CIDRS: readonly [string, number, "ipv4" | "ipv6"][]
   ["2001::", 23, "ipv6"],
   ["2001:db8::", 32, "ipv6"],
   ["2002::", 16, "ipv6"],
+  ["2620:4f:8000::", 48, "ipv6"],
   ["3fff::", 20, "ipv6"],
   ["5f00::", 16, "ipv6"],
 ];
@@ -131,7 +170,7 @@ export function isPublicIpAddress(address: string): boolean {
   }
   const allowed = family === 4
     ? GLOBAL_IPV4.check(address, "ipv4")
-    : GLOBAL_IPV6.check(address, "ipv6");
+    : PUBLIC_IPV6_ALLOCATIONS.check(address, "ipv6");
   return allowed && !NON_PUBLIC_SPECIAL_USE.check(address, family === 4 ? "ipv4" : "ipv6");
 }
 
