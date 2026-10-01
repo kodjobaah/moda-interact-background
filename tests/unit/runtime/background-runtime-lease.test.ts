@@ -56,16 +56,25 @@ describe("BackgroundRuntimeLeaseService", () => {
     }
   });
 
-  it("uses the fixed hourly cadence for checkout recovery expiry", async () => {
-    const expiryName = "CHECKOUT_RECOVERY_EXPIRY" as any;
-    const db = sqlDatabase([{ name: expiryName, generation: 1 }]);
+  it("preserves existing lease cadence mappings and adds fixed Merchant Knowledge cadences", async () => {
+    const leaseName = "MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION" as any;
+    const db = sqlDatabase([{ name: leaseName, generation: 1 }]);
     const service = new BackgroundRuntimeLeaseService(db, "owner");
 
-    await service.tryAcquire(expiryName);
+    await service.tryAcquire(leaseName);
 
     const query = db.$queryRaw.mock.calls[0]?.[0] as { sql?: unknown; strings?: unknown };
-    const fragments = String(query.sql ?? query.strings ?? "");
-    expect(fragments).toContain("CHECKOUT_RECOVERY_EXPIRY");
-    expect(fragments).toContain("THEN 3600");
+    const sql = String(query.sql ?? query.strings ?? "");
+    for (const cadence of [
+      `WHEN 'BILLING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "billingReconciliationIntervalSeconds"`,
+      `WHEN 'RECOVERY_CAPACITY_REPAIR'::"BackgroundRuntimeLeaseName" THEN "recoveryRepairIntervalSeconds"`,
+      `WHEN 'CHECKOUT_RECOVERY_EXPIRY'::"BackgroundRuntimeLeaseName" THEN 3600`,
+      `WHEN 'TRANSLATION_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "translationReconciliationIntervalSeconds"`,
+      `WHEN 'QUEUE_CONCURRENCY_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 0`,
+      `WHEN 'MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 60`,
+      `WHEN 'MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP'::"BackgroundRuntimeLeaseName" THEN 3600`,
+    ]) {
+      expect(sql).toContain(cadence);
+    }
   });
 });

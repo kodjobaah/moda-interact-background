@@ -24,6 +24,8 @@ export class BackgroundRuntimeLeaseService {
           WHEN 'CHECKOUT_RECOVERY_EXPIRY'::"BackgroundRuntimeLeaseName" THEN 3600
           WHEN 'TRANSLATION_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN "translationReconciliationIntervalSeconds"
           WHEN 'QUEUE_CONCURRENCY_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 0
+          WHEN 'MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 60
+          WHEN 'MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP'::"BackgroundRuntimeLeaseName" THEN 3600
         END AS "cadenceSeconds"
         FROM "public"."BackgroundRuntimeConfig"
         WHERE "id" = 'default'
