@@ -8,7 +8,26 @@ Configure these only on the messaging worker:
 
 - `COMMERCE_MCP_URL`: fixed private Commerce URL ending in `/api/mcp`. No credentials, query or fragment. HTTP is supported for the private service network; redirects are rejected.
 - `DEPLOYMENT_ENVIRONMENT_NAME`: existing shared environment identity; match Commerce.
-- Existing `GROQ_COMMERCE_MODEL`/provider credentials and single Moda WhatsApp sender configuration remain required.
+- `COMMERCE_CONNECTION_KEYS_JSON`: existing credential-decryption keyring used for the environment's encrypted OpenRouter credential.
+- The single Moda WhatsApp sender configuration remains required. The legacy conversational Groq model selector is not used by the CommerceAgent; `GROQ_API_KEY` may remain required independently for Groq speech transcription.
+
+## Production model resolution
+
+Each production turn resolves one effective model for the trusted Shop and
+deployment environment in a repeatable-read transaction. Precedence is
+`SHOP -> PRICING_PLAN -> PLATFORM`: a valid explicit Shop selection wins; without
+one, an `ACTIVE` or `TRIALING` current subscription may inherit the model
+assigned to its current BillingPlan handle; otherwise the Platform selection is
+used. Pending subscription plan changes do not grant model benefits early.
+Broken explicit selections fail closed instead of silently falling back.
+
+The winning model identity and configuration are fixed for the complete
+CommerceAgent turn. Each model invocation reads and decrypts the current
+environment OpenRouter credential and constructs a fresh Shared
+`OpenRouterModelClient`, so credential rotation takes effect on the next
+invocation without changing the model mid-turn. A model-selection change is
+observed by the next turn. OpenRouter credentials and provider errors are not
+logged or exposed to the customer.
 
 Requests use the bounded `X-Moda-Commerce-Context` header. Resolve requests have no grant selector. Execute requests carry the persisted grant and release IDs. The original grant survives retries and worker restarts; current revocation may only reduce its usable tools. A new release cannot expand it.
 

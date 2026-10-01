@@ -68,12 +68,18 @@ Redis/BullMQ is used for asynchronous execution and PostgreSQL remains the durab
 
 ## Commerce Agent Configuration
 
-The Background service requires these runtime settings when the CommerceAgent
-is used:
+The production CommerceAgent resolves one effective model per Shop and turn,
+using `SHOP -> PRICING_PLAN -> PLATFORM` precedence. Price Plan inheritance
+applies only to the current `ACTIVE` or `TRIALING` subscription plan; pending
+plan changes do not grant model benefits early. The selected model and its
+configuration stay fixed for the turn, while the encrypted environment
+OpenRouter credential is resolved for every model invocation so credential
+rotation takes effect without a worker restart.
 
-- `GROQ_API_KEY` authenticates the Groq provider.
-- `GROQ_COMMERCE_MODEL` selects the Groq model used for the single CommerceAgent
-      tool loop. It must be non-blank; there is no source-code fallback model.
+Commerce model selection and OpenRouter credentials are managed through the
+Commerce model configuration. The legacy conversational Groq model selector is
+no longer a CommerceAgent setting. `GROQ_API_KEY` may still be required
+independently for Groq speech transcription.
 
 ## Responsibilities
 
@@ -208,7 +214,11 @@ deterministically   recovery data to CommerceAgent
 
 ## Commerce Agent
 
-The commerce agent uses Groq through the Vercel AI SDK.
+The production CommerceAgent uses the effective OpenRouter model selected for
+the Shop and current subscription plan. The model remains stable throughout a
+turn; the current environment credential is resolved for each model invocation.
+See [the CommerceAgent host notes](docs/commerce-host.md) for the resolution
+rules and credential boundary.
 
 When a customer sends a message, the agent context is rebuilt from the latest persisted application state.
 

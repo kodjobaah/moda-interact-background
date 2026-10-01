@@ -20,24 +20,19 @@ import {
   it,
   vi,
 } from "vitest";
-import {
-  generateText,
-  type LanguageModel,
-} from "ai";
+import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
 
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
 
 
-vi.mock("../../../src/providers/groq.provider.js", () => ({
-  groq: vi.fn(),
-}));
-
 const hostOperation = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/commerce/host.js", () => ({
-  modelAdapter: () => ({}),
   executeCommerceHost: async () => observeCommerceTool(hostOperation),
+}));
+vi.mock("../../../src/commerce/model-environment.js", () => ({
+  resolveCommerceEnvironment: () => "DEVELOPMENT",
 }));
 import { observeCommerceTool } from "../../../src/commerce/observe-tool.js";
 
@@ -48,6 +43,7 @@ const provider = new NodeTracerProvider({
 const contextManager = new AsyncHooksContextManager();
 
 const agentContext: RecoveryAgentContext = {
+  shopId: "sensitive-shop-id",
   shop: "sensitive-shop.myshopify.com",
   recovery: {
     id: "recovery-secret-id",
@@ -105,7 +101,7 @@ async function runObservedTurn() {
       () => observeConversationTurn(
         "whatsapp",
         () => runCommerceAgent(agentContext, {
-          model: {} as LanguageModel,
+          model: { invoke: vi.fn() } satisfies CommerceModelInvoker,
         }),
         turnObservation,
       ),

@@ -1383,6 +1383,7 @@ export class CheckoutRecoveryService {
 
       select: {
         id: true,
+        shopId: true,
         shop: {
           select: {
             domain: true,
@@ -1436,6 +1437,7 @@ export class CheckoutRecoveryService {
     const messages = bounded.currentMessages;
 
     return {
+      shopId: recovery.shopId,
       shop: recovery.shop.domain,
 
       recovery: {
@@ -1501,6 +1503,7 @@ export class CheckoutRecoveryService {
       where: { id: checkoutRecoveryId },
       select: {
         id: true,
+        shopId: true,
         shop: { select: { domain: true } },
         status: true,
         checkoutToken: true,
@@ -1522,6 +1525,7 @@ export class CheckoutRecoveryService {
     );
 
     return {
+      shopId: recovery.shopId,
       shop: recovery.shop.domain,
       recovery: {
         id: recovery.id,

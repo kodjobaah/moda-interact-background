@@ -24,6 +24,7 @@ export interface AgentConversationContext {
 }
 
 export interface RecoveryAgentContext {
+  shopId: string;
   shop: string;
 
   recovery: {

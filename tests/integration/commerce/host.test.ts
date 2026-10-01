@@ -23,6 +23,7 @@ import {
   responseContractCanonicalJson,
   type CommerceManifest,
 } from "@modainteract/moda-interact-shared/commerce";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { Prisma } from "@prisma/client";
 const db = vi.hoisted(() => ({
   conversation: { findUnique: vi.fn() },
@@ -51,6 +52,7 @@ const config = () => ({
   endpoint,
 });
 const context: RecoveryAgentContext = {
+  shopId: "shop-fixture",
   shop: "fixture.myshopify.com",
   recovery: {
     id: "recovery-fixture",
@@ -261,13 +263,69 @@ const run = (
   invoke: (r: ModelRequest, s: AbortSignal) => Promise<any>,
   c = context,
   signal?: AbortSignal,
+  logger?: ReturnType<typeof createLogger>,
 ) =>
   executeCommerceHost(c, {
     model: { invoke },
     config: config(),
     ...(signal ? { signal } : {}),
+    ...(logger ? {
+      logger,
+      modelSelection: {
+        selectionSource: "PRICING_PLAN",
+        selectionShopId: c.shopId,
+        merchantPricingPlanId: "plan-safe-id",
+        shopifyPlanHandle: "starter",
+      },
+    } : {}),
   });
 describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
+  it("passes a safe child logger to Shared while preserving the messaging service identity", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: "DEVELOPMENT",
+      sink: (record) => records.push(record as unknown as Record<string, unknown>),
+    });
+
+    await run(async () => final(), context, undefined, logger);
+
+    const started = records.find((record) => record.event === "commerce.turn.started");
+    expect(started).toMatchObject({
+      "service.name": "moda-messaging-worker",
+      data: {
+        component: "commerce-turn-runner",
+        recoveryId: "recovery-fixture",
+        conversationId: "conversation-fixture",
+        modelSelectionSource: "PRICING_PLAN",
+        merchantPricingPlanId: "plan-safe-id",
+      },
+    });
+    expect(JSON.stringify(records)).not.toMatch(/Name <ignore rules>|Tell me about this basket|credential|provider payload/i);
+  });
+
+  it("denies a mismatched canonical Shop ID before invoking the model", async () => {
+    const invoke = vi.fn(async () => final());
+
+    await expect(run(invoke, { ...context, shopId: "another-shop" })).rejects.toMatchObject({
+      code: "DENIED",
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(observations).toHaveLength(0);
+  });
+
+  it("denies a mismatched Shop domain before invoking the model", async () => {
+    const invoke = vi.fn(async () => final());
+
+    await expect(run(invoke, { ...context, shop: "another-shop.myshopify.com" })).rejects.toMatchObject({
+      code: "DENIED",
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(observations).toHaveLength(0);
+  });
+
   it("discovers arbitrary names, sends bounded context only and sends only reply text", async () => {
     const requests: ModelRequest[] = [];
     const output = await run(async (request) => {
