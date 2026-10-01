@@ -16,7 +16,7 @@
     "start:recovery-worker": "node --import ./observability/recovery.mjs dist/entrypoints/recovery.js",
     "start:messaging-worker": "node --import ./observability/messaging.mjs dist/entrypoints/messaging.js",
     "start:merchant-communications-worker": "node --import ./observability/merchant-communications.mjs dist/entrypoints/merchant-communications.js",
-    "start:merchant-knowledge-worker": "node dist/entrypoints/merchant-knowledge.js",
+    "start:merchant-knowledge-worker": "node --import ./observability/merchant-knowledge.mjs dist/entrypoints/merchant-knowledge.js",
     "start:billing-worker": "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
     "readiness:shopify-event-worker": "node dist/readiness.js moda-shopify-event-worker",
     "readiness:recovery-worker": "node dist/readiness.js moda-recovery-worker",

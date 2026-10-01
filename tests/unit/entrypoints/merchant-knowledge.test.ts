@@ -78,7 +78,7 @@ describe("Merchant Knowledge worker entrypoint", () => {
 
   it("exposes the dedicated start and readiness commands", () => {
     expect(packageJson.scripts["start:merchant-knowledge-worker"]).toBe(
-      "node dist/entrypoints/merchant-knowledge.js",
+      "node --import ./observability/merchant-knowledge.mjs dist/entrypoints/merchant-knowledge.js",
     );
     expect(packageJson.scripts["readiness:merchant-knowledge-worker"]).toBe(
       "node dist/readiness.js moda-merchant-knowledge-worker",

@@ -16,25 +16,35 @@ const workerProfiles = [
     script: "start:shopify-event-worker",
     profile: "shopify-event",
     entrypoint: "shopify-event",
+    resourceCleanup: "...closeWorkerResources",
   },
   {
     serviceName: "moda-recovery-worker",
     script: "start:recovery-worker",
     profile: "recovery",
     entrypoint: "recovery",
+    resourceCleanup: "...closeWorkerResources",
   },
   {
     serviceName: "moda-messaging-worker",
     script: "start:messaging-worker",
     profile: "messaging",
     entrypoint: "messaging",
+    resourceCleanup: "...closeWorkerResources",
+  },
+  {
+    serviceName: "moda-merchant-knowledge-worker",
+    script: "start:merchant-knowledge-worker",
+    profile: "merchant-knowledge",
+    entrypoint: "merchant-knowledge",
+    resourceCleanup: "...closeMerchantKnowledgeResources",
   },
 ] as const;
 
 describe("production worker observability startup", () => {
   it.each(workerProfiles)(
     "preloads shared observability before $serviceName imports",
-    ({ serviceName, script, profile, entrypoint }) => {
+    ({ serviceName, script, profile, entrypoint, resourceCleanup }) => {
       const preloadPath = `./observability/${profile}.mjs`;
       const preloadSource = readFileSync(preloadPath, "utf8");
       const entrypointSource = readFileSync(
@@ -55,7 +65,7 @@ describe("production worker observability startup", () => {
       );
       expect(preloadSource).not.toMatch(/bullmq|genai/i);
       expect(entrypointSource).toContain("closeWorkerObservability");
-      expect(entrypointSource).toContain("...closeWorkerResources");
+      expect(entrypointSource).toContain(resourceCleanup);
       expect(entrypointSource).toContain("closeWorkerObservability");
       expect(entrypointSource).toContain("await closeWorkerObservability()");
     },
