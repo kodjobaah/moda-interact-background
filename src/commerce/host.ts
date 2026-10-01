@@ -1,12 +1,6 @@
 import { isStableLanguageSignal } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
-import {
-  generateText,
-  jsonSchema,
-  tool,
-  type LanguageModel,
-  type JSONSchema7,
-} from "ai";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   canonicalJson,
   CommerceTurnIdentitySchema,
@@ -16,8 +10,7 @@ import {
 } from "@modainteract/moda-interact-shared/commerce";
 import {
   runCommerceTurn,
-  type ModelRequest,
-  type ModelStep,
+  type CommerceModelInvoker,
 } from "@modainteract/moda-interact-shared/commerce/runner";
 import prisma from "../lib/db.js";
 import type {
@@ -38,6 +31,7 @@ import {
   manifestMatchesGrant,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
+import { resolveCommerceEnvironment } from "./model-environment.js";
 import {
   extractTrustedEvidence,
   recordEvidenceRefreshOutcome,
@@ -45,40 +39,14 @@ import {
   type EvidenceExtractor,
 } from "./evidence.js";
 
-export function modelAdapter(model: LanguageModel) {
-  return {
-    async invoke(
-      request: ModelRequest,
-      signal: AbortSignal,
-    ): Promise<ModelStep> {
-      const result = await generateText({
-        model,
-        abortSignal: signal,
-        maxRetries: 0,
-        messages: request.messages as any,
-        tools: Object.fromEntries(
-          request.tools.map((t) => [
-            t.name,
-            tool({
-              description: t.description,
-              inputSchema: jsonSchema(t.inputSchema as JSONSchema7),
-            }),
-          ]),
-        ),
-      });
-      return {
-        calls: result.toolCalls.map((call) => ({
-          name: call.toolName,
-          arguments: call.input,
-        })),
-        outputTokens: result.usage.outputTokens ?? request.maxOutputTokens,
-      };
-    },
-  };
-}
 export type HostDependencies = {
-  model: {
-    invoke(request: ModelRequest, signal: AbortSignal): Promise<ModelStep>;
+  model: CommerceModelInvoker;
+  logger?: StructuredLogger;
+  modelSelection?: {
+    selectionSource: string;
+    selectionShopId: string | null;
+    merchantPricingPlanId: string | null;
+    shopifyPlanHandle: string | null;
   };
   config?: McpConfiguration;
   signal?: AbortSignal;
@@ -126,6 +94,8 @@ async function execute(
     ["standalone", "product-only"].includes(recovery.id)
   )
     throw new CommerceHostError("DENIED");
+  if (recovery.shopId !== context.shopId || recovery.shop.domain !== context.shop)
+    throw new CommerceHostError("DENIED");
   if (
     current.inboundVersion !== context.conversation.version ||
     current.processingInboundVersion !== current.inboundVersion ||
@@ -139,6 +109,10 @@ async function execute(
     checkoutRecoveryId: recovery.id,
     conversationId: current.id,
     inboundVersion: current.inboundVersion,
+  });
+  const logger = deps.logger ?? createLogger({
+    serviceName: "moda-messaging-worker",
+    environment: resolveCommerceEnvironment(),
   });
   const config = deps.config ?? mcpConfiguration();
   let grant = await readGrant(turn);
@@ -292,6 +266,14 @@ async function execute(
             return step;
           },
         },
+        logger: logger.child({
+          component: "commerce-agent-host",
+          recoveryId: recovery.id,
+          conversationId: current.id,
+          modelSelectionSource: deps.modelSelection?.selectionSource ?? null,
+          merchantPricingPlanId: deps.modelSelection?.merchantPricingPlanId ?? null,
+          shopifyPlanHandle: deps.modelSelection?.shopifyPlanHandle ?? null,
+        }),
         now: Date.now,
         digest,
         tools: descriptors.map((descriptor) => ({

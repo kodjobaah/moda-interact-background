@@ -1,23 +1,35 @@
-import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-
-
-
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
 import { runCommerceAgent } from "../../../src/agents/commerce.agent.js";
-
 import type { RecoveryAgentContext } from "../../../src/agents/types.js";
 
-const { groq } = vi.hoisted(() => ({
-  groq: vi.fn((modelId: string) => ({ modelId }) as any),
+const host = vi.hoisted(() => vi.fn(async () => ({
+  replyText: "Hello",
+  detectedLanguageTag: null,
+  detectedLanguageConfidence: null,
+})));
+const productionResolution = vi.hoisted(() => ({
+  readKeyring: vi.fn(() => { throw new Error("keyring should not be read"); }),
+  resolveCredential: vi.fn(() => { throw new Error("credential should not be read"); }),
+  createModel: vi.fn(() => { throw new Error("production model should not be resolved"); }),
 }));
 
-vi.mock("../../../src/providers/groq.provider.js", () => ({
-  groq,
+vi.mock("../../../src/commerce/host.js", () => ({ executeCommerceHost: host }));
+vi.mock("../../../src/commerce/credential-keyring.js", () => ({
+  readCommerceCredentialKeyring: productionResolution.readKeyring,
 }));
-
-const host = vi.hoisted(() => vi.fn(async () => ({replyText:"Hello",detectedLanguageTag:null,detectedLanguageConfidence:null})));
-vi.mock("../../../src/commerce/host.js", () => ({executeCommerceHost:host,modelAdapter:(model:unknown)=>model}));
+vi.mock("../../../src/commerce/openrouter-credential.js", () => ({
+  createOpenRouterCredentialResolver: productionResolution.resolveCredential,
+}));
+vi.mock("../../../src/commerce/production-model.js", () => ({
+  createProductionCommerceModelInvoker: productionResolution.createModel,
+}));
+vi.mock("../../../src/commerce/model-environment.js", () => ({
+  resolveCommerceEnvironment: vi.fn(() => "DEVELOPMENT"),
+}));
 
 const context: RecoveryAgentContext = {
+  shopId: "shop-test",
   shop: "test-shop.myshopify.com",
   recovery: {
     id: "recovery-1",
@@ -37,48 +49,35 @@ const context: RecoveryAgentContext = {
   },
 };
 
-const originalModel = process.env.GROQ_COMMERCE_MODEL;
-
 beforeEach(() => {
   host.mockClear();
-  groq.mockClear();
+  productionResolution.readKeyring.mockClear();
+  productionResolution.resolveCredential.mockClear();
+  productionResolution.createModel.mockClear();
 });
 
-afterEach(() => {
-  if (originalModel === undefined) {
-    delete process.env.GROQ_COMMERCE_MODEL;
-  } else {
-    process.env.GROQ_COMMERCE_MODEL = originalModel;
-  }
-});
+describe("CommerceAgent model injection", () => {
+  it("uses the injected CommerceModelInvoker without resolving production models or credentials", async () => {
+    const model = { invoke: vi.fn() } satisfies CommerceModelInvoker;
 
-describe("CommerceAgent model configuration", () => {
-  it("passes the configured model to the Groq provider", async () => {
-    process.env.GROQ_COMMERCE_MODEL = "llama-3.3-70b-versatile";
-
-    await expect(runCommerceAgent(context)).resolves.toMatchObject({
+    await expect(runCommerceAgent(context, { model })).resolves.toMatchObject({
       replyText: "Hello",
     });
 
-    expect(groq).toHaveBeenCalledWith("llama-3.3-70b-versatile");
-    expect(host).toHaveBeenCalledOnce();
+    expect(host).toHaveBeenCalledWith(context, expect.objectContaining({ model }));
+    expect(productionResolution.readKeyring).not.toHaveBeenCalled();
+    expect(productionResolution.resolveCredential).not.toHaveBeenCalled();
+    expect(productionResolution.createModel).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, "", "   "])(
-    "fails before provider use when GROQ_COMMERCE_MODEL is %j",
-    async (model) => {
-      if (model === undefined) {
-        delete process.env.GROQ_COMMERCE_MODEL;
-      } else {
-        process.env.GROQ_COMMERCE_MODEL = model;
-      }
+  it("does not use the obsolete Commerce Groq setting", async () => {
+    const model = { invoke: vi.fn() } satisfies CommerceModelInvoker;
+    vi.stubEnv(["GROQ", "COMMERCE_MODEL"].join("_"), "obsolete-model-id");
 
-      await expect(runCommerceAgent(context)).rejects.toMatchObject({
-        name: "CommerceAgentConfigurationError",
-        message: "GROQ_COMMERCE_MODEL environment variable is not set",
-      });
-      expect(groq).not.toHaveBeenCalled();
-      expect(host).not.toHaveBeenCalled();
-    },
-  );
+    await expect(runCommerceAgent(context, { model })).resolves.toMatchObject({
+      replyText: "Hello",
+    });
+    expect(host).toHaveBeenCalledOnce();
+    vi.unstubAllEnvs();
+  });
 });

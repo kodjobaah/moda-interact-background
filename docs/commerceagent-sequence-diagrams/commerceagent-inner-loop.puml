@@ -1,0 +1,39 @@
+@startuml
+title CommerceAgent production model inner loop
+
+actor "WhatsApp worker" as Worker
+participant "CommerceAgent" as Agent
+database "PostgreSQL" as DB
+participant "Shared OpenRouterModelClient" as Client
+cloud "OpenRouter" as OpenRouter
+
+Worker -> Agent: runCommerceAgent(context with trusted Shop.id)
+Agent -> DB: resolve model in REPEATABLE READ
+note right of DB
+SHOP explicit selection
+  then current ACTIVE/TRIALING PRICING_PLAN
+  then PLATFORM selection
+Pending plans are ignored.
+end note
+DB --> Agent: winning model and provenance
+note right of Agent
+Model identity/configuration is fixed
+for this production turn.
+end note
+
+loop each model invocation in the turn
+  Agent -> DB: read encrypted credential for exact environment
+  DB --> Agent: current encrypted credential and keyId
+  Agent -> Agent: decrypt with Shared AAD and existing keyring
+  Agent -> Client: construct fresh client(model config, current credential)
+  Client -> OpenRouter: invoke model request
+  OpenRouter --> Client: model step
+  Client --> Agent: model step
+end
+
+note over Agent,DB
+Credential rotation applies to the next invocation.
+A model-selection change applies to the next production turn.
+GROQ_API_KEY remains independent speech-transcription configuration.
+end note
+@enduml

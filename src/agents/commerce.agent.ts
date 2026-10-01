@@ -1,18 +1,23 @@
-import type { LanguageModel } from "ai";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
 import { observeAgentInvocation } from "@modainteract/moda-interact-shared/observability/genai";
-import { groq } from "../providers/groq.provider.js";
-import { executeCommerceHost, modelAdapter } from "../commerce/host.js";
+import prisma from "../lib/db.js";
+import { executeCommerceHost } from "../commerce/host.js";
+import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
+import {
+  createOpenRouterCredentialResolver,
+  type OpenRouterCredentialResolver,
+} from "../commerce/openrouter-credential.js";
+import { createProductionCommerceModelInvoker } from "../commerce/production-model.js";
 import type { RecoveryAgentContext } from "./types.js";
 export type CommerceAgentDependencies = {
-  model?: LanguageModel;
+  model?: CommerceModelInvoker;
   signal?: AbortSignal;
+  logger?: StructuredLogger;
+  db?: typeof prisma;
+  credentialResolver?: OpenRouterCredentialResolver;
 };
-export class CommerceAgentConfigurationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "CommerceAgentConfigurationError";
-  }
-}
 export async function runCommerceAgent(
   context: RecoveryAgentContext,
   dependencies: CommerceAgentDependencies = {},
@@ -20,13 +25,34 @@ export async function runCommerceAgent(
   return observeAgentInvocation(
     { agentName: "commerce-agent" },
     async () => {
-      const modelId = process.env.GROQ_COMMERCE_MODEL?.trim();
-      if (!dependencies.model && !modelId)
-        throw new CommerceAgentConfigurationError(
-          "GROQ_COMMERCE_MODEL environment variable is not set",
-        );
+      const environment = resolveCommerceEnvironment();
+      const db = dependencies.db ?? prisma;
+      let model = dependencies.model;
+      let modelSelection;
+      if (!model) {
+        const credentialResolver =
+          dependencies.credentialResolver ??
+          createOpenRouterCredentialResolver({
+            db,
+            keyring: readCommerceCredentialKeyring(),
+          });
+        const productionModel = await createProductionCommerceModelInvoker({
+          db,
+          environment,
+          shopId: context.shopId,
+          credentialResolver,
+        });
+        model = productionModel;
+        modelSelection = productionModel.selection;
+      }
+      const logger = dependencies.logger ?? createLogger({
+        serviceName: "moda-messaging-worker",
+        environment,
+      });
       return executeCommerceHost(context, {
-        model: modelAdapter(dependencies.model ?? groq(modelId!)),
+        model,
+        logger,
+        ...(modelSelection ? { modelSelection } : {}),
         ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       });
     },
