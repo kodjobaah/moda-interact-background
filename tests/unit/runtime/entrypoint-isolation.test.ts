@@ -44,6 +44,22 @@ const entrypoints = [
     ],
   },
   {
+    file: "src/entrypoints/merchant-knowledge.ts",
+    script: "start:merchant-knowledge-worker",
+    command:
+      "node --import ./observability/merchant-knowledge.mjs dist/entrypoints/merchant-knowledge.js",
+    readinessScript: "readiness:merchant-knowledge-worker",
+    readinessCommand: "node dist/readiness.js moda-merchant-knowledge-worker",
+    serviceName: "moda-merchant-knowledge-worker",
+    ownedWorkers: ["merchant-knowledge.worker.js"],
+    excludedWorkers: [
+      "checkout.worker.js",
+      "orders.worker.js",
+      "pending-recovery-candidate.worker.js",
+      "whatsapp.worker.js",
+    ],
+  },
+  {
     file: "src/entrypoints/billing.ts",
     script: "start:billing-worker",
     command: "node --import ./observability/billing.mjs dist/entrypoints/billing.js",
