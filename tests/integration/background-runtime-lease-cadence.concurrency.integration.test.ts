@@ -90,4 +90,47 @@ describeWithDatabase("background runtime lease cadence PostgreSQL concurrency", 
       await database.$disconnect();
     }
   }, 30_000);
+
+  it.each([
+    ["MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION", 61],
+    ["MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP", 3601],
+  ] as const)("gates %s reacquisition on its fixed cadence and fences stale owners", async (name, elapsedSeconds) => {
+    const database = new PrismaClient();
+    const first = new BackgroundRuntimeLeaseService(database, "integration-owner-1");
+    const second = new BackgroundRuntimeLeaseService(database, "integration-owner-2");
+
+    try {
+      await database.backgroundRuntimeLease.deleteMany({ where: { name } });
+
+      const initial = await first.tryAcquire(name);
+      expect(initial?.generation).toBe(1);
+      expect(await first.release(initial!)).toBe(true);
+
+      const retained = await database.backgroundRuntimeLease.findUnique({ where: { name } });
+      expect(retained?.lastFinishedAt).not.toBeNull();
+
+      const insideCadence = await Promise.all([first.tryAcquire(name), second.tryAcquire(name)]);
+      expect(insideCadence.every((handle) => handle === null)).toBe(true);
+
+      await database.$executeRaw(Prisma.sql`
+        UPDATE "public"."BackgroundRuntimeLease"
+        SET "lastFinishedAt" = NOW() - (${elapsedSeconds} * INTERVAL '1 second')
+        WHERE "name" = ${name}::"BackgroundRuntimeLeaseName"
+      `);
+      const competing = await Promise.all([first.tryAcquire(name), second.tryAcquire(name)]);
+      const acquired = competing.filter((handle): handle is NonNullable<typeof handle> => handle !== null);
+      expect(acquired).toHaveLength(1);
+      expect(acquired[0]?.generation).toBe(2);
+
+      const staleOwner = acquired[0]?.ownerToken === "integration-owner-1" ? second : first;
+      expect(await staleOwner.heartbeat(initial!)).toBe(false);
+      expect(await staleOwner.release(initial!)).toBe(false);
+
+      const winningService = acquired[0]?.ownerToken === "integration-owner-1" ? first : second;
+      expect(await winningService.release(acquired[0]!)).toBe(true);
+    } finally {
+      await database.backgroundRuntimeLease.deleteMany({ where: { name } });
+      await database.$disconnect();
+    }
+  }, 30_000);
 });
