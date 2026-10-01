@@ -73,6 +73,7 @@ describe("BackgroundRuntimeLeaseService", () => {
       `WHEN 'QUEUE_CONCURRENCY_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 0`,
       `WHEN 'MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 60`,
       `WHEN 'MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP'::"BackgroundRuntimeLeaseName" THEN 3600`,
+      `WHEN 'MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 300`,
     ]) {
       expect(sql).toContain(cadence);
     }

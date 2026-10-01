@@ -40,7 +40,7 @@ describe("Merchant Knowledge worker entrypoint", () => {
     expect(source).toContain('serviceName: "moda-merchant-knowledge-worker"');
     expect(source).toContain("createMerchantKnowledgeWorker(processingService)");
     expect(source.match(/createMerchantKnowledgeWorker\(/g)).toHaveLength(1);
-    expect(source.match(/startDynamicLeasedScheduler\(\{/g)).toHaveLength(2);
+    expect(source.match(/startDynamicLeasedScheduler\(\{/g)).toHaveLength(3);
 
     expect(source).toContain(
       'leaseName: "MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION"',
@@ -51,6 +51,10 @@ describe("Merchant Knowledge worker entrypoint", () => {
       "merchantKnowledgeReconciliationService.reconcilePendingOnce",
     );
     expect(source).toContain("pageSize: 100");
+    expect(source).toContain('leaseName: "MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION"');
+    expect(source).toContain("intervalMs: 300_000");
+    expect(source).toContain("merchantKnowledgeEntitlementReconciliationService.reconcileOnce");
+    expect(source).toContain("shopPageSize: 100");
 
     expect(source).toContain(
       'leaseName: "MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP"',
@@ -63,6 +67,7 @@ describe("Merchant Knowledge worker entrypoint", () => {
   it("closes worker, scheduler, queue, config, observability and Redis resources", () => {
     expect(source).toContain("...closeMerchantKnowledgeResources");
     expect(source).toContain("stopPendingReconciliation");
+    expect(source).toContain("stopEntitlementReconciliation");
     expect(source).toContain("stopUploadCleanup");
     expect(source).toContain("closeWorkerObservability");
     expect(source).toContain("closeQueuePerformanceTelemetry");

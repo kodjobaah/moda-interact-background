@@ -16,6 +16,7 @@ import { loadMerchantKnowledgeR2Config } from "../services/merchant-knowledge-r2
 import { MerchantKnowledgeEmbeddingService, loadMerchantKnowledgeEmbeddingConfig } from "../services/merchant-knowledge-embedding.js";
 import { MerchantKnowledgeProcessingService } from "../services/merchant-knowledge-processing.service.js";
 import { merchantKnowledgeReconciliationService } from "../services/merchant-knowledge-reconciliation.service.js";
+import { merchantKnowledgeEntitlementReconciliationService } from "../services/merchant-knowledge-entitlement-reconciliation.service.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-knowledge-worker",
@@ -58,6 +59,19 @@ void startReadyWorkerProcess({
       },
       onError: () => console.error("Merchant Knowledge reconciliation failed"),
     });
+    const stopEntitlementReconciliation = await startDynamicLeasedScheduler({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+      leaseName: "MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION",
+      intervalMs: 300_000,
+      runImmediately: true,
+      run: async () => {
+        await merchantKnowledgeEntitlementReconciliationService.reconcileOnce({
+          shopPageSize: 100,
+        });
+      },
+      onError: () => console.error("Merchant Knowledge entitlement reconciliation failed"),
+    });
     const stopUploadCleanup = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -79,6 +93,7 @@ void startReadyWorkerProcess({
       closeResources: [
         ...closeMerchantKnowledgeResources,
         stopPendingReconciliation,
+        stopEntitlementReconciliation,
         stopUploadCleanup,
         () => backgroundRuntimeConfigService.close(),
         closeWorkerObservability,
