@@ -9,7 +9,7 @@ import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler
 import { createMerchantKnowledgeWorker } from "../workers/merchant-knowledge.worker.js";
 import { merchantKnowledgeQueue, closeMerchantKnowledgeResources } from "./merchant-knowledge-resources.js";
 import { MerchantKnowledgeUploadedAssetAcquirerService } from "../services/merchant-knowledge-uploaded-asset-acquirer.js";
-import { MerchantKnowledgeWebPageAcquirerService } from "../services/merchant-knowledge-web-page-acquirer.js";
+import { MerchantKnowledgeWebPageAcquirer } from "../services/merchant-knowledge-web-page-acquirer.js";
 import { MerchantKnowledgeUploadCleanupService } from "../services/merchant-knowledge-upload-cleanup.service.js";
 import { createMerchantKnowledgeR2Client } from "../services/merchant-knowledge-r2-client.js";
 import { loadMerchantKnowledgeR2Config } from "../services/merchant-knowledge-r2-config.js";
@@ -33,7 +33,7 @@ void startReadyWorkerProcess({
       maxXlsxUncompressedBytes: r2Config.maxXlsxUncompressedBytes,
     });
     const processingService = new MerchantKnowledgeProcessingService({
-      webPageAcquirer: new MerchantKnowledgeWebPageAcquirerService(),
+      webPageAcquirer: new MerchantKnowledgeWebPageAcquirer(),
       uploadedAssetAcquirer,
       embedding,
     });
