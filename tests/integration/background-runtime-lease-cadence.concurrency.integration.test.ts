@@ -94,6 +94,7 @@ describeWithDatabase("background runtime lease cadence PostgreSQL concurrency", 
   it.each([
     ["MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION", 61],
     ["MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP", 3601],
+    ["MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION", 301],
   ] as const)("gates %s reacquisition on its fixed cadence and fences stale owners", async (name, elapsedSeconds) => {
     const database = new PrismaClient();
     const first = new BackgroundRuntimeLeaseService(database, "integration-owner-1");
