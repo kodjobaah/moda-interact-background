@@ -25,6 +25,16 @@ import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-sub
 import { backgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { shopifyDiscountCatalogueService } from "./shopify-discount-catalogue.service.js";
 import { ensureCurrentBillingPeriodProjection } from "./current-billing-period-projection.service.js";
+import {
+  classifySubscriptionReconciliation,
+  RETRYABLE_PLAN_CHANGE_SYNC_ERRORS,
+  sameDate,
+  type EstablishedPlanChangeExpected,
+  type FreeCycleExpected,
+  type InitialActivationExpected,
+  type ReinstallExpected,
+  type RolloverExpected,
+} from "./billing-subscription-reconciliation/classification.js";
 
 const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
@@ -34,28 +44,9 @@ const RETRY_TIERS = [
   { ageMs: 60 * 60 * 1000, delayMs: 5 * 60 * 1000 },
   { ageMs: RETRY_WINDOW_MS, delayMs: 30 * 60 * 1000 },
 ] as const;
-const RETRYABLE_PLAN_CHANGE_SYNC_ERRORS = [
-  "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
-  "MISSING_BILLING_CYCLE",
-  "MISSING_USAGE_METER",
-  "INVALID_INCLUDED_ALLOWANCE",
-] as const;
-
-function sameDate(left: Date | null, right: Date | null): boolean {
-  return left === null && right === null
-    || left !== null && right !== null && left.getTime() === right.getTime();
-}
-
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
 type RuntimeConfigReader = { current: () => BackgroundRuntimeConfigSnapshot };
-type InitialActivationExpected = {
-  subscriptionId: string;
-  pendingPlanId: string;
-  pendingShopifyPlanHandle: string;
-  pendingEffectiveAt: Date;
-  nextReconcileAt: Date | null;
-};
 export type InitialActivationPlan = {
   id: string;
   active: boolean;
@@ -65,37 +56,6 @@ export type InitialActivationPlan = {
   shopifyUsageEventHandle: string | null;
   includedRecoveryConversationAllowance: number | null;
 };
-type FreeCycleExpected = {
-  subscriptionId: string;
-  currentPlanId: string;
-  nextReconcileAt: Date;
-};
-type RolloverExpected = {
-  subscriptionId: string;
-  currentPlanId: string;
-  billingPeriodId: string;
-  currentPeriodStart: Date;
-  currentPeriodEnd: Date;
-  nextReconcileAt: Date;
-};
-type EstablishedPlanChangeExpected = {
-  subscriptionId: string;
-  currentPlanId: string;
-  pendingPlanId: string;
-  pendingShopifyPlanHandle: string;
-  pendingEffectiveAt: Date;
-  currentPeriodStart: Date | null;
-  currentPeriodEnd: Date | null;
-  billingPeriodId: string | null;
-  nextReconcileAt: Date;
-};
-
-type ReinstallExpected = {
-  subscriptionId: string;
-  nextReconcileAt: Date;
-  reinstallPendingAt: Date;
-};
-
 export function nextSubscriptionReconcileAt(pendingEffectiveAt: Date, now = new Date()): Date | null {
   const ageMs = Math.max(0, now.getTime() - pendingEffectiveAt.getTime());
   const tier = RETRY_TIERS.find(({ ageMs: tierAge }) => ageMs < tierAge);
@@ -301,108 +261,33 @@ export class BillingSubscriptionReconciliationService {
         },
       },
     });
-    const row = rowResult;
-    if (!row || !row.subscription || !row.shopifyShopId) {
-      logSkip("missing-shop-subscription-or-shopify-id");
+    const classification = classifySubscriptionReconciliation(rowResult, job);
+    if (classification.type === "skip") {
+      logSkip(classification.reason, classification.fields);
       return;
     }
-    if (row.status === "UNINSTALLED") {
-      if (row.reinstallPendingAt == null || row.subscription.nextReconcileAt === null) {
-        logSkip("uninstalled-reconciliation-not-due");
-        return;
-      }
-      if (row.subscription.id !== job.subscriptionId) {
-        logSkip("subscription-id-mismatch", { currentSubscriptionId: row.subscription.id });
-        return;
-      }
-      if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
-        logSkip("stale-next-reconcile-at", { currentNextReconcileAt: row.subscription.nextReconcileAt.toISOString() });
-        return;
-      }
+    const row = classification.row;
+    if (classification.kind === "reinstall") {
       this.logger.info("billing.subscription_reconciliation.job_accepted", {
         shopId: row.id,
-        subscriptionId: row.subscription.id,
+        subscriptionId: classification.expected.subscriptionId,
         kind: "reinstall",
       });
-      await this.reconcileReinstall(row.id, row.subscription.id, row.reinstallPendingAt, row.subscription.nextReconcileAt, row.shopifyShopId);
+      await this.reconcileReinstall(
+        row.id,
+        classification.expected.subscriptionId,
+        classification.expected.reinstallPendingAt,
+        classification.expected.nextReconcileAt,
+        row.shopifyShopId,
+      );
       return;
     }
-    if (row.status !== "ACTIVE") {
-      logSkip("shop-not-active", { shopStatus: row.status });
-      return;
-    }
-    const isInitialActivation = row.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT
-      && row.subscription.planId === null
-      && row.subscription.pendingPlanId !== null
-      && row.subscription.pendingShopifyPlanHandle !== null
-      && row.subscription.nextReconcileAt !== null;
-    const isCycleDiscovery = row.settings?.onboardingCompleted === true
-      && (row.subscription.status === SubscriptionProjectionStatus.ACTIVE || row.subscription.status === SubscriptionProjectionStatus.TRIALING)
-      && row.subscription.planId !== null
-      && row.subscription.billingPeriodId === null
-      && row.subscription.pendingPlanId === null
-      && row.subscription.pendingShopifyPlanHandle === null
-      && row.subscription.pendingEffectiveAt === null
-      && row.subscription.nextReconcileAt !== null;
-    const isRollover = row.settings?.onboardingCompleted === true
-      && (row.subscription.status === SubscriptionProjectionStatus.ACTIVE || row.subscription.status === SubscriptionProjectionStatus.TRIALING)
-      && row.subscription.planId !== null
-      && row.subscription.billingPeriodId !== null
-      && row.subscription.pendingPlanId === null
-      && row.subscription.pendingShopifyPlanHandle === null
-      && row.subscription.pendingEffectiveAt === null
-      && row.subscription.nextReconcileAt !== null;
-    const isFrozenReconciliation = row.settings?.onboardingCompleted === true
-      && row.subscription.status === SubscriptionProjectionStatus.FROZEN
-      && row.subscription.planId !== null
-      && row.subscription.nextReconcileAt !== null;
-    const isEstablishedPlanChange = row.settings?.onboardingCompleted === true
-      && (
-        row.subscription.status === SubscriptionProjectionStatus.ACTIVE
-        || row.subscription.status === SubscriptionProjectionStatus.TRIALING
-        || (row.subscription.status === SubscriptionProjectionStatus.SYNC_ERROR
-          && RETRYABLE_PLAN_CHANGE_SYNC_ERRORS.includes(row.subscription.lastSyncErrorCode as typeof RETRYABLE_PLAN_CHANGE_SYNC_ERRORS[number]))
-      )
-      && row.subscription.planId !== null
-      && row.subscription.pendingPlanId !== null
-      && row.subscription.pendingShopifyPlanHandle !== null
-      && row.subscription.pendingEffectiveAt !== null
-      && row.subscription.nextReconcileAt !== null;
-    if (row.subscription.id !== job.subscriptionId) {
-      logSkip("subscription-id-mismatch", { currentSubscriptionId: row.subscription.id });
-      return;
-    }
-    if (!row.subscription.nextReconcileAt) {
-      logSkip("next-reconcile-at-cleared");
-      return;
-    }
-    if (row.subscription.nextReconcileAt.toISOString() !== job.expectedNextReconcileAt) {
-      logSkip("stale-next-reconcile-at", { currentNextReconcileAt: row.subscription.nextReconcileAt.toISOString() });
-      return;
-    }
-    if (!isInitialActivation && !isCycleDiscovery && !isRollover && !isEstablishedPlanChange && !isFrozenReconciliation) {
-      logSkip("subscription-state-ineligible", {
-        shopStatus: row.status,
-        subscriptionStatus: row.subscription.status,
-        onboardingCompleted: row.settings?.onboardingCompleted ?? null,
-        hasPlan: row.subscription.planId !== null,
-        hasBillingPeriod: row.subscription.billingPeriodId !== null,
-        hasPendingPlan: row.subscription.pendingPlanId !== null,
-        hasPendingPlanHandle: row.subscription.pendingShopifyPlanHandle !== null,
-        hasPendingEffectiveAt: row.subscription.pendingEffectiveAt !== null,
-      });
-      return;
-    }
-
-    const reconciliationKind = isInitialActivation
-      ? "initial-activation"
-      : isCycleDiscovery
-        ? "cycle-discovery"
-        : isRollover
-          ? "rollover"
-          : isEstablishedPlanChange
-            ? "established-plan-change"
-            : "frozen-reconciliation";
+    const reconciliationKind = classification.kind;
+    const isInitialActivation = reconciliationKind === "initial-activation";
+    const isCycleDiscovery = reconciliationKind === "cycle-discovery";
+    const isRollover = reconciliationKind === "rollover";
+    const isFrozenReconciliation = reconciliationKind === "frozen-reconciliation";
+    const isEstablishedPlanChange = reconciliationKind === "established-plan-change";
     this.logger.info("billing.subscription_reconciliation.job_accepted", {
       shopId: row.id,
       subscriptionId: row.subscription.id,
@@ -411,34 +296,7 @@ export class BillingSubscriptionReconciliationService {
       nextReconcileAt: row.subscription.nextReconcileAt.toISOString(),
     });
 
-    const expected: InitialActivationExpected | FreeCycleExpected | RolloverExpected | EstablishedPlanChangeExpected = isCycleDiscovery || isRollover || isFrozenReconciliation
-      ? {
-          subscriptionId: row.subscription.id,
-          currentPlanId: row.subscription.planId!,
-          billingPeriodId: row.subscription.billingPeriodId!,
-          currentPeriodStart: row.subscription.currentPeriodStart!,
-          currentPeriodEnd: row.subscription.currentPeriodEnd!,
-          nextReconcileAt: row.subscription.nextReconcileAt,
-        }
-      : isEstablishedPlanChange
-        ? {
-            subscriptionId: row.subscription.id,
-            currentPlanId: row.subscription.planId!,
-            pendingPlanId: row.subscription.pendingPlanId!,
-            pendingShopifyPlanHandle: row.subscription.pendingShopifyPlanHandle!,
-            pendingEffectiveAt: row.subscription.pendingEffectiveAt!,
-            currentPeriodStart: row.subscription.currentPeriodStart,
-            currentPeriodEnd: row.subscription.currentPeriodEnd,
-            billingPeriodId: row.subscription.billingPeriodId,
-            nextReconcileAt: row.subscription.nextReconcileAt,
-          }
-        : {
-          subscriptionId: row.subscription.id,
-          pendingPlanId: row.subscription.pendingPlanId!,
-          pendingShopifyPlanHandle: row.subscription.pendingShopifyPlanHandle!,
-          pendingEffectiveAt: row.subscription.pendingEffectiveAt!,
-          nextReconcileAt: row.subscription.nextReconcileAt,
-        };
+    const expected = classification.expected;
     const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange || isFrozenReconciliation) && row.subscription.planId
       ? await this.database.billingPlan.findUnique({
           where: { id: row.subscription.planId },
