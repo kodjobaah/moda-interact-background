@@ -3,14 +3,12 @@ import { loadCommerceHistory } from "../commerce/history.js";
 
 import prisma from "../lib/db.js";
 import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
-import { Prisma } from "@prisma/client";
 import type {
   CheckoutCreatedContractInput,
   CartActivityContractInput,
   CheckoutUpdatedContractInput,
   OrderCompletedContractInput,
 } from "../events/shopify-contract-adapter.js";
-import { customerService } from "./customer.service.js";
 import { conversationService } from "./conversation.service.js";
 import { conversationMessageService } from "./conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "./outbound-whatsapp-admission.service.js";
@@ -22,12 +20,14 @@ import {
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
 import { recoveryPolicyService } from "./recovery-policy.service.js";
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
-import { recoveryOutreachFollowUpService } from "./recovery-outreach-follow-up.service.js";
 import {
   shopExecutionEligibilityService,
   type ShopExecutionDenialReason,
 } from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
+import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
+import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiation.service.js";
+import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recovery-outreach-finalization.service.js";
 import {
   toLookupInput,
   type AbandonedCheckoutLookupInput,
@@ -75,9 +75,23 @@ export type CheckoutRefreshResult =
   | { kind: "ignored"; reason: string };
 
 export class CheckoutRecoveryService {
+  private readonly initiationService: RecoveryInitiationService;
+  private readonly finalizationService: RecoveryOutreachFinalizationService;
+
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
-  ) {}
+  ) {
+    this.finalizationService = new RecoveryOutreachFinalizationService(this.billingService);
+    this.initiationService = new RecoveryInitiationService(
+      this.billingService,
+      this.finalizationService,
+      {
+        upsertRecovery: (event, generation) => this.upsertRecovery(event, generation),
+        resolveRecipient: (event) => this.resolveRecipient(event),
+        markRecoveryCapacityBlocked: (recoveryId) => this.markRecoveryCapacityBlocked(recoveryId),
+      },
+    );
+  }
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
     const scheduled =
@@ -171,7 +185,7 @@ export class CheckoutRecoveryService {
           } as const;
         }
 
-        const existing = await this.findLatestRecovery(
+        const existing = await findLatestRecovery(
           candidate.shopId,
           candidate.checkoutToken,
         );
@@ -259,16 +273,6 @@ export class CheckoutRecoveryService {
         } as const;
       },
     );
-  }
-
-  private async findLatestRecovery(
-    shopId: string,
-    checkoutToken: string,
-  ) {
-    return prisma.checkoutRecovery.findFirst({
-      where: { shopId, checkoutToken },
-      orderBy: [{ generation: "desc" }, { id: "desc" }],
-    });
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
@@ -456,7 +460,7 @@ export class CheckoutRecoveryService {
       };
     }
 
-    const recovery = await this.findLatestRecovery(shop.id, event.checkoutToken);
+    const recovery = await findLatestRecovery(shop.id, event.checkoutToken);
 
     // No recovery: the update is irrelevant before recovery exists.
     if (!recovery) {
@@ -597,79 +601,19 @@ export class CheckoutRecoveryService {
   }
 
   async upsertRecovery(event: RecoveryCheckoutSeed, generation = 1) {
-    const shop = await prisma.shop.findUniqueOrThrow({
-      where: { domain: event.shop },
-      select: { id: true },
-    });
-    try {
-      return await prisma.checkoutRecovery.create({
-        data: {
-        shopId: shop.id,
-
-        checkoutToken: event.checkoutToken,
-        cartToken: event.cartToken,
-
-        status: "DETECTED",
-        generation,
-
-        currency: event.currency,
-
-        totalPrice: event.totalPrice !== null ? event.totalPrice : null,
-
-        checkoutUrl: event.checkoutUrl,
-
-        lineItems: event.lineItems,
-
-        detectedAt: new Date(event.detectedAt),
-        lastExternalActivityAt: new Date(
-          event.lastExternalActivityAt ?? event.detectedAt,
-        ),
-
-        completedAt:
-          event.completedAt !== null ? new Date(event.completedAt) : null,
-        },
-      });
-    } catch (error) {
-      if (!isUniqueConflict(error)) throw error;
-      return this.findLatestRecovery(shop.id, event.checkoutToken);
-    }
+    return this.initiationService.upsertRecovery(event, generation);
   }
 
   async attachCustomer(recoveryId: string, customerId: string) {
-    return prisma.checkoutRecovery.updateMany({
-      where: { id: recoveryId, status: "DETECTED" },
-      data: {
-        customerId,
-      },
-    });
+    return this.initiationService.attachCustomer(recoveryId, customerId);
   }
 
   resolveRecipient(event: RecoveryCheckoutSeed): string {
-    if (event.customer.phone) {
-      return event.customer.phone;
-    }
-
-    const testRecipient = process.env.TEST_WHATSAPP_RECIPIENT;
-
-    if (!testRecipient) {
-      throw new Error(
-        "No customer phone and TEST_WHATSAPP_RECIPIENT is not configured",
-      );
-    }
-
-    return testRecipient;
+    return this.initiationService.resolveRecipient(event);
   }
 
   async markRecoveryMessageSent(recoveryId: string) {
-    return prisma.checkoutRecovery.updateMany({
-      where: { id: recoveryId, status: "DETECTED" },
-      data: {
-        status: "MESSAGE_SENT",
-        messageSentAt: new Date(),
-        admissionBlockedAt: null,
-        admissionBlockReason: null,
-      },
-    });
+    return this.initiationService.markRecoveryMessageSent(recoveryId);
   }
 
   /*
@@ -824,243 +768,7 @@ export class CheckoutRecoveryService {
   }
 
   async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1) {
-    // 1
-    let recovery = await this.upsertRecovery(event, generation);
-    if (!recovery) {
-      throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
-    }
-
-    // 2
-    const customer = await customerService.resolveCustomer(event);
-
-    if (customer && recovery.customerId !== customer.id) {
-      recovery = await prisma.checkoutRecovery.update({
-        where: {
-          id: recovery.id,
-        },
-
-        data: {
-          customerId: customer.id,
-        },
-      });
-    }
-
-    // Don't send again if this recovery
-    // already progressed beyond DETECTED.
-    if (recovery.status !== "DETECTED") {
-      if (recovery.status === "MESSAGE_SENT" || recovery.status === "ENGAGED") {
-        await this.ensureScheduledInitialFollowUp(recovery.id);
-      }
-      return recovery;
-    }
-
-    const policy = await recoveryPolicyService.resolve(recovery.shopId);
-    const attempt = await recoveryOutreachAttemptService.getOrCreate({
-      recoveryId: recovery.id,
-      sequence: 1,
-      policy,
-    });
-
-    // 3
-    const recipient = this.resolveRecipient(event);
-
-    // 4
-    const selection = await whatsappTemplateSelectorService.select({
-      shopId: recovery.shopId,
-      providerAccountId:
-        outboundWhatsAppAdmissionService.getProviderAccountId(),
-      purpose: "checkout-recovery",
-      languageTag: null, // Initial outreach selects the approved shop-language variant.
-      countryCode: event.internationalContext?.countryCode ?? null,
-      resolveMarketCapability: async () => "unknown" as const,
-    });
-
-    if (
-      selection.outcome !== "selected" &&
-      selection.outcome !== "provider-check-required"
-    ) {
-      return recovery;
-    }
-
-    let billing = await this.billingService.admit({
-      shopId: recovery.shopId,
-      recoveryId: recovery.id,
-      outreachAttemptId: attempt.id,
-    });
-    if (billing.kind === "blocked") {
-      if (billing.reason === "capacity-exhausted") {
-        await this.markRecoveryCapacityBlocked(recovery.id);
-        await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED");
-      }
-      return recovery;
-    }
-
-    const content = conversationMessageService.buildRecoveryTemplateDescriptor({
-      purpose: "checkout-recovery",
-      templateName: selection.providerTemplateName,
-      canonicalLanguageTag: selection.canonicalLanguageTag,
-      providerLanguageCode: selection.providerLanguageCode,
-    });
-
-    let conversation;
-    try {
-      conversation = await conversationService.getOrCreateRecoveryConversation(
-        recovery.id,
-        event.internationalContext,
-      );
-    } catch (error) {
-      await this.billingService.releaseBeforeProvider(billing.admission);
-      throw error;
-    }
-
-    let result;
-    try {
-      const revalidated = await this.billingService.revalidateBeforeProvider({
-        admission: billing.admission,
-        recoveryId: recovery.id,
-        outreachAttemptId: attempt.id,
-      });
-      if (revalidated.kind === "blocked") {
-        await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", {
-          failureCode: revalidated.reason,
-        });
-        return recovery;
-      }
-      billing = revalidated;
-
-      // 5b
-      result = await outboundWhatsAppAdmissionService.sendTemplate({
-        shopId: recovery.shopId,
-        conversationId: conversation.id,
-        idempotencyKey: `recovery-outreach:${attempt.id}`,
-        senderType: "AUTOMATION",
-        content,
-        to: recipient,
-        templateName: selection.providerTemplateName,
-        languageCode: selection.providerLanguageCode,
-      });
-    } catch (error) {
-      await this.billingService.handleProviderFailure({
-        admission: billing.admission,
-        error,
-      });
-      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
-        failureCode: "PROVIDER_FAILURE",
-      });
-
-      throw error;
-    }
-
-    if (result.kind === "suppressed") {
-      if (result.reason === "duplicate") {
-        const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
-        if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
-          this.requireConfirmedMessage(existing, conversation.id, attempt.id);
-          await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: existing, policy });
-          return recovery;
-        }
-        if (existing?.status === "PENDING") {
-          throw new Error(`Recovery outreach send is still pending for attempt ${attempt.id}`);
-        }
-        if (!existing) {
-          throw new Error(`Recovery outreach admission has no durable message for attempt ${attempt.id}`);
-        }
-      }
-      await this.billingService.releaseBeforeProvider(billing.admission);
-      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
-        failureCode: result.reason,
-      });
-      return recovery;
-    }
-
-    const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
-    this.requireConfirmedMessage(persistedMessage, conversation.id, attempt.id);
-    await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: persistedMessage, policy });
-
-    return recovery;
-  }
-
-  private requireConfirmedMessage(
-    message: { id: string; conversationId: string; status: string; sentAt: Date | null } | null,
-    conversationId: string,
-    attemptId: string,
-  ): asserts message is { id: string; conversationId: string; status: string; sentAt: Date } {
-    if (
-      !message ||
-      !["SENT", "DELIVERED", "READ"].includes(message.status) ||
-      !message.sentAt ||
-      message.conversationId !== conversationId
-    ) {
-      throw new Error(`Recovery outreach has no confirmed durable message for attempt ${attemptId}`);
-    }
-  }
-
-  private async finalizeConfirmedOutreach(input: {
-    recovery: { id: string; status: string };
-    attempt: { id: string; sequence: number; followUpDueAt?: Date | null };
-    admission: Parameters<RecoveryBillingService["commitSuccessfulInitiation"]>[0]["admission"];
-    message: { id: string; conversationId: string; status: string; sentAt: Date };
-    policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null };
-  }) {
-    await this.billingService.commitSuccessfulInitiation({
-      admission: input.admission,
-      recoveryId: input.recovery.id,
-      occurredAt: input.message.sentAt,
-    });
-
-    const followUpDueAt = input.attempt.sequence === 1
-      ? input.attempt.followUpDueAt ?? (
-          input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
-            ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
-            : null
-        )
-      : null;
-    const transition = await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(
-      input.attempt.id,
-      {
-        sentAt: input.message.sentAt,
-        outboundMessageId: input.message.id,
-        followUpDueAt,
-      },
-    );
-    if (transition && transition.count === 0) {
-      const current = await prisma.recoveryOutreachAttempt.findUnique({ where: { id: input.attempt.id } });
-      if (!current || current.outboundMessageId !== input.message.id || ["FAILED", "CANCELLED"].includes(current.status)) {
-        throw new Error(`Recovery outreach finalisation conflict for attempt ${input.attempt.id}`);
-      }
-    }
-
-    if (input.attempt.sequence === 1) {
-      if (input.recovery.status === "DETECTED") {
-        await prisma.checkoutRecovery.updateMany({
-          where: { id: input.recovery.id, status: "DETECTED" },
-          data: { status: "MESSAGE_SENT", messageSentAt: input.message.sentAt, admissionBlockedAt: null, admissionBlockReason: null },
-        });
-      }
-      await this.ensureScheduledInitialFollowUp(input.recovery.id);
-    }
-  }
-
-  private async ensureScheduledInitialFollowUp(recoveryId: string) {
-    const recovery = await prisma.checkoutRecovery.findUnique({
-      where: { id: recoveryId },
-      include: { outreachAttempts: { orderBy: { sequence: "asc" } } },
-    });
-    const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
-    if (
-      !recovery ||
-      !["MESSAGE_SENT", "ENGAGED"].includes(recovery.status) ||
-      !initial ||
-      initial.status !== "WAITING_FOR_RESPONSE" ||
-      !initial.sentAt ||
-      !initial.followUpDueAt ||
-      initial.customerRespondedAt ||
-      recovery.outreachAttempts.some((item) => ["WAITING_FOR_RESPONSE", "ENGAGED"].includes(item.status) && item.sequence === 2)
-    ) return;
-    await recoveryOutreachFollowUpService.schedule(
-      { checkoutRecoveryId: recovery.id, sequence: 2 },
-      initial.followUpDueAt,
-    );
+    return this.initiationService.handleCheckoutCreated(event, generation);
   }
 
   async processRecoveryOutreachFollowUp(recoveryId: string) {
@@ -1169,8 +877,8 @@ export class CheckoutRecoveryService {
             if (result.reason === "duplicate") {
               const existing = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
               if (existing?.status === "SENT" || existing?.status === "DELIVERED" || existing?.status === "READ") {
-                this.requireConfirmedMessage(existing, recovery.conversation.id, attempt.id);
-                await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: existing });
+                this.finalizationService.requireConfirmedMessage(existing, recovery.conversation.id, attempt.id);
+                await this.finalizationService.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: existing });
                 return { kind: "sent", attemptId: attempt.id } as const;
               }
               if (existing?.status === "PENDING") {
@@ -1185,8 +893,8 @@ export class CheckoutRecoveryService {
             return result;
           }
           const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
-          this.requireConfirmedMessage(persistedMessage, recovery.conversation.id, attempt.id);
-          await this.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: persistedMessage });
+          this.finalizationService.requireConfirmedMessage(persistedMessage, recovery.conversation.id, attempt.id);
+          await this.finalizationService.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: persistedMessage });
           return { kind: "sent", attemptId: attempt.id } as const;
         } catch (error) {
           if (!providerSendCompleted) {
@@ -1200,17 +908,7 @@ export class CheckoutRecoveryService {
   }
 
   async markRecoveryCapacityBlocked(recoveryId: string, blockedAt = new Date()) {
-    return prisma.checkoutRecovery.updateMany({
-      where: {
-        id: recoveryId,
-        status: "DETECTED",
-        admissionBlockReason: null,
-      },
-      data: {
-        admissionBlockedAt: blockedAt,
-        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
-      },
-    });
+    return this.initiationService.markRecoveryCapacityBlocked(recoveryId, blockedAt);
   }
 
   async resumeCapacityBlockedRecovery(recoveryId: string) {
@@ -1572,8 +1270,4 @@ function safelyNormalize(
   } catch {
     return null;
   }
-}
-
-function isUniqueConflict(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
