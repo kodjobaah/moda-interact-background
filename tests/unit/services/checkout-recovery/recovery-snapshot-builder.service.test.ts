@@ -8,11 +8,9 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     shop: {
       findUnique: vi.fn(async () => ({
-        settings: {
-          defaultLanguageTag: "pt-BR",
-          defaultCountryCode: "BR",
-          defaultTimeZone: "America/Sao_Paulo",
-        },
+        defaultLanguageTag: "pt-BR",
+        defaultCountryCode: "BR",
+        defaultTimeZone: "America/Sao_Paulo",
       })),
     },
   },
@@ -77,11 +75,9 @@ describe("RecoverySnapshotBuilderService", () => {
   beforeEach(() => {
     prismaMock.shop.findUnique.mockClear();
     prismaMock.shop.findUnique.mockResolvedValue({
-      settings: {
-        defaultLanguageTag: "pt-BR",
-        defaultCountryCode: "BR",
-        defaultTimeZone: "America/Sao_Paulo",
-      },
+      defaultLanguageTag: "pt-BR",
+      defaultCountryCode: "BR",
+      defaultTimeZone: "America/Sao_Paulo",
     });
   });
 
@@ -102,13 +98,9 @@ describe("RecoverySnapshotBuilderService", () => {
     expect(prismaMock.shop.findUnique).toHaveBeenCalledExactlyOnceWith({
       where: { id: candidate.shopId },
       select: {
-        settings: {
-          select: {
-            defaultLanguageTag: true,
-            defaultCountryCode: true,
-            defaultTimeZone: true,
-          },
-        },
+        defaultLanguageTag: true,
+        defaultCountryCode: true,
+        defaultTimeZone: true,
       },
     });
     expect(seed).toEqual({

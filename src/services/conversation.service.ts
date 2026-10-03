@@ -436,11 +436,11 @@ export class ConversationService {
   ) {
     const recovery = await prisma.checkoutRecovery.findUniqueOrThrow({
       where: { id: checkoutRecoveryId },
-      select: { shop: { select: { settings: { select: { defaultLanguageTag: true } } } } },
+      select: { shop: { select: { defaultLanguageTag: true } } },
     });
     const language = await this.languageService.resolveInitial({
       currentLanguageTag: null, currentLanguageSource: null,
-      merchantLanguageTag: recovery.shop.settings?.defaultLanguageTag ?? null,
+      merchantLanguageTag: recovery.shop.defaultLanguageTag ?? null,
     });
     return prisma.conversation.upsert({
       where: { checkoutRecoveryId },

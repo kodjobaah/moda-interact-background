@@ -51,7 +51,7 @@ The completion report records the exact fixture matrix and results. Deployment t
 
 ## Shop language and spoken-language transcription (Attempt 2)
 
-New recovery conversations read `ShopSettings.defaultLanguageTag`, canonicalize it,
+New recovery conversations read the shared `Shop.defaultLanguageTag`, canonicalize it,
 then persist `MERCHANT_DEFAULT`. Checkout locale, phone and country do not determine
 language. An existing conversation is never reset by the upsert. Missing/invalid
 shop configuration leaves the existing null fallback; no platform template locale

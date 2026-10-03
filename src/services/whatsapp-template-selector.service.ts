@@ -86,7 +86,7 @@ function uniqueVariant(
 
 export class WhatsAppTemplateSelectorService {
   constructor(
-    private readonly catalogue: Pick<PrismaClient, "whatsAppTemplateVariant" | "shopSettings"> = prisma,
+    private readonly catalogue: Pick<PrismaClient, "whatsAppTemplateVariant" | "shop"> = prisma,
   ) {}
 
   async select(
@@ -97,11 +97,11 @@ export class WhatsAppTemplateSelectorService {
       return { outcome: "template-unavailable", reason: "invalid-language" };
     }
 
-    const settings = await this.catalogue.shopSettings.findUnique({
-      where: { shopId: input.shopId },
+    const shop = await this.catalogue.shop.findUnique({
+      where: { id: input.shopId },
       select: { defaultLanguageTag: true },
     });
-    const merchantLanguage = normalizeLanguageTag(settings?.defaultLanguageTag ?? null);
+    const merchantLanguage = normalizeLanguageTag(shop?.defaultLanguageTag ?? null);
     const platformLanguage = normalizeLanguageTag(input.platformFallbackLanguageTag ?? null);
     const variants = await this.catalogue.whatsAppTemplateVariant.findMany({
       where: {
