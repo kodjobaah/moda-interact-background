@@ -11,13 +11,13 @@ const variant = (overrides: Record<string, unknown> = {}) => ({
 
 function createSelector(rows: unknown[]) {
   const findMany = vi.fn().mockResolvedValue(rows);
-  const findUnique = vi.fn().mockResolvedValue({ defaultLanguageTag: "en-GB" });
+  const findShop = vi.fn().mockResolvedValue({ defaultLanguageTag: "en-GB" });
   const selector = new WhatsAppTemplateSelectorService({
     whatsAppTemplateVariant: { findMany },
-    shopSettings: { findUnique },
+    shop: { findUnique: findShop },
   } as never);
 
-  return { selector, findMany, findUnique };
+  return { selector, findMany, findShop };
 }
 
 const input = (overrides: Record<string, unknown> = {}) => ({
@@ -32,7 +32,7 @@ const input = (overrides: Record<string, unknown> = {}) => ({
 
 describe("WhatsAppTemplateSelectorService", () => {
   it("selects an exact canonical locale and keeps provider language separate", async () => {
-    const { selector } = createSelector([variant()]);
+    const { selector, findShop } = createSelector([variant()]);
 
     await expect(selector.select(input())).resolves.toMatchObject({
       outcome: "selected",
@@ -42,6 +42,10 @@ describe("WhatsAppTemplateSelectorService", () => {
       providerTemplateId: "tpl_en_us",
       selectionSource: "exact",
       marketCapability: "supported",
+    });
+    expect(findShop).toHaveBeenCalledWith({
+      where: { id: "shop_1" },
+      select: { defaultLanguageTag: true },
     });
   });
 

@@ -257,11 +257,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     prismaMock.shop.findUnique.mockResolvedValue({
       id: "shop_1",
       status: "ACTIVE",
-      settings: {
-        defaultLanguageTag: "pt-BR",
-        defaultCountryCode: "BR",
-        defaultTimeZone: "America/Sao_Paulo",
-      },
+      defaultLanguageTag: "pt-BR",
+      defaultCountryCode: "BR",
+      defaultTimeZone: "America/Sao_Paulo",
     });
     prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
@@ -278,7 +276,13 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("creates a recovery from current Shopify data when the lookup is found and recoverable", async () => {
-    prismaMock.shop.findUnique.mockResolvedValue({ id: "shop_1", status: "ACTIVE" });
+    prismaMock.shop.findUnique.mockResolvedValue({
+      id: "shop_1",
+      status: "ACTIVE",
+      defaultLanguageTag: "pt-BR",
+      defaultCountryCode: "BR",
+      defaultTimeZone: "America/Sao_Paulo",
+    });
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
 
     const result = await service.materializeMaturedCandidate(candidate);
@@ -298,8 +302,8 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(
       conversationServiceMock.getOrCreateRecoveryConversation,
     ).toHaveBeenCalledWith("recovery-1", {
-      languageTag: "fr-CA",
-      languageSource: "shopify",
+      languageTag: "pt-BR",
+      languageSource: "merchant-default",
       countryCode: "GB",
       currencyCode: "GBP",
       timeZone: "Europe/London",

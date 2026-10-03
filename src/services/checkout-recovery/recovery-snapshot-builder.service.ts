@@ -18,19 +18,15 @@ export class RecoverySnapshotBuilderService {
     const shop = await prisma.shop.findUnique({
       where: { id: candidate.shopId },
       select: {
-        settings: {
-          select: {
-            defaultLanguageTag: true,
-            defaultCountryCode: true,
-            defaultTimeZone: true,
-          },
-        },
+        defaultLanguageTag: true,
+        defaultCountryCode: true,
+        defaultTimeZone: true,
       },
     });
     const internationalContext = resolveRecoveryInternationalContext(
       candidate,
       checkout,
-      shop?.settings,
+      shop,
     );
 
     return toRecoverySeed(candidate, shopDomain, checkout, internationalContext);
