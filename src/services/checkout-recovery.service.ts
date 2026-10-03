@@ -20,10 +20,7 @@ import {
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
 import { recoveryPolicyService } from "./recovery-policy.service.js";
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
-import {
-  shopExecutionEligibilityService,
-  type ShopExecutionDenialReason,
-} from "./shop-execution-eligibility.service.js";
+import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
 import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiation.service.js";
@@ -33,13 +30,11 @@ import { recoverySnapshotBuilderService } from "./checkout-recovery/recovery-sna
 import { RecoveryMaterializationService } from "./checkout-recovery/recovery-materialization.service.js";
 import type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
 export type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
-import {
-  toLookupInput,
-  type AbandonedCheckoutLookupInput,
-  type NormalizedAbandonedCheckout,
-} from "../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
+import { CheckoutEventOrchestratorService } from "./checkout-recovery/checkout-event-orchestrator.service.js";
+import type { CheckoutRefreshResult } from "./checkout-recovery/checkout-event-orchestrator.service.js";
+export type { CheckoutRefreshResult } from "./checkout-recovery/checkout-event-orchestrator.service.js";
 
 interface RecoveryOrderCompletionInput {
   shop: string;
@@ -52,18 +47,13 @@ interface RecoveryOrderCompletionInput {
   completedAt: string | null;
 }
 
-export type CheckoutRefreshResult =
-  | { kind: "pending"; outcome: string; jobId?: string }
-  | { kind: "refreshed"; recoveryId: string; status: string }
-  | { kind: "discarded"; reason: string }
-  | { kind: "ignored"; reason: string };
-
 export class CheckoutRecoveryService {
   private readonly initiationService: RecoveryInitiationService;
   private readonly finalizationService: RecoveryOutreachFinalizationService;
   private readonly followUpProcessorService: RecoveryOutreachFollowUpProcessorService;
   private readonly snapshotBuilderService = recoverySnapshotBuilderService;
   private readonly materializationService: RecoveryMaterializationService;
+  private readonly checkoutEventOrchestrator: CheckoutEventOrchestratorService;
 
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -92,50 +82,20 @@ export class CheckoutRecoveryService {
         ? this.handleCheckoutCreated(seed)
         : this.handleCheckoutCreated(seed, generation),
     });
+    this.checkoutEventOrchestrator = new CheckoutEventOrchestratorService(
+      prisma,
+      pendingRecoveryCandidateService,
+      shopExecutionEligibilityService,
+      findLatestRecovery,
+      abandonedCheckoutLookupService,
+      this.snapshotBuilderService,
+    );
   }
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
-    const scheduled =
-      await pendingRecoveryCandidateService.scheduleFromCheckoutCreated(event);
-
-    if (scheduled.outcome === "discarded-shop-unavailable") {
-      return {
-        kind: "ignored",
-        reason: "shop-unavailable",
-        shopDomain: scheduled.shopDomain,
-        checkoutToken: event.checkoutToken,
-        source: "v2",
-      } as const;
-    }
-    if (scheduled.outcome === "discarded-subscription-frozen") {
-      return {
-        kind: "ignored",
-        reason: "subscription-frozen",
-        shopDomain: scheduled.shopDomain,
-        checkoutToken: event.checkoutToken,
-        source: "v2",
-      } as const;
-    }
-
-    return {
-      kind: "scheduled",
-      outcome: scheduled.outcome,
-      delayMinutes: scheduled.delayMinutes,
-      shopDomain: event.shopDomain,
-      checkoutToken: event.checkoutToken,
-      source: "v2",
-    } as const;
+    return this.checkoutEventOrchestrator.handleCheckoutCreatedContract(event);
   }
 
-  /**
-   * Transition a matured pending candidate into durable `CheckoutRecovery`.
-   *
-   * ARCH-001-BACKGROUND-004. The webhook's embedded basket/customer payload is
-   * never used here. Current Shopify data (from ARCH-001-BACKGROUND-003) is the
-   * only source used to populate recovery state. Non-recoverable outcomes
-   * (not-found, ambiguous, bound-exceeded, already-completed) produce no
-   * recovery record and no message.
-   */
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
@@ -143,194 +103,17 @@ export class CheckoutRecoveryService {
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
-    return prisma.checkoutRecovery.updateMany({
-      where: {
-        id: recoveryId,
-        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-        lastExternalActivityAt: { lt: activityAt },
-      },
-      data: { lastExternalActivityAt: activityAt },
-    });
+    return this.checkoutEventOrchestrator.recordExternalActivity(recoveryId, activityAt);
   }
 
-  /**
-   * Process a checkout-update event by refreshing an existing
-   * `CheckoutRecovery` from current Shopify data.
-   *
-   * ARCH-001-BACKGROUND-006. No `CheckoutRecovery` means the update is
-   * discarded immediately: no Shopify lookup and no write beyond the recovery
-   * lookup. When a recovery exists, the current Shopify abandoned checkout is
-   * re-fetched (BACKGROUND-003) and only basket/content fields are refreshed.
-   * The webhook payload is never used as recovery state. Lifecycle status and
-   * timing (detectedAt/messageSentAt/engagedAt/completedAt) are preserved: a
-   * terminal recovery is never reopened and this task never restarts recovery
-   * timing or creates a new recovery.
-   */
   async handleCheckoutUpdatedContract(
     event: CheckoutUpdatedContractInput,
   ): Promise<CheckoutRefreshResult> {
-    const shop = await prisma.shop.findUnique({
-      where: { domain: event.shopDomain },
-      select: {
-        id: true,
-        status: true,
-        subscription: { select: { status: true } },
-      },
-    });
-    if (!shop) {
-      return { kind: "discarded", reason: "shop-not-found" } as const;
-    }
-    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
-    if (!execution.allowed) {
-      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
-    }
-
-    const pending =
-      await pendingRecoveryCandidateService.refreshCandidateActivity({
-        shopId: shop.id,
-        checkoutToken: event.checkoutToken,
-        cartToken: null,
-        activityAt: event.activityAt,
-        isEmpty: null,
-        ...(event.internationalContext
-          ? { internationalContext: event.internationalContext }
-          : {}),
-      });
-    if (pending.outcome !== "not-found") {
-      return {
-        kind: "pending",
-        outcome: pending.outcome,
-        ...("jobId" in pending ? { jobId: pending.jobId } : {}),
-      };
-    }
-
-    const recovery = await findLatestRecovery(shop.id, event.checkoutToken);
-
-    // No recovery: the update is irrelevant before recovery exists.
-    if (!recovery) {
-      return { kind: "discarded", reason: "recovery-not-found" } as const;
-    }
-
-    // A terminal recovery is never reopened by a checkout update.
-    if (["COMPLETED", "CANCELLED"].includes(recovery.status)) {
-      return {
-        kind: "ignored",
-        reason: `terminal-${recovery.status.toLowerCase()}`,
-      } as const;
-    }
-
-    if (recovery.status === "EXPIRED") {
-      const scheduled = await pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
-        shopDomain: event.shopDomain,
-        checkoutToken: event.checkoutToken,
-        cartToken: recovery.cartToken,
-        checkoutCreatedAt: recovery.detectedAt.toISOString(),
-        abandonedCheckoutUrl: recovery.checkoutUrl,
-        activityAt: event.activityAt,
-        ...(event.internationalContext
-          ? { internationalContext: event.internationalContext }
-          : {}),
-      });
-      return {
-        kind: "pending",
-        outcome: scheduled.outcome,
-        ...("jobId" in scheduled ? { jobId: scheduled.jobId } : {}),
-      } as const;
-    }
-
-    // Fetch the current Shopify abandoned checkout. The lookup input is derived
-    // exclusively from durable recovery state (shop/checkout/cart correlation,
-    // stored recovery URL, and the Shopify creation timestamp retained in
-    // detectedAt), never from the webhook payload.
-    const lookupInput: AbandonedCheckoutLookupInput = {
-      shopId: shop.id,
-      shopDomain: event.shopDomain,
-      checkoutToken: event.checkoutToken,
-      cartToken: recovery.cartToken,
-      abandonedCheckoutUrl: recovery.checkoutUrl,
-      checkoutCreatedAt: recovery.detectedAt
-        ? recovery.detectedAt.toISOString()
-        : null,
-    };
-
-      await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
-
-    const outcome = await abandonedCheckoutLookupService.lookup(lookupInput);
-
-    // Transient provider failures remain retryable and are never converted into
-    // a "nothing to refresh" discard.
-    if (outcome.kind === "provider-error") {
-      throw new Error(
-        `Abandoned checkout provider error while refreshing recovery ${recovery.id}: ${outcome.message}`,
-      );
-    }
-
-    if (outcome.kind !== "found") {
-      // not-found / ambiguous / bounded-limit-exceeded: the current checkout
-      // cannot be identified deterministically, so there is nothing to refresh.
-      return {
-        kind: "discarded",
-        reason: `lookup-${outcome.kind}`,
-      } as const;
-    }
-
-    const checkout = outcome.checkout;
-
-    // Refresh basket/content fields only. The status-guarded updateMany preserves
-    // lifecycle status and prevents refreshing a recovery that concurrently
-    // transitioned to a terminal state.
-    const refreshed = await prisma.$transaction(async (transaction) => {
-      const updated = await transaction.checkoutRecovery.updateMany({
-        where: {
-          id: recovery.id,
-          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-        },
-        data: {
-          currency: checkout.currencyCode,
-          totalPrice: checkout.totalPrice,
-          checkoutUrl: checkout.abandonedCheckoutUrl,
-          lineItems: this.snapshotBuilderService.serializeLineItems(
-            checkout.lineItems,
-          ),
-        },
-      });
-      return updated;
-    });
-
-    if (refreshed.count === 0) {
-      return { kind: "ignored", reason: "already-transitioned" } as const;
-    }
-
-    return {
-      kind: "refreshed",
-      recoveryId: recovery.id,
-      status: recovery.status,
-    } as const;
+    return this.checkoutEventOrchestrator.handleCheckoutUpdatedContract(event);
   }
 
   async handleCartActivityContract(event: CartActivityContractInput) {
-    const shop = await shopExecutionEligibilityService.resolveShopById(event.shopId);
-    if (!shop) {
-      return { kind: "ignored", reason: "shop-unavailable" } as const;
-    }
-    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop);
-    if (!execution.allowed) {
-      return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
-    }
-    const result =
-      await pendingRecoveryCandidateService.refreshCandidateActivity({
-        shopId: event.shopId,
-        checkoutToken: null,
-        cartToken: event.cartToken,
-        activityAt: event.activityAt,
-        isEmpty: event.isEmpty,
-      });
-
-    return {
-      kind: "pending",
-      outcome: result.outcome,
-      ...("jobId" in result ? { jobId: result.jobId } : {}),
-    } as const;
+    return this.checkoutEventOrchestrator.handleCartActivityContract(event);
   }
 
   async handleOrderCompletedContract(event: OrderCompletedContractInput) {
@@ -860,16 +643,6 @@ export class CheckoutRecoveryService {
 }
 
 export const checkoutRecoveryService = new CheckoutRecoveryService();
-
-function lifecycleReason(
-  reason: ShopExecutionDenialReason,
-) {
-  return reason === "CONTRACT_REQUIRED"
-    ? "contract-required"
-    : reason === "SUBSCRIPTION_FROZEN"
-      ? "subscription-frozen"
-      : "shop-unavailable";
-}
 
 function safelyNormalize(
   value: string | null | undefined,
