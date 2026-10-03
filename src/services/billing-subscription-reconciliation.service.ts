@@ -1144,7 +1144,7 @@ export class BillingSubscriptionReconciliationService {
       });
       if (billingPeriod.kind === "CONFLICT") {
         const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
+        await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncedAt: now, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
         return { kind: "conflict" as const, nextReconcileAt };
       }
       await transaction.subscription.update({
