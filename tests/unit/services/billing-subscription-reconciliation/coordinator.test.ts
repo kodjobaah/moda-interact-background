@@ -48,7 +48,7 @@ function initialRow() {
     status: "ACTIVE",
     reinstallPendingAt: null,
     shopifyShopId: "gid://shopify/Shop/1",
-    settings: { onboardingCompleted: false },
+    onboardingCompleted: false,
     subscription: {
       id: "subscription-1",
       status: "NO_CONTRACT",
@@ -69,7 +69,7 @@ function initialRow() {
 function cycleRow() {
   return {
     ...initialRow(),
-    settings: { onboardingCompleted: true },
+    onboardingCompleted: true,
     subscription: {
       ...initialRow().subscription,
       status: "ACTIVE",

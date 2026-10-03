@@ -168,7 +168,7 @@ export class BillingSubscriptionReconciliationService {
       shopId: row.id,
       subscriptionId: row.subscription.id,
       kind: reconciliationKind,
-      onboardingCompleted: row.settings?.onboardingCompleted ?? null,
+      onboardingCompleted: row.onboardingCompleted,
       nextReconcileAt: row.subscription.nextReconcileAt.toISOString(),
     });
 

@@ -69,7 +69,7 @@ export type ReconciliationClassificationRow = {
   status: string;
   reinstallPendingAt: Date | null;
   shopifyShopId: string | null;
-  settings: { onboardingCompleted: boolean } | null;
+  onboardingCompleted: boolean;
   subscription: ClassificationSubscription | null;
 };
 
@@ -151,7 +151,7 @@ export function classifySubscriptionReconciliation(
     && subscription.pendingPlanId !== null
     && subscription.pendingShopifyPlanHandle !== null
     && subscription.nextReconcileAt !== null;
-  const isCycleDiscovery = row.settings?.onboardingCompleted === true
+  const isCycleDiscovery = row.onboardingCompleted
     && (subscription.status === SubscriptionProjectionStatus.ACTIVE || subscription.status === SubscriptionProjectionStatus.TRIALING)
     && subscription.planId !== null
     && subscription.billingPeriodId === null
@@ -159,7 +159,7 @@ export function classifySubscriptionReconciliation(
     && subscription.pendingShopifyPlanHandle === null
     && subscription.pendingEffectiveAt === null
     && subscription.nextReconcileAt !== null;
-  const isRollover = row.settings?.onboardingCompleted === true
+  const isRollover = row.onboardingCompleted
     && (subscription.status === SubscriptionProjectionStatus.ACTIVE || subscription.status === SubscriptionProjectionStatus.TRIALING)
     && subscription.planId !== null
     && subscription.billingPeriodId !== null
@@ -167,11 +167,11 @@ export function classifySubscriptionReconciliation(
     && subscription.pendingShopifyPlanHandle === null
     && subscription.pendingEffectiveAt === null
     && subscription.nextReconcileAt !== null;
-  const isFrozenReconciliation = row.settings?.onboardingCompleted === true
+  const isFrozenReconciliation = row.onboardingCompleted
     && subscription.status === SubscriptionProjectionStatus.FROZEN
     && subscription.planId !== null
     && subscription.nextReconcileAt !== null;
-  const isEstablishedPlanChange = row.settings?.onboardingCompleted === true
+  const isEstablishedPlanChange = row.onboardingCompleted
     && (
       subscription.status === SubscriptionProjectionStatus.ACTIVE
       || subscription.status === SubscriptionProjectionStatus.TRIALING
@@ -208,7 +208,7 @@ export function classifySubscriptionReconciliation(
       fields: {
         shopStatus: row.status,
         subscriptionStatus: subscription.status,
-        onboardingCompleted: row.settings?.onboardingCompleted ?? null,
+        onboardingCompleted: row.onboardingCompleted,
         hasPlan: subscription.planId !== null,
         hasBillingPeriod: subscription.billingPeriodId !== null,
         hasPendingPlan: subscription.pendingPlanId !== null,

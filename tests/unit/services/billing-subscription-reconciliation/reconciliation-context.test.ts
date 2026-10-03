@@ -18,7 +18,7 @@ describe("ReconciliationContextService", () => {
         status: true,
         reinstallPendingAt: true,
         shopifyShopId: true,
-        settings: { select: { onboardingCompleted: true } },
+        onboardingCompleted: true,
         subscription: {
           select: {
             id: true,

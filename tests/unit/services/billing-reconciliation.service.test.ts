@@ -728,6 +728,7 @@ describe("BillingReconciliationService", () => {
     });
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      shop: { update: vi.fn() },
       shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted }), update: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") }), update: vi.fn() },
       billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
@@ -745,6 +746,7 @@ describe("BillingReconciliationService", () => {
     expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ grantedQuantity: 100 }),
     }));
+    expect(transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
     expect(transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(test.database.shopSettings.findUnique).not.toHaveBeenCalled();
   });
@@ -804,6 +806,7 @@ describe("BillingReconciliationService", () => {
     test.database.$transaction.mockImplementation(async (callback: (value: typeof activationTransaction) => unknown) => callback(activationTransaction));
     const activationTransaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      shop: { update: vi.fn() },
       shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: false }), update: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ ...current, nextReconcileAt: null }), update: vi.fn() },
       billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
@@ -815,6 +818,7 @@ describe("BillingReconciliationService", () => {
 
     await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
     expect(activationTransaction.billingPeriod.create).toHaveBeenCalledOnce();
+    expect(activationTransaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
     expect(activationTransaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
   });
 

@@ -18,7 +18,7 @@ function makeRow(overrides: {
   status?: string;
   reinstallPendingAt?: Date | null;
   shopifyShopId?: string | null;
-  settings?: ReconciliationClassificationRow["settings"];
+  onboardingCompleted?: boolean;
   subscription?: Partial<NonNullable<ReconciliationClassificationRow["subscription"]>> | null;
 } = {}): ReconciliationClassificationRow {
   const baseSubscription: NonNullable<ReconciliationClassificationRow["subscription"]> = {
@@ -41,7 +41,7 @@ function makeRow(overrides: {
     status: "ACTIVE",
     reinstallPendingAt: null,
     shopifyShopId: "gid://shopify/Shop/1",
-    settings: { onboardingCompleted: false },
+    onboardingCompleted: false,
     ...shopOverrides,
     subscription: subscription === null
       ? null
@@ -89,7 +89,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("accepts cycle discovery and preserves its period-style snapshot shape", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.ACTIVE,
         planId: "plan-current",
@@ -113,7 +113,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("accepts rollover when period-date fields are null", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.ACTIVE,
         planId: "plan-current",
@@ -132,7 +132,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("accepts established plan changes and preserves nullable current-cycle fields", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.ACTIVE,
         planId: "plan-current",
@@ -161,7 +161,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it.each(RETRYABLE_PLAN_CHANGE_SYNC_ERRORS)("accepts retryable SYNC_ERROR %s", (lastSyncErrorCode) => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.SYNC_ERROR,
         planId: "plan-current",
@@ -177,7 +177,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("uses the same period-style expected shape for frozen reconciliation without pending keys", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.FROZEN,
         planId: "plan-current",
@@ -249,7 +249,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("skips a cleared schedule before reporting ineligible subscription state", () => {
     expect(classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.CANCELLED,
         planId: null,
@@ -263,7 +263,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("skips non-retryable SYNC_ERROR plan changes", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.SYNC_ERROR,
         planId: "plan-current",
@@ -292,7 +292,7 @@ describe("classifySubscriptionReconciliation", () => {
 
   it("keeps the frozen-state predicate permissive while reporting state evidence", () => {
     const result = classify(makeRow({
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         status: SubscriptionProjectionStatus.CANCELLED,
         planId: null,

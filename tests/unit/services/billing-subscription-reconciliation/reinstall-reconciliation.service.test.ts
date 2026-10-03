@@ -162,7 +162,7 @@ describe("ReinstallReconciliationService", () => {
     expect(test.database.$transaction).toHaveBeenCalledOnce();
     expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(3);
     expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
-      expect.stringContaining('FROM "shopify"."Shop"'),
+      expect.stringContaining('FROM "commerce"."Shop"'),
       expect.stringContaining('FROM "shopify"."ShopSettings"'),
       expect.stringContaining('FROM "billing"."Subscription"'),
     ]);
@@ -183,6 +183,13 @@ describe("ReinstallReconciliationService", () => {
     expect(test.transaction.billingPeriod.create).toHaveBeenCalledOnce();
     expect(test.transaction.subscription.update).toHaveBeenCalledOnce();
     expect(test.transaction.shop.update).toHaveBeenCalledOnce();
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
+      expect.stringContaining('FROM "commerce"."Shop"'),
+      expect.stringContaining('FROM "shopify"."ShopSettings"'),
+      expect.stringContaining('FROM "billing"."Subscription"'),
+    ]);
     expect(test.events.indexOf("subscription.update")).toBeLessThan(test.events.indexOf("discount.publish"));
     expect(test.events.indexOf("shop.update")).toBeLessThan(test.events.indexOf("discount.publish"));
     expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledWith("shop-1", "REINSTALL_RECONCILED");
@@ -245,11 +252,13 @@ describe("ReinstallReconciliationService", () => {
     await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
 
     expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
-    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "shopify"."Shop"')));
+    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "commerce"."Shop"')));
     expect(test.transaction.billingPeriod.findUnique).toHaveBeenCalledWith({ where: { id: "period-paid" } });
     expect(test.transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledWith({
       where: { billingPeriodId_counter: { billingPeriodId: "period-paid", counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } },
     });
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledOnce();
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
@@ -269,20 +278,30 @@ describe("ReinstallReconciliationService", () => {
         currentPeriodEnd: oldEnd,
       },
     });
-    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockResolvedValue({
-      kind: "transitioned",
-      billingPeriodId: "period-new",
-      nextReconcileAt: new Date("2026-09-30T23:55:00.000Z"),
-      planKind: BillingPlanKind.PAID_METERED,
+    const transition = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockImplementation(async () => {
+      test.events.push("rollover.transition");
+      return {
+        kind: "transitioned",
+        billingPeriodId: "period-new",
+        nextReconcileAt: new Date("2026-09-30T23:55:00.000Z"),
+        planKind: BillingPlanKind.PAID_METERED,
+      };
     });
 
     await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
 
     expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
     expect(test.database.$transaction).toHaveBeenCalledOnce();
-    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => query.strings?.join("?") ?? "")).toEqual([
+      expect.stringContaining('FROM "commerce"."Shop"'),
+      expect.stringContaining('FROM "shopify"."ShopSettings"'),
+    ]);
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: expect.objectContaining({ onboardingCompleted: true }) });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(transition).toHaveBeenCalledOnce();
-    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "shopify"."Shop"')));
+    expect(test.events.indexOf("alignment.read")).toBeLessThan(test.events.findIndex((event) => event.includes('FROM "commerce"."Shop"')));
+    expect(test.events.findIndex((event) => event.includes('FROM "shopify"."ShopSettings"'))).toBeLessThan(test.events.indexOf("rollover.transition"));
     expect(test.events.indexOf("shop.update")).toBeLessThan(test.events.indexOf("discount.publish"));
     expect(test.events.indexOf("discount.publish")).toBeLessThan(test.events.indexOf("queue.publish"));
     transition.mockRestore();
