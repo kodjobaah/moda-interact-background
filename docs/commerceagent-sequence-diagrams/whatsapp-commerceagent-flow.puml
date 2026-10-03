@@ -1,0 +1,214 @@
+@startuml
+hide footbox
+autonumber
+
+actor Customer
+participant "Meta / WhatsApp" as Meta
+participant "WhatsApp webhook\nmoda-interact-messaging/app/routes/whatsapp.tsx" as Ingress
+queue "BullMQ: whatsapp-events" as Q
+participant "Messaging worker\nmoda-interact-background/src/workers/whatsapp.worker.ts" as Worker
+participant "Raw abuse admission\ninbound-whatsapp-abuse-admission.service.ts" as Abuse
+participant "Recovery routing\nrecovery-routing.service.ts" as Routing
+database "PostgreSQL / Prisma" as DB
+participant "Audio processing\ninbound-whatsapp-audio.service.ts" as Audio
+participant "Conversation service\nconversation.service.ts" as Conversation
+participant "Turn processor\nconversation-turn-processor.service.ts" as Turn
+participant "Outbound admission\noutbound-whatsapp-admission.service.ts" as Admission
+participant "CommerceAgent\nagents/commerce.agent.ts" as Agent
+participant "Commerce host\ncommerce/host.ts" as Host
+participant "Commerce MCP route\nmoda-interact-commerce/app/api/mcp/route.ts" as MCP
+participant "WhatsApp service\nwhatsapp.service.ts" as WA
+
+== Inbound webhook acceptance ==
+Customer -> Meta: WhatsApp message
+Meta -> Ingress: POST /webhook/whatsapp
+Ingress -> Ingress: verifyMetaSignature(rawBody)
+alt Wrong method / invalid signature / invalid JSON
+  Ingress --> Meta: 405 / 401 / 400
+else Authenticated payload
+  loop payload.entry[].changes[]
+    alt change.field != "messages"
+      Ingress -> Ingress: skip change
+    else inbound customer message
+      Ingress -> Ingress: normalizeInboundMessageFromWebhook()
+      alt shared schema validation fails
+        Ingress --> Meta: 400 INVALID_EVENT
+      else valid normalized message
+        Ingress -> Q: add("message-received", event)\njobId = hash(providerMessageId), attempts=3
+      end
+    else provider delivery status
+      Ingress -> Ingress: handleProviderStatus()
+      Ingress -> Q: add("message-status", status)
+    end
+  end
+  Ingress --> Meta: 200 EVENT_RECEIVED
+end
+
+== Background inbound processing ==
+Q -> Worker: message-received
+Worker -> Abuse: admitRaw(providerMessageId, customerPhone)
+alt Raw sender/global limiter denies\nor limiter unavailable
+  Abuse --> Worker: denied
+  Worker --> Q: finish without business action
+else Raw admission allowed
+  Worker -> Routing: resolveInboundMessage(event)
+  Routing -> DB: resolve configured sender, prior message,\nreply context and recovery conversation
+  alt Provider account/phone-number mismatch
+    Routing --> Worker: {kind: ignored}
+    Worker --> Q: finish silently
+  else Explicit reply reference invalid\nor no unique recovery conversation\nor shop unavailable
+    Routing --> Worker: {kind: guidance, reason}
+    Worker -> WA: sendRoutingGuidance()\n(unsupported content is not guided)
+    WA -> Meta: fixed routing guidance
+    Meta -> Customer: guidance message
+    Worker --> Q: finish
+  else Recovery conversation resolved
+    Routing --> Worker: conversationId + checkoutRecoveryId + shopId
+    Worker -> DB: checkoutRecoveryService.recordExternalActivity()
+
+    alt content.type == audio
+      Worker -> Audio: process(event, conversationId)
+      Audio -> DB: reserve PENDING inbound audio message
+      Audio -> Meta: download media
+      Audio -> Audio: validate duration <= 120 sec\nand transcribe
+      alt completed transcription and still latest turn
+        Audio -> DB: mark COMPLETED, write transcript,\nincrement inboundVersion
+        Worker -> Turn: enqueue(conversationId, inboundVersion)
+      else fallback required
+        Worker -> Admission: sendText(voice-fallback:<providerMessageId>)
+        Admission -> WA: sendWhatsAppText()
+        WA -> Meta: fallback response
+        Meta -> Customer: fallback response
+      else stale / ignored
+        Worker --> Q: finish
+      end
+
+    else content.type == unsupported
+      Worker -> Conversation: receiveMessage("[Unsupported WhatsApp content: ...]")
+      Conversation -> DB: persist inbound + increment inboundVersion
+      Worker -> DB: mark contentType=UNSUPPORTED when new
+      note right of Worker
+        Unsupported content is persisted,
+        but NO CommerceAgent turn is enqueued.
+      end note
+
+    else content.type == text
+      Worker -> Conversation: receiveMessage(event)
+      Conversation -> DB: create inbound message + increment inboundVersion
+      alt duplicate providerMessageId
+        Conversation --> Worker: duplicate=true
+        note right of Worker
+          Current retry path returns here.
+          It does not re-enqueue a pending turn.
+        end note
+        Worker --> Q: finish
+      else new inbound
+        Conversation --> Worker: observed inboundVersion
+        Worker -> Turn: enqueue(conversationId, version)
+        Turn -> DB: read pendingTurnStartedAt / lastInboundAt
+        Turn -> Q: add("process-conversation-turn", version)\nwith quiet-window delay
+      end
+    end
+  end
+end
+
+== Settled conversation turn ==
+Q -> Worker: process-conversation-turn
+Worker -> Turn: process(conversationId, observedVersion)
+Turn -> DB: getTurnState()
+alt Stale/already processed/no pending turn
+  Turn --> Worker: return
+else Quiet window not yet settled
+  Turn -> Q: move/reschedule delayed turn
+else Cannot claim processing lease
+  Turn -> Q: reschedule after 250 ms
+else Lease claimed
+  Turn -> Worker: loadConversationTurn()
+  Worker -> DB: load conversation/customer/shop/recovery/current messages
+  Worker -> DB: getAgentContext(checkoutRecoveryId)
+
+  alt Shop execution unavailable
+    Turn -> DB: complete/release inactive turn
+  else Settled-turn abuse admission denied
+    Turn -> DB: complete suppressed turn\nor release + enqueue latest version
+  else Current message window exceeds size bound
+    Turn -> Admission: reserve clarification:<conversation>:<version>
+    alt outbound admission suppressed
+      Turn -> DB: complete turn
+    else admitted
+      Admission -> WA: send prepared clarification
+      WA -> Meta: clarification
+      Meta -> Customer: clarification
+      Turn -> DB: complete turn
+    end
+  else Normal CommerceAgent turn
+    Turn -> Admission: reserve agent:<conversation>:<version>
+    Admission -> DB: serializable billing/policy/limit check\n+ PENDING outbound message + UsageEvent
+    alt admission suppressed
+      Turn -> DB: complete turn
+    else terminal reserved slot
+      Admission -> WA: fixed terminal message
+      WA -> Meta: terminal message
+      Meta -> Customer: terminal message
+      Turn -> DB: complete turn
+    else admitted for agent execution
+      Turn -> Agent: runCommerceAgent(context)
+      Agent -> Host: executeCommerceHost(context, model)
+      Host -> DB: reload turn/recovery; validate lease\nread existing grant if any
+
+      Host -> MCP: first private MCP request\n(resolve manifest or execute manifest/tools)
+      note right of MCP
+        CURRENT SNAPSHOT:
+        app/api/mcp/route.ts uses
+        createUnavailableMcpRuntime().
+      end note
+      MCP --> Host: 503 UNAVAILABLE
+      Host --> Agent: CommerceHostError(UNAVAILABLE, retryable=true)
+      Agent --> Turn: throw
+      Turn -> Admission: failPrepared(messageId)\nwhen provider send was not attempted
+      Admission -> DB: mark PENDING outbound FAILED\nremove/reconcile usage reservation
+      Turn -> DB: release processing lease
+      Turn --> Worker: rethrow -> job failure
+      note right of Q
+        process-conversation-turn has no explicit
+        attempts/backoff configured in this code path.
+      end note
+    end
+  end
+end
+
+== Path after Commerce MCP production runtime is wired ==
+note over Host,MCP
+  The following is implemented in Background/shared/Commerce components,
+  but is not currently reachable end-to-end through the route wiring above.
+end note
+Host -> MCP: resolve/execute assertion + MCP requests
+MCP --> Host: capability manifest / prompts / tools
+Host -> DB: persist/read immutable conversation grant
+Host -> Agent: shared Commerce runner drives model/tool loop
+Agent --> Turn: replyText + evidence + language result
+Turn -> DB: hasChanged() / applyDetectedLanguage()
+alt Newer inbound version arrived while agent ran
+  Turn -> Admission: failPrepared(stale outbound)
+  Turn -> DB: release lease
+  Turn -> Q: enqueue latest inboundVersion
+else turn still current
+  Turn -> Admission: sendPreparedText(replyText)
+  Admission -> DB: re-check shop eligibility
+  Admission -> WA: sendWhatsAppText(replyText)
+  WA -> Meta: outbound WhatsApp response
+  Meta -> Customer: agent response
+  Admission -> DB: mark outbound SENT + providerMessageId
+  Turn -> DB: completeTurn(observedVersion)
+end
+
+== Provider delivery status callback ==
+Meta -> Ingress: POST webhook status (sent/delivered/read/failed)
+Ingress -> Q: add("message-status")
+Q -> Worker: message-status
+Worker -> DB: whatsappProviderStatusService.process()\nmonotonic state transition
+opt first DELIVERED/READ transition
+  Worker -> DB: create idempotent DELIVERED_WHATSAPP_MESSAGE usage event
+end
+
+@enduml
