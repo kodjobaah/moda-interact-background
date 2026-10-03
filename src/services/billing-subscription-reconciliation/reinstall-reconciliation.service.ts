@@ -158,7 +158,7 @@ export class ReinstallReconciliationService {
         lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-      await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+      await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true, status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return { kind: "committed" as const };
     });
     if (committed.kind === "conflict") {
@@ -189,6 +189,7 @@ export class ReinstallReconciliationService {
     try {
       const result = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
         await lockShop(transaction, shopId);
+        await lockShopSettings(transaction, shopId);
         if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return { kind: "stale" as const };
         const rollover = await new SamePlanBillingPeriodRolloverService(this.database).transitionInTransaction(transaction, { shopId, subscriptionId: expected.subscriptionId, provider, plan, now: this.now() });
         if (rollover.kind !== "transitioned" && rollover.kind !== "unchanged") return rollover;
@@ -197,7 +198,7 @@ export class ReinstallReconciliationService {
           : null;
         await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt } });
         await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-        await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+        await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true, status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
         return rollover;
       });
       if (result.kind === "transitioned" || result.kind === "unchanged") {
@@ -248,7 +249,7 @@ export class ReinstallReconciliationService {
         nextReconcileAt: next, lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null,
       } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-      await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+      await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true, status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
     if (committed === true) {
@@ -260,12 +261,13 @@ export class ReinstallReconciliationService {
 
   private async activateReinstallAfterRollover(shopId: string, expected: ReinstallExpected): Promise<boolean> {
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await lockShop(transaction, shopId);
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, expected.subscriptionId);
       const current = await transaction.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { nextReconcileAt: true } });
       if (!current || !current.nextReconcileAt) return false;
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-      await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
+      await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true, status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       return true;
     });
     return committed;

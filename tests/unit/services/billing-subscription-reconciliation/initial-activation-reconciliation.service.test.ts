@@ -78,6 +78,7 @@ function harness({
     platformBillingPolicy: {
       findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 7 }),
     },
+    shop: { update: vi.fn().mockResolvedValue({}) },
     shopSettings: { update: vi.fn().mockResolvedValue({}) },
   };
   const database = {
@@ -178,7 +179,14 @@ describe("InitialActivationReconciliationService", () => {
       expected,
     );
 
-    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(3);
+    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => (query as { sql: string }).sql.replace(/\s+/g, " ").trim())).toEqual([
+      expect.stringContaining('FROM "commerce"."Shop"'),
+      expect.stringContaining('FROM "shopify"."ShopSettings"'),
+      expect.stringContaining('FROM "billing"."Subscription"'),
+    ]);
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ planId: "plan-free", status: SubscriptionProjectionStatus.ACTIVE, billingPeriodId: "period-1" }),
     }));
@@ -216,6 +224,13 @@ describe("InitialActivationReconciliationService", () => {
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ planId: paidPlan.id, billingPeriodId: "period-1", status: SubscriptionProjectionStatus.ACTIVE }),
     }));
+    expect(test.transaction.$queryRaw.mock.calls.map(([query]) => (query as { sql: string }).sql.replace(/\s+/g, " ").trim())).toEqual([
+      expect.stringContaining('FROM "commerce"."Shop"'),
+      expect.stringContaining('FROM "shopify"."ShopSettings"'),
+      expect.stringContaining('FROM "billing"."Subscription"'),
+    ]);
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
     expect(test.discountPublisher.publishDiscountSync).toHaveBeenCalledOnce();
   });
 

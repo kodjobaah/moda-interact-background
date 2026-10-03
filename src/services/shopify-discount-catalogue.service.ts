@@ -117,11 +117,11 @@ export class ShopifyDiscountCatalogueService {
   }
 
   private async getEligibility(transaction: Prisma.TransactionClient, shopId: string): Promise<boolean> {
-    const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { domain: true, status: true, settings: { select: { onboardingCompleted: true } }, subscription: { select: { status: true } } } });
+    const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { domain: true, status: true, onboardingCompleted: true, subscription: { select: { status: true } } } });
     if (!shop) return false;
     const session = await transaction.session.findFirst({ where: { shop: shop.domain, isOnline: false }, select: { scope: true }, orderBy: { expires: "desc" } });
     return shop.status === "ACTIVE"
-      && shop.settings?.onboardingCompleted === true
+      && shop.onboardingCompleted === true
       && ACTIVE.includes(shop.subscription?.status as typeof ACTIVE[number])
       && session?.scope?.split(",").some((scope) => scope.trim() === "read_discounts") === true;
   }

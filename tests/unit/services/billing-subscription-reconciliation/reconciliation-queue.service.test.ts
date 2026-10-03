@@ -97,7 +97,7 @@ describe("ReconciliationQueueService", () => {
     expect(where.AND[1].OR[0]).toEqual({ subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } });
     expect(where.AND[1].OR[1]).toEqual({ subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } });
     expect(where.AND[1].OR[2]).toEqual(expect.objectContaining({
-      settings: { is: { onboardingCompleted: true } },
+      onboardingCompleted: true,
       subscription: { is: expect.objectContaining({ billingPeriodId: null, plan: { is: { active: true, kind: "FREE", recoveryCreditPackEnabled: true } } }) },
     }));
     expect(where.AND[1].OR[3]).toEqual(expect.objectContaining({

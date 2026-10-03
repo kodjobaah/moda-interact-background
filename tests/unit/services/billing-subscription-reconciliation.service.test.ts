@@ -66,10 +66,7 @@ function harness({
       }),
       update: vi.fn(),
     },
-    shopSettings: {
-      findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: row?.settings?.onboardingCompleted ?? false }),
-      update: vi.fn(),
-    },
+    shopSettings: { update: vi.fn() },
     shop: {
       findUnique: vi.fn(async ({ select }: any) => selectFields(row, select)),
       update: vi.fn(),
@@ -127,7 +124,7 @@ function pendingRow(overrides = {}) {
     id: "shop-1",
     status: "ACTIVE",
     shopifyShopId: "gid://shopify/Shop/1",
-    settings: { onboardingCompleted: false },
+    onboardingCompleted: false,
     subscription: {
       id: "subscription-1",
       status: "NO_CONTRACT",
@@ -183,7 +180,7 @@ const payload = createSubscriptionReconcilePayload(
 
 function cycleRow(overrides = {}) {
   return pendingRow({
-    settings: { onboardingCompleted: true },
+    onboardingCompleted: true,
     subscription: {
       id: "subscription-1",
       status: "ACTIVE",
@@ -236,7 +233,7 @@ const establishedProvider = {
 
 function establishedRow(overrides = {}) {
   return pendingRow({
-    settings: { onboardingCompleted: true },
+    onboardingCompleted: true,
     subscription: {
       id: "subscription-1",
       status: "ACTIVE",
@@ -451,7 +448,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("reconstructs a missing FROZEN reconciliation job with one deterministic identity", async () => {
     const next = new Date("2026-09-12T13:00:00.000Z");
-    const row = { id: "shop-1", status: "ACTIVE", settings: { onboardingCompleted: true }, subscription: { id: "subscription-1", status: "FROZEN", planId: "plan-current", billingPeriodId: "period-current", pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: next, plan: { active: true, kind: "PAID_METERED" } } };
+    const row = { id: "shop-1", status: "ACTIVE", onboardingCompleted: true, subscription: { id: "subscription-1", status: "FROZEN", planId: "plan-current", billingPeriodId: "period-current", pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: next, plan: { active: true, kind: "PAID_METERED" } } };
     const test = harness({ nowValue: now });
     test.database.shop.findMany.mockResolvedValue([row]);
     await test.service.reconstruct();
@@ -1085,7 +1082,7 @@ describe("BillingSubscriptionReconciliationService", () => {
   });
 
   it("keeps NO_CONTRACT pending intent and schedules the next retry on null provider truth", async () => {
-    const test = harness({ row: pendingRow({ settings: { onboardingCompleted: true } }), providerResult: null });
+    const test = harness({ row: pendingRow({ onboardingCompleted: true }), providerResult: null });
     await test.service.reconcileJob(payload);
     expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "NO_CONTRACT", nextReconcileAt: expect.any(Date) }),
@@ -1159,7 +1156,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("verifies Free activation transactionally and schedules the period drain", async () => {
     const test = harness({
-      row: pendingRow({ settings: { onboardingCompleted: true } }),
+      row: pendingRow({ onboardingCompleted: true }),
       providerResult: freeProvider,
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true },
     });
@@ -1181,7 +1178,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("activates a matching paid target with a period snapshot, included counter, lifetime grant, and drain schedule", async () => {
     const test = harness({
-      row: pendingRow({ settings: { onboardingCompleted: true }, subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
+      row: pendingRow({ onboardingCompleted: true, subscription: { ...pendingRow().subscription, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026" } }),
       providerResult: paidProvider,
       plan: paidPlan,
     });
@@ -1494,11 +1491,16 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
   });
 
-  it("locks ShopSettings before Subscription for verified Free completion", async () => {
+  it("locks Shop, ShopSettings, and Subscription in order for verified Free completion", async () => {
     const test = harness({ row: pendingRow(), providerResult: freeProvider, plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: false } });
     await test.service.reconcileJob(payload);
-    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
-    expect(test.transaction.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(test.transaction.$queryRaw.mock.invocationCallOrder[1]);
+    expect(test.transaction.$queryRaw.mock.calls.map(([query]: [{ strings?: string[] }]) => query.strings?.join("?") ?? "")).toEqual([
+      expect.stringContaining('FROM "commerce"."Shop"'),
+      expect.stringContaining('FROM "shopify"."ShopSettings"'),
+      expect.stringContaining('FROM "billing"."Subscription"'),
+    ]);
+    expect(test.transaction.shop.update).toHaveBeenCalledWith({ where: { id: "shop-1" }, data: { onboardingCompleted: true } });
+    expect(test.transaction.shopSettings.update).toHaveBeenCalledWith({ where: { shopId: "shop-1" }, data: { onboardingCompleted: true } });
   });
 
   it("does not commit or publish when the locked Free activation state is stale", async () => {
@@ -1518,10 +1520,11 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(payload);
 
-    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(3);
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.transaction.shopEntitlementCounter.upsert).not.toHaveBeenCalled();
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shop.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.queue.add).not.toHaveBeenCalled();
   });
@@ -1544,7 +1547,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
   it("applies another provider plan as authoritative current truth without activating the pending target", async () => {
     const test = harness({
-      row: pendingRow({ settings: { onboardingCompleted: true } }),
+      row: pendingRow({ onboardingCompleted: true }),
       providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"] },
       plan: { ...paidPlan, id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
     });
@@ -1707,7 +1710,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const row = {
       id: "shop-1",
       status: "ACTIVE",
-      settings: { onboardingCompleted: true },
+      onboardingCompleted: true,
       subscription: {
         id: "subscription-1",
         status: "ACTIVE",
@@ -2210,7 +2213,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const currentEnd = new Date("2026-10-01T00:00:00.000Z");
     const test = harness({
       row: pendingRow({
-        settings: { onboardingCompleted: true },
+        onboardingCompleted: true,
         subscription: {
           id: "subscription-1",
           status: "ACTIVE",

@@ -5,7 +5,7 @@ import type { StructuredLogger } from "@modainteract/moda-interact-shared/loggin
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import { ensureCurrentBillingPeriodProjection } from "../current-billing-period-projection.service.js";
-import { lockShopSettings, lockSubscription } from "./locking.js";
+import { lockShop, lockShopSettings, lockSubscription } from "./locking.js";
 import { sameDate, type InitialActivationExpected } from "./classification.js";
 import { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
 import type { InitialActivationPlan, OtherCurrentPlan } from "./types.js";
@@ -88,6 +88,7 @@ export class InitialActivationReconciliationService {
       return;
     }
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await lockShop(transaction, shopId);
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, subscriptionId);
       const current = await transaction.subscription.findUnique({
@@ -143,6 +144,7 @@ export class InitialActivationReconciliationService {
           lastSyncErrorAt: null,
         },
       });
+      await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
       if (!lifetimeCounter) {
         if (!policy) throw new Error("PlatformBillingPolicy.default is required for first lifetime Free grant");
@@ -190,6 +192,7 @@ export class InitialActivationReconciliationService {
     const nextReconcileAt = new Date(Math.max(now.getTime(), periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
     const expectedGrant = allowance as number;
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await lockShop(transaction, shopId);
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, subscriptionId);
       const current = await transaction.subscription.findUnique({
@@ -316,6 +319,7 @@ export class InitialActivationReconciliationService {
           lastSyncErrorAt: null,
         },
       });
+      await transaction.shop.update({ where: { id: shopId }, data: { onboardingCompleted: true } });
       await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
       return true;
     });

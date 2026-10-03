@@ -54,7 +54,7 @@ export class ReconciliationQueueService {
           { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
           { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
           {
-            settings: { is: { onboardingCompleted: true } },
+            onboardingCompleted: true,
             subscription: { is: {
               status: { in: [SubscriptionProjectionStatus.ACTIVE, SubscriptionProjectionStatus.TRIALING] },
               planId: { not: null },

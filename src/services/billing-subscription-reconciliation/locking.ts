@@ -12,7 +12,7 @@ export async function lockShopSettings(transaction: Prisma.TransactionClient, sh
 export async function lockShop(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
   await transaction.$queryRaw(Prisma.sql`
       SELECT "id"
-      FROM "shopify"."Shop"
+      FROM "commerce"."Shop"
       WHERE "id" = ${shopId}
       FOR UPDATE
     `);
