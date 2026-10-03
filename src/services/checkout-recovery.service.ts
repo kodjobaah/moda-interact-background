@@ -30,6 +30,9 @@ import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiati
 import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recovery-outreach-finalization.service.js";
 import { RecoveryOutreachFollowUpProcessorService } from "./checkout-recovery/recovery-outreach-follow-up-processor.service.js";
 import { recoverySnapshotBuilderService } from "./checkout-recovery/recovery-snapshot-builder.service.js";
+import { RecoveryMaterializationService } from "./checkout-recovery/recovery-materialization.service.js";
+import type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
+export type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
 import {
   toLookupInput,
   type AbandonedCheckoutLookupInput,
@@ -49,21 +52,6 @@ interface RecoveryOrderCompletionInput {
   completedAt: string | null;
 }
 
-export type MaturedCandidateMaterializationResult =
-  | { outcome: "recovery-created"; checkoutToken: string }
-  | { outcome: "no-op-existing"; checkoutToken: string; status: string }
-  | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
-  | { outcome: "discarded-not-found"; checkoutToken: string }
-  | { outcome: "discarded-not-recoverable"; checkoutToken: string }
-  | { outcome: "discarded-ambiguous"; checkoutToken: string }
-  | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
-  | { outcome: "discarded-order-completed"; checkoutToken: string }
-  | {
-      outcome: "discarded-shop-unavailable";
-      checkoutToken: string;
-      reason?: "CONTRACT_REQUIRED" | "SUBSCRIPTION_FROZEN" | "SHOP_UNAVAILABLE" | "UNMAPPED_PLAN" | "SYNC_ERROR";
-    };
-
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
   | { kind: "refreshed"; recoveryId: string; status: string }
@@ -75,6 +63,7 @@ export class CheckoutRecoveryService {
   private readonly finalizationService: RecoveryOutreachFinalizationService;
   private readonly followUpProcessorService: RecoveryOutreachFollowUpProcessorService;
   private readonly snapshotBuilderService = recoverySnapshotBuilderService;
+  private readonly materializationService: RecoveryMaterializationService;
 
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -93,6 +82,16 @@ export class CheckoutRecoveryService {
         markRecoveryCapacityBlocked: (recoveryId) => this.markRecoveryCapacityBlocked(recoveryId),
       },
     );
+    this.materializationService = new RecoveryMaterializationService({
+      executionEligibility: shopExecutionEligibilityService,
+      abandonedCheckoutLookup: abandonedCheckoutLookupService,
+      pendingRecoveryCandidate: pendingRecoveryCandidateService,
+      findLatestRecovery,
+      snapshotBuilder: this.snapshotBuilderService,
+      initiate: (seed, generation) => generation === undefined
+        ? this.handleCheckoutCreated(seed)
+        : this.handleCheckoutCreated(seed, generation),
+    });
   }
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -140,136 +139,7 @@ export class CheckoutRecoveryService {
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
-    const execution = await shopExecutionEligibilityService.evaluate(candidate.shopId);
-    if (!execution.allowed) {
-      return {
-        outcome: "discarded-shop-unavailable",
-        checkoutToken: candidate.checkoutToken,
-        ...(execution.reason !== "SHOP_UNAVAILABLE"
-          ? { reason: execution.reason }
-          : {}),
-      } as const;
-    }
-    const shopDomain = await abandonedCheckoutLookupService.resolveShopDomain(
-      candidate.shopId,
-    );
-
-    // Checkout-scoped serialization with the order path (ARCH-001-BACKGROUND-005).
-    return pendingRecoveryCandidateService.withCheckoutLock(
-      candidate.shopId,
-      candidate.checkoutToken,
-      async () => {
-        const lockedExecution = await shopExecutionEligibilityService.evaluate(
-          candidate.shopId,
-        );
-        if (!lockedExecution.allowed) {
-          return {
-            outcome: "discarded-shop-unavailable",
-            checkoutToken: candidate.checkoutToken,
-            ...(lockedExecution.reason !== "SHOP_UNAVAILABLE"
-              ? { reason: lockedExecution.reason }
-              : {}),
-          } as const;
-        }
-
-        // If an order already processed this checkout, the checkout completed
-        // before recovery action was committed: do not create a recovery or
-        // send a recovery message for it.
-        if (
-          await pendingRecoveryCandidateService.hasOrderProcessed(
-            candidate.shopId,
-            candidate.checkoutToken,
-          )
-        ) {
-          return {
-            outcome: "discarded-order-completed",
-            checkoutToken: candidate.checkoutToken,
-          } as const;
-        }
-
-        const existing = await findLatestRecovery(
-          candidate.shopId,
-          candidate.checkoutToken,
-        );
-        let generation = 1;
-        if (existing) {
-          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
-            return {
-              outcome: "no-op-existing",
-              checkoutToken: candidate.checkoutToken,
-              status: existing.status,
-            } as const;
-          }
-          if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
-            return {
-              outcome: "discarded-terminal",
-              checkoutToken: candidate.checkoutToken,
-              status: existing.status,
-            } as const;
-          }
-          generation = existing.generation + 1;
-        }
-
-        const outcome = await abandonedCheckoutLookupService.lookup(
-          toLookupInput(candidate, shopDomain),
-        );
-
-        // Transient Shopify/API failures remain retryable and are never
-        // translated into a "not recoverable" decision.
-        if (outcome.kind === "provider-error") {
-          throw new Error(
-            `Abandoned checkout provider error while materializing candidate: ${outcome.message}`,
-          );
-        }
-
-        if (outcome.kind === "not-found") {
-          return {
-            outcome: "discarded-not-found",
-            checkoutToken: candidate.checkoutToken,
-          } as const;
-        }
-
-        if (outcome.kind === "ambiguous") {
-          return {
-            outcome: "discarded-ambiguous",
-            checkoutToken: candidate.checkoutToken,
-          } as const;
-        }
-
-        if (outcome.kind === "bounded-limit-exceeded") {
-          return {
-            outcome: "discarded-bound-exceeded",
-            checkoutToken: candidate.checkoutToken,
-          } as const;
-        }
-
-        const checkout = outcome.checkout;
-
-        // Shopify reports the checkout already completed: not recoverable.
-        if (checkout.completedAt != null) {
-          return {
-            outcome: "discarded-not-recoverable",
-            checkoutToken: candidate.checkoutToken,
-          } as const;
-        }
-
-        const seed = await this.snapshotBuilderService.build(
-          candidate,
-          shopDomain,
-          checkout,
-        );
-        if (generation === 1) {
-          await this.handleCheckoutCreated(seed);
-        } else {
-          await this.handleCheckoutCreated(seed, generation);
-        }
-
-        return {
-          outcome: "recovery-created",
-          checkoutToken: seed.checkoutToken,
-        } as const;
-      },
-    );
+    return this.materializationService.materialize(candidate);
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
