@@ -6,8 +6,6 @@ import {
 import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
-import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS, type ShopifyDiscountSyncJob } from "@modainteract/moda-interact-shared/shopify";
-import { createShopifyDiscountSyncJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
@@ -19,7 +17,6 @@ import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "./shopify-plan-change-transition.service.js";
 import { ShopifySubscriptionLifecycleReconciliationService } from "./shopify-subscription-lifecycle-reconciliation.service.js";
 import { backgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
-import { shopifyDiscountCatalogueService } from "./shopify-discount-catalogue.service.js";
 import { ensureCurrentBillingPeriodProjection } from "./current-billing-period-projection.service.js";
 import {
   classifySubscriptionReconciliation,
@@ -33,35 +30,22 @@ import {
 } from "./billing-subscription-reconciliation/classification.js";
 import { ReconciliationQueueService } from "./billing-subscription-reconciliation/reconciliation-queue.service.js";
 export { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation/reconciliation-queue.service.js";
+import type { InitialActivationPlan } from "./billing-subscription-reconciliation/types.js";
+import { DiscountSyncPublisherService } from "./billing-subscription-reconciliation/discount-sync-publisher.service.js";
+import { InitialActivationReconciliationService } from "./billing-subscription-reconciliation/initial-activation-reconciliation.service.js";
+import { lockShop, lockShopSettings, lockSubscription } from "./billing-subscription-reconciliation/locking.js";
+import { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./billing-subscription-reconciliation/reconciliation-timing.js";
+export { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./billing-subscription-reconciliation/reconciliation-timing.js";
+export type { InitialActivationPlan } from "./billing-subscription-reconciliation/types.js";
 
-const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const FREE_CYCLE_DISCOVERY_RETRY_MS = 5 * 60 * 1000;
-export const ROLLOVER_RETRY_MS = 60 * 1000;
-const RETRY_TIERS = [
-  { ageMs: 10 * 60 * 1000, delayMs: 60 * 1000 },
-  { ageMs: 60 * 60 * 1000, delayMs: 5 * 60 * 1000 },
-  { ageMs: RETRY_WINDOW_MS, delayMs: 30 * 60 * 1000 },
-] as const;
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
 type RuntimeConfigReader = { current: () => BackgroundRuntimeConfigSnapshot };
-export type InitialActivationPlan = {
-  id: string;
-  active: boolean;
-  name: string;
-  kind: BillingPlanKind;
-  shopifyPlanHandle: string;
-  shopifyUsageEventHandle: string | null;
-  includedRecoveryConversationAllowance: number | null;
-};
-export function nextSubscriptionReconcileAt(pendingEffectiveAt: Date, now = new Date()): Date | null {
-  const ageMs = Math.max(0, now.getTime() - pendingEffectiveAt.getTime());
-  const tier = RETRY_TIERS.find(({ ageMs: tierAge }) => ageMs < tierAge);
-  return tier ? new Date(now.getTime() + tier.delayMs) : null;
-}
 
 export class BillingSubscriptionReconciliationService {
   private readonly reconciliationQueue: ReconciliationQueueService;
+  private readonly initialActivationReconciliation: InitialActivationReconciliationService;
+  private readonly discountSyncPublisher: DiscountSyncPublisherService;
 
   constructor(
     private readonly database: BillingDatabase = prisma,
@@ -76,35 +60,18 @@ export class BillingSubscriptionReconciliationService {
     private readonly discountQueue?: Pick<Queue, "add">,
   ) {
     this.reconciliationQueue = new ReconciliationQueueService(this.database, this.queue, this.logger, this.now);
+    this.discountSyncPublisher = new DiscountSyncPublisherService(this.database, this.discountQueue, this.logger, this.now);
+    this.initialActivationReconciliation = new InitialActivationReconciliationService(
+      this.database,
+      this.reconciliationQueue,
+      this.discountSyncPublisher,
+      this.logger,
+      this.now,
+    );
   }
 
   private async publishDiscountSync(shopId: string, reason: "SUBSCRIPTION_ACTIVATED" | "REINSTALL_RECONCILED"): Promise<void> {
-    if (!this.discountQueue) return;
-    const shop = await this.database.shop.findUnique({ where: { id: shopId }, select: { domain: true } });
-    if (!shop) return;
-    const requestedAt = this.now();
-    const job: ShopifyDiscountSyncJob = {
-      schemaVersion: 1,
-      shopId,
-      shopDomain: shop.domain,
-      reason,
-      requestedAt: requestedAt.toISOString(),
-      deliveryId: null,
-      webhookTopic: null,
-    };
-    try {
-      const requestResult = await shopifyDiscountCatalogueService.requestSync(shopId, requestedAt);
-      if (requestResult === "unavailable") return;
-      await this.discountQueue.add(SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.jobName, job, {
-        jobId: createShopifyDiscountSyncJobId({ shopId, reason, requestedAt: job.requestedAt }),
-        attempts: 3,
-        backoff: { type: "exponential", delay: 1000 },
-        removeOnComplete: true,
-        removeOnFail: false,
-      });
-    } catch (error) {
-      this.logger.warn("shopify.discount_sync.enqueue_failed", { shopId, reason, errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure" });
-    }
+    await this.discountSyncPublisher.publishDiscountSync(shopId, reason);
   }
 
   async activateInitialPaid(
@@ -114,7 +81,7 @@ export class BillingSubscriptionReconciliationService {
     plan: InitialActivationPlan,
     expected: InitialActivationExpected,
   ): Promise<void> {
-    await this.completeVerifiedPaid(shopId, subscriptionId, provider, plan, expected);
+    await this.initialActivationReconciliation.completeVerifiedPaid(shopId, subscriptionId, provider, plan, expected);
   }
 
   async enqueue(job: BillingSubscriptionReconcileJob, delay = 0): Promise<void> {
@@ -250,7 +217,7 @@ export class BillingSubscriptionReconciliationService {
           runtimeConfig,
         );
       } else {
-        await this.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
+        await this.initialActivationReconciliation.recordProviderFailure(row.id, expected as InitialActivationExpected, error);
       }
       return;
     }
@@ -338,7 +305,7 @@ export class BillingSubscriptionReconciliationService {
       } else if (isEstablishedPlanChange) {
         await this.recordEstablishedPlanChangeRetry(row.id, expected as EstablishedPlanChangeExpected, "PROVIDER_STATE_UNRESOLVED");
       } else {
-        await this.recordMissingSubscription(row.id, expected as InitialActivationExpected);
+        await this.initialActivationReconciliation.recordMissingSubscription(row.id, expected as InitialActivationExpected);
       }
       return;
     }
@@ -377,7 +344,7 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
       if (plan?.active && plan.id === row.subscription.pendingPlanId && plan.kind === BillingPlanKind.FREE) {
-        await this.completeVerifiedFree(
+        await this.initialActivationReconciliation.completeVerifiedFree(
           row.id,
           row.subscription.id,
           provider,
@@ -397,7 +364,7 @@ export class BillingSubscriptionReconciliationService {
       && provider.planHandle === row.subscription.pendingShopifyPlanHandle
       && plan.kind === BillingPlanKind.PAID_METERED
     ) {
-      await this.completeVerifiedPaid(
+      await this.initialActivationReconciliation.completeVerifiedPaid(
         row.id,
         row.subscription.id,
         provider,
@@ -416,7 +383,7 @@ export class BillingSubscriptionReconciliationService {
         || plan.shopifyPlanHandle !== row.subscription.pendingShopifyPlanHandle
       )
     ) {
-      await this.recordPaidActivationFailure(
+      await this.initialActivationReconciliation.recordPaidActivationFailure(
         row.id,
         expected as InitialActivationExpected,
         "PENDING_PLAN_HANDLE_MISMATCH",
@@ -424,7 +391,7 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
 
-    await this.applyOtherCurrentPlan(
+    await this.initialActivationReconciliation.applyOtherCurrentPlan(
       row.id,
       row.subscription.id,
       provider,
@@ -703,40 +670,6 @@ export class BillingSubscriptionReconciliationService {
     if (updated.count > 0) this.logger.warn("billing.subscription_reconciliation.reinstall_blocked", { shopId, subscriptionId: expected.subscriptionId, errorCode });
   }
 
-  private async recordMissingSubscription(shopId: string, expected: InitialActivationExpected): Promise<void> {
-    const now = this.now();
-    const next = expected.pendingEffectiveAt ? nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now) : null;
-    const updated = await this.casPendingUpdate(expected, {
-      status: SubscriptionProjectionStatus.NO_CONTRACT,
-      lastSyncedAt: now,
-      lastSyncErrorCode: null,
-      lastSyncErrorAt: null,
-      ...(next ? { nextReconcileAt: next } : {
-        pendingShopifyPlanHandle: null,
-        pendingPlanId: null,
-        pendingEffectiveAt: null,
-        nextReconcileAt: null,
-      }),
-    });
-    if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
-  }
-
-  private async recordProviderFailure(shopId: string, expected: InitialActivationExpected, error: unknown): Promise<void> {
-    const now = this.now();
-    const next = expected.pendingEffectiveAt ? nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now) : null;
-    this.logger.error("billing.subscription_reconciliation.provider_failed", {
-      shopId,
-      subscriptionId: expected.subscriptionId,
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
-    });
-    const updated = await this.casPendingUpdate(expected, {
-        lastSyncErrorCode: "PARTNER_API_ERROR",
-        lastSyncErrorAt: now,
-        ...(next ? { nextReconcileAt: next } : { pendingShopifyPlanHandle: null, pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: null }),
-    });
-    if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
-  }
-
   private async recordFrozenProviderFailure(
     shopId: string,
     subscriptionId: string,
@@ -767,25 +700,6 @@ export class BillingSubscriptionReconciliationService {
       },
     });
     if (updated.count > 0) await this.publishNext(shopId, subscriptionId, next);
-  }
-
-  private async casPendingUpdate(
-    expected: InitialActivationExpected,
-    data: Prisma.SubscriptionUpdateManyMutationInput,
-  ): Promise<boolean> {
-    const result = await this.database.subscription.updateMany({
-      where: {
-        id: expected.subscriptionId,
-        status: SubscriptionProjectionStatus.NO_CONTRACT,
-        planId: null,
-        pendingPlanId: expected.pendingPlanId,
-        pendingShopifyPlanHandle: expected.pendingShopifyPlanHandle,
-        pendingEffectiveAt: expected.pendingEffectiveAt,
-        nextReconcileAt: expected.nextReconcileAt,
-      },
-      data,
-    });
-    return result.count > 0;
   }
 
   private async publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void> {
@@ -1230,7 +1144,7 @@ export class BillingSubscriptionReconciliationService {
       });
       if (billingPeriod.kind === "CONFLICT") {
         const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt } });
+        await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
         return { kind: "conflict" as const, nextReconcileAt };
       }
       await transaction.subscription.update({
@@ -1243,379 +1157,12 @@ export class BillingSubscriptionReconciliationService {
     if (committed.kind === "committed") await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
-  private async completeVerifiedFree(
-    shopId: string,
-    subscriptionId: string,
-    provider: PartnerSubscription,
-    planId: string,
-    recoveryCreditPackEnabled: boolean,
-    expectedNextReconcileAt: string,
-    planName: string,
-    expected: InitialActivationExpected,
-  ): Promise<void> {
-    const now = this.now();
-    const nextReconcileAt = recoveryCreditPackEnabled
-      ? provider.currentPeriodEnd
-        ? new Date(Math.max(now.getTime(), provider.currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS))
-        : new Date(now.getTime() + FREE_CYCLE_DISCOVERY_RETRY_MS)
-      : null;
-    if (!provider.currentPeriodStart || !provider.currentPeriodEnd) {
-      const updated = await this.casPendingUpdate(expected, {
-        lastSyncedAt: now,
-        lastSyncErrorCode: "MISSING_BILLING_CYCLE",
-        lastSyncErrorAt: now,
-        nextReconcileAt,
-      });
-      if (updated && nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
-      return;
-    }
-    const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      await this.lockShopSettings(transaction, shopId);
-      await this.lockSubscription(transaction, subscriptionId);
-      const current = await transaction.subscription.findUnique({
-        where: { id: subscriptionId },
-        select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
-      });
-      if (
-        !current
-        || current.status !== SubscriptionProjectionStatus.NO_CONTRACT
-        || current.planId !== null
-        || current.pendingPlanId !== expected.pendingPlanId
-        || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle
-        || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt?.toISOString()
-        || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)
-      ) return { kind: "stale" as const };
-
-      const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } }, select: { id: true } });
-      const policy = lifetimeCounter
-        ? null
-        : await transaction.platformBillingPolicy.findUnique({ where: { id: "default" }, select: { lifetimeFreeRecoveryAllowance: true } });
-      if (!lifetimeCounter && !policy) throw new Error("PlatformBillingPolicy.default is required for first lifetime Free grant");
-      const billingPeriod = await ensureCurrentBillingPeriodProjection(transaction, {
-        shopId,
-        subscriptionId,
-        periodStart: provider.currentPeriodStart!,
-        periodEnd: provider.currentPeriodEnd!,
-        providerPlanHandle: provider.planHandle,
-        plan: { id: planId, name: planName, kind: BillingPlanKind.FREE, shopifyPlanHandle: provider.planHandle, includedRecoveryConversationAllowance: null },
-      });
-      if (billingPeriod.kind === "CONFLICT") {
-        const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
-        return { kind: "conflict" as const, nextReconcileAt };
-      }
-      await transaction.subscription.update({
-        where: { id: subscriptionId },
-        data: {
-          planId,
-          observedShopifyPlanHandle: provider.planHandle,
-          status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
-          billingPeriodId: billingPeriod.billingPeriodId,
-          currentPeriodStart: provider.currentPeriodStart,
-          currentPeriodEnd: provider.currentPeriodEnd,
-          trialEndsAt: provider.trialEndsAt,
-          cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
-          providerSubscriptionId: provider.providerSubscriptionId,
-          pendingShopifyPlanHandle: null,
-          pendingPlanId: null,
-          pendingEffectiveAt: null,
-          nextReconcileAt,
-          lastSyncedAt: now,
-          lastSyncErrorCode: null,
-          lastSyncErrorAt: null,
-        },
-      });
-      await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-      if (!lifetimeCounter) {
-        if (!policy) throw new Error("PlatformBillingPolicy.default is required for first lifetime Free grant");
-        await transaction.shopEntitlementCounter.upsert({
-          where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
-          update: {},
-          create: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: policy.lifetimeFreeRecoveryAllowance },
-        });
-      }
-      return { kind: "committed" as const };
-    });
-    if (committed.kind === "conflict") await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
-    if (committed.kind === "committed") {
-      await this.publishDiscountSync(shopId, "SUBSCRIPTION_ACTIVATED");
-      if (nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
-    }
-  }
-
-  private async completeVerifiedPaid(
-    shopId: string,
-    subscriptionId: string,
-    provider: PartnerSubscription,
-    plan: InitialActivationPlan,
-    expected: InitialActivationExpected,
-  ): Promise<void> {
-    const now = this.now();
-    const allowance = plan.includedRecoveryConversationAllowance;
-    const isValidAllowance = Number.isSafeInteger(allowance)
-      && (allowance ?? -1) >= 0;
-    const hasValidCycle = provider.currentPeriodStart !== null
-      && provider.currentPeriodEnd !== null
-      && provider.currentPeriodStart < provider.currentPeriodEnd;
-    const hasMeter = Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
-    if (provider.status === "TRIALING" && provider.trialEndsAt && provider.trialEndsAt > now && !hasValidCycle) {
-      await this.recordUnsupportedPaidTrial(shopId, expected);
-      return;
-    }
-    if (!hasValidCycle || !isValidAllowance || !hasMeter) {
-      await this.recordPaidActivationFailure(shopId, expected, !hasValidCycle ? "MISSING_BILLING_CYCLE" : !hasMeter ? "MISSING_USAGE_METER" : "INVALID_INCLUDED_ALLOWANCE");
-      return;
-    }
-
-    const periodStart = provider.currentPeriodStart as Date;
-    const periodEnd = provider.currentPeriodEnd as Date;
-    const nextReconcileAt = new Date(Math.max(now.getTime(), periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
-    const expectedGrant = allowance as number;
-    const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      await this.lockShopSettings(transaction, shopId);
-      await this.lockSubscription(transaction, subscriptionId);
-      const current = await transaction.subscription.findUnique({
-        where: { id: subscriptionId },
-        select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true },
-      });
-      if (
-        !current
-        || current.status !== SubscriptionProjectionStatus.NO_CONTRACT
-        || current.planId !== null
-        || current.pendingPlanId !== expected.pendingPlanId
-        || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle
-        || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString()
-        || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)
-      ) return false;
-
-      const currentPlan = await transaction.billingPlan.findUnique({
-        where: { id: current.pendingPlanId },
-        select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, shopifyUsageEventHandle: true, includedRecoveryConversationAllowance: true },
-      });
-      const currentAllowance = currentPlan?.includedRecoveryConversationAllowance;
-      const currentPlanValid = currentPlan?.id === expected.pendingPlanId
-        && currentPlan.shopifyPlanHandle === expected.pendingShopifyPlanHandle
-        && currentPlan.shopifyPlanHandle === provider.planHandle
-        && currentPlan.active
-        && currentPlan.kind === BillingPlanKind.PAID_METERED
-        && currentPlan.shopifyUsageEventHandle !== null
-        && provider.usageEventHandles.includes(currentPlan.shopifyUsageEventHandle)
-        && currentAllowance === allowance
-        && Number.isSafeInteger(currentAllowance)
-        && (currentAllowance ?? -1) >= 0;
-      if (!currentPlanValid) throw new Error("Initial paid activation found an incompatible pending plan");
-
-      const existingPeriod = await transaction.billingPeriod.findUnique({
-        where: { shopId_periodStart_periodEnd: { shopId, periodStart, periodEnd } },
-      });
-      if (existingPeriod?.status === BillingPeriodStatus.CLOSED) {
-        throw new Error("Initial paid activation cannot reopen a closed billing period");
-      }
-      if (existingPeriod && (
-        existingPeriod.subscriptionId !== subscriptionId
-        || existingPeriod.planId !== currentPlan.id
-        || existingPeriod.shopifyPlanHandleSnapshot !== provider.planHandle
-        || existingPeriod.planNameSnapshot !== currentPlan.name
-        || existingPeriod.planKindSnapshot !== BillingPlanKind.PAID_METERED
-        || existingPeriod.includedRecoveryCreditsGranted !== currentAllowance
-      )) {
-        throw new Error("Initial paid activation found an incompatible billing period");
-      }
-      const billingPeriod = existingPeriod ?? await transaction.billingPeriod.create({
-        data: {
-          shopId,
-          subscriptionId,
-          planId: currentPlan.id,
-          shopifyPlanHandleSnapshot: provider.planHandle,
-          planNameSnapshot: currentPlan.name,
-          planKindSnapshot: BillingPlanKind.PAID_METERED,
-          includedRecoveryCreditsGranted: currentAllowance as number,
-          periodStart,
-          periodEnd,
-          status: BillingPeriodStatus.OPEN,
-        },
-      });
-      const existingCounter = await transaction.billingPeriodEntitlementCounter.findUnique({
-        where: {
-          billingPeriodId_counter: {
-            billingPeriodId: billingPeriod.id,
-            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          },
-        },
-      });
-      if (existingCounter && (
-        existingCounter.grantedQuantity !== currentAllowance
-        || existingCounter.shopId !== shopId
-      )) {
-        throw new Error("Initial paid activation found an incompatible included-credit counter");
-      }
-      await transaction.billingPeriodEntitlementCounter.upsert({
-        where: {
-          billingPeriodId_counter: {
-            billingPeriodId: billingPeriod.id,
-            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          },
-        },
-        update: {},
-        create: {
-          shopId,
-          billingPeriodId: billingPeriod.id,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          grantedQuantity: currentAllowance as number,
-          committedQuantity: 0,
-          reservedQuantity: 0,
-          forfeitedQuantity: 0,
-        },
-      });
-      const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({
-        where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
-      });
-      if (!lifetimeCounter) {
-        const policy = await transaction.platformBillingPolicy.findUnique({ where: { id: "default" }, select: { lifetimeFreeRecoveryAllowance: true } });
-        if (!policy) throw new Error("PlatformBillingPolicy.default is required for first lifetime Free grant");
-        await transaction.shopEntitlementCounter.create({
-          data: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: policy.lifetimeFreeRecoveryAllowance },
-        });
-      }
-      await transaction.subscription.update({
-        where: { id: subscriptionId },
-        data: {
-          planId: currentPlan.id,
-          observedShopifyPlanHandle: provider.planHandle,
-          status: SubscriptionProjectionStatus.ACTIVE,
-          billingPeriodId: billingPeriod.id,
-          currentPeriodStart: periodStart,
-          currentPeriodEnd: periodEnd,
-          trialEndsAt: provider.trialEndsAt,
-          cancelAtPeriodEnd: provider.cancelAtPeriodEnd,
-          providerSubscriptionId: provider.providerSubscriptionId,
-          pendingShopifyPlanHandle: null,
-          pendingPlanId: null,
-          pendingEffectiveAt: null,
-          nextReconcileAt,
-          lastSyncedAt: now,
-          lastSyncErrorCode: null,
-          lastSyncErrorAt: null,
-        },
-      });
-      await transaction.shopSettings.update({ where: { shopId }, data: { onboardingCompleted: true } });
-      return true;
-    });
-    if (committed) {
-      await this.publishDiscountSync(shopId, "SUBSCRIPTION_ACTIVATED");
-      await this.publishNext(shopId, subscriptionId, nextReconcileAt);
-    }
-  }
-
-  private async recordUnsupportedPaidTrial(shopId: string, expected: InitialActivationExpected): Promise<void> {
-    const now = this.now();
-    const updated = await this.casPendingUpdate(expected, {
-      lastSyncedAt: now,
-      lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL",
-      lastSyncErrorAt: now,
-      nextReconcileAt: null,
-    });
-    if (updated) {
-      this.logger.warn("billing.subscription_reconciliation.unsupported_paid_trial", {
-        shopId,
-        subscriptionId: expected.subscriptionId,
-      });
-    }
-  }
-
-  private async recordPaidActivationFailure(
-    shopId: string,
-    expected: InitialActivationExpected,
-    errorCode: "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE" | "PENDING_PLAN_HANDLE_MISMATCH",
-  ): Promise<void> {
-    const now = this.now();
-    const next = nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now);
-    const updated = await this.casPendingUpdate(expected, {
-      lastSyncedAt: now,
-      lastSyncErrorCode: errorCode,
-      lastSyncErrorAt: now,
-      ...(next ? { nextReconcileAt: next } : { nextReconcileAt: null }),
-    });
-    if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
-  }
-
-  private async applyOtherCurrentPlan(
-    shopId: string,
-    subscriptionId: string,
-    provider: PartnerSubscription,
-    plan: { id: string; active: boolean; name: string; kind: BillingPlanKind; shopifyPlanHandle: string; shopifyUsageEventHandle: string | null; includedRecoveryConversationAllowance: number | null } | null,
-    pendingShopifyPlanHandle: string,
-    expectedNextReconcileAt: string,
-    expected: InitialActivationExpected,
-  ): Promise<void> {
-    const now = this.now();
-    const planUsable = Boolean(plan?.active);
-    const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
-      || Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
-    const hasValidProviderCycle = provider.currentPeriodStart !== null
-      && provider.currentPeriodEnd !== null
-      && provider.currentPeriodStart < provider.currentPeriodEnd;
-    const status = !planUsable
-      ? SubscriptionProjectionStatus.UNMAPPED
-      : !meterUsable
-        ? SubscriptionProjectionStatus.SYNC_ERROR
-        : provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE;
-    if (planUsable && meterUsable && !hasValidProviderCycle) {
-      const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-      const updated = await this.casPendingUpdate(expected, {
-        lastSyncedAt: now,
-        lastSyncErrorCode: "MISSING_BILLING_CYCLE",
-        lastSyncErrorAt: now,
-        nextReconcileAt,
-      });
-      if (updated) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
-      return;
-    }
-    const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
-      await this.lockShopSettings(transaction, shopId);
-      await this.lockSubscription(transaction, subscriptionId);
-      const current = await transaction.subscription.findUnique({ where: { id: subscriptionId }, select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true } });
-      if (!current || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return { kind: "stale" as const };
-      const billingPeriod = planUsable && meterUsable && plan && provider.currentPeriodStart && provider.currentPeriodEnd
-        ? await ensureCurrentBillingPeriodProjection(transaction, {
-            shopId,
-            subscriptionId,
-            periodStart: provider.currentPeriodStart,
-            periodEnd: provider.currentPeriodEnd,
-            providerPlanHandle: provider.planHandle,
-            plan,
-          })
-        : null;
-      if (billingPeriod?.kind === "CONFLICT") {
-        const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt } });
-        return { kind: "conflict" as const, nextReconcileAt };
-      }
-      const pendingPlan = provider.pendingPlanHandle
-        ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
-        : null;
-      await transaction.subscription.update({ where: { id: subscriptionId }, data: { planId: planUsable ? plan?.id ?? null : null, observedShopifyPlanHandle: provider.planHandle, status, billingPeriodId: billingPeriod?.kind === "READY" ? billingPeriod.billingPeriodId : null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd, trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId, pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: status === SubscriptionProjectionStatus.UNMAPPED ? "UNMAPPED_PLAN_HANDLE" : status === SubscriptionProjectionStatus.SYNC_ERROR ? "MISSING_USAGE_METER" : null, lastSyncErrorAt: status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING ? null : now } });
-      return { kind: "committed" as const };
-    });
-    if (committed.kind === "conflict") await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
-  }
-
   private async lockShopSettings(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
-    await transaction.$queryRaw(Prisma.sql`
-      SELECT "shopId"
-      FROM "shopify"."ShopSettings"
-      WHERE "shopId" = ${shopId}
-      FOR UPDATE
-    `);
+    await lockShopSettings(transaction, shopId);
   }
 
   private async lockShop(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
-    await transaction.$queryRaw(Prisma.sql`
-      SELECT "id"
-      FROM "shopify"."Shop"
-      WHERE "id" = ${shopId}
-      FOR UPDATE
-    `);
+    await lockShop(transaction, shopId);
   }
 
   private async isReinstallAuthority(
@@ -1639,12 +1186,7 @@ export class BillingSubscriptionReconciliationService {
   }
 
   private async lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
-    await transaction.$queryRaw(Prisma.sql`
-      SELECT "id"
-      FROM "billing"."Subscription"
-      WHERE "id" = ${subscriptionId}
-      FOR UPDATE
-    `);
+    await lockSubscription(transaction, subscriptionId);
   }
 }
 
