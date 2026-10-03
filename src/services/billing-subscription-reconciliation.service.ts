@@ -3,7 +3,7 @@ import {
   type BillingSubscriptionReconcileJob,
 } from "@modainteract/moda-interact-shared/billing";
 import { BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
-import { Prisma, type PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
@@ -26,7 +26,10 @@ import { InitialActivationReconciliationService } from "./billing-subscription-r
 import { ReinstallReconciliationService } from "./billing-subscription-reconciliation/reinstall-reconciliation.service.js";
 import { BillingCycleReconciliationService } from "./billing-subscription-reconciliation/billing-cycle-reconciliation.service.js";
 import { EstablishedPlanChangeReconciliationService } from "./billing-subscription-reconciliation/established-plan-change-reconciliation.service.js";
-import { lockShop, lockShopSettings, lockSubscription } from "./billing-subscription-reconciliation/locking.js";
+import {
+  ReconciliationContextService,
+} from "./billing-subscription-reconciliation/reconciliation-context.js";
+import type { ReconciliationClassification } from "./billing-subscription-reconciliation/classification.js";
 import { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt } from "./billing-subscription-reconciliation/reconciliation-timing.js";
 export { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./billing-subscription-reconciliation/reconciliation-timing.js";
 export type { InitialActivationPlan } from "./billing-subscription-reconciliation/types.js";
@@ -42,6 +45,7 @@ export class BillingSubscriptionReconciliationService {
   private readonly reinstallReconciliation: ReinstallReconciliationService;
   private readonly billingCycleReconciliation: BillingCycleReconciliationService;
   private readonly establishedPlanChangeReconciliation: EstablishedPlanChangeReconciliationService;
+  private readonly reconciliationContext: ReconciliationContextService;
 
   constructor(
     private readonly database: BillingDatabase = prisma,
@@ -55,6 +59,7 @@ export class BillingSubscriptionReconciliationService {
     private readonly runtimeConfig: RuntimeConfigReader = backgroundRuntimeConfigService,
     private readonly discountQueue?: Pick<Queue, "add">,
   ) {
+    this.reconciliationContext = new ReconciliationContextService(this.database);
     this.reconciliationQueue = new ReconciliationQueueService(this.database, this.queue, this.logger, this.now);
     this.discountSyncPublisher = new DiscountSyncPublisherService(this.database, this.discountQueue, this.logger, this.now);
     this.initialActivationReconciliation = new InitialActivationReconciliationService(
@@ -124,37 +129,21 @@ export class BillingSubscriptionReconciliationService {
         ...fields,
       });
     };
-    const rowResult = await this.database.shop.findUnique({
-      where: { id: job.shopId },
-      select: {
-        id: true,
-        status: true,
-        reinstallPendingAt: true,
-        shopifyShopId: true,
-        settings: { select: { onboardingCompleted: true } },
-        subscription: {
-          select: {
-            id: true,
-            status: true,
-            planId: true,
-            pendingPlanId: true,
-            pendingShopifyPlanHandle: true,
-            pendingEffectiveAt: true,
-            nextReconcileAt: true,
-            billingPeriodId: true,
-            currentPeriodStart: true,
-            currentPeriodEnd: true,
-            cancelAtPeriodEnd: true,
-            lastSyncErrorCode: true,
-          },
-        },
-      },
-    });
+    const rowResult = await this.reconciliationContext.loadShop(job.shopId);
     const classification = classifySubscriptionReconciliation(rowResult, job);
     if (classification.type === "skip") {
       logSkip(classification.reason, classification.fields);
       return;
     }
+    await this.dispatchAcceptedJob(job, runtimeConfig, classification, logSkip);
+  }
+
+  private async dispatchAcceptedJob(
+    job: BillingSubscriptionReconcileJob,
+    runtimeConfig: BackgroundRuntimeConfigSnapshot,
+    classification: Extract<ReconciliationClassification, { type: "accepted" }>,
+    logSkip: (reason: string, fields?: Record<string, unknown>) => void,
+  ): Promise<void> {
     const row = classification.row;
     if (classification.kind === "reinstall") {
       this.logger.info("billing.subscription_reconciliation.job_accepted", {
@@ -185,10 +174,7 @@ export class BillingSubscriptionReconciliationService {
 
     const expected = classification.expected;
     const currentPlan = (isCycleDiscovery || isRollover || isEstablishedPlanChange || isFrozenReconciliation) && row.subscription.planId
-      ? await this.database.billingPlan.findUnique({
-          where: { id: row.subscription.planId },
-          select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, recoveryCreditPackEnabled: true, shopifyUsageEventHandle: true, shopifyRecoveryCreditPackEventHandle: true, includedRecoveryConversationAllowance: true },
-        })
+      ? await this.reconciliationContext.loadCurrentPlan(row.subscription.planId)
       : null;
     if (isCycleDiscovery && (!currentPlan || !currentPlan.active || currentPlan.kind !== BillingPlanKind.FREE || !currentPlan.recoveryCreditPackEnabled)) {
       logSkip("cycle-discovery-plan-ineligible", { currentPlanKind: currentPlan?.kind ?? null, currentPlanActive: currentPlan?.active ?? null });
@@ -410,17 +396,6 @@ export class BillingSubscriptionReconciliationService {
     await this.reconciliationQueue.publishCommittedLifecycleSchedule(shopId, subscriptionId);
   }
 
-  private async lockShopSettings(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
-    await lockShopSettings(transaction, shopId);
-  }
-
-  private async lockShop(transaction: Prisma.TransactionClient, shopId: string): Promise<void> {
-    await lockShop(transaction, shopId);
-  }
-
-  private async lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
-    await lockSubscription(transaction, subscriptionId);
-  }
 }
 
 export const billingSubscriptionReconciliationService = new BillingSubscriptionReconciliationService();
