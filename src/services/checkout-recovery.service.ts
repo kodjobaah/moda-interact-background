@@ -29,6 +29,7 @@ import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
 import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiation.service.js";
 import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recovery-outreach-finalization.service.js";
 import { RecoveryOutreachFollowUpProcessorService } from "./checkout-recovery/recovery-outreach-follow-up-processor.service.js";
+import { recoverySnapshotBuilderService } from "./checkout-recovery/recovery-snapshot-builder.service.js";
 import {
   toLookupInput,
   type AbandonedCheckoutLookupInput,
@@ -36,12 +37,6 @@ import {
 } from "../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
 import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
-import {
-  canonicaliseLanguageTag,
-  normalizeCountryCode,
-  normalizeTimeZone,
-  type InternationalContext,
-} from "@modainteract/moda-interact-shared/internationalization";
 
 interface RecoveryOrderCompletionInput {
   shop: string;
@@ -79,6 +74,7 @@ export class CheckoutRecoveryService {
   private readonly initiationService: RecoveryInitiationService;
   private readonly finalizationService: RecoveryOutreachFinalizationService;
   private readonly followUpProcessorService: RecoveryOutreachFollowUpProcessorService;
+  private readonly snapshotBuilderService = recoverySnapshotBuilderService;
 
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -257,15 +253,10 @@ export class CheckoutRecoveryService {
           } as const;
         }
 
-        const internationalContext = await this.resolveInternationalContext(
-          candidate,
-          checkout,
-        );
-        const seed = this.toRecoverySeed(
+        const seed = await this.snapshotBuilderService.build(
           candidate,
           shopDomain,
           checkout,
-          internationalContext,
         );
         if (generation === 1) {
           await this.handleCheckoutCreated(seed);
@@ -290,129 +281,6 @@ export class CheckoutRecoveryService {
       },
       data: { lastExternalActivityAt: activityAt },
     });
-  }
-
-  /**
-   * Map current Shopify data plus candidate correlation identifiers into the
-   * existing recovery seed shape. Only the lookup result supplies customer,
-   * line item, pricing, currency and recovery URL; the candidate provides only
-   * the shopId, checkout token and cart token.
-   */
-  private toRecoverySeed(
-    candidate: PendingRecoveryCandidate,
-    shopDomain: string,
-    checkout: NormalizedAbandonedCheckout,
-    internationalContext: InternationalContext,
-  ): RecoveryCheckoutSeed {
-    return {
-      shop: shopDomain,
-      checkoutToken: candidate.checkoutToken,
-      cartToken: candidate.cartToken,
-      detectedAt:
-        checkout.createdAt ||
-        candidate.checkoutCreatedAt ||
-        new Date().toISOString(),
-      ...(candidate.lastActivityAt
-        ? { lastExternalActivityAt: candidate.lastActivityAt }
-        : {}),
-      currency: checkout.currencyCode,
-      totalPrice: checkout.totalPrice,
-      checkoutUrl: checkout.abandonedCheckoutUrl,
-      completedAt: checkout.completedAt,
-      internationalContext,
-      customer: checkout.customer
-        ? {
-            shopifyCustomerId: checkout.customer.shopifyCustomerId,
-            phone: checkout.customer.phone,
-            email: checkout.customer.email,
-            firstName: checkout.customer.firstName,
-            lastName: checkout.customer.lastName,
-          }
-        : {
-            shopifyCustomerId: null,
-            phone: null,
-            email: null,
-            firstName: null,
-            lastName: null,
-          },
-      lineItems: this.serializeLineItems(checkout.lineItems),
-    };
-  }
-
-  private async resolveInternationalContext(
-    candidate: PendingRecoveryCandidate,
-    checkout: NormalizedAbandonedCheckout,
-  ): Promise<InternationalContext> {
-    const shop = await prisma.shop.findUnique({
-      where: { id: candidate.shopId },
-      select: {
-        settings: {
-          select: {
-            defaultLanguageTag: true,
-            defaultCountryCode: true,
-            defaultTimeZone: true,
-          },
-        },
-      },
-    });
-
-    const eventContext = candidate.internationalContext;
-    const currentContext = checkout.internationalContext ?? {
-      languageTag: null,
-      languageSource: null,
-      countryCode: null,
-      currencyCode: null,
-      timeZone: null,
-    };
-    const merchantContext = shop?.settings;
-    const languageTag =
-      safelyNormalize(
-        merchantContext?.defaultLanguageTag,
-        canonicaliseLanguageTag,
-      );
-    const countryCode =
-      currentContext.countryCode ??
-      eventContext?.countryCode ??
-      safelyNormalize(
-        merchantContext?.defaultCountryCode,
-        normalizeCountryCode,
-      );
-    const timeZone =
-      currentContext.timeZone ??
-
-      eventContext?.timeZone ??
-      safelyNormalize(merchantContext?.defaultTimeZone, normalizeTimeZone);
-
-    return {
-      languageTag,
-      languageSource: languageTag
-        ? "merchant-default"
-        : null,
-      countryCode,
-      currencyCode:
-        currentContext.currencyCode ?? eventContext?.currencyCode ?? null,
-      timeZone,
-    };
-  }
-
-  /**
-   * Serialize current Shopify abandoned-checkout line items into the durable
-   * recovery snapshot shape. This is the only place that maps normalized line
-   * items into the stored `CheckoutRecovery.lineItems` JSON, so creation
-   * (BACKGROUND-004) and refresh (BACKGROUND-006) store an identical shape.
-   */
-  private serializeLineItems(
-    lineItems: NormalizedAbandonedCheckout["lineItems"],
-  ): RecoveryCheckoutSeed["lineItems"] {
-    return lineItems.map((li) => ({
-      productId: li.productId,
-      variantId: li.variantId,
-      title: li.title,
-      variantTitle: li.variantTitle,
-      sku: li.sku,
-      quantity: li.quantity,
-      price: li.price,
-    }));
   }
 
   /**
@@ -551,7 +419,9 @@ export class CheckoutRecoveryService {
           currency: checkout.currencyCode,
           totalPrice: checkout.totalPrice,
           checkoutUrl: checkout.abandonedCheckoutUrl,
-          lineItems: this.serializeLineItems(checkout.lineItems),
+          lineItems: this.snapshotBuilderService.serializeLineItems(
+            checkout.lineItems,
+          ),
         },
       });
       return updated;
@@ -884,12 +754,10 @@ export class CheckoutRecoveryService {
           abandonedCheckoutUrl: current.checkoutUrl,
           checkoutCreatedAt: current.detectedAt.toISOString(),
         };
-        const context = await this.resolveInternationalContext(candidate, outcome.checkout);
-        const seed = this.toRecoverySeed(
+        const seed = await this.snapshotBuilderService.build(
           candidate,
           recovery.shop.domain,
           outcome.checkout,
-          context,
         );
         if ((current.generation ?? 1) === 1) {
           await this.handleCheckoutCreated(seed);
