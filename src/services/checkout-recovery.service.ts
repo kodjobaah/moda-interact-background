@@ -35,17 +35,8 @@ import type { AgentMessage, RecoveryAgentContext } from "../agents/types.js";
 import { CheckoutEventOrchestratorService } from "./checkout-recovery/checkout-event-orchestrator.service.js";
 import type { CheckoutRefreshResult } from "./checkout-recovery/checkout-event-orchestrator.service.js";
 export type { CheckoutRefreshResult } from "./checkout-recovery/checkout-event-orchestrator.service.js";
-
-interface RecoveryOrderCompletionInput {
-  shop: string;
-  orderId: string;
-  checkoutToken: string | null;
-  cartToken: string | null;
-  customerId: string | null;
-  totalPrice: string | null;
-  currency: string | null;
-  completedAt: string | null;
-}
+import { OrderRecoveryCorrelationService } from "./checkout-recovery/order-recovery-correlation.service.js";
+import type { RecoveryOrderCompletionInput } from "./checkout-recovery/order-recovery-correlation.service.js";
 
 export class CheckoutRecoveryService {
   private readonly initiationService: RecoveryInitiationService;
@@ -54,6 +45,7 @@ export class CheckoutRecoveryService {
   private readonly snapshotBuilderService = recoverySnapshotBuilderService;
   private readonly materializationService: RecoveryMaterializationService;
   private readonly checkoutEventOrchestrator: CheckoutEventOrchestratorService;
+  private readonly orderRecoveryCorrelationService: OrderRecoveryCorrelationService;
 
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -89,6 +81,10 @@ export class CheckoutRecoveryService {
       findLatestRecovery,
       abandonedCheckoutLookupService,
       this.snapshotBuilderService,
+    );
+    this.orderRecoveryCorrelationService = new OrderRecoveryCorrelationService(
+      prisma,
+      pendingRecoveryCandidateService,
     );
   }
 
@@ -160,140 +156,7 @@ export class CheckoutRecoveryService {
    * or retained business event is created for an unrelated order.
    */
   async handleOrderCompleted(event: RecoveryOrderCompletionInput) {
-    // Customer identity alone must not associate an order with recovery; we
-    // require a checkout/cart correlation identifier.
-    if (!event.checkoutToken && !event.cartToken) {
-      return { kind: "ignored", reason: "missing-correlation" } as const;
-    }
-
-    const shop = await prisma.shop.findUnique({
-      where: { domain: event.shop },
-      select: { id: true, status: true },
-    });
-
-    if (!shop) {
-      return { kind: "ignored", reason: "shop-not-found" } as const;
-    }
-    if (shop.status !== "ACTIVE") {
-      return { kind: "ignored", reason: "shop-unavailable" } as const;
-    }
-
-    // Cart-only orders must be correlated through the indexed transient
-    // candidate correlation before we can determine the checkout scope.
-    let checkoutTokenForScope = event.checkoutToken;
-    if (!checkoutTokenForScope) {
-      const cartOnly = await pendingRecoveryCandidateService.resolveCandidate({
-        shopId: shop.id,
-        checkoutToken: null,
-        cartToken: event.cartToken,
-      });
-
-      if (!cartOnly) {
-        return { kind: "discarded", reason: "no-checkout-token" } as const;
-      }
-
-      checkoutTokenForScope = cartOnly.candidate.checkoutToken;
-    }
-    return pendingRecoveryCandidateService.withCheckoutLock(
-      shop.id,
-      checkoutTokenForScope,
-      async () => {
-        // 1. Resolve a pending candidate (checkout then cart fallback, O(1)).
-        const matched = await pendingRecoveryCandidateService.resolveCandidate({
-          shopId: shop.id,
-          checkoutToken: checkoutTokenForScope,
-          cartToken: event.cartToken,
-        });
-
-        if (matched) {
-          // The checkout completed before recovery began: cancel the candidate
-          // and all its aliases, then discard the order.
-          await pendingRecoveryCandidateService.cancelCandidate(matched);
-          await pendingRecoveryCandidateService.markOrderProcessed(
-            shop.id,
-            matched.candidate.checkoutToken,
-          );
-          return {
-            kind: "cancelled-candidate",
-            checkoutToken: matched.candidate.checkoutToken,
-          } as const;
-        }
-
-        const checkoutToken = event.checkoutToken as string | null;
-        if (!checkoutToken) {
-          // No candidate matched, so there is no checkout identity with which
-          // to find an existing recovery.
-          return { kind: "discarded", reason: "no-checkout-token" } as const;
-        }
-        // 2. No candidate. Record that an order was processed for this checkout
-        //    so an in-flight materialization cannot send a recovery message.
-        await pendingRecoveryCandidateService.markOrderProcessed(
-          shop.id,
-          checkoutToken,
-        );
-
-        // 3. Look up and complete the existing recovery if eligible.
-        return prisma.$transaction(async (transaction) => {
-          const recovery = await transaction.checkoutRecovery.findFirst({
-            where: { shopId: shop.id, checkoutToken },
-            orderBy: [{ generation: "desc" }, { id: "desc" }],
-            select: { id: true, status: true, generation: true },
-          });
-
-          if (!recovery) {
-            return { kind: "discarded", reason: "recovery-not-found" } as const;
-          }
-
-          if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
-            return {
-              kind: "ignored",
-              reason: `terminal-${recovery.status.toLowerCase()}`,
-            } as const;
-          }
-
-          const completedAt = new Date(
-            event.completedAt ?? new Date().toISOString(),
-          );
-
-          const updated = await transaction.checkoutRecovery.updateMany({
-            where: {
-              id: recovery.id,
-              status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-            },
-            data: {
-              status: "COMPLETED",
-              completedAt,
-              admissionBlockedAt: null,
-              admissionBlockReason: null,
-            },
-          });
-
-          if (updated.count === 0) {
-            return { kind: "ignored", reason: "already-transitioned" } as const;
-          }
-
-          await transaction.checkoutRecoveryStatusHistory.create({
-            data: {
-              checkoutRecoveryId: recovery.id,
-              fromStatus: recovery.status,
-              toStatus: "COMPLETED",
-              reason: "Order completed",
-              source: "shopify.orders.create",
-              metadata: event.customerId
-                ? { orderId: event.orderId, customerId: event.customerId }
-                : { orderId: event.orderId },
-              occurredAt: completedAt,
-            },
-          });
-
-          return {
-            kind: "completed",
-            recoveryId: recovery.id,
-            fromStatus: recovery.status,
-          } as const;
-        });
-      },
-    );
+    return this.orderRecoveryCorrelationService.handleOrderCompleted(event);
   }
 
   async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1) {
