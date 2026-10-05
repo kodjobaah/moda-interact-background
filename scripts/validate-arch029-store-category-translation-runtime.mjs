@@ -25,6 +25,9 @@ const required = [
   '"commerce"."CommerceStoreCategoryTranslationBatchItem"',
   "STORE_CATEGORY_TRANSLATION_JOB_NAMES",
   "createCommerceTranslationProviderCredentialAad",
+  "background.store_category_translation.batch_polled",
+  "providerResponseSummary",
+  "requestCounts",
 ];
 for (const token of required) {
   if (!combined.includes(token)) throw new Error(`ARCH-029 B01 missing required runtime token: ${token}`);

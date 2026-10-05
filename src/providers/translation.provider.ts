@@ -48,8 +48,15 @@ export type NormalizedProviderStatus =
   | "expired"
   | "cancelled";
 
+export type TranslationProviderRequestCounts = {
+  total: number | null;
+  completed: number | null;
+  failed: number | null;
+};
+
 export type TranslationProviderBatch = {
   provider: "openai";
+  providerStatus: OpenAIBatchStatus;
   providerBatchId: string;
   logicalBatchId: string;
   status: NormalizedProviderStatus;
@@ -58,7 +65,15 @@ export type TranslationProviderBatch = {
   errorFileId: string | null;
   failureCode: string | null;
   createdAt: string | null;
+  inProgressAt?: string | null;
+  expiresAt?: string | null;
+  finalizingAt?: string | null;
   completedAt: string | null;
+  failedAt?: string | null;
+  expiredAt?: string | null;
+  cancellingAt?: string | null;
+  cancelledAt?: string | null;
+  requestCounts?: TranslationProviderRequestCounts | null;
 };
 
 export type TranslationProviderResult = {
@@ -113,7 +128,19 @@ type OpenAIBatch = {
   errors?: { data?: Array<{ code?: string | null }> } | null;
   metadata?: Record<string, string> | null;
   created_at?: number | null;
+  in_progress_at?: number | null;
+  expires_at?: number | null;
+  finalizing_at?: number | null;
   completed_at?: number | null;
+  failed_at?: number | null;
+  expired_at?: number | null;
+  cancelling_at?: number | null;
+  cancelled_at?: number | null;
+  request_counts?: {
+    total?: number | null;
+    completed?: number | null;
+    failed?: number | null;
+  } | null;
 };
 
 type ParsedOutputLine = {
@@ -338,6 +365,7 @@ function normalizeBatch(
 ): TranslationProviderBatch {
   return {
     provider: "openai",
+    providerStatus: batch.status,
     providerBatchId: batch.id,
     logicalBatchId,
     status: normalizeStatus(batch.status),
@@ -346,7 +374,15 @@ function normalizeBatch(
     errorFileId: batch.error_file_id ?? null,
     failureCode: batch.errors?.data?.[0]?.code ?? null,
     createdAt: toIsoDate(batch.created_at),
+    inProgressAt: toIsoDate(batch.in_progress_at),
+    expiresAt: toIsoDate(batch.expires_at),
+    finalizingAt: toIsoDate(batch.finalizing_at),
     completedAt: toIsoDate(batch.completed_at),
+    failedAt: toIsoDate(batch.failed_at),
+    expiredAt: toIsoDate(batch.expired_at),
+    cancellingAt: toIsoDate(batch.cancelling_at),
+    cancelledAt: toIsoDate(batch.cancelled_at),
+    requestCounts: normalizeRequestCounts(batch.request_counts),
   };
 }
 
@@ -369,6 +405,17 @@ function toIsoDate(timestamp: number | null | undefined): string | null {
   return timestamp === null || timestamp === undefined
     ? null
     : new Date(timestamp * 1000).toISOString();
+}
+
+function normalizeRequestCounts(
+  counts: OpenAIBatch["request_counts"],
+): TranslationProviderRequestCounts | null {
+  if (!counts) return null;
+  return {
+    total: typeof counts.total === "number" ? counts.total : null,
+    completed: typeof counts.completed === "number" ? counts.completed : null,
+    failed: typeof counts.failed === "number" ? counts.failed : null,
+  };
 }
 
 function parseOutputFile(body: string): TranslationProviderResult[] {

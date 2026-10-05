@@ -15,6 +15,7 @@ import { MERCHANT_COMMUNICATIONS_QUEUE_NAME } from "../domain/translation-batch.
 import {
   createOpenAITranslationProvider,
   type TranslationProvider,
+  type TranslationProviderBatch,
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -36,6 +37,7 @@ import {
 type PollBatch = {
   id: string;
   runId: string;
+  categoryId: string;
   environment: string;
   provider: string;
   model: string;
@@ -60,6 +62,26 @@ const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
+
+function providerResponseSummary(batch: TranslationProviderBatch) {
+  return {
+    status: batch.providerStatus,
+    normalizedStatus: batch.status,
+    createdAt: batch.createdAt,
+    inProgressAt: batch.inProgressAt ?? null,
+    expiresAt: batch.expiresAt ?? null,
+    finalizingAt: batch.finalizingAt ?? null,
+    completedAt: batch.completedAt,
+    failedAt: batch.failedAt ?? null,
+    expiredAt: batch.expiredAt ?? null,
+    cancellingAt: batch.cancellingAt ?? null,
+    cancelledAt: batch.cancelledAt ?? null,
+    requestCounts: batch.requestCounts ?? null,
+    outputFileAvailable: Boolean(batch.outputFileId),
+    errorFileAvailable: Boolean(batch.errorFileId),
+    failureCode: batch.failureCode,
+  };
+}
 
 function defaultCredentialResolver(): TranslationProviderCredentialResolver {
   return createTranslationProviderCredentialResolver({
@@ -131,21 +153,45 @@ export class StoreCategoryTranslationBatchPollService {
       const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
       providerBatch = await provider.retrieveBatch(batch.providerBatchId);
     } catch (error) {
-      const nextSequence = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
-      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig.translationPollIntervalSeconds);
+      const schedule = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+      await this.enqueuePoll(batch.id, schedule.pollSequence, runtimeConfig.translationPollIntervalSeconds);
       logger.warn("background.store_category_translation.batch_poll_failed", {
         runId: batch.runId,
         batchId: batch.id,
-        pollSequence: nextSequence,
+        pollSequence: schedule.pollSequence,
+        nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
         errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
       });
-      return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+      return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
     }
 
     if (providerBatch.status === "nonterminal") {
-      const nextSequence = await this.advanceNonterminal(batch, runtimeConfig);
-      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig.translationPollIntervalSeconds);
-      return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+      const schedule = await this.advanceNonterminal(batch, runtimeConfig);
+      await this.enqueuePoll(
+        batch.id,
+        schedule.pollSequence,
+        runtimeConfig.translationPollIntervalSeconds,
+      );
+      logger.info("background.store_category_translation.batch_polled", {
+        runId: batch.runId,
+        categoryId: batch.categoryId,
+        batchId: batch.id,
+        providerBatchId: batch.providerBatchId,
+        provider: batch.provider,
+        model: batch.model,
+        providerStatus: providerBatch.providerStatus,
+        normalizedStatus: providerBatch.status,
+        providerResponse: providerResponseSummary(providerBatch),
+        pollSequence: batch.pollSequence,
+        nextPollSequence: schedule.pollSequence,
+        nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
+        pollIntervalSeconds: runtimeConfig.translationPollIntervalSeconds,
+      });
+      return {
+        status: "rescheduled",
+        batchId: batch.id,
+        pollSequence: schedule.pollSequence,
+      };
     }
 
     if (providerBatch.status === "completed") {
@@ -165,6 +211,20 @@ export class StoreCategoryTranslationBatchPollService {
             AND "pollSequence" = ${batch.pollSequence}
         `));
       if (updated !== 1) return { status: "stale", batchId: batch.id };
+      logger.info("background.store_category_translation.batch_polled", {
+        runId: batch.runId,
+        categoryId: batch.categoryId,
+        batchId: batch.id,
+        providerBatchId: batch.providerBatchId,
+        provider: batch.provider,
+        model: batch.model,
+        providerStatus: providerBatch.providerStatus,
+        normalizedStatus: providerBatch.status,
+        providerResponse: providerResponseSummary(providerBatch),
+        pollSequence: batch.pollSequence,
+        outputFileAvailable: Boolean(providerBatch.outputFileId),
+        errorFileAvailable: Boolean(providerBatch.errorFileId),
+      });
       await this.enqueueResults(batch.id);
       return { status: "completed", batchId: batch.id };
     }
@@ -176,13 +236,25 @@ export class StoreCategoryTranslationBatchPollService {
       runtimeConfig,
     );
     if (!terminalApplied) return { status: "stale", batchId: batch.id };
+    logger.warn("background.store_category_translation.batch_polled", {
+      runId: batch.runId,
+      categoryId: batch.categoryId,
+      batchId: batch.id,
+      providerBatchId: batch.providerBatchId,
+      provider: batch.provider,
+      model: batch.model,
+      providerStatus: providerBatch.providerStatus,
+      normalizedStatus: providerBatch.status,
+      providerResponse: providerResponseSummary(providerBatch),
+      pollSequence: batch.pollSequence,
+    });
     return { status: "terminal", batchId: batch.id, providerStatus: providerBatch.status };
   }
 
   private async loadBatch(batchId: string): Promise<PollBatch | null> {
     return this.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<PollBatch[]>(Prisma.sql`
-        SELECT b."id", b."runId", r."environment"::text AS "environment",
+        SELECT b."id", b."runId", r."categoryId", r."environment"::text AS "environment",
           b."provider", b."model", b."providerBatchId", b."status"::text AS "status", b."pollSequence"
         FROM "commerce"."CommerceStoreCategoryTranslationBatch" b
         INNER JOIN "commerce"."CommerceStoreCategoryTranslationRun" r ON r."id" = b."runId"
@@ -195,9 +267,9 @@ export class StoreCategoryTranslationBatchPollService {
   private async rescheduleAfterReadFailure(
     batch: PollBatch,
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
-  ): Promise<number> {
+  ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -208,18 +280,18 @@ export class StoreCategoryTranslationBatchPollService {
         WHERE "id" = ${batch.id}
           AND "status" = 'SUBMITTED'
           AND "pollSequence" = ${batch.pollSequence}
-        RETURNING "pollSequence"
+        RETURNING "pollSequence", "nextPollAt"
       `);
-      return rows[0]?.pollSequence ?? batch.pollSequence;
+      return rows[0] ?? { pollSequence: batch.pollSequence, nextPollAt: null };
     });
   }
 
   private async advanceNonterminal(
     batch: PollBatch,
     runtimeConfig: BackgroundRuntimeConfigSnapshot,
-  ): Promise<number> {
+  ): Promise<{ pollSequence: number; nextPollAt: Date | null }> {
     return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<Array<{ pollSequence: number }>>(Prisma.sql`
+      const rows = await transaction.$queryRaw<Array<{ pollSequence: number; nextPollAt: Date | null }>>(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
         SET
           "lastPolledAt" = NOW(),
@@ -230,9 +302,9 @@ export class StoreCategoryTranslationBatchPollService {
         WHERE "id" = ${batch.id}
           AND "status" = 'SUBMITTED'
           AND "pollSequence" = ${batch.pollSequence}
-        RETURNING "pollSequence"
+        RETURNING "pollSequence", "nextPollAt"
       `);
-      return rows[0]?.pollSequence ?? batch.pollSequence;
+      return rows[0] ?? { pollSequence: batch.pollSequence, nextPollAt: null };
     });
   }
 

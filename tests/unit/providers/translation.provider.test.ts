@@ -97,6 +97,40 @@ describe("OpenAI translation provider", () => {
     expect(line.body.input[1]?.content).toContain("Shoes");
   });
 
+  it("preserves bounded OpenAI Batch progress metadata for operational logging", async () => {
+    const client = createFakeClient();
+    client.batches.retrieve.mockResolvedValue({
+      id: "batch-progress",
+      status: "in_progress",
+      input_file_id: "file-input",
+      output_file_id: null,
+      error_file_id: null,
+      created_at: 1_780_000_000,
+      in_progress_at: 1_780_000_010,
+      expires_at: 1_780_086_400,
+      finalizing_at: null,
+      completed_at: null,
+      failed_at: null,
+      expired_at: null,
+      cancelling_at: null,
+      cancelled_at: null,
+      request_counts: { total: 57, completed: 41, failed: 0 },
+    });
+    const provider = createOpenAITranslationProvider({
+      client: client as never,
+    });
+
+    await expect(provider.retrieveBatch("batch-progress")).resolves.toMatchObject({
+      providerStatus: "in_progress",
+      status: "nonterminal",
+      requestCounts: { total: 57, completed: 41, failed: 0 },
+      inProgressAt: new Date(1_780_000_010 * 1000).toISOString(),
+      expiresAt: new Date(1_780_086_400 * 1000).toISOString(),
+      outputFileId: null,
+      errorFileId: null,
+    });
+  });
+
   it("normalizes provider statuses", () => {
     expect(translationProviderTestInternals.normalizeStatus("in_progress")).toBe(
       "nonterminal",
