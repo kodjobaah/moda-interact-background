@@ -25,7 +25,8 @@
     "readiness:merchant-knowledge-worker": "node dist/readiness.js moda-merchant-knowledge-worker",
     "readiness:billing-worker": "node dist/readiness.js moda-billing-worker",
     "prisma:validate": "prisma validate --schema database/prisma/schema.prisma",
-    "prisma:generate": "prisma generate --schema database/prisma/schema.prisma"
+    "prisma:generate": "prisma generate --schema database/prisma/schema.prisma",
+    "test:arch029-store-category-translation-runtime": "node scripts/validate-arch029-store-category-translation-runtime.mjs"
   },
   "keywords": [],
   "author": "",
@@ -33,7 +34,7 @@
   "dependencies": {
     "@ai-sdk/openai": "^4.0.46",
     "@aws-sdk/client-s3": "^3.1143.0",
-    "@modainteract/moda-interact-shared": "1.1.0",
+    "@modainteract/moda-interact-shared": "1.3.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",

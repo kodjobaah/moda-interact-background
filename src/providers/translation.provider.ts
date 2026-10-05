@@ -35,7 +35,7 @@ type OpenAIBatchStatus =
 export type TranslationRequest = {
   translationId: string;
   providerCustomId?: string;
-  direction: MerchantTranslationDirection;
+  direction?: MerchantTranslationDirection;
   sourceLanguageTag: string;
   targetLanguageTag: string;
   sourceText: string;
@@ -95,6 +95,7 @@ type OpenAITranslationProviderOptions = {
   model?: string;
   provider?: string;
   maxCorrelationPages?: number;
+  apiKey?: string;
 };
 
 type BatchListPage = {
@@ -145,7 +146,7 @@ export class TranslationProviderResponseError extends Error {
 export function createOpenAITranslationProvider(
   options: OpenAITranslationProviderOptions = {},
 ): TranslationProvider {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const apiKey = options.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
   const model = options.model?.trim() || process.env.TRANSLATION_MODEL?.trim();
   const provider = options.provider?.trim() || process.env.TRANSLATION_PROVIDER?.trim() || "openai";
 
@@ -272,7 +273,9 @@ export function createOpenAITranslationProvider(
 }
 
 function buildBatchRequestLine(request: TranslationRequest, model: string): string {
-  MerchantTranslationDirectionSchema.parse(request.direction);
+  if (request.direction !== undefined) {
+    MerchantTranslationDirectionSchema.parse(request.direction);
+  }
   const customId = request.providerCustomId ?? encodeTranslationId(request.translationId);
 
   return JSON.stringify({

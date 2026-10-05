@@ -14,8 +14,15 @@ import { handleTranslationBatchResults } from "./translation-batch-results.worke
 import { handleTranslationReconcile } from "./translation-reconcile.worker.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
+import { STORE_CATEGORY_TRANSLATION_JOB_NAMES } from "../domain/store-category-translation.js";
+import { handleStoreCategoryTranslationBatchSubmit } from "./store-category-translation-batch-submit.worker.js";
+import { handleStoreCategoryTranslationBatchPoll } from "./store-category-translation-batch-poll.worker.js";
+import { handleStoreCategoryTranslationBatchResults } from "./store-category-translation-batch-results.worker.js";
 
-const jobNames = Object.values(MERCHANT_COMMUNICATIONS_JOB_NAMES);
+const jobNames = [
+  ...Object.values(MERCHANT_COMMUNICATIONS_JOB_NAMES),
+  ...Object.values(STORE_CATEGORY_TRANSLATION_JOB_NAMES),
+];
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-merchant-communications-worker",
   enableMetrics: false,
@@ -43,6 +50,12 @@ export function createMerchantCommunicationsWorker() {
           return handleTranslationBatchResults(job.data);
         case MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_RECONCILE:
           return handleTranslationReconcile(job.data);
+        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_SUBMIT:
+          return handleStoreCategoryTranslationBatchSubmit(job.data);
+        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL:
+          return handleStoreCategoryTranslationBatchPoll(job.data);
+        case STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
+          return handleStoreCategoryTranslationBatchResults(job.data);
         default:
           throw new Error(`Unknown merchant communications job: ${job.name}`);
       }

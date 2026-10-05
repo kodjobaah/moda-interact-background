@@ -74,6 +74,29 @@ describe("OpenAI translation provider", () => {
     );
   });
 
+  it("accepts generic translation requests without a support-message direction", async () => {
+    const client = createFakeClient();
+    const provider = createOpenAITranslationProvider({
+      client: client as never,
+      model: "gpt-4.1-mini",
+      apiKey: "database-backed-key",
+    });
+
+    await provider.prepareBatchInput([{
+      translationId: "store-category-item-1",
+      sourceLanguageTag: "en",
+      targetLanguageTag: "fr",
+      sourceText: "Shoes",
+    }]);
+
+    const upload = client.files.create.mock.calls[0]?.[0] as { file: Blob };
+    const line = JSON.parse((await upload.file.text()).trim()) as {
+      body: { input: Array<{ role: string; content: string }> };
+    };
+    expect(line.body.input[1]?.content).toContain("Translate from en to fr.");
+    expect(line.body.input[1]?.content).toContain("Shoes");
+  });
+
   it("normalizes provider statuses", () => {
     expect(translationProviderTestInternals.normalizeStatus("in_progress")).toBe(
       "nonterminal",

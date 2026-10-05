@@ -6,6 +6,7 @@ import { backgroundRuntimeConfigService } from "../runtime/background-runtime-co
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
+import { storeCategoryTranslationReconciliationService } from "../services/store-category-translation-reconciliation.service.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
 void startReadyWorkerProcess({
@@ -28,7 +29,21 @@ void startReadyWorkerProcess({
       intervalMs: 0,
       runImmediately: true,
       getIntervalMs: (snapshot) => snapshot.translationReconciliationIntervalSeconds * 1000,
-      run: async (snapshot) => { await translationReconciliationService.reconcile(undefined, snapshot); },
+      run: async (snapshot) => {
+        const outcomes = await Promise.allSettled([
+          translationReconciliationService.reconcile(undefined, snapshot),
+          storeCategoryTranslationReconciliationService.reconcile(snapshot),
+        ]);
+        const failures = outcomes.filter(
+          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+        );
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures.map((failure) => failure.reason),
+            "translation reconciliation failed",
+          );
+        }
+      },
       onError: (error) => console.error("translation reconciliation failed", error),
     });
 
@@ -45,6 +60,7 @@ void startReadyWorkerProcess({
         stopScheduler,
         () => backgroundRuntimeConfigService.close(),
         () => translationReconciliationService.close(),
+        () => storeCategoryTranslationReconciliationService.close(),
         closeWorkerObservability,
         closeQueuePerformanceTelemetry,
       ],
