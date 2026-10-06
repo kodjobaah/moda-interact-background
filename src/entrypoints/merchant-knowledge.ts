@@ -13,7 +13,9 @@ import { MerchantKnowledgeWebPageAcquirer } from "../services/merchant-knowledge
 import { MerchantKnowledgeUploadCleanupService } from "../services/merchant-knowledge-upload-cleanup.service.js";
 import { createMerchantKnowledgeR2Client } from "../services/merchant-knowledge-r2-client.js";
 import { loadMerchantKnowledgeR2Config } from "../services/merchant-knowledge-r2-config.js";
-import { MerchantKnowledgeEmbeddingService, loadMerchantKnowledgeEmbeddingConfig } from "../services/merchant-knowledge-embedding.js";
+import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
+import { createMerchantKnowledgeEmbeddingResolver } from "../services/merchant-knowledge-embedding-runtime.js";
 import { MerchantKnowledgeProcessingService } from "../services/merchant-knowledge-processing.service.js";
 import { merchantKnowledgeReconciliationService } from "../services/merchant-knowledge-reconciliation.service.js";
 import { merchantKnowledgeEntitlementReconciliationService } from "../services/merchant-knowledge-entitlement-reconciliation.service.js";
@@ -21,9 +23,11 @@ import { merchantKnowledgeEntitlementReconciliationService } from "../services/m
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-knowledge-worker",
   loadWorkerProcess: async () => {
-    const embedding = new MerchantKnowledgeEmbeddingService(
-      loadMerchantKnowledgeEmbeddingConfig(),
-    );
+    const embeddingResolver = createMerchantKnowledgeEmbeddingResolver({
+      db: prisma,
+      environment: resolveCommerceEnvironment(),
+      keyring: readCommerceCredentialKeyring(),
+    });
     const r2Config = loadMerchantKnowledgeR2Config();
     const r2 = createMerchantKnowledgeR2Client(r2Config);
     const uploadedAssetAcquirer = new MerchantKnowledgeUploadedAssetAcquirerService({
@@ -36,7 +40,7 @@ void startReadyWorkerProcess({
     const processingService = new MerchantKnowledgeProcessingService({
       webPageAcquirer: new MerchantKnowledgeWebPageAcquirer(),
       uploadedAssetAcquirer,
-      embedding,
+      embeddingResolver,
     });
     const uploadCleanupService = new MerchantKnowledgeUploadCleanupService({
       database: prisma,

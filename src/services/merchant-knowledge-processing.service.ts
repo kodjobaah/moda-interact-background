@@ -23,7 +23,11 @@ import {
   classifyMerchantKnowledgeProcessingError,
   MerchantKnowledgeProcessingError,
 } from "./merchant-knowledge-failures.js";
-import type { MerchantKnowledgeEmbeddingService } from "./merchant-knowledge-embedding.js";
+import type {
+  MerchantKnowledgeEmbeddingConfig,
+  MerchantKnowledgeEmbeddingService,
+} from "./merchant-knowledge-embedding.js";
+import type { MerchantKnowledgeEmbeddingResolver } from "./merchant-knowledge-embedding-runtime.js";
 import {
   countMerchantKnowledgeCodePoints,
   merchantKnowledgeContentUnits,
@@ -51,7 +55,8 @@ export interface MerchantKnowledgeProcessingDependencies {
   eligibility?: EligibilityResolver;
   webPageAcquirer: MerchantKnowledgeWebPageAcquirer;
   uploadedAssetAcquirer: MerchantKnowledgeUploadedAssetAcquirer;
-  embedding: MerchantKnowledgeEmbeddingService;
+  embedding?: MerchantKnowledgeEmbeddingService;
+  embeddingResolver?: MerchantKnowledgeEmbeddingResolver;
   logger?: StructuredLogger;
   now?: () => Date;
 }
@@ -68,6 +73,9 @@ export class MerchantKnowledgeProcessingService {
   private readonly now: () => Date;
 
   constructor(private readonly dependencies: MerchantKnowledgeProcessingDependencies) {
+    if (!dependencies.embedding && !dependencies.embeddingResolver) {
+      throw new Error("Merchant Knowledge embedding runtime is required");
+    }
     this.database = dependencies.database ?? prisma;
     this.eligibility = dependencies.eligibility ?? merchantKnowledgeEntitlementService;
     this.logger = dependencies.logger ?? logger;
@@ -164,6 +172,7 @@ export class MerchantKnowledgeProcessingService {
     }
 
     let acquired;
+    let embedding: MerchantKnowledgeEmbeddingService;
     let content: string;
     let contentUnits: number;
     let truncated: boolean;
@@ -173,6 +182,7 @@ export class MerchantKnowledgeProcessingService {
     const maxContentUnits = initialEligibility.entitlement.maxContentUnitsPerSource;
     const maxCodePoints = maxContentUnits * 4;
     try {
+      embedding = await this.resolveEmbedding();
       acquired = await this.acquire(revision, job);
       const normalized = normalizeMerchantKnowledgeText(acquired.extractedText);
       const normalizedCodePoints = countMerchantKnowledgeCodePoints(normalized);
@@ -182,8 +192,8 @@ export class MerchantKnowledgeProcessingService {
       contentHash = createHash("sha256").update(content, "utf8").digest("hex");
       chunks = chunkMerchantKnowledgeText(content);
       for (const chunk of chunks) {
-        const vector = await this.dependencies.embedding.embed(chunk.content);
-        this.validateVector(vector);
+        const vector = await embedding.embed(chunk.content);
+        this.validateVector(vector, embedding.config.dimensions);
         chunkVectors.push(vector);
       }
     } catch (error) {
@@ -216,6 +226,7 @@ export class MerchantKnowledgeProcessingService {
       truncated,
       chunks,
       vectors: chunkVectors,
+      embeddingConfig: embedding.config,
     });
     this.logOutcome(revision.id, promoted ? "ACTIVE" : "STALE_NOOP");
   }
@@ -333,6 +344,7 @@ export class MerchantKnowledgeProcessingService {
     truncated: boolean;
     chunks: MerchantKnowledgeChunkContent[];
     vectors: number[][];
+    embeddingConfig: MerchantKnowledgeEmbeddingConfig;
   }): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const source = await transaction.merchantKnowledgeSource.findUnique({
@@ -404,7 +416,7 @@ export class MerchantKnowledgeProcessingService {
         const chunk = input.chunks[index];
         const vector = input.vectors[index];
         if (!chunk || !vector) continue;
-        this.validateVector(vector);
+        this.validateVector(vector, input.embeddingConfig.dimensions);
         const vectorLiteral = `[${vector.map((value) => value.toString()).join(",")}]`;
         await transaction.$executeRaw(Prisma.sql`
           INSERT INTO "commerce"."MerchantKnowledgeChunk"
@@ -412,9 +424,9 @@ export class MerchantKnowledgeProcessingService {
              "embedding", "embeddingProvider", "embeddingModel", "embeddingDimensions", "embeddingIndexVersion")
           VALUES
             (${randomUUID()}, ${candidate.id}, ${chunk.ordinal}, ${chunk.content}, ${chunk.contentUnits}, ${chunk.contentHash},
-             ${vectorLiteral}::vector, ${this.dependencies.embedding.config.provider},
-             ${this.dependencies.embedding.config.model}, ${this.dependencies.embedding.config.dimensions},
-             ${this.dependencies.embedding.config.indexVersion})
+             ${vectorLiteral}::vector, ${input.embeddingConfig.provider},
+             ${input.embeddingConfig.model}, ${input.embeddingConfig.dimensions},
+             ${input.embeddingConfig.indexVersion})
         `);
       }
 
@@ -445,9 +457,14 @@ export class MerchantKnowledgeProcessingService {
     });
   }
 
-  private validateVector(vector: number[]): void {
+  private async resolveEmbedding(): Promise<MerchantKnowledgeEmbeddingService> {
+    if (this.dependencies.embedding) return this.dependencies.embedding;
+    return this.dependencies.embeddingResolver!.resolve();
+  }
+
+  private validateVector(vector: number[], expectedDimensions: number): void {
     if (
-      vector.length !== this.dependencies.embedding.config.dimensions
+      vector.length !== expectedDimensions
       || !vector.every((value) => Number.isFinite(value))
     ) {
       throw new MerchantKnowledgeProcessingError("EMBEDDING_VECTOR_INVALID", false);

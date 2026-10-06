@@ -1,7 +1,5 @@
 import OpenAI from "openai";
 
-import { countMerchantKnowledgeCodePoints } from "./merchant-knowledge-normalization.js";
-
 export interface MerchantKnowledgeEmbeddingConfig {
   provider: "openai";
   model: string;
@@ -22,40 +20,6 @@ export class MerchantKnowledgeEmbeddingConfigurationError extends Error {
     super(code);
     this.name = "MerchantKnowledgeEmbeddingConfigurationError";
   }
-}
-
-export function loadMerchantKnowledgeEmbeddingConfig(
-  environment: NodeJS.ProcessEnv = process.env,
-): MerchantKnowledgeEmbeddingConfig {
-  const provider = environment.EMBEDDING_PROVIDER?.trim();
-  const model = environment.EMBEDDING_MODEL?.trim();
-  const dimensionsValue = environment.EMBEDDING_DIMENSIONS?.trim();
-  const indexVersion = environment.EMBEDDING_INDEX_VERSION?.trim();
-  const apiKey = environment.EMBEDDING_API_KEY?.trim();
-
-  if (provider !== "openai") {
-    throw new MerchantKnowledgeEmbeddingConfigurationError(
-      "UNSUPPORTED_EMBEDDING_PROVIDER",
-    );
-  }
-  if (!model || !dimensionsValue || !indexVersion || !apiKey) {
-    throw new MerchantKnowledgeEmbeddingConfigurationError(
-      "INVALID_EMBEDDING_CONFIGURATION",
-    );
-  }
-
-  const dimensions = Number(dimensionsValue);
-  if (
-    !Number.isSafeInteger(dimensions)
-    || dimensions <= 0
-    || countMerchantKnowledgeCodePoints(indexVersion) > 64
-  ) {
-    throw new MerchantKnowledgeEmbeddingConfigurationError(
-      "INVALID_EMBEDDING_CONFIGURATION",
-    );
-  }
-
-  return { provider: "openai", model, dimensions, indexVersion, apiKey };
 }
 
 interface OpenAIEmbeddingClient {
