@@ -657,10 +657,14 @@ export class BillingReconciliationService {
           await transaction.subscription.update({
             where: { id: existing.id },
             data: {
+              status,
+              observedShopifyPlanHandle: provider.planHandle,
               billingPeriodId: result.billingPeriodId,
               currentPeriodStart: provider.currentPeriodStart,
               currentPeriodEnd: provider.currentPeriodEnd,
               lastSyncedAt: now,
+              lastSyncErrorCode: syncErrorCode,
+              lastSyncErrorAt: syncErrorCode ? now : null,
             },
           });
           return { kind: "ready" as const };

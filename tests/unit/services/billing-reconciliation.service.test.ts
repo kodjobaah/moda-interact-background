@@ -597,6 +597,41 @@ describe("BillingReconciliationService", () => {
     }));
   });
 
+  it("clears a stale sync error after a successful same-plan current-cycle reconciliation", async () => {
+    const cycleStart = new Date("2026-09-01T00:00:00.000Z");
+    const cycleEnd = new Date("2026-10-01T00:00:00.000Z");
+    const plan = { id: "plan-free", active: true, name: "Free", kind: "FREE", shopifyPlanHandle: "free-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null };
+    const test = harness({
+      plan,
+      partnerResult: { ...providerSubscription, planHandle: "free-2026", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null, currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd },
+    });
+    const stale = {
+      id: "subscription-1", status: "SYNC_ERROR", planId: plan.id, billingPeriodId: "period-1",
+      currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd, cancelAtPeriodEnd: true,
+      pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: cycleEnd,
+      lastSyncErrorCode: "PARTNER_API_ERROR",
+    };
+    test.database.subscription.findUnique.mockResolvedValue(stale);
+    test.transaction.subscription.findUnique.mockResolvedValue(stale);
+    test.transaction.billingPeriod.findUnique.mockResolvedValue({
+      id: "period-1", shopId: "shop-1", subscriptionId: "subscription-1", planId: plan.id,
+      shopifyPlanHandleSnapshot: "free-2026", planNameSnapshot: "Free", planKindSnapshot: "FREE",
+      includedRecoveryCreditsGranted: null, periodStart: cycleStart, periodEnd: cycleEnd, status: "OPEN",
+    });
+
+    await expect(test.service.reconcileOnce()).resolves.toMatchObject({ subscriptionErrors: 0 });
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith({
+      where: { id: "subscription-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        observedShopifyPlanHandle: "free-2026",
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+      }),
+    });
+  });
+
   it("does not recreate a missing lifetime Free counter when recovery history makes the grant ambiguous", async () => {
     const cycleStart = new Date("2026-09-01T00:00:00.000Z");
     const cycleEnd = new Date("2026-10-01T00:00:00.000Z");
