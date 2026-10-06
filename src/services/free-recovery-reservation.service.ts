@@ -69,7 +69,21 @@ export class FreeRecoveryReservationService {
     const quantity = validateQuantity(input.quantity);
     return this.withRetry(() =>
       this.database.$transaction(
-        (transaction) => this.reserveInTransaction(transaction, input, quantity),
+        (transaction) =>
+          this.reserveInTransaction(transaction, input, quantity, false),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
+  }
+
+  async reservePostContract(
+    input: FreeRecoveryReservationInput,
+  ): Promise<ReservationOutcome> {
+    const quantity = validateQuantity(input.quantity);
+    return this.withRetry(() =>
+      this.database.$transaction(
+        (transaction) =>
+          this.reserveInTransaction(transaction, input, quantity, true),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
@@ -109,6 +123,7 @@ export class FreeRecoveryReservationService {
     transaction: ReservationTransaction,
     input: FreeRecoveryReservationInput,
     quantity: number,
+    postContract: boolean,
   ): Promise<ReservationOutcome> {
     const existing = await transaction.usageReservation.findUnique({
       where: { sourceKey: input.sourceKey },
@@ -146,8 +161,10 @@ export class FreeRecoveryReservationService {
       return replayOutcome(existing, counter);
     }
 
-    const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
-    if (policy.newRecoveriesPaused) return { kind: "paused" };
+    if (!postContract) {
+      const policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
+      if (policy.newRecoveriesPaused) return { kind: "paused" };
+    }
 
     const counter = await transaction.shopEntitlementCounter.findUnique({
       where: {

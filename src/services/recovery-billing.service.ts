@@ -32,6 +32,11 @@ import {
   promotionalRecoveryReservationService,
   type PromotionalReservationOutcome,
 } from "./promotional-recovery-reservation.service.js";
+import {
+  postContractRecoveryPolicyResolver,
+  PostContractRecoveryPolicyError,
+  type PostContractRecoveryPolicy,
+} from "./post-contract-recovery-policy.service.js";
 
 const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
 
@@ -51,9 +56,14 @@ type RecoveryPolicyResolver = Pick<
   typeof effectiveBillingPolicyResolver,
   "resolve"
 >;
+type PostContractRecoveryPolicyResolver = Pick<
+  typeof postContractRecoveryPolicyResolver,
+  "resolve"
+>;
+type RecoveryPolicy = EffectiveBillingPolicy | PostContractRecoveryPolicy;
 type FreeReservationService = Pick<
   typeof freeRecoveryReservationService,
-  "reserve" | "commit" | "release" | "markAmbiguous"
+  "reserve" | "reservePostContract" | "commit" | "release" | "markAmbiguous"
 >;
 type PurchasedReservationService = Pick<
   typeof purchasedRecoveryReservationService,
@@ -82,7 +92,7 @@ export type RecoveryBillingAdmission =
   | {
       kind: "purchased";
       sourceKey: string;
-      policy: EffectiveBillingPolicy;
+      policy: RecoveryPolicy;
     }
   | {
       kind: "promotional";
@@ -92,7 +102,7 @@ export type RecoveryBillingAdmission =
   | {
       kind: "lifetime-free";
       sourceKey: string;
-      policy: EffectiveBillingPolicy;
+      policy: RecoveryPolicy;
     };
 
 export type RecoveryBillingAdmissionResult =
@@ -120,6 +130,7 @@ export class RecoveryBillingService {
     private readonly purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
     private readonly paidIncludedReservationService: PaidIncludedReservationService = paidIncludedRecoveryReservationService,
     private readonly promotionalReservationService: PromotionalReservationService = promotionalRecoveryReservationService,
+    private readonly postContractPolicyResolver: PostContractRecoveryPolicyResolver = postContractRecoveryPolicyResolver,
   ) {}
 
   async admit(input: {
@@ -127,13 +138,36 @@ export class RecoveryBillingService {
     recoveryId: string;
     outreachAttemptId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
+    const sourceKey = createRecoveryIdempotencyKey(
+      input.shopId,
+      input.outreachAttemptId
+        ? `recovery-outreach:${input.outreachAttemptId}`
+        : input.recoveryId,
+    );
+
     let policy: EffectiveBillingPolicy;
     try {
       policy = await this.policyResolver.resolve(input.shopId);
     } catch (error) {
       if (error instanceof EffectiveBillingPolicyError) {
         if (error.reason === "NO_CONTRACT") {
-          return { kind: "blocked", reason: "contract-required" };
+          try {
+            const postContractPolicy =
+              await this.postContractPolicyResolver.resolve(input.shopId);
+            return this.admitPostContract(
+              input.shopId,
+              sourceKey,
+              postContractPolicy,
+            );
+          } catch (postContractError) {
+            if (
+              postContractError instanceof PostContractRecoveryPolicyError &&
+              postContractError.reason === "CONTRACT_REQUIRED"
+            ) {
+              return { kind: "blocked", reason: "contract-required" };
+            }
+            throw postContractError;
+          }
         }
         if (error.reason === "SUBSCRIPTION_FROZEN") {
           return { kind: "blocked", reason: "subscription-frozen" };
@@ -144,12 +178,6 @@ export class RecoveryBillingService {
     if (!policy.features.has(CHECKOUT_RECOVERY_FEATURE_KEY)) {
       return { kind: "blocked", reason: "feature-unavailable" };
     }
-    const sourceKey = createRecoveryIdempotencyKey(
-      input.shopId,
-      input.outreachAttemptId
-        ? `recovery-outreach:${input.outreachAttemptId}`
-        : input.recoveryId,
-    );
 
     if (policy.newRecoveriesPaused) {
       return { kind: "blocked", reason: "paused" };
@@ -250,6 +278,29 @@ export class RecoveryBillingService {
     };
   }
 
+  private async admitPostContract(
+    shopId: string,
+    sourceKey: string,
+    policy: PostContractRecoveryPolicy,
+  ): Promise<RecoveryBillingAdmissionResult> {
+    if (policy.newRecoveriesPaused) {
+      return { kind: "blocked", reason: "paused" };
+    }
+
+    const purchased = await this.tryPurchasedAdmission(shopId, sourceKey, policy);
+    if (purchased) return purchased;
+
+    const lifetimeFree = await this.tryLifetimeFreeAdmission(
+      shopId,
+      sourceKey,
+      policy,
+      true,
+    );
+    if (lifetimeFree) return lifetimeFree;
+
+    return { kind: "blocked", reason: "capacity-exhausted" };
+  }
+
   async revalidateBeforeProvider(input: {
     admission: RecoveryBillingAdmission;
     recoveryId: string;
@@ -260,12 +311,36 @@ export class RecoveryBillingService {
       current = await this.policyResolver.resolve(input.admission.policy.shopId);
     } catch (error) {
       if (error instanceof EffectiveBillingPolicyError) {
-        if (error.reason === "NO_CONTRACT" || error.reason === "SUBSCRIPTION_FROZEN") {
+        if (error.reason === "NO_CONTRACT") {
+          if (isDurableCreditAdmission(input.admission)) {
+            try {
+              const postContractPolicy =
+                await this.postContractPolicyResolver.resolve(
+                  input.admission.policy.shopId,
+                );
+              if (postContractPolicy.newRecoveriesPaused) {
+                await this.releaseBeforeProvider(input.admission);
+                return { kind: "blocked", reason: "paused" };
+              }
+              return { kind: "admitted", admission: input.admission };
+            } catch (postContractError) {
+              if (
+                postContractError instanceof PostContractRecoveryPolicyError &&
+                (postContractError.reason === "CONTRACT_REQUIRED" ||
+                  postContractError.reason === "SHOP_UNAVAILABLE")
+              ) {
+                await this.releaseBeforeProvider(input.admission);
+                return { kind: "blocked", reason: "contract-required" };
+              }
+              throw postContractError;
+            }
+          }
           await this.releaseBeforeProvider(input.admission);
-          return {
-            kind: "blocked",
-            reason: error.reason === "NO_CONTRACT" ? "contract-required" : "subscription-frozen",
-          };
+          return { kind: "blocked", reason: "contract-required" };
+        }
+        if (error.reason === "SUBSCRIPTION_FROZEN") {
+          await this.releaseBeforeProvider(input.admission);
+          return { kind: "blocked", reason: "subscription-frozen" };
         }
       }
       throw error;
@@ -282,6 +357,11 @@ export class RecoveryBillingService {
     if (current.newRecoveriesPaused) {
       await this.releaseBeforeProvider(input.admission);
       return { kind: "blocked", reason: "paused" };
+    }
+
+    if (!current.features.has(CHECKOUT_RECOVERY_FEATURE_KEY)) {
+      await this.releaseBeforeProvider(input.admission);
+      return { kind: "blocked", reason: "feature-unavailable" };
     }
 
     if (
@@ -457,7 +537,7 @@ export class RecoveryBillingService {
   private async tryPurchasedAdmission(
     shopId: string,
     sourceKey: string,
-    policy: EffectiveBillingPolicy,
+    policy: RecoveryPolicy,
   ): Promise<RecoveryBillingAdmissionResult | null> {
     const reservationInput: PurchasedRecoveryReservationInput = {
       shopId,
@@ -486,10 +566,9 @@ export class RecoveryBillingService {
       if (isAmbiguous(reservation))
         return { kind: "blocked", reason: "reservation-in-flight" };
       if (isReleased(reservation)) {
-        const reactivated = await this.reservationService.reserve({
-          shopId,
-          sourceKey,
-        });
+        const reactivated = isPostContractRecoveryPolicy(policy)
+          ? await this.reservationService.reservePostContract({ shopId, sourceKey })
+          : await this.reservationService.reserve({ shopId, sourceKey });
         if (!isAdmittedReplay(reactivated, "LIFETIME_FREE_RECOVERY_CREDITS")) {
           return { kind: "blocked", reason: "reservation-in-flight" };
         }
@@ -505,12 +584,12 @@ export class RecoveryBillingService {
   private async tryLifetimeFreeAdmission(
     shopId: string,
     sourceKey: string,
-    policy: EffectiveBillingPolicy,
+    policy: RecoveryPolicy,
+    postContract = false,
   ): Promise<RecoveryBillingAdmissionResult | null> {
-    const reservation = await this.reservationService.reserve({
-      shopId,
-      sourceKey,
-    });
+    const reservation = postContract
+      ? await this.reservationService.reservePostContract({ shopId, sourceKey })
+      : await this.reservationService.reserve({ shopId, sourceKey });
     if (
       reservation.kind === "reserved" ||
       isOwnedBy(reservation, "LIFETIME_FREE_RECOVERY_CREDITS")
@@ -656,6 +735,21 @@ export class RecoveryBillingService {
       });
     });
   }
+}
+
+function isDurableCreditAdmission(
+  admission: RecoveryBillingAdmission,
+): admission is Extract<
+  RecoveryBillingAdmission,
+  { kind: "purchased" | "lifetime-free" }
+> {
+  return admission.kind === "purchased" || admission.kind === "lifetime-free";
+}
+
+function isPostContractRecoveryPolicy(
+  policy: RecoveryPolicy,
+): policy is PostContractRecoveryPolicy {
+  return "mode" in policy && policy.mode === "POST_CONTRACT_DURABLE_CREDITS";
 }
 
 function isDefinitiveProviderFailure(error: unknown): boolean {

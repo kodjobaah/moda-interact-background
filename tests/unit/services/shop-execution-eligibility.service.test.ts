@@ -1,12 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import { ShopExecutionEligibilityService } from "../../../src/services/shop-execution-eligibility.service.js";
 
-function service(status: string | null, shopStatus = "ACTIVE") {
+function service(
+  status: string | null,
+  shopStatus = "ACTIVE",
+  options: {
+    onboardingCompleted?: boolean;
+    lastProviderLifecycleState?: string | null;
+  } = {},
+) {
   return new ShopExecutionEligibilityService({
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         status,
-        shop: { status: shopStatus },
+        lastProviderLifecycleState:
+          options.lastProviderLifecycleState ?? null,
+        shop: {
+          status: shopStatus,
+          onboardingCompleted: options.onboardingCompleted ?? false,
+        },
       }),
     },
   } as never);
@@ -71,4 +83,35 @@ describe("ShopExecutionEligibilityService", () => {
       reason: "SHOP_UNAVAILABLE",
     });
   });
+  it("allows recovery-only execution after a verified subscribed contract has ended", async () => {
+    const eligibility = service("NO_CONTRACT", "ACTIVE", {
+      onboardingCompleted: true,
+      lastProviderLifecycleState: "CANCELED",
+    });
+
+    await expect(
+      eligibility.evaluate("shop-1", undefined, "recovery"),
+    ).resolves.toEqual({ allowed: true, shopId: "shop-1" });
+    await expect(eligibility.evaluate("shop-1")).resolves.toEqual({
+      allowed: false,
+      shopId: "shop-1",
+      reason: "CONTRACT_REQUIRED",
+    });
+  });
+
+  it("does not treat an onboarded merchant that never subscribed as post-contract recovery eligible", async () => {
+    const eligibility = service("NO_CONTRACT", "ACTIVE", {
+      onboardingCompleted: true,
+      lastProviderLifecycleState: null,
+    });
+
+    await expect(
+      eligibility.evaluate("shop-1", undefined, "recovery"),
+    ).resolves.toEqual({
+      allowed: false,
+      shopId: "shop-1",
+      reason: "CONTRACT_REQUIRED",
+    });
+  });
+
 });

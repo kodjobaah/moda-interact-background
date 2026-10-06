@@ -29,7 +29,12 @@ const event = {
   occurredAt: "2026-09-20T12:00:00Z",
   content: { type: "text", text: "help" },
 } as const;
-const recovery = { id: "r1", shopId: "shop1", customer: { phone: "  +4477 " } };
+const recovery = {
+  id: "r1",
+  shopId: "shop1",
+  status: "MESSAGE_SENT",
+  customer: { phone: "  +4477 " },
+};
 beforeEach(() => {
   vi.resetAllMocks();
   active.mockResolvedValue(true);
@@ -153,6 +158,24 @@ describe("C2 strict recovery routing", () => {
       await new RecoveryRoutingService().resolveInboundMessage(event),
     ).toMatchObject({ reason: "INVALID_REFERENCE" });
   });
+
+  it("uses post-contract recovery scope only for a continuing recovery", async () => {
+    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, status: "ENGAGED" },
+    });
+    await new RecoveryRoutingService().resolveInboundMessage(event);
+    expect(active).toHaveBeenLastCalledWith("shop1", "recovery");
+
+    active.mockClear();
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, status: "COMPLETED" },
+    });
+    await new RecoveryRoutingService().resolveInboundMessage(event);
+    expect(active).toHaveBeenLastCalledWith("shop1", "general");
+  });
+
   it("checks availability only after selecting the one recovery", async () => {
     db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
     active.mockResolvedValue(false);

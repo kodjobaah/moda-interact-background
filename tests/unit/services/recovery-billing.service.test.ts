@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { RecoveryBillingService } from "../../../src/services/recovery-billing.service.js";
+import { EffectiveBillingPolicyError } from "../../../src/services/effective-billing-policy.service.js";
+import { PostContractRecoveryPolicyError } from "../../../src/services/post-contract-recovery-policy.service.js";
 
 function createDatabase(selectedGrant?: Record<string, unknown> | null) {
   const thread = { id: "thread-1" };
@@ -145,6 +147,166 @@ function purchasedPack(overrides: Record<string, unknown> = {}) {
 }
 
 describe("RecoveryBillingService", () => {
+
+  it("uses purchased credits after an onboarded Shopify subscription has ended", async () => {
+    const freeReservationService = {
+      reserve: vi.fn(),
+      reservePostContract: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({
+        kind: "reserved" as const,
+        reservation: {},
+        counter: "PURCHASED_RECOVERY_CREDITS" as const,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const postContractPolicy = {
+      mode: "POST_CONTRACT_DURABLE_CREDITS" as const,
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      subscriptionStatus: "NO_CONTRACT" as const,
+      newRecoveriesPaused: false,
+      automatedWhatsappPaused: false,
+      outboundSoftLimit: 1000,
+      outboundHardLimit: 2000,
+      terminalMessageReservedSlots: 1,
+      billingPeriod: null,
+    };
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new EffectiveBillingPolicyError(
+            "NO_CONTRACT",
+            "contract ended",
+          );
+        }),
+      } as never,
+      freeReservationService as never,
+      purchasedReservationService as never,
+      paidIncludedReservationService() as never,
+      unavailablePromotionalReservationService() as never,
+      { resolve: vi.fn(async () => postContractPolicy) } as never,
+    );
+
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "post-contract" }),
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: {
+        kind: "purchased",
+        policy: { mode: "POST_CONTRACT_DURABLE_CREDITS" },
+      },
+    });
+    expect(purchasedReservationService.reserve).toHaveBeenCalledTimes(1);
+    expect(freeReservationService.reservePostContract).not.toHaveBeenCalled();
+  });
+
+  it("falls back to lifetime credits after contract end without using paid or promotional allowance", async () => {
+    const freeReservationService = {
+      reserve: vi.fn(),
+      reservePostContract: vi.fn(async () => ({
+        kind: "reserved" as const,
+        reservation: {},
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS" as const,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const purchasedReservationService = {
+      reserve: vi.fn(async () => ({
+        kind: "credits-exhausted" as const,
+        available: 0,
+      })),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const paid = paidIncludedReservationService();
+    const promotional = unavailablePromotionalReservationService();
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new EffectiveBillingPolicyError(
+            "NO_CONTRACT",
+            "contract ended",
+          );
+        }),
+      } as never,
+      freeReservationService as never,
+      purchasedReservationService as never,
+      paid as never,
+      promotional as never,
+      {
+        resolve: vi.fn(async () => ({
+          mode: "POST_CONTRACT_DURABLE_CREDITS",
+          shopId: "shop-1",
+          subscriptionId: "subscription-1",
+          subscriptionStatus: "NO_CONTRACT",
+          newRecoveriesPaused: false,
+          automatedWhatsappPaused: false,
+          outboundSoftLimit: 1000,
+          outboundHardLimit: 2000,
+          terminalMessageReservedSlots: 1,
+          billingPeriod: null,
+        })),
+      } as never,
+    );
+
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "lifetime-after-end" }),
+    ).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "lifetime-free" },
+    });
+    expect(freeReservationService.reservePostContract).toHaveBeenCalledTimes(1);
+    expect(paid.reserve).not.toHaveBeenCalled();
+    expect(promotional.reserve).not.toHaveBeenCalled();
+  });
+
+  it("keeps an onboarded merchant that never subscribed contract-required", async () => {
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new EffectiveBillingPolicyError(
+            "NO_CONTRACT",
+            "no contract",
+          );
+        }),
+      } as never,
+      {
+        reserve: vi.fn(),
+        reservePostContract: vi.fn(),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      paidIncludedReservationService() as never,
+      unavailablePromotionalReservationService() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new PostContractRecoveryPolicyError(
+            "CONTRACT_REQUIRED",
+            "never subscribed",
+          );
+        }),
+      } as never,
+    );
+
+    await expect(
+      service.admit({ shopId: "shop-1", recoveryId: "never-subscribed" }),
+    ).resolves.toEqual({ kind: "blocked", reason: "contract-required" });
+  });
   it("denies checkout recovery before any reservation when the feature is absent", async () => {
     const database = createDatabase();
     const reservation = { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
@@ -267,6 +429,104 @@ describe("RecoveryBillingService", () => {
     await expect(service.revalidateBeforeProvider({ admission, recoveryId: "paused" }))
       .resolves.toEqual({ kind: "blocked", reason: "paused" });
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a purchased reservation admitted when the contract ends before provider send", async () => {
+    const purchasedReservationService = {
+      reserve: vi.fn(),
+      commit: vi.fn(),
+      release: vi.fn(),
+      markAmbiguous: vi.fn(),
+    };
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new EffectiveBillingPolicyError(
+            "NO_CONTRACT",
+            "contract ended",
+          );
+        }),
+      } as never,
+      {
+        reserve: vi.fn(),
+        reservePostContract: vi.fn(),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
+      purchasedReservationService as never,
+      paidIncludedReservationService() as never,
+      unavailablePromotionalReservationService() as never,
+      {
+        resolve: vi.fn(async () => ({
+          mode: "POST_CONTRACT_DURABLE_CREDITS",
+          shopId: "shop-1",
+          subscriptionId: "subscription-1",
+          subscriptionStatus: "NO_CONTRACT",
+          newRecoveriesPaused: false,
+          automatedWhatsappPaused: false,
+          outboundSoftLimit: 1000,
+          outboundHardLimit: 2000,
+          terminalMessageReservedSlots: 1,
+          billingPeriod: null,
+        })),
+      } as never,
+    );
+    const admission = {
+      kind: "purchased",
+      sourceKey: "purchased:before-contract-end",
+      policy: paidPolicy("ACTIVE"),
+    } as never;
+
+    await expect(
+      service.revalidateBeforeProvider({
+        admission,
+        recoveryId: "before-contract-end",
+      }),
+    ).resolves.toEqual({ kind: "admitted", admission });
+    expect(purchasedReservationService.release).not.toHaveBeenCalled();
+  });
+
+  it("releases non-durable plan capacity when the contract ends before provider send", async () => {
+    const paidReservationService = paidIncludedReservationService();
+    const postContractResolver = { resolve: vi.fn() };
+    const service = new RecoveryBillingService(
+      createDatabase() as never,
+      {
+        resolve: vi.fn(async () => {
+          throw new EffectiveBillingPolicyError(
+            "NO_CONTRACT",
+            "contract ended",
+          );
+        }),
+      } as never,
+      {
+        reserve: vi.fn(),
+        reservePostContract: vi.fn(),
+        commit: vi.fn(),
+        release: vi.fn(),
+        markAmbiguous: vi.fn(),
+      } as never,
+      { reserve: vi.fn(), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
+      paidReservationService as never,
+      unavailablePromotionalReservationService() as never,
+      postContractResolver as never,
+    );
+    const admission = {
+      kind: "paid",
+      sourceKey: "paid-included:period-1:contract-ended",
+      policy: paidPolicy("ACTIVE", "period-1"),
+    } as never;
+
+    await expect(
+      service.revalidateBeforeProvider({
+        admission,
+        recoveryId: "contract-ended",
+      }),
+    ).resolves.toEqual({ kind: "blocked", reason: "contract-required" });
+    expect(paidReservationService.release).toHaveBeenCalledOnce();
+    expect(postContractResolver.resolve).not.toHaveBeenCalled();
   });
 
   it("releases and re-admits included capacity when the period changes before the provider", async () => {

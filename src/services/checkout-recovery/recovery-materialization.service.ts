@@ -37,7 +37,11 @@ export class RecoveryMaterializationService {
   async materialize(
     candidate: PendingRecoveryCandidate,
   ): Promise<MaturedCandidateMaterializationResult> {
-    const execution = await this.dependencies.executionEligibility.evaluate(candidate.shopId);
+    const execution = await this.dependencies.executionEligibility.evaluate(
+      candidate.shopId,
+      undefined,
+      "recovery",
+    );
     if (!execution.allowed) {
       return {
         outcome: "discarded-shop-unavailable",
@@ -51,7 +55,11 @@ export class RecoveryMaterializationService {
       candidate.shopId,
       candidate.checkoutToken,
       async () => {
-        const lockedExecution = await this.dependencies.executionEligibility.evaluate(candidate.shopId);
+        const lockedExecution = await this.dependencies.executionEligibility.evaluate(
+          candidate.shopId,
+          undefined,
+          "recovery",
+        );
         if (!lockedExecution.allowed) {
           return {
             outcome: "discarded-shop-unavailable",

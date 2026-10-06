@@ -197,6 +197,10 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
   );
 }
 
+function isContinuingRecoveryStatus(status: string | null | undefined): boolean {
+  return status === "MESSAGE_SENT" || status === "ENGAGED";
+}
+
 export async function processInboundJobData(input: unknown, jobId?: string, audioOptions: { finalAttempt?: boolean } = {}) {
   const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
   if (!parsed.success) {
@@ -226,6 +230,7 @@ export async function loadConversationTurn(
         select: {
           id: true,
           shopId: true,
+          status: true,
           shop: { select: { domain: true, status: true } },
           customer: { select: { phone: true, id: true, firstName: true } },
         },
@@ -248,10 +253,17 @@ export async function loadConversationTurn(
     conversation.checkoutRecovery?.customer?.phone;
   const shopStatus =
     conversation.checkoutRecovery?.shop?.status;
+  const recoveryStatus = conversation.checkoutRecovery?.status;
+  const executionScope = isContinuingRecoveryStatus(recoveryStatus)
+    ? "recovery"
+    : "general";
   if (
     shopId &&
     (shopStatus !== "ACTIVE" ||
-      !(await shopExecutionEligibilityService.isShopExecutionActive(shopId)))
+      !(await shopExecutionEligibilityService.isShopExecutionActive(
+        shopId,
+        executionScope,
+      )))
   ) {
     return {
       shopId,

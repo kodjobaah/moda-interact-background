@@ -28,7 +28,11 @@ export function createRecoveryCapacityResumeWorker() {
       throw new Error(`Unknown capacity resume job: ${job.name}`);
     }
 
-    const execution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
+    const execution = await shopExecutionEligibilityService.evaluate(
+      job.data.shopId,
+      undefined,
+      "recovery",
+    );
     if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
 
     const batchSize = backgroundRuntimeConfigService.current().recoveryResumeBatchSize;
@@ -50,7 +54,11 @@ export function createRecoveryCapacityResumeWorker() {
     if (!capacityExhausted && attempted === batchSize) {
       const lastRecovery = recoveries[attempted - 1];
       if (lastRecovery) {
-        const finalExecution = await shopExecutionEligibilityService.evaluate(job.data.shopId);
+        const finalExecution = await shopExecutionEligibilityService.evaluate(
+          job.data.shopId,
+          undefined,
+          "recovery",
+        );
         if (!finalExecution.allowed) {
           return { kind: "ignored", reason: finalExecution.reason };
         }

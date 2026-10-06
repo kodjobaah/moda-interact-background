@@ -1,8 +1,10 @@
 import {
+  CheckoutRecoveryStatus,
   MessageSenderType,
   MessageStatus,
   Prisma,
   UsageMetric,
+  UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
@@ -16,6 +18,11 @@ import type {
   BillingPolicyClient,
   EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
+import {
+  PostContractRecoveryPolicyError,
+  PostContractRecoveryPolicyResolver,
+  type PostContractRecoveryPolicy,
+} from "./post-contract-recovery-policy.service.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import type {
   ShopExecutionDenialReason,
@@ -35,12 +42,17 @@ const TERMINAL_MESSAGE =
 
 type AdmissionDatabase = Pick<
   PrismaClient,
-  "$transaction" | "conversation" | "conversationMessage" | "usageEvent"
+  | "$transaction"
+  | "conversation"
+  | "conversationMessage"
+  | "usageEvent"
+  | "usageReservation"
 >;
 type PolicyResolverFactory = (
   client: BillingPolicyClient,
 ) => Pick<EffectiveBillingPolicyResolver, "resolve">;
 type Transaction = Prisma.TransactionClient;
+type OutboundPolicy = EffectiveBillingPolicy | PostContractRecoveryPolicy;
 
 export type OutboundAdmissionInput = {
   shopId: string;
@@ -48,6 +60,7 @@ export type OutboundAdmissionInput = {
   idempotencyKey: string;
   senderType: Extract<MessageSenderType, "AGENT" | "AUTOMATION">;
   content?: string;
+  recoveryCreditSourceKey?: string;
 };
 
 export type OutboundAdmissionResult =
@@ -57,6 +70,7 @@ export type OutboundAdmissionResult =
       messageId: string;
       conversationId: string;
       terminal: boolean;
+      executionScope?: "general" | "recovery";
     }
   | { kind: "suppressed"; reason: OutboundSuppressionReason };
 
@@ -79,6 +93,8 @@ export class OutboundWhatsAppAdmissionService {
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
     private readonly executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate"> =
       shopExecutionEligibilityService,
+    private readonly createPostContractPolicyResolver = (client: Prisma.TransactionClient) =>
+      new PostContractRecoveryPolicyResolver(client),
   ) {}
 
   getProviderAccountId(): string {
@@ -134,7 +150,14 @@ export class OutboundWhatsAppAdmissionService {
     if (admission.kind !== "admitted") return admission;
 
     try {
-      const execution = await this.executionEligibility.evaluate(admission.shopId);
+      const execution =
+        admission.executionScope === "recovery"
+          ? await this.executionEligibility.evaluate(
+              admission.shopId,
+              undefined,
+              "recovery",
+            )
+          : await this.executionEligibility.evaluate(admission.shopId);
       if (!execution.allowed) {
         await this.failPrepared(admission.messageId);
         return { kind: "suppressed", reason: suppressionReason(execution.reason) };
@@ -169,6 +192,7 @@ export class OutboundWhatsAppAdmissionService {
     shopId,
     conversationId,
     terminal,
+    executionScope = "general",
     to,
     text,
     previewUrl,
@@ -180,7 +204,14 @@ export class OutboundWhatsAppAdmissionService {
     replyToProviderMessageId?: string;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
-    const execution = await this.executionEligibility.evaluate(shopId);
+    const execution =
+      executionScope === "recovery"
+        ? await this.executionEligibility.evaluate(
+            shopId,
+            undefined,
+            "recovery",
+          )
+        : await this.executionEligibility.evaluate(shopId);
     if (!execution.allowed) {
       await this.failPrepared(messageId);
       return { kind: "suppressed", reason: suppressionReason(execution.reason) };
@@ -200,7 +231,14 @@ export class OutboundWhatsAppAdmissionService {
           : {}),
       });
       await this.markSent(messageId, result.providerMessageId);
-      return { kind: "admitted", shopId, messageId, conversationId, terminal };
+      return {
+        kind: "admitted",
+        shopId,
+        messageId,
+        conversationId,
+        terminal,
+        executionScope,
+      };
     } catch (error) {
       await this.markProviderFailure(messageId, error);
       throw error;
@@ -227,34 +265,70 @@ export class OutboundWhatsAppAdmissionService {
     });
     if (existing) return { kind: "suppressed", reason: "duplicate" };
 
-    let policy: EffectiveBillingPolicy;
-    try {
-      policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
-    } catch (error) {
-      if (
-        error instanceof EffectiveBillingPolicyError &&
-        (error.reason === "NO_CONTRACT" || error.reason === "SUBSCRIPTION_FROZEN")
-      ) {
-        return {
-          kind: "suppressed",
-          reason: error.reason === "NO_CONTRACT" ? "contract-required" : "subscription-frozen",
-        };
-      }
-      throw error;
-    }
-    if (policy.automatedWhatsappPaused) return { kind: "suppressed", reason: "paused" };
-
     const conversation = await transaction.conversation.findUnique({
       where: { id: input.conversationId },
       select: {
         shopId: true,
-        checkoutRecovery: { select: { shopId: true } },
+        checkoutRecovery: { select: { shopId: true, status: true } },
       },
     });
     const conversationShopId =
       conversation?.shopId ?? conversation?.checkoutRecovery?.shopId;
     if (!conversation || conversationShopId !== input.shopId) {
       return { kind: "suppressed", reason: "conversation-invalid" };
+    }
+
+    let policy: OutboundPolicy;
+    let executionScope: "general" | "recovery" = "general";
+    try {
+      policy = await this.createPolicyResolver(transaction).resolve(input.shopId);
+    } catch (error) {
+      if (
+        error instanceof EffectiveBillingPolicyError &&
+        error.reason === "NO_CONTRACT"
+      ) {
+        const continuingRecovery =
+          conversation.checkoutRecovery !== null &&
+          isContinuingRecoveryStatus(conversation.checkoutRecovery.status);
+        const hasDurableReservation =
+          input.recoveryCreditSourceKey !== undefined &&
+          (await hasDurableRecoveryReservation(
+            transaction,
+            input.shopId,
+            input.recoveryCreditSourceKey,
+          ));
+        if (
+          !conversation.checkoutRecovery ||
+          (!continuingRecovery && !hasDurableReservation)
+        ) {
+          return { kind: "suppressed", reason: "contract-required" };
+        }
+        try {
+          policy = await this.createPostContractPolicyResolver(
+            transaction,
+          ).resolve(input.shopId);
+          executionScope = "recovery";
+        } catch (postContractError) {
+          if (
+            postContractError instanceof PostContractRecoveryPolicyError &&
+            (postContractError.reason === "CONTRACT_REQUIRED" ||
+              postContractError.reason === "SHOP_UNAVAILABLE")
+          ) {
+            return { kind: "suppressed", reason: "contract-required" };
+          }
+          throw postContractError;
+        }
+      } else if (
+        error instanceof EffectiveBillingPolicyError &&
+        error.reason === "SUBSCRIPTION_FROZEN"
+      ) {
+        return { kind: "suppressed", reason: "subscription-frozen" };
+      } else {
+        throw error;
+      }
+    }
+    if (policy.automatedWhatsappPaused) {
+      return { kind: "suppressed", reason: "paused" };
     }
 
     const outboundMessages = await transaction.conversationMessage.findMany({
@@ -315,6 +389,7 @@ export class OutboundWhatsAppAdmissionService {
       messageId: message.id,
       conversationId: input.conversationId,
       terminal: isTerminal,
+      executionScope,
     };
   }
 
@@ -359,6 +434,34 @@ export class OutboundWhatsAppAdmissionService {
     }
     throw lastError;
   }
+}
+
+function isContinuingRecoveryStatus(status: CheckoutRecoveryStatus): boolean {
+  return (
+    status === CheckoutRecoveryStatus.MESSAGE_SENT ||
+    status === CheckoutRecoveryStatus.ENGAGED
+  );
+}
+
+async function hasDurableRecoveryReservation(
+  transaction: Transaction,
+  shopId: string,
+  sourceKey: string,
+): Promise<boolean> {
+  const reservation = await transaction.usageReservation.findUnique({
+    where: { sourceKey },
+    select: {
+      shopId: true,
+      status: true,
+      counter: { select: { counter: true } },
+    },
+  });
+  return (
+    reservation?.shopId === shopId &&
+    reservation.status === UsageReservationStatus.RESERVED &&
+    (reservation.counter?.counter === "PURCHASED_RECOVERY_CREDITS" ||
+      reservation.counter?.counter === "LIFETIME_FREE_RECOVERY_CREDITS")
+  );
 }
 
 function suppressionReason(reason: ShopExecutionDenialReason): OutboundSuppressionReason {

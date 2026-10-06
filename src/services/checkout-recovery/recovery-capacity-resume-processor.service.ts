@@ -51,7 +51,11 @@ export class RecoveryCapacityResumeProcessorService {
     if (recovery.shop.status !== "ACTIVE") {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
-    const execution = await this.shopExecutionEligibilityService.evaluate(recovery.shopId);
+    const execution = await this.shopExecutionEligibilityService.evaluate(
+      recovery.shopId,
+      undefined,
+      "recovery",
+    );
     if (!execution.allowed) {
       return { kind: "ignored", reason: execution.reason } as const;
     }
@@ -82,6 +86,8 @@ export class RecoveryCapacityResumeProcessorService {
         }
         const lockedExecution = await this.shopExecutionEligibilityService.evaluate(
           recovery.shopId,
+          undefined,
+          "recovery",
         );
         if (!lockedExecution.allowed) {
           return { kind: "ignored", reason: lockedExecution.reason } as const;

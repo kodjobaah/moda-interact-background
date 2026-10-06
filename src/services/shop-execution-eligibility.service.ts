@@ -1,6 +1,7 @@
 import prisma from "../lib/db.js";
 import { SubscriptionProjectionStatus } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { isVerifiedEndedSubscription } from "./post-contract-recovery-policy.service.js";
 
 type ShopExecutionClient = Partial<Pick<PrismaClient, "shop">> &
   Partial<Pick<PrismaClient, "subscription">>;
@@ -8,9 +9,15 @@ type ShopExecutionClient = Partial<Pick<PrismaClient, "shop">> &
 export type ShopExecutionRecord = {
   id: string;
   status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED";
-  subscription: { status: string } | null;
+  onboardingCompleted?: boolean;
+  subscription: {
+    status: string;
+    lastProviderLifecycleState?: string | null;
+  } | null;
   settings: { recoveryDelayMinutes: number | null } | null;
 };
+
+export type ShopExecutionScope = "general" | "recovery";
 
 export type ShopExecutionDenialReason =
   | "CONTRACT_REQUIRED"
@@ -34,7 +41,13 @@ export class ShopExecutionEligibilityService {
       select: {
         id: true,
         status: true,
-        subscription: { select: { status: true } },
+        onboardingCompleted: true,
+        subscription: {
+          select: {
+            status: true,
+            lastProviderLifecycleState: true,
+          },
+        },
         settings: { select: { recoveryDelayMinutes: true } },
       },
     });
@@ -42,26 +55,36 @@ export class ShopExecutionEligibilityService {
 
   async resolveShopById(
     shopId: string,
-  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "subscription"> | null> {
+  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "onboardingCompleted" | "subscription"> | null> {
     if (!this.client.shop) return null;
     return this.client.shop.findUnique({
       where: { id: shopId },
       select: {
         id: true,
         status: true,
-        subscription: { select: { status: true } },
+        onboardingCompleted: true,
+        subscription: {
+          select: {
+            status: true,
+            lastProviderLifecycleState: true,
+          },
+        },
       },
     });
   }
 
-  async isShopExecutionActive(shopId: string): Promise<boolean> {
-    const decision = await this.evaluate(shopId);
+  async isShopExecutionActive(
+    shopId: string,
+    scope: ShopExecutionScope = "general",
+  ): Promise<boolean> {
+    const decision = await this.evaluate(shopId, undefined, scope);
     return decision.allowed;
   }
 
   async evaluate(
     shopId: string,
     knownShopStatus?: string,
+    scope: ShopExecutionScope = "general",
   ): Promise<ShopExecutionDecision> {
     if (!this.client.subscription) {
       if (knownShopStatus !== undefined) {
@@ -82,26 +105,54 @@ export class ShopExecutionEligibilityService {
       where: { shopId },
       select: {
         status: true,
-        shop: { select: { status: true } },
+        lastProviderLifecycleState: true,
+        shop: {
+          select: {
+            status: true,
+            onboardingCompleted: true,
+          },
+        },
       },
     });
     if (!subscription || subscription.shop.status !== "ACTIVE") {
       return { allowed: false, shopId, reason: "SHOP_UNAVAILABLE" };
     }
-    return this.evaluateResolvedShop({
-      id: shopId,
-      status: subscription.shop.status,
-      subscription: { status: subscription.status },
-    });
+    return this.evaluateResolvedShop(
+      {
+        id: shopId,
+        status: subscription.shop.status,
+        onboardingCompleted: subscription.shop.onboardingCompleted,
+        subscription: {
+          status: subscription.status,
+          lastProviderLifecycleState: subscription.lastProviderLifecycleState,
+        },
+      },
+      scope,
+    );
   }
 
   evaluateResolvedShop(
-    shop: Pick<ShopExecutionRecord, "id" | "status" | "subscription">,
+    shop: Pick<
+      ShopExecutionRecord,
+      "id" | "status" | "onboardingCompleted" | "subscription"
+    >,
+    scope: ShopExecutionScope = "general",
   ): ShopExecutionDecision {
     if (shop.status !== "ACTIVE" || !shop.subscription) {
       return { allowed: false, shopId: shop.id, reason: "SHOP_UNAVAILABLE" };
     }
     if (shop.subscription.status === SubscriptionProjectionStatus.NO_CONTRACT) {
+      if (
+        scope === "recovery" &&
+        isVerifiedEndedSubscription({
+          status: shop.subscription.status,
+          lastProviderLifecycleState:
+            shop.subscription.lastProviderLifecycleState,
+          onboardingCompleted: shop.onboardingCompleted,
+        })
+      ) {
+        return { allowed: true, shopId: shop.id };
+      }
       return { allowed: false, shopId: shop.id, reason: "CONTRACT_REQUIRED" };
     }
     if (shop.subscription.status === SubscriptionProjectionStatus.FROZEN) {

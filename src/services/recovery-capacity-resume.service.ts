@@ -63,7 +63,10 @@ export class RecoveryCapacityResumeService {
     let scheduled = 0;
     for (const shop of shops) {
       try {
-        if (!(await shopExecutionEligibilityService.isShopExecutionActive(shop.shopId))) {
+        if (!(await shopExecutionEligibilityService.isShopExecutionActive(
+          shop.shopId,
+          "recovery",
+        ))) {
           continue;
         }
         await this.schedule({ shopId: shop.shopId, trigger: "repair" });

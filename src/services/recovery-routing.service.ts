@@ -98,6 +98,7 @@ export class RecoveryRoutingService {
           select: {
             id: true,
             shopId: true,
+            status: true,
             customer: { select: { phone: true } },
           },
         },
@@ -112,9 +113,13 @@ export class RecoveryRoutingService {
         stored.conversationId !== conversationId)
     )
       return { kind: "guidance", reason: "INVALID_REFERENCE" };
+    const executionScope = isContinuingRecoveryStatus(recovery.status)
+      ? "recovery"
+      : "general";
     if (
       !(await shopExecutionEligibilityService.isShopExecutionActive(
         recovery.shopId,
+        executionScope,
       ))
     )
       return { kind: "guidance", reason: "SHOP_UNAVAILABLE" };
@@ -126,4 +131,8 @@ export class RecoveryRoutingService {
     };
   }
 }
+function isContinuingRecoveryStatus(status: string): boolean {
+  return status === "MESSAGE_SENT" || status === "ENGAGED";
+}
+
 export const recoveryRoutingService = new RecoveryRoutingService();

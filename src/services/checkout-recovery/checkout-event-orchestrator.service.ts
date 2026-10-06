@@ -91,13 +91,22 @@ export class CheckoutEventOrchestratorService {
       select: {
         id: true,
         status: true,
-        subscription: { select: { status: true } },
+        onboardingCompleted: true,
+        subscription: {
+          select: {
+            status: true,
+            lastProviderLifecycleState: true,
+          },
+        },
       },
     });
     if (!shop) {
       return { kind: "discarded", reason: "shop-not-found" } as const;
     }
-    const execution = this.shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    const execution = this.shopExecutionEligibilityService.evaluateResolvedShop(
+      shop,
+      "recovery",
+    );
     if (!execution.allowed) {
       return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }
@@ -210,7 +219,10 @@ export class CheckoutEventOrchestratorService {
     if (!shop) {
       return { kind: "ignored", reason: "shop-unavailable" } as const;
     }
-    const execution = this.shopExecutionEligibilityService.evaluateResolvedShop(shop);
+    const execution = this.shopExecutionEligibilityService.evaluateResolvedShop(
+      shop,
+      "recovery",
+    );
     if (!execution.allowed) {
       return { kind: "ignored", reason: lifecycleReason(execution.reason) } as const;
     }

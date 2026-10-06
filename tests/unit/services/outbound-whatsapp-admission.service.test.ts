@@ -6,6 +6,7 @@ import {
   TERMINAL_MESSAGE,
   runCommerceAgentAfterAdmission,
 } from "../../../src/services/outbound-whatsapp-admission.service.js";
+import { EffectiveBillingPolicyError } from "../../../src/services/effective-billing-policy.service.js";
 
 function harness({
   policy = {},
@@ -17,6 +18,10 @@ function harness({
   existing = null,
   provider = {},
   executionEligibility = { evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })) },
+  recoveryLinked = false,
+  recoveryStatus = "DETECTED",
+  durableReservation = null,
+  postContractPolicy = null,
 }: {
   policy?: Record<string, unknown>;
   usageRows?: Array<{ sourceType: string; quantity: number; sourceId?: string }>;
@@ -24,6 +29,10 @@ function harness({
   existing?: { sourceId: string } | null;
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
+  recoveryLinked?: boolean;
+  recoveryStatus?: "DETECTED" | "MESSAGE_SENT" | "ENGAGED" | "COMPLETED" | "EXPIRED" | "CANCELLED";
+  durableReservation?: Record<string, unknown> | null;
+  postContractPolicy?: Record<string, unknown> | null;
 } = {}) {
   const messages = new Map<string, { id: string; content: string; status: string }>();
   const usage = [...usageRows];
@@ -53,10 +62,15 @@ function harness({
       }),
       deleteMany: vi.fn(),
     },
+    usageReservation: {
+      findUnique: vi.fn().mockResolvedValue(durableReservation),
+    },
     conversation: {
       findUnique: vi.fn().mockResolvedValue({
-        shopId: "shop-1",
-        checkoutRecovery: null,
+        shopId: recoveryLinked ? null : "shop-1",
+        checkoutRecovery: recoveryLinked
+          ? { shopId: "shop-1", status: recoveryStatus }
+          : null,
       }),
       update: vi.fn(),
       create: vi.fn().mockResolvedValue({ id: "conversation-new" }),
@@ -95,6 +109,22 @@ function harness({
     billingPeriod: null,
     ...policy,
   }) };
+  const postContractResolver = {
+    resolve: vi.fn().mockResolvedValue(
+      postContractPolicy ?? {
+        mode: "POST_CONTRACT_DURABLE_CREDITS",
+        shopId: "shop-1",
+        subscriptionId: "subscription-1",
+        subscriptionStatus: "NO_CONTRACT",
+        newRecoveriesPaused: false,
+        automatedWhatsappPaused: false,
+        outboundSoftLimit: 3,
+        outboundHardLimit: 3,
+        terminalMessageReservedSlots: 1,
+        billingPeriod: null,
+      },
+    ),
+  };
   const providerMock = {
     sendWhatsAppText: vi.fn().mockResolvedValue({ providerMessageId: "wamid-1" }),
     sendWhatsAppTemplate: vi.fn().mockResolvedValue({ providerMessageId: "wamid-template" }),
@@ -109,12 +139,14 @@ function harness({
     resolver,
     providerMock,
     executionEligibility,
+    postContractResolver,
     service: new OutboundWhatsAppAdmissionService(
       database as never,
       () => resolver,
       providerMock as never,
       3,
       executionEligibility as never,
+      () => postContractResolver as never,
     ),
   };
 }
@@ -158,6 +190,87 @@ describe("OutboundWhatsAppAdmissionService", () => {
       text: baseInput.text,
     });
     expect(test.messages.get("message-1")).toMatchObject({ status: "SENT", content: "Hello" });
+  });
+
+  it("allows a recovery-linked durable-credit send after the Shopify contract has ended", async () => {
+    const test = harness({
+      recoveryLinked: true,
+      durableReservation: {
+        shopId: "shop-1",
+        status: "RESERVED",
+        counter: { counter: "PURCHASED_RECOVERY_CREDITS" },
+      },
+    });
+    test.resolver.resolve.mockRejectedValueOnce(
+      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
+    );
+
+    const result = await test.service.sendTemplate({
+      shopId: "shop-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "recovery-outreach:attempt-1",
+      recoveryCreditSourceKey: "recovery:shop-1:attempt-1",
+      senderType: "AUTOMATION",
+      to: "+15551234567",
+      templateName: "recovery",
+      languageCode: "en",
+    });
+
+    expect(result).toMatchObject({
+      kind: "admitted",
+      executionScope: "recovery",
+    });
+    expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
+    expect(test.executionEligibility.evaluate).toHaveBeenCalledWith(
+      "shop-1",
+      undefined,
+      "recovery",
+    );
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
+  });
+
+  it("lets an in-flight recovery conversation continue after the contract ends", async () => {
+    const test = harness({
+      recoveryLinked: true,
+      recoveryStatus: "ENGAGED",
+    });
+    test.resolver.resolve.mockRejectedValueOnce(
+      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
+    );
+
+    const result = await test.service.sendText({
+      ...baseInput,
+      senderType: "AGENT",
+      idempotencyKey: "agent:conversation-1:2",
+    });
+
+    expect(result).toMatchObject({
+      kind: "admitted",
+      executionScope: "recovery",
+    });
+    expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
+    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an unstarted recovery or generic message bypass NO_CONTRACT without a durable reservation", async () => {
+    const test = harness({ recoveryLinked: true, recoveryStatus: "DETECTED" });
+    test.resolver.resolve.mockRejectedValueOnce(
+      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
+    );
+
+    await expect(
+      test.service.sendTemplate({
+        shopId: "shop-1",
+        conversationId: "conversation-1",
+        idempotencyKey: "recovery-outreach:no-reservation",
+        senderType: "AUTOMATION",
+        to: "+15551234567",
+        templateName: "recovery",
+        languageCode: "en",
+      }),
+    ).resolves.toEqual({ kind: "suppressed", reason: "contract-required" });
+    expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("forwards preview and reply context after the immediate eligibility check", async () => {

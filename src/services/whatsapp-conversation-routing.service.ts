@@ -27,6 +27,7 @@ type ConversationOwner = {
 
 type ExistingConversationOwner = ConversationOwner & {
   recoveryLinked: boolean;
+  recoveryStatus: string | null;
 };
 
 export const canonicalPhone = (phone: string) =>
@@ -117,7 +118,10 @@ export class WhatsAppConversationRoutingService {
           },
         },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        checkoutRecovery: { select: { status: true } },
+      },
       take: 2,
     });
 
@@ -125,13 +129,22 @@ export class WhatsAppConversationRoutingService {
       return { kind: "guidance", reason: "CONTEXT_REQUIRED" };
     }
 
-    if (!(await shopExecutionEligibilityService.isShopExecutionActive(shopId))) {
+    const recoveryConversation = recoveryConversations[0]!;
+    const executionScope = isContinuingRecoveryStatus(
+      recoveryConversation.checkoutRecovery?.status,
+    )
+      ? "recovery"
+      : "general";
+    if (!(await shopExecutionEligibilityService.isShopExecutionActive(
+      shopId,
+      executionScope,
+    ))) {
       return { kind: "guidance", reason: "SHOP_UNAVAILABLE" };
     }
 
     return {
       kind: "resolved",
-      conversationId: recoveryConversations[0]!.id,
+      conversationId: recoveryConversation.id,
       shopId,
       customerId,
     };
@@ -146,7 +159,14 @@ export class WhatsAppConversationRoutingService {
       return { kind: "guidance", reason: "INVALID_REFERENCE" };
     }
 
-    if (!(await shopExecutionEligibilityService.isShopExecutionActive(owner.shopId))) {
+    const executionScope =
+      owner.recoveryLinked && isContinuingRecoveryStatus(owner.recoveryStatus)
+        ? "recovery"
+        : "general";
+    if (!(await shopExecutionEligibilityService.isShopExecutionActive(
+      owner.shopId,
+      executionScope,
+    ))) {
       return { kind: "guidance", reason: "SHOP_UNAVAILABLE" };
     }
 
@@ -176,6 +196,7 @@ export class WhatsAppConversationRoutingService {
           select: {
             shopId: true,
             customerId: true,
+            status: true,
           },
         },
       },
@@ -193,6 +214,7 @@ export class WhatsAppConversationRoutingService {
       shopId,
       customerId,
       recoveryLinked: conversation.checkoutRecovery !== null,
+      recoveryStatus: conversation.checkoutRecovery?.status ?? null,
     };
   }
 
@@ -274,6 +296,10 @@ export class WhatsAppConversationRoutingService {
     if (owners.length !== 1) return { kind: "ambiguous" };
     return { kind: "owner", owner: owners[0]! };
   }
+}
+
+function isContinuingRecoveryStatus(status: string | null | undefined): boolean {
+  return status === "MESSAGE_SENT" || status === "ENGAGED";
 }
 
 function deduplicateOwners(owners: ConversationOwner[]): ConversationOwner[] {

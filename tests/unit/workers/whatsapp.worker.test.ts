@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   recovery: { recordExternalActivity: vi.fn() },
   processor: { enqueue: vi.fn() },
   database: { conversation: { findUniqueOrThrow: vi.fn() } },
+  eligibility: { isShopExecutionActive: vi.fn() },
 }));
 
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
@@ -60,6 +61,10 @@ vi.mock("../../../src/services/recovery-routing.service.js", () => ({
 vi.mock("../../../src/services/whatsapp-provider-status.service.js", () => ({
   whatsappProviderStatusService: { process: vi.fn() },
 }));
+vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
+  shopExecutionEligibilityService: mocks.eligibility,
+}));
+
 vi.mock(
   "../../../src/services/conversation-turn-processor.service.js",
   () => ({
@@ -100,6 +105,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       lastInboundAt: new Date(),
     });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
+    mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
   });
 
   it.each(["UNINSTALLED", "SUSPENDED"])(
@@ -141,6 +147,57 @@ describe("WhatsApp worker inbound execution gate", () => {
       occurredAt: new Date(event.occurredAt),
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+  });
+
+
+  it("uses recovery execution scope only for a continuing delayed recovery turn", async () => {
+    mocks.eligibility.isShopExecutionActive.mockResolvedValue(false);
+    mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({
+      id: "conversation-1",
+      type: "RECOVERY",
+      shopId: null,
+      customer: { phone: "+447700900000", id: "customer-1", firstName: null },
+      shop: null,
+      checkoutRecoveryId: "recovery-1",
+      checkoutRecovery: {
+        id: "recovery-1",
+        shopId: "shop-1",
+        status: "ENGAGED",
+        shop: { domain: "example.myshopify.com", status: "ACTIVE" },
+        customer: { phone: "+447700900000", id: "customer-1", firstName: null },
+      },
+      messages: [],
+    });
+
+    await loadConversationTurn("conversation-1", new Date());
+    expect(mocks.eligibility.isShopExecutionActive).toHaveBeenLastCalledWith(
+      "shop-1",
+      "recovery",
+    );
+
+    mocks.eligibility.isShopExecutionActive.mockClear();
+    mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({
+      id: "conversation-1",
+      type: "RECOVERY",
+      shopId: null,
+      customer: { phone: "+447700900000", id: "customer-1", firstName: null },
+      shop: null,
+      checkoutRecoveryId: "recovery-1",
+      checkoutRecovery: {
+        id: "recovery-1",
+        shopId: "shop-1",
+        status: "COMPLETED",
+        shop: { domain: "example.myshopify.com", status: "ACTIVE" },
+        customer: { phone: "+447700900000", id: "customer-1", firstName: null },
+      },
+      messages: [],
+    });
+
+    await loadConversationTurn("conversation-1", new Date());
+    expect(mocks.eligibility.isShopExecutionActive).toHaveBeenLastCalledWith(
+      "shop-1",
+      "general",
+    );
   });
 
   it("ignores a legacy payload before admission, routing, or persistence", async () => {

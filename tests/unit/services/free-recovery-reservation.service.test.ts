@@ -110,6 +110,21 @@ describe("FreeRecoveryReservationService", () => {
     expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledTimes(1);
   });
 
+  it("reserves lifetime capacity after contract end without requiring an active billing policy", async () => {
+    const { service, transaction } = createHarness();
+
+    await expect(
+      service.reservePostContract({
+        shopId: "shop-1",
+        sourceKey: "recovery:post-contract",
+      }),
+    ).resolves.toMatchObject({
+      kind: "reserved",
+      counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+    });
+    expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledOnce();
+  });
+
   it("commits one usage event and makes commit replay terminal", async () => {
     const { service, transaction, state } = createHarness();
     await service.reserve({ shopId: "shop-1", sourceKey: "recovery:2" });

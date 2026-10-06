@@ -17,7 +17,8 @@ const activeRecovery = {
 const shop = {
   id: "shop-1",
   status: "ACTIVE",
-  subscription: { status: "ACTIVE" },
+  onboardingCompleted: true,
+  subscription: { status: "ACTIVE", lastProviderLifecycleState: "UPDATED" },
 };
 const currentCheckout = {
   abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=current",
@@ -152,8 +153,19 @@ describe("CheckoutEventOrchestratorService", () => {
 
     expect(harness.database.shop.findUnique).toHaveBeenCalledWith({
       where: { domain: event.shopDomain },
-      select: { id: true, status: true, subscription: { select: { status: true } } },
+      select: {
+        id: true,
+        status: true,
+        onboardingCompleted: true,
+        subscription: {
+          select: { status: true, lastProviderLifecycleState: true },
+        },
+      },
     });
+    expect(harness.shopExecutionEligibilityService.evaluateResolvedShop).toHaveBeenCalledWith(
+      shop,
+      "recovery",
+    );
     expect(harness.order.slice(0, 3)).toEqual(["shop-read", "eligibility", "pending-refresh"]);
   });
 

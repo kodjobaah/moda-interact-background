@@ -103,6 +103,7 @@ export class PendingRecoveryCandidateService {
     const execution = await shopExecutionEligibilityService.evaluate(
       shop.id,
       shop.status,
+      "recovery",
     );
     if (shop.subscription?.status === "FROZEN") {
       return { outcome: "discarded-subscription-frozen", shopDomain };

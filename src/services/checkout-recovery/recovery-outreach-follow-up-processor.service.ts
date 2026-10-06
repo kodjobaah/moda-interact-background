@@ -69,7 +69,11 @@ export class RecoveryOutreachFollowUpProcessorService {
           recoveryId,
           initialAttempt: initial,
         });
-        const execution = await shopExecutionEligibilityService.evaluate(recovery.shopId);
+        const execution = await shopExecutionEligibilityService.evaluate(
+          recovery.shopId,
+          undefined,
+          "recovery",
+        );
         if (!execution.allowed) {
           await recoveryOutreachAttemptService.markStatus(attempt.id, "CANCELLED", { failureCode: execution.reason });
           return { kind: "suppressed", reason: execution.reason } as const;
@@ -113,6 +117,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             shopId: recovery.shopId,
             conversationId: recovery.conversation.id,
             idempotencyKey: `recovery-outreach:${attempt.id}`,
+            recoveryCreditSourceKey: billing.admission.sourceKey,
             senderType: "AUTOMATION",
             content,
             to: recovery.customer.phone,

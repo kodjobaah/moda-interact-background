@@ -190,6 +190,7 @@ export class RecoveryInitiationService {
         shopId: recovery.shopId,
         conversationId: conversation.id,
         idempotencyKey: `recovery-outreach:${attempt.id}`,
+        recoveryCreditSourceKey: billing.admission.sourceKey,
         senderType: "AUTOMATION",
         content,
         to: recipient,

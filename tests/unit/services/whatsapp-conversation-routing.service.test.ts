@@ -49,7 +49,11 @@ beforeEach(() => {
   db.conversation.findUnique.mockResolvedValue({
     shopId: null,
     customerId: null,
-    checkoutRecovery: { shopId: "shop-1", customerId: "customer-1" },
+    checkoutRecovery: {
+      shopId: "shop-1",
+      customerId: "customer-1",
+      status: "MESSAGE_SENT",
+    },
   });
 });
 
@@ -132,6 +136,39 @@ describe("WhatsAppConversationRoutingService", () => {
         contextMessageId: "old",
       }),
     ).resolves.toEqual({ kind: "guidance", reason: "CONTEXT_REQUIRED" });
+  });
+
+
+  it("uses recovery scope only for continuing recovery conversations", async () => {
+    db.conversationMessage.findUnique.mockResolvedValue({
+      direction: "INBOUND",
+      conversationId: "stored-conversation",
+    });
+
+    db.conversation.findUnique.mockResolvedValue({
+      shopId: null,
+      customerId: null,
+      checkoutRecovery: {
+        shopId: "shop-1",
+        customerId: "customer-1",
+        status: "ENGAGED",
+      },
+    });
+    await new WhatsAppConversationRoutingService().resolveInboundMessage(event);
+    expect(active).toHaveBeenLastCalledWith("shop-1", "recovery");
+
+    active.mockClear();
+    db.conversation.findUnique.mockResolvedValue({
+      shopId: null,
+      customerId: null,
+      checkoutRecovery: {
+        shopId: "shop-1",
+        customerId: "customer-1",
+        status: "COMPLETED",
+      },
+    });
+    await new WhatsAppConversationRoutingService().resolveInboundMessage(event);
+    expect(active).toHaveBeenLastCalledWith("shop-1", "general");
   });
 
   it("never falls back from an invalid explicit reply reference", async () => {
