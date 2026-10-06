@@ -884,6 +884,40 @@ describe("BillingReconciliationService", () => {
       }),
     }));
     expect(test.database.subscription.updateMany.mock.calls[0]?.[0].data).not.toHaveProperty("planId");
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.error",
+      expect.objectContaining({
+        shopId: "shop-1",
+        errorCode: "PARTNER_API_ERROR",
+        error: "Partner unavailable",
+      }),
+    );
+  });
+
+  it("reports post-provider reconciliation failures as internal errors", async () => {
+    const test = harness();
+    test.database.billingPlan.findUnique.mockReset();
+    test.database.billingPlan.findUnique.mockRejectedValueOnce(
+      new Error("PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance"),
+    );
+
+    const result = await test.service.reconcileOnce();
+
+    expect(result).toMatchObject({ subscriptionsScanned: 1, subscriptionsSynced: 0, subscriptionErrors: 1 });
+    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        lastSyncErrorCode: "INTERNAL_RECONCILIATION_ERROR",
+      }),
+    }));
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "billing.subscription_reconciliation.error",
+      expect.objectContaining({
+        shopId: "shop-1",
+        errorCode: "INTERNAL_RECONCILIATION_ERROR",
+        error: "PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance",
+      }),
+    );
   });
 
   it("B008-R7 reports a current-cycle usage discrepancy without creating a correction", async () => {
@@ -1032,6 +1066,7 @@ describe("BillingReconciliationService", () => {
       usageEvent: { updateMany: vi.fn() },
       usageReservation: { aggregate: vi.fn() },
       billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ shopId: "shop-1", billingPeriodId: "period-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0 }), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), upsert: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ id: "subscription-1", shopId: "shop-1", status: "ACTIVE", planId: "plan-1", billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: boundary, nextReconcileAt: boundary, billingPeriod: { id: "period-old", periodStart: new Date("2026-09-01T00:00:00.000Z"), periodEnd: boundary, status: "OPEN" } }), update: vi.fn() },
     };
     test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
@@ -1116,6 +1151,7 @@ describe("BillingReconciliationService", () => {
       usageEvent: { updateMany: vi.fn() },
       usageReservation: { aggregate: vi.fn() },
       billingPeriodEntitlementCounter: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), upsert: vi.fn() },
     };
     test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
 
@@ -1211,6 +1247,7 @@ describe("BillingReconciliationService", () => {
       usageEvent: { updateMany: vi.fn() },
       usageReservation: { aggregate: vi.fn() },
       billingPeriodEntitlementCounter: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+      shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), upsert: vi.fn() },
     };
     test.database.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
 

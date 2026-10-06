@@ -36,6 +36,7 @@ type BillingReconciliationDatabase = PrismaClient;
 type UsagePublisher = Pick<typeof shopifyUsageEventPublisherService, "publishDue">;
 type PurchaseReconciler = Pick<typeof recoveryCreditPurchaseService, "reconcileProviderConfirmed">;
 type SubscriptionQueue = Pick<Queue, "add">;
+type BillingReconciliationErrorCode = "PARTNER_API_ERROR" | "INTERNAL_RECONCILIATION_ERROR";
 
 export type BillingReconciliationResult = {
   published: Awaited<ReturnType<UsagePublisher["publishDue"]>>;
@@ -150,8 +151,10 @@ export class BillingReconciliationService {
       discrepancies: [],
     };
     for (const shop of shops) {
+      let errorCode: BillingReconciliationErrorCode = "PARTNER_API_ERROR";
       try {
         const snapshot = await getSubscriptionReconciliationSnapshot(this.partner, shop.shopifyShopId!);
+        errorCode = "INTERNAL_RECONCILIATION_ERROR";
         const projection = await this.applySubscription(shop.id, snapshot, runtimeConfig);
         result.subscriptionsSynced += 1;
         const purchaseReconciliation = await this.reconcilePackPurchases(shop.id, snapshot.activeSubscription, projection);
@@ -175,7 +178,7 @@ export class BillingReconciliationService {
         if (discrepancy) result.discrepancies.push(discrepancy);
       } catch (error) {
         result.subscriptionErrors += 1;
-        await this.markSyncError(shop.id, error, runtimeConfig);
+        await this.markSyncError(shop.id, errorCode, error, runtimeConfig);
       }
     }
     return result;
@@ -1022,11 +1025,12 @@ export class BillingReconciliationService {
 
   private async markSyncError(
     shopId: string,
+    errorCode: BillingReconciliationErrorCode,
     error: unknown,
     runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">,
   ): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
-    this.logger.error("billing.subscription_reconciliation.error", { shopId, error: message });
+    this.logger.error("billing.subscription_reconciliation.error", { shopId, errorCode, error: message });
     const now = this.now();
     const subscription = await this.database.subscription.findUnique({
       where: { shopId },
@@ -1045,7 +1049,7 @@ export class BillingReconciliationService {
         nextReconcileAt: subscription.nextReconcileAt,
       },
       data: {
-        lastSyncErrorCode: "PARTNER_API_ERROR",
+        lastSyncErrorCode: errorCode,
         lastSyncErrorAt: now,
         lastSyncedAt: now,
         nextReconcileAt,
