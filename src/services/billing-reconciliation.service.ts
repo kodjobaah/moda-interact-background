@@ -30,6 +30,7 @@ import {
   BillingReconciliationSchedulerService,
   type BillingReconciliationErrorCode,
 } from "./billing-reconciliation/reconciliation-scheduler.service.js";
+import { ProviderAbsenceReconciliationService } from "./billing-reconciliation/provider-absence-reconciliation.service.js";
 
 export type { UsageDiscrepancy } from "./billing-reconciliation/provider-usage-reconciliation.service.js";
 
@@ -113,6 +114,7 @@ export class BillingReconciliationService {
 
   private readonly providerUsageReconciliation: ProviderUsageReconciliationService;
   private readonly reconciliationScheduler: BillingReconciliationSchedulerService;
+  private readonly providerAbsenceReconciliation: ProviderAbsenceReconciliationService;
 
   constructor(
     private readonly database: BillingReconciliationDatabase = prisma,
@@ -137,6 +139,10 @@ export class BillingReconciliationService {
       this.subscriptionQueue,
       this.logger,
       this.now,
+    );
+    this.providerAbsenceReconciliation = new ProviderAbsenceReconciliationService(
+      this.database,
+      this.reconciliationScheduler,
     );
   }
 
@@ -208,78 +214,7 @@ export class BillingReconciliationService {
     const provider = snapshot.activeSubscription;
     const now = this.now();
     if (!provider) {
-      const existing = await this.database.subscription.findUnique({
-        where: { shopId },
-        select: {
-          id: true,
-          status: true,
-          billingPeriodId: true,
-          nextReconcileAt: true,
-          pendingShopifyPlanHandle: true,
-          pendingPlanId: true,
-          pendingEffectiveAt: true,
-          plan: { select: { shopifyRecoveryCreditPackEventHandle: true } },
-        },
-      });
-      if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
-        && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
-        const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database, undefined, undefined, runtimeConfig).reconcile(
-          shopId,
-          existing.id,
-          snapshot,
-          now,
-        );
-        if (lifecycleResult === "handled" || lifecycleResult === "restored") {
-          await this.reconciliationScheduler.publishCommittedLifecycleSchedule(shopId, existing.id);
-          if (lifecycleResult === "restored") {
-            const restored = await this.database.subscription.findUnique({ where: { id: existing.id }, select: { billingPeriodId: true } });
-            return { billingPeriodId: restored?.billingPeriodId ?? null, packMeterHandle: null };
-          }
-          return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
-        }
-      }
-      const pending = existing?.pendingPlanId && existing.pendingShopifyPlanHandle
-        ? {
-            pendingShopifyPlanHandle: existing.pendingShopifyPlanHandle,
-            pendingPlanId: existing.pendingPlanId,
-            pendingEffectiveAt: existing.pendingEffectiveAt,
-          }
-        : {
-            pendingShopifyPlanHandle: null,
-            pendingPlanId: null,
-            pendingEffectiveAt: null,
-          };
-      if (existing) {
-        const nextReconcileAt = new Date(now.getTime() + (runtimeConfig?.billingProviderRetrySeconds ?? 300) * 1000);
-        await this.database.subscription.updateMany({
-          where: { id: existing.id, nextReconcileAt: existing.nextReconcileAt },
-          data: { nextReconcileAt, lastSyncedAt: now },
-        });
-        return {
-          billingPeriodId: existing.billingPeriodId,
-          packMeterHandle: existing.plan?.shopifyRecoveryCreditPackEventHandle ?? null,
-        };
-      }
-      await this.database.subscription.upsert({
-        where: { shopId },
-        update: {
-          planId: null,
-          observedShopifyPlanHandle: null,
-          status: SubscriptionProjectionStatus.NO_CONTRACT,
-          billingPeriodId: null,
-          currentPeriodStart: null,
-          currentPeriodEnd: null,
-          trialEndsAt: null,
-          cancelAtPeriodEnd: false,
-          providerSubscriptionId: null,
-          lastSyncedAt: now,
-          lastSyncErrorCode: null,
-          lastSyncErrorAt: null,
-          ...pending,
-        },
-        create: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT, lastSyncedAt: now },
-      });
-      return { billingPeriodId: null, packMeterHandle: null };
+      return this.providerAbsenceReconciliation.reconcile(shopId, snapshot, now, runtimeConfig);
     }
 
     const plan = await this.database.billingPlan.findUnique({

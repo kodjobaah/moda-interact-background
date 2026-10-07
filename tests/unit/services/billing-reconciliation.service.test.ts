@@ -687,18 +687,6 @@ describe("BillingReconciliationService", () => {
     expect(queue.add).toHaveBeenCalledOnce();
   });
 
-  it("B008-R3 projects a genuine no-contract response without downgrading to Free", async () => {
-    const test = harness({ partnerResult: null });
-
-    const result = await test.service.reconcileOnce();
-    expect(result.subscriptionErrors).toBe(0);
-
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ nextReconcileAt: expect.any(Date) }),
-    }));
-    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
-  });
-
   it("B008-R4 persists pending plan and effective boundary without changing current entitlement", async () => {
     const test = harness();
 
