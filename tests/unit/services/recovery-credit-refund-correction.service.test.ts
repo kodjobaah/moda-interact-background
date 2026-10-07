@@ -71,37 +71,6 @@ function harness(row = refundRow(), providerResult = provider) {
 }
 
 describe("RecoveryCreditRefundCorrectionService", () => {
-  it("completes exact reported provider proof and decrements both counters once", async () => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("1.00"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-      automaticCorrectionUsageEvent: {
-        id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED",
-      },
-    });
-    const test = harness(row, {
-      ...provider,
-      providerUsageSnapshot: [{ handle: "pack-meter", quantity: "0", costAmount: "0.00", costCurrency: "USD" }],
-      providerUsagePricingSnapshot: [],
-    });
-    test.database.recoveryCreditPurchase.findUnique.mockResolvedValue({ status: "WITHDRAWN", currentAmount: 1, reservedAmount: 0, version: 3 });
-    test.database.shopEntitlementCounter.findUnique.mockResolvedValue({ id: "counter-1", version: 4, refundingQuantity: 1, grantedQuantity: 1 });
-    test.database.recoveryCreditPurchase.updateMany.mockResolvedValue({ count: 1 });
-    test.database.shopEntitlementCounter.updateMany.mockResolvedValue({ count: 1 });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, completed: 1 });
-    expect(test.database.shopEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ refundingQuantity: { decrement: 1 }, grantedQuantity: { decrement: 1 } }) }));
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ version: 0, automaticCorrectionUsageEventId: "correction-event-1" }), data: expect.objectContaining({ status: "COMPLETED", providerConfirmedByPlatformAdminId: null, providerActionKind: null }) }));
-    expect(test.database.merchantSupportMessage.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ systemCode: "BILLING_REFUND_COMPLETED", sourceLanguageTag: "en-GB", kind: "SYSTEM", state: "AVAILABLE" }) }));
-    expect(test.database.merchantSupportMessage.upsert).toHaveBeenCalledTimes(1);
-  });
-
   it("keeps native App Pricing eligible when the legacy provider id is null", async () => {
     const nativeProvider = { ...provider, providerSubscriptionId: null };
     const context = deriveShopifyProviderContextIdentity({ providerSubscriptionId: null, planHandle: "pro-2026", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd });

@@ -1,25 +1,17 @@
 import {
-  Prisma,
   RecoveryCreditPurchaseStatus,
   RecoveryCreditRefundStatus,
   ShopifyReportState,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import {
-  ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-  BILLING_SYSTEM_MESSAGE_CODES,
-  createMerchantBillingSystemSourceKey,
-} from "@modainteract/moda-interact-shared/billing";
-import {
-  MerchantSupportMessageKind,
-  MerchantSupportMessageState,
-} from "@prisma/client";
-
 import prisma from "../lib/db.js";
 import {
   shopifyPartnerBillingApi,
   type ShopifyPartnerBillingProvider,
 } from "../providers/shopify-partner-billing.provider.js";
+import {
+  RefundCompletionService,
+} from "./recovery-credit-refund-correction/refund-completion.service.js";
 import {
   RefundPreparationService,
 } from "./recovery-credit-refund-correction/refund-preparation.service.js";
@@ -54,6 +46,7 @@ export type RecoveryCreditRefundCorrectionResult = {
 export class RecoveryCreditRefundCorrectionService {
   private readonly providerState: RefundProviderStateService;
   private readonly preparation: RefundPreparationService;
+  private readonly completion: RefundCompletionService;
 
   constructor(
     private readonly database: RefundDatabase = prisma,
@@ -63,6 +56,7 @@ export class RecoveryCreditRefundCorrectionService {
   ) {
     this.providerState = new RefundProviderStateService(database, partner);
     this.preparation = new RefundPreparationService(database, this.providerState, now);
+    this.completion = new RefundCompletionService(database, now);
   }
 
   async processDue(): Promise<RecoveryCreditRefundCorrectionResult> {
@@ -144,7 +138,7 @@ export class RecoveryCreditRefundCorrectionService {
       && proof.cost.equals(refund.expectedProviderUsageCostAfterCorrection!);
 
     if (matchesExpectedAfter) {
-      const completed = await this.complete(refund, proof.cost, proof.currency);
+      const completed = await this.completion.complete(refund, proof.currency);
       return completed ? "completed" : "reconciled";
     }
     if (matchesBefore) return "reconciled";
@@ -178,68 +172,6 @@ export class RecoveryCreditRefundCorrectionService {
       select: { id: true },
     });
     return Boolean(unresolvedPurchase);
-  }
-
-  private async complete(refund: RefundRow, providerCost: Prisma.Decimal, currency: string): Promise<boolean> {
-    return this.database.$transaction(async (transaction) => {
-      const purchase = await transaction.recoveryCreditPurchase.findUnique({
-        where: { id: refund.purchaseId },
-        select: { status: true, currentAmount: true, reservedAmount: true, version: true },
-      });
-      const counter = await transaction.shopEntitlementCounter.findUnique({
-        where: { shopId_counter: { shopId: refund.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
-        select: { id: true, version: true, refundingQuantity: true, grantedQuantity: true },
-      });
-      if (!purchase || !counter || purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN
-        || purchase.reservedAmount !== 0 || purchase.currentAmount !== refund.finalCreditQuantity
-        || counter.refundingQuantity < refund.finalCreditQuantity) return false;
-      const updatedPurchase = await transaction.recoveryCreditPurchase.updateMany({
-        where: { id: refund.purchaseId, status: RecoveryCreditPurchaseStatus.WITHDRAWN, version: purchase.version, reservedAmount: 0, currentAmount: refund.finalCreditQuantity },
-        data: { currentAmount: 0, status: RecoveryCreditPurchaseStatus.REFUNDED, version: { increment: 1 } },
-      });
-      const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
-        where: { id: counter.id, version: counter.version, refundingQuantity: { gte: refund.finalCreditQuantity }, grantedQuantity: { gte: refund.finalCreditQuantity } },
-        data: { refundingQuantity: { decrement: refund.finalCreditQuantity }, grantedQuantity: { decrement: refund.finalCreditQuantity }, version: { increment: 1 } },
-      });
-      const updatedRefund = await transaction.recoveryCreditRefund.updateMany({
-        where: { id: refund.id, status: RecoveryCreditRefundStatus.REQUESTED, version: refund.version, automaticCorrectionUsageEventId: refund.automaticCorrectionUsageEventId },
-        data: { providerAmount: refund.expectedProviderAmount, providerCurrency: currency, providerConfirmedAt: this.now(), providerConfirmedByPlatformAdminId: null, providerActionKind: null, status: RecoveryCreditRefundStatus.COMPLETED, completedAt: this.now(), version: { increment: 1 } },
-      });
-      if (updatedPurchase.count !== 1 || updatedCounter.count !== 1 || updatedRefund.count !== 1) throw new Error("automatic refund completion CAS failed");
-      const completionTime = this.now();
-      const systemCode = BILLING_SYSTEM_MESSAGE_CODES.REFUND_COMPLETED;
-      const sourceKey = createMerchantBillingSystemSourceKey(
-        refund.shopId,
-        systemCode,
-        refund.id,
-        ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-      );
-      const thread = await transaction.merchantSupportThread.upsert({
-        where: { shopId: refund.shopId },
-        create: { shopId: refund.shopId },
-        update: {},
-      });
-      await transaction.merchantSupportMessage.upsert({
-        where: { sourceKey },
-        create: {
-          threadId: thread.id,
-          kind: MerchantSupportMessageKind.SYSTEM,
-          state: MerchantSupportMessageState.AVAILABLE,
-          originalBody: "Your recovery-credit refund has completed. The refundable purchased credits have been removed and Shopify provider reconciliation is complete.",
-          sourceLanguageTag: "en-GB",
-          systemCode,
-          systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
-          sourceKey,
-          availableAt: completionTime,
-        },
-        update: {},
-      });
-      await transaction.merchantSupportThread.update({
-        where: { id: thread.id },
-        data: { lastMessageAt: completionTime },
-      });
-      return true;
-    });
   }
 
   private async markNeedsAttention(refund: RefundRow, reason: string): Promise<void> {
