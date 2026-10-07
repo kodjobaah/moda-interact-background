@@ -11,7 +11,6 @@ import {
   BILLING_SYSTEM_MESSAGE_CODES,
   createMerchantBillingSystemSourceKey,
   createShopifyUsageIdempotencyKey,
-  deriveShopifyProviderContextIdentity,
 } from "@modainteract/moda-interact-shared/billing";
 import {
   MerchantSupportMessageKind,
@@ -20,12 +19,13 @@ import {
 
 import prisma from "../lib/db.js";
 import {
-  getSubscriptionReconciliationSnapshot,
   shopifyPartnerBillingApi,
-  type PartnerSubscription,
   type PartnerUsagePricingSnapshot,
   type ShopifyPartnerBillingProvider,
 } from "../providers/shopify-partner-billing.provider.js";
+import {
+  RefundProviderStateService,
+} from "./recovery-credit-refund-correction/refund-provider-state.service.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
@@ -91,12 +91,16 @@ export type RecoveryCreditRefundCorrectionResult = {
 };
 
 export class RecoveryCreditRefundCorrectionService {
+  private readonly providerState: RefundProviderStateService;
+
   constructor(
     private readonly database: RefundDatabase = prisma,
-    private readonly partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
+    partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
     private readonly now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
-  ) {}
+  ) {
+    this.providerState = new RefundProviderStateService(database, partner);
+  }
 
   async processDue(): Promise<RecoveryCreditRefundCorrectionResult> {
     const refunds = await this.database.recoveryCreditRefund.findMany({
@@ -218,7 +222,7 @@ export class RecoveryCreditRefundCorrectionService {
     }
     if (event.shopifyReportState !== ShopifyReportState.REPORTED) return "reconciled";
 
-    const proof = await this.readProviderState(refund);
+    const proof = await this.providerState.read(refund);
     if (!proof.safe) {
       await this.markNeedsAttention(refund, proof.reason);
       return "needs-attention";
@@ -283,7 +287,7 @@ export class RecoveryCreditRefundCorrectionService {
     const finalCreditQuantity = refund.purchase.currentAmount;
     const ratio = new Prisma.Decimal(finalCreditQuantity).div(refund.purchase.creditsGranted);
     if (ratio.lte(0) || ratio.gt(1)) return unsafe("refund ratio is outside (0, 1]");
-    const provider = await this.readProviderForPrepare(refund);
+    const provider = await this.providerState.readForPrepare(refund);
     if (!provider.safe) return provider;
     if (provider.currency !== refund.purchaseProviderCurrencySnapshot.toUpperCase()) {
       return unsafe("Shopify provider quantity, cost, or currency is unavailable");
@@ -309,63 +313,6 @@ export class RecoveryCreditRefundCorrectionService {
       costAfter,
       correctionValue,
     };
-  }
-
-  private async readProviderState(refund: RefundRow): Promise<ProviderStateProof> {
-    const shopifyShopId = refund.shop.shopifyShopId;
-    if (!shopifyShopId) return unsafe("shop has no Shopify identifier");
-    const snapshot = await getSubscriptionReconciliationSnapshot(this.partner, shopifyShopId);
-    const provider = snapshot.activeSubscription;
-    if (!provider) return unsafe("Shopify subscription is unavailable");
-    const period = await this.database.billingPeriod.findUnique({
-      where: { id: refund.billingPeriodIdSnapshot },
-      select: { periodStart: true, periodEnd: true },
-    });
-    if (!period || !provider.currentPeriodStart || !provider.currentPeriodEnd) {
-      return unsafe("Shopify provider period is unavailable");
-    }
-    let context: string;
-    try {
-      context = deriveShopifyProviderContextIdentity({
-        providerSubscriptionId: provider.providerSubscriptionId,
-        planHandle: provider.planHandle,
-        currentPeriodStart: provider.currentPeriodStart,
-        currentPeriodEnd: provider.currentPeriodEnd,
-      });
-    } catch {
-      return unsafe("Shopify provider context identity is unavailable");
-    }
-    if (
-      context !== refund.providerSubscriptionIdSnapshot
-      || provider.planHandle !== refund.planHandleSnapshot
-      || provider.currentPeriodStart.getTime() !== period.periodStart.getTime()
-      || provider.currentPeriodEnd.getTime() !== period.periodEnd.getTime()
-      || !provider.usageEventHandles.includes(refund.eventHandleSnapshot)
-    ) return unsafe("Shopify provider context does not match frozen refund provenance");
-    const usage = provider.providerUsageSnapshot.find((item) => item.handle === refund.eventHandleSnapshot);
-    const quantity = parseDecimal(usage?.quantity);
-    const cost = parseDecimal(usage?.costAmount);
-    const currency = usage?.costCurrency?.trim().toUpperCase();
-    if (!quantity || !cost || cost.lt(0) || !currency) {
-      return unsafe("Shopify provider quantity, cost, or currency is unavailable");
-    }
-    const pricing = provider.providerUsagePricingSnapshot?.find((item) => item.handle === refund.eventHandleSnapshot);
-    return {
-      safe: true,
-      quantity,
-      cost,
-      currency,
-      ...(pricing ? { pricing } : {}),
-    };
-  }
-
-  private async readProviderForPrepare(refund: RefundRow): Promise<ProviderProof> {
-    const state = await this.readProviderState(refund);
-    if (!state.safe) return state;
-    if (!state.pricing || state.pricing.currency?.toUpperCase() !== state.currency) {
-      return unsafe("Shopify provider pricing is unavailable or ambiguous");
-    }
-    return { ...state, pricing: state.pricing };
   }
 
   private async complete(refund: RefundRow, providerCost: Prisma.Decimal, currency: string): Promise<boolean> {
@@ -448,8 +395,6 @@ export class RecoveryCreditRefundCorrectionService {
 
 type CorrectionOutcome = "prepared" | "reconciled" | "completed" | "provider-action-required" | "needs-attention";
 type UnsafeProof = { safe: false; reason: string };
-type ProviderStateProof = { safe: true; quantity: Prisma.Decimal; cost: Prisma.Decimal; currency: string; pricing?: PartnerUsagePricingSnapshot } | UnsafeProof;
-type ProviderProof = { safe: true; quantity: Prisma.Decimal; cost: Prisma.Decimal; currency: string; pricing: PartnerUsagePricingSnapshot } | UnsafeProof;
 type PreparationProof = { safe: true; finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string; quantityBefore: Prisma.Decimal; costBefore: Prisma.Decimal; quantityAfter: Prisma.Decimal; costAfter: Prisma.Decimal; correctionValue: Prisma.Decimal } | UnsafeProof;
 
 class PrepareRaceError extends Error {
