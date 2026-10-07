@@ -1,161 +1,19 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+
 import {
-  OutboundWhatsAppAdmissionService,
   TERMINAL_MESSAGE,
   runCommerceAgentAfterAdmission,
 } from "../../../src/services/outbound-whatsapp-admission.service.js";
 import { EffectiveBillingPolicyError } from "../../../src/services/effective-billing-policy.service.js";
+import {
+  admissionHarness,
+  baseAdmissionInput,
+} from "./outbound-whatsapp-admission/outbound-admission.test-support.js";
 
-function harness({
-  policy = {},
-  usageRows = [],
-  conversationMessages = [
-    { id: "message-existing-1", conversationId: "conversation-1" },
-    { id: "message-existing-2", conversationId: "conversation-1" },
-  ],
-  existing = null,
-  provider = {},
-  executionEligibility = { evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })) },
-  recoveryLinked = false,
-  recoveryStatus = "DETECTED",
-  durableReservation = null,
-  postContractPolicy = null,
-}: {
-  policy?: Record<string, unknown>;
-  usageRows?: Array<{ sourceType: string; quantity: number; sourceId?: string }>;
-  conversationMessages?: Array<{ id: string; conversationId: string }>;
-  existing?: { sourceId: string } | null;
-  provider?: Record<string, unknown>;
-  executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
-  recoveryLinked?: boolean;
-  recoveryStatus?: "DETECTED" | "MESSAGE_SENT" | "ENGAGED" | "COMPLETED" | "EXPIRED" | "CANCELLED";
-  durableReservation?: Record<string, unknown> | null;
-  postContractPolicy?: Record<string, unknown> | null;
-} = {}) {
-  const messages = new Map<string, { id: string; content: string; status: string }>();
-  const usage = [...usageRows];
-  let messageNumber = 0;
-  const transaction = {
-    usageEvent: {
-      findUnique: vi.fn().mockResolvedValue(existing),
-      groupBy: vi.fn().mockImplementation(async ({ where }: { where?: { sourceId?: { in: string[] } } }) =>
-        [...usage
-          .filter((row) => !row.sourceId || !where?.sourceId || where.sourceId.in.includes(row.sourceId))
-          .reduce((totals, row) => totals.set(
-            row.sourceType,
-            (totals.get(row.sourceType) ?? 0) + row.quantity,
-          ), new Map<string, number>())]
-          .map(([sourceType, quantity]) => ({
-            sourceType,
-            _sum: { quantity },
-          })),
-      ),
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-        usage.push({
-          sourceType: String(data.sourceType),
-          quantity: Number(data.quantity),
-          sourceId: String(data.sourceId),
-        });
-        return { id: `usage-${usage.length}` };
-      }),
-      deleteMany: vi.fn(),
-    },
-    usageReservation: {
-      findUnique: vi.fn().mockResolvedValue(durableReservation),
-    },
-    conversation: {
-      findUnique: vi.fn().mockResolvedValue({
-        shopId: recoveryLinked ? null : "shop-1",
-        checkoutRecovery: recoveryLinked
-          ? { shopId: "shop-1", status: recoveryStatus }
-          : null,
-      }),
-      update: vi.fn(),
-      create: vi.fn().mockResolvedValue({ id: "conversation-new" }),
-    },
-    conversationMessage: {
-      findMany: vi.fn().mockImplementation(async ({ where }: { where: { conversationId: string } }) =>
-        conversationMessages
-          .filter((message) => message.conversationId === where.conversationId)
-          .map(({ id }) => ({ id })),
-      ),
-      findUnique: vi.fn().mockResolvedValue({ conversationId: "conversation-1" }),
-      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
-        const message = { id: `message-${++messageNumber}`, content: String(data.content), status: String(data.status) };
-        messages.set(message.id, message);
-        conversationMessages.push({ id: message.id, conversationId: String(data.conversationId) });
-        return message;
-      }),
-      update: vi.fn().mockImplementation(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
-        const message = messages.get(where.id);
-        if (message) Object.assign(message, data);
-        return message;
-      }),
-    },
-  };
-  const database = {
-    $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
-      typeof operation === "function" ? operation(transaction) : undefined,
-    ),
-    ...transaction,
-  };
-  const resolver = { resolve: vi.fn().mockResolvedValue({
-    shopId: "shop-1",
-    outboundHardLimit: 3,
-    terminalMessageReservedSlots: 1,
-    automatedWhatsappPaused: false,
-    billingPeriod: null,
-    ...policy,
-  }) };
-  const postContractResolver = {
-    resolve: vi.fn().mockResolvedValue(
-      postContractPolicy ?? {
-        mode: "POST_CONTRACT_DURABLE_CREDITS",
-        shopId: "shop-1",
-        subscriptionId: "subscription-1",
-        subscriptionStatus: "NO_CONTRACT",
-        newRecoveriesPaused: false,
-        automatedWhatsappPaused: false,
-        outboundSoftLimit: 3,
-        outboundHardLimit: 3,
-        terminalMessageReservedSlots: 1,
-        billingPeriod: null,
-      },
-    ),
-  };
-  const providerMock = {
-    sendWhatsAppText: vi.fn().mockResolvedValue({ providerMessageId: "wamid-1" }),
-    sendWhatsAppTemplate: vi.fn().mockResolvedValue({ providerMessageId: "wamid-template" }),
-    ...provider,
-  };
-
-  return {
-    database,
-    transaction,
-    messages,
-    usage,
-    resolver,
-    providerMock,
-    executionEligibility,
-    postContractResolver,
-    service: new OutboundWhatsAppAdmissionService(
-      database as never,
-      () => resolver,
-      providerMock as never,
-      3,
-      executionEligibility as never,
-      () => postContractResolver as never,
-    ),
-  };
-}
-
-const baseInput = {
-  shopId: "shop-1",
-  conversationId: "conversation-1",
-  idempotencyKey: "outbound-1",
-  senderType: "AGENT" as const,
+const textInput = {
+  ...baseAdmissionInput,
   to: "+15551234567",
   text: "Hello",
 };
@@ -172,10 +30,10 @@ describe("OutboundWhatsAppAdmissionService", () => {
     }
   });
 
-  it("persists a normal intent before sending and records success", async () => {
-    const test = harness();
+  it("persists durable intent before provider delivery", async () => {
+    const test = admissionHarness();
 
-    const result = await test.service.sendText(baseInput);
+    const result = await test.facade.sendText(textInput);
 
     expect(result).toMatchObject({
       kind: "admitted",
@@ -186,14 +44,17 @@ describe("OutboundWhatsAppAdmissionService", () => {
       test.providerMock.sendWhatsAppText,
     );
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      to: baseInput.to,
-      text: baseInput.text,
+      to: textInput.to,
+      text: textInput.text,
     });
-    expect(test.messages.get("message-1")).toMatchObject({ status: "SENT", content: "Hello" });
+    expect(test.messages.get("message-1")).toMatchObject({
+      status: "SENT",
+      content: "Hello",
+    });
   });
 
-  it("allows a recovery-linked durable-credit send after the Shopify contract has ended", async () => {
-    const test = harness({
+  it("composes post-contract durable recovery admission with recovery-scoped delivery", async () => {
+    const test = admissionHarness({
       recoveryLinked: true,
       durableReservation: {
         shopId: "shop-1",
@@ -205,9 +66,8 @@ describe("OutboundWhatsAppAdmissionService", () => {
       new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
     );
 
-    const result = await test.service.sendTemplate({
-      shopId: "shop-1",
-      conversationId: "conversation-1",
+    const result = await test.facade.sendTemplate({
+      ...baseAdmissionInput,
       idempotencyKey: "recovery-outreach:attempt-1",
       recoveryCreditSourceKey: "recovery:shop-1:attempt-1",
       senderType: "AUTOMATION",
@@ -216,10 +76,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
       languageCode: "en",
     });
 
-    expect(result).toMatchObject({
-      kind: "admitted",
-      executionScope: "recovery",
-    });
+    expect(result).toMatchObject({ kind: "admitted", executionScope: "recovery" });
     expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
     expect(test.executionEligibility.evaluate).toHaveBeenCalledWith(
       "shop-1",
@@ -229,98 +86,33 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
   });
 
-  it("lets an in-flight recovery conversation continue after the contract ends", async () => {
-    const test = harness({
-      recoveryLinked: true,
-      recoveryStatus: "ENGAGED",
-    });
-    test.resolver.resolve.mockRejectedValueOnce(
-      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
-    );
-
-    const result = await test.service.sendText({
-      ...baseInput,
-      senderType: "AGENT",
-      idempotencyKey: "agent:conversation-1:2",
-    });
-
-    expect(result).toMatchObject({
-      kind: "admitted",
-      executionScope: "recovery",
-    });
-    expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
-    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledOnce();
-  });
-
-  it("does not let an unstarted recovery or generic message bypass NO_CONTRACT without a durable reservation", async () => {
-    const test = harness({ recoveryLinked: true, recoveryStatus: "DETECTED" });
-    test.resolver.resolve.mockRejectedValueOnce(
-      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
-    );
-
-    await expect(
-      test.service.sendTemplate({
-        shopId: "shop-1",
-        conversationId: "conversation-1",
-        idempotencyKey: "recovery-outreach:no-reservation",
-        senderType: "AUTOMATION",
-        to: "+15551234567",
-        templateName: "recovery",
-        languageCode: "en",
-      }),
-    ).resolves.toEqual({ kind: "suppressed", reason: "contract-required" });
-    expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
-    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
-  });
-
-  it("does not count inbound or other metrics and reserves the terminal slot exactly once", async () => {
-    const test = harness({
-      usageRows: [
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 },
-        { sourceType: "CUSTOMER_INBOUND", quantity: 99 },
-      ],
-    });
-
-    const terminal = await test.service.sendText(baseInput);
-    const duplicateTerminal = await test.service.sendText({
-      ...baseInput,
-      idempotencyKey: "outbound-2",
-    });
-
-    expect(terminal).toMatchObject({ kind: "admitted", terminal: true });
-    expect(test.messages.get("message-1")?.content).toBe(TERMINAL_MESSAGE);
-    expect(duplicateTerminal).toEqual({ kind: "suppressed", reason: "terminal-already-used" });
-    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses deterministic terminal text instead of a template transport", async () => {
-    const test = harness({
+  it("composes terminal admission with deterministic text instead of template transport", async () => {
+    const test = admissionHarness({
       usageRows: [
         { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 },
       ],
     });
 
-    await test.service.sendTemplate({
-      ...baseInput,
+    await test.facade.sendTemplate({
+      ...baseAdmissionInput,
       idempotencyKey: "terminal-template",
+      to: "+15551234567",
       templateName: "recovery",
       languageCode: "en",
     });
 
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      to: baseInput.to,
+      to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
   });
 
-  it.each([
-    ["recovery", { recovery: true }],
-    ["product", { recovery: false }],
-  ])("does not invoke the CommerceAgent for a terminal %s admission", async (_label, context) => {
+  it("does not invoke CommerceAgent for a terminal admission", async () => {
     const runAgent = vi.fn().mockResolvedValue({ replyText: "ordinary reply" });
     const sendPreparedText = vi.fn().mockResolvedValue({
       kind: "admitted",
+      shopId: "shop-1",
       messageId: "message-1",
       conversationId: "conversation-1",
       terminal: true,
@@ -333,129 +125,47 @@ describe("OutboundWhatsAppAdmissionService", () => {
       terminal: true,
     };
 
-    await expect(runCommerceAgentAfterAdmission({
-      admission,
-      to: baseInput.to,
-      context,
-      runAgent,
-      sendPreparedText,
-      failPrepared: vi.fn(),
-    })).resolves.toBeNull();
+    await expect(
+      runCommerceAgentAfterAdmission({
+        admission,
+        to: "+15551234567",
+        context: { recovery: true },
+        runAgent,
+        sendPreparedText,
+        failPrepared: vi.fn(),
+      }),
+    ).resolves.toBeNull();
 
     expect(runAgent).not.toHaveBeenCalled();
     expect(sendPreparedText).toHaveBeenCalledWith({
       ...admission,
-      to: baseInput.to,
+      to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
   });
 
-  it("keeps outbound capacity independent between conversations", async () => {
-    const test = harness({
-      policy: { outboundHardLimit: 3, terminalMessageReservedSlots: 1 },
-      conversationMessages: [
-        { id: "a-1", conversationId: "conversation-a" },
-        { id: "a-2", conversationId: "conversation-a" },
-        { id: "b-1", conversationId: "conversation-b" },
-      ],
-      usageRows: [
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1, sourceId: "a-1" },
-        { sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1, sourceId: "a-2" },
-      ],
-    });
-    test.transaction.conversation.findUnique.mockResolvedValue({
+  it("fails the prepared durable intent when CommerceAgent fails before provider delivery", async () => {
+    const failure = new Error("agent failed");
+    const failPrepared = vi.fn().mockResolvedValue(undefined);
+    const admission = {
+      kind: "admitted" as const,
       shopId: "shop-1",
-      checkoutRecovery: null,
-    });
-
-    const conversationA = await test.service.sendText({
-      ...baseInput,
-      conversationId: "conversation-a",
-      idempotencyKey: "conversation-a-next",
-    });
-    const conversationB = await test.service.sendText({
-      ...baseInput,
-      conversationId: "conversation-b",
-      idempotencyKey: "conversation-b-first",
-    });
-
-    expect(conversationA).toMatchObject({ kind: "admitted", terminal: true });
-    expect(conversationB).toMatchObject({ kind: "admitted", terminal: false });
-  });
-
-  it("accumulates repeated sends only within one conversation", async () => {
-    const test = harness({
-      policy: { outboundHardLimit: 4, terminalMessageReservedSlots: 1 },
-    });
-
-    const results = [];
-    for (const idempotencyKey of ["repeat-1", "repeat-2", "repeat-3", "repeat-4"]) {
-      results.push(await test.service.sendText({ ...baseInput, idempotencyKey }));
-    }
-
-    expect(results.slice(0, 3)).toEqual([
-      expect.objectContaining({ kind: "admitted", terminal: false }),
-      expect.objectContaining({ kind: "admitted", terminal: false }),
-      expect.objectContaining({ kind: "admitted", terminal: false }),
-    ]);
-    expect(results[3]).toMatchObject({ kind: "admitted", terminal: true });
-  });
-
-  it("suppresses paused and duplicate sends before provider invocation", async () => {
-    const paused = harness({ policy: { automatedWhatsappPaused: true } });
-    expect(await paused.service.sendText(baseInput)).toEqual({ kind: "suppressed", reason: "paused" });
-    expect(paused.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
-
-    const duplicate = harness({ existing: { sourceId: "message-existing" } });
-    expect(await duplicate.service.sendText(baseInput)).toEqual({ kind: "suppressed", reason: "duplicate" });
-    expect(duplicate.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
-  });
-
-  it("counts only usage sourced from the target conversation and rejects another shop", async () => {
-    const test = harness({
-      policy: { outboundHardLimit: 4, terminalMessageReservedSlots: 1 },
-      usageRows: [{ sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 2 }],
-    });
-
-    await test.service.sendText(baseInput);
-
-    expect(test.transaction.usageEvent.groupBy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          sourceId: { in: ["message-existing-1", "message-existing-2"] },
-        }),
-      }),
-    );
-
-    test.transaction.conversation.findUnique.mockResolvedValue({
-      shopId: "shop-other",
-      checkoutRecovery: null,
-    });
-    const rejected = await test.service.sendText({
-      ...baseInput,
-      idempotencyKey: "outbound-other-shop",
-    });
-    expect(rejected).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
-    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
-  });
-
-  it("suppresses a template send when contract is missing after admission", async () => {
-    const executionEligibility = {
-      evaluate: vi.fn()
-        .mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason: "CONTRACT_REQUIRED" }),
+      messageId: "message-1",
+      conversationId: "conversation-1",
+      terminal: false,
     };
-    const test = harness({ executionEligibility });
 
-    const result = await test.service.sendTemplate({
-      ...baseInput,
-      templateName: "recovery",
-      languageCode: "en",
-      executionEligibility,
-    } as never);
+    await expect(
+      runCommerceAgentAfterAdmission({
+        admission,
+        to: "+15551234567",
+        context: { recovery: false },
+        runAgent: vi.fn().mockRejectedValue(failure),
+        sendPreparedText: vi.fn(),
+        failPrepared,
+      }),
+    ).rejects.toThrow("agent failed");
 
-    expect(result).toEqual({ kind: "suppressed", reason: "contract-required" });
-    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
-    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(failPrepared).toHaveBeenCalledWith("message-1");
   });
-
 });
