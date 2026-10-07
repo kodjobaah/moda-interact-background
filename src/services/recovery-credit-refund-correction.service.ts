@@ -3,14 +3,12 @@ import {
   RecoveryCreditPurchaseStatus,
   RecoveryCreditRefundStatus,
   ShopifyReportState,
-  UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import {
   ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
   BILLING_SYSTEM_MESSAGE_CODES,
   createMerchantBillingSystemSourceKey,
-  createShopifyUsageIdempotencyKey,
 } from "@modainteract/moda-interact-shared/billing";
 import {
   MerchantSupportMessageKind,
@@ -20,12 +18,18 @@ import {
 import prisma from "../lib/db.js";
 import {
   shopifyPartnerBillingApi,
-  type PartnerUsagePricingSnapshot,
   type ShopifyPartnerBillingProvider,
 } from "../providers/shopify-partner-billing.provider.js";
 import {
+  RefundPreparationService,
+} from "./recovery-credit-refund-correction/refund-preparation.service.js";
+import {
   RefundProviderStateService,
 } from "./recovery-credit-refund-correction/refund-provider-state.service.js";
+import {
+  refundSelect,
+  type RefundRow,
+} from "./recovery-credit-refund-correction/refund-correction.types.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
@@ -38,49 +42,6 @@ const LIVE_RECOVERY_CREDIT_REFUND_STATUSES = [
 
 type RefundDatabase = PrismaClient;
 
-type RefundRow = {
-  id: string;
-  createdAt: Date;
-  shopId: string;
-  status: RecoveryCreditRefundStatus;
-  reason: string | null;
-  purchaseId: string;
-  billingPeriodIdSnapshot: string;
-  providerSubscriptionIdSnapshot: string;
-  planHandleSnapshot: string;
-  eventHandleSnapshot: string;
-  shopifyPartnerDevelopmentSnapshot: boolean;
-  purchaseProviderAmountSnapshot: Prisma.Decimal;
-  purchaseProviderCurrencySnapshot: string;
-  finalCreditQuantity: number | null;
-  expectedProviderAmount: Prisma.Decimal | null;
-  expectedProviderCurrency: string | null;
-  automaticCorrectionUsageEventId: string | null;
-  providerUsageQuantityBeforeCorrection: Prisma.Decimal | null;
-  providerUsageCostBeforeCorrection: Prisma.Decimal | null;
-  expectedProviderUsageQuantityAfterCorrection: Prisma.Decimal | null;
-  expectedProviderUsageCostAfterCorrection: Prisma.Decimal | null;
-  version: number;
-  purchase: {
-    usageEventId: string;
-    status: RecoveryCreditPurchaseStatus;
-    currentAmount: number;
-    reservedAmount: number;
-    creditsGranted: number;
-  };
-  shop: { shopifyShopId: string | null };
-  automaticCorrectionUsageEvent: {
-    id: string;
-    quantity: Prisma.Decimal;
-    correctionOfUsageEventId: string | null;
-    sourceType: string | null;
-    sourceId: string | null;
-    shopifyEventHandle: string | null;
-    shopifyIdempotencyKey: string | null;
-    shopifyReportState: ShopifyReportState;
-  } | null;
-};
-
 export type RecoveryCreditRefundCorrectionResult = {
   selected: number;
   prepared: number;
@@ -92,6 +53,7 @@ export type RecoveryCreditRefundCorrectionResult = {
 
 export class RecoveryCreditRefundCorrectionService {
   private readonly providerState: RefundProviderStateService;
+  private readonly preparation: RefundPreparationService;
 
   constructor(
     private readonly database: RefundDatabase = prisma,
@@ -100,6 +62,7 @@ export class RecoveryCreditRefundCorrectionService {
     private readonly pageSize = DEFAULT_PAGE_SIZE,
   ) {
     this.providerState = new RefundProviderStateService(database, partner);
+    this.preparation = new RefundPreparationService(database, this.providerState, now);
   }
 
   async processDue(): Promise<RecoveryCreditRefundCorrectionResult> {
@@ -132,7 +95,10 @@ export class RecoveryCreditRefundCorrectionService {
           ? "reconciled"
           : "provider-action-required";
         if (outcome === "provider-action-required") {
-          await this.markProviderActionRequired(refund, error instanceof Error ? error.message : "provider proof unavailable");
+          await this.preparation.markProviderActionRequired(
+            refund,
+            error instanceof Error ? error.message : "provider proof unavailable",
+          );
         }
       }
       result.prepared += outcome === "prepared" ? 1 : 0;
@@ -146,68 +112,10 @@ export class RecoveryCreditRefundCorrectionService {
 
   private async prepare(refund: RefundRow): Promise<CorrectionOutcome> {
     if (await this.hasEarlierLiveMeterMutation(refund)) return "reconciled";
-    const proof = await this.readProof(refund);
-    if (!proof.safe) {
-      await this.markProviderActionRequired(refund, proof.reason);
-      return "provider-action-required";
-    }
-
-    const correctionIdempotencyKey = `recovery-credit-refund:${refund.id}`;
-    try {
-      await this.database.$transaction(async (transaction) => {
-        const correction = await transaction.usageEvent.upsert({
-          where: { idempotencyKey: correctionIdempotencyKey },
-          update: {},
-          create: {
-            shopId: refund.shopId,
-            billingPeriodId: refund.billingPeriodIdSnapshot,
-            metric: UsageMetric.RECOVERY_CREDIT_PACK_PURCHASE,
-            quantity: proof.correctionValue,
-            correctionOfUsageEventId: refund.purchase.usageEventId,
-            sourceType: "RECOVERY_CREDIT_REFUND",
-            sourceId: refund.id,
-            shopifyEventHandle: refund.eventHandleSnapshot,
-            shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(
-              refund.shopId,
-              correctionIdempotencyKey,
-            ),
-            idempotencyKey: correctionIdempotencyKey,
-            occurredAt: this.now(),
-            shopifyReportState: ShopifyReportState.PENDING,
-          },
-        });
-        const linked = await transaction.recoveryCreditRefund.updateMany({
-          where: {
-            id: refund.id,
-            status: RecoveryCreditRefundStatus.REQUESTED,
-            automaticCorrectionUsageEventId: null,
-          },
-          data: {
-            finalCreditQuantity: proof.finalCreditQuantity,
-            expectedProviderAmount: proof.expectedProviderAmount,
-            expectedProviderCurrency: proof.currency,
-            providerUsageQuantityBeforeCorrection: proof.quantityBefore,
-            providerUsageCostBeforeCorrection: proof.costBefore,
-            expectedProviderUsageQuantityAfterCorrection: proof.quantityAfter,
-            expectedProviderUsageCostAfterCorrection: proof.costAfter,
-            automaticCorrectionUsageEventId: correction.id,
-          },
-        });
-        if (linked.count !== 1) throw new PrepareRaceError();
-      });
-      return "prepared";
-    } catch (error) {
-      if (!(error instanceof PrepareRaceError)) throw error;
-    }
-
-    const current = await this.database.recoveryCreditRefund.findUnique({
-      where: { id: refund.id },
-      select: refundSelect,
-    });
-    if (current?.automaticCorrectionUsageEventId) {
-      return this.reconcile(current as unknown as RefundRow);
-    }
-    return "reconciled";
+    const result = await this.preparation.prepare(refund);
+    if (result.kind === "prepared") return "prepared";
+    if (result.kind === "provider-action-required") return "provider-action-required";
+    return result.refund ? this.reconcile(result.refund) : "reconciled";
   }
 
   private async reconcile(refund: RefundRow): Promise<CorrectionOutcome> {
@@ -272,49 +180,6 @@ export class RecoveryCreditRefundCorrectionService {
     return Boolean(unresolvedPurchase);
   }
 
-  private async readProof(refund: RefundRow): Promise<PreparationProof> {
-    if (
-      refund.status !== RecoveryCreditRefundStatus.REQUESTED
-      || refund.purchase.status !== RecoveryCreditPurchaseStatus.WITHDRAWN
-      || refund.purchase.currentAmount <= 0
-      || refund.purchase.reservedAmount !== 0
-      || refund.purchase.creditsGranted <= 0
-      || !eligibleProviderAmount(
-        refund.purchaseProviderAmountSnapshot,
-        refund.shopifyPartnerDevelopmentSnapshot,
-      )
-    ) return unsafe("refund purchase is not eligible for automatic correction");
-    const finalCreditQuantity = refund.purchase.currentAmount;
-    const ratio = new Prisma.Decimal(finalCreditQuantity).div(refund.purchase.creditsGranted);
-    if (ratio.lte(0) || ratio.gt(1)) return unsafe("refund ratio is outside (0, 1]");
-    const provider = await this.providerState.readForPrepare(refund);
-    if (!provider.safe) return provider;
-    if (provider.currency !== refund.purchaseProviderCurrencySnapshot.toUpperCase()) {
-      return unsafe("Shopify provider quantity, cost, or currency is unavailable");
-    }
-    const quantityBefore = provider.quantity;
-    const costBefore = provider.cost;
-    const correctionValue = ratio.neg();
-    const quantityAfter = quantityBefore.plus(correctionValue);
-    if (quantityAfter.lt(0)) return unsafe("provider quantity would become negative");
-    const costAfter = calculateTieredCost(provider.pricing!, quantityAfter);
-    if (!costAfter) return unsafe("live Shopify pricing is unavailable or ambiguous");
-    const expectedProviderAmount = refund.purchaseProviderAmountSnapshot.mul(ratio).toDecimalPlaces(2);
-    const reduction = costBefore.minus(costAfter).toDecimalPlaces(2);
-    if (!reduction.equals(expectedProviderAmount)) return unsafe("live Shopify pricing does not prove the refund amount");
-    return {
-      safe: true,
-      finalCreditQuantity,
-      expectedProviderAmount,
-      currency: provider.currency!,
-      quantityBefore,
-      costBefore,
-      quantityAfter,
-      costAfter,
-      correctionValue,
-    };
-  }
-
   private async complete(refund: RefundRow, providerCost: Prisma.Decimal, currency: string): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const purchase = await transaction.recoveryCreditPurchase.findUnique({
@@ -377,14 +242,6 @@ export class RecoveryCreditRefundCorrectionService {
     });
   }
 
-  private async markProviderActionRequired(refund: RefundRow, reason: string): Promise<void> {
-    const evidence = localRefundEvidence(refund);
-    await this.database.recoveryCreditRefund.updateMany({
-      where: { id: refund.id, status: RecoveryCreditRefundStatus.REQUESTED, automaticCorrectionUsageEventId: null },
-      data: { finalCreditQuantity: evidence?.finalCreditQuantity ?? null, expectedProviderAmount: evidence?.expectedProviderAmount ?? null, expectedProviderCurrency: evidence?.currency ?? null, status: RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED, reason: boundedReason(reason) },
-    });
-  }
-
   private async markNeedsAttention(refund: RefundRow, reason: string): Promise<void> {
     await this.database.recoveryCreditRefund.updateMany({
       where: { id: refund.id, status: RecoveryCreditRefundStatus.REQUESTED, automaticCorrectionUsageEventId: { not: null } },
@@ -394,54 +251,8 @@ export class RecoveryCreditRefundCorrectionService {
 }
 
 type CorrectionOutcome = "prepared" | "reconciled" | "completed" | "provider-action-required" | "needs-attention";
-type UnsafeProof = { safe: false; reason: string };
-type PreparationProof = { safe: true; finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string; quantityBefore: Prisma.Decimal; costBefore: Prisma.Decimal; quantityAfter: Prisma.Decimal; costAfter: Prisma.Decimal; correctionValue: Prisma.Decimal } | UnsafeProof;
-
-class PrepareRaceError extends Error {
-  constructor() {
-    super("recovery-credit refund preparation lost its refund-link race");
-    this.name = "PrepareRaceError";
-  }
-}
-
-const refundSelect = {
-  id: true, shopId: true, status: true, reason: true, purchaseId: true,
-  createdAt: true,
-  billingPeriodIdSnapshot: true, providerSubscriptionIdSnapshot: true, planHandleSnapshot: true,
-  eventHandleSnapshot: true, shopifyPartnerDevelopmentSnapshot: true, purchaseProviderAmountSnapshot: true, purchaseProviderCurrencySnapshot: true,
-  finalCreditQuantity: true, expectedProviderAmount: true, expectedProviderCurrency: true,
-  automaticCorrectionUsageEventId: true, providerUsageQuantityBeforeCorrection: true,
-  providerUsageCostBeforeCorrection: true, expectedProviderUsageQuantityAfterCorrection: true,
-  expectedProviderUsageCostAfterCorrection: true,
-  version: true,
-  purchase: { select: { usageEventId: true, status: true, currentAmount: true, reservedAmount: true, creditsGranted: true } },
-  shop: { select: { shopifyShopId: true } },
-  automaticCorrectionUsageEvent: { select: { id: true, quantity: true, correctionOfUsageEventId: true, sourceType: true, sourceId: true, shopifyEventHandle: true, shopifyIdempotencyKey: true, shopifyReportState: true } },
-} as const;
-
 function refundMeterKey(refund: Pick<RefundRow, "shopId" | "eventHandleSnapshot">): string {
   return JSON.stringify([refund.shopId, refund.eventHandleSnapshot]);
-}
-
-function calculateTieredCost(pricing: PartnerUsagePricingSnapshot, quantity: Prisma.Decimal): Prisma.Decimal | null {
-  if (!quantity.isFinite() || quantity.lt(0) || !pricing.tiers.length) return null;
-  const tiers = pricing.tiers.map((tier) => ({ ...tier, upTo: tier.upTo === null ? null : new Prisma.Decimal(tier.upTo), unit: parseDecimal(tier.amountPerUnit), flat: parseDecimal(tier.amount) }));
-  if (tiers.some((tier) => !tier.unit || !tier.flat || tier.unit.lt(0) || tier.flat.lt(0))) return null;
-  if (pricing.tiersMode.toUpperCase() === "VOLUME") {
-    const tier = tiers.find((candidate) => candidate.upTo === null || quantity.lte(candidate.upTo));
-    return tier ? tier.flat!.plus(quantity.mul(tier.unit!)) : null;
-  }
-  if (pricing.tiersMode.toUpperCase() !== "GRADUATED") return null;
-  let total = new Prisma.Decimal(0);
-  let lower = new Prisma.Decimal(0);
-  for (const tier of tiers) {
-    const upper = tier.upTo ?? quantity;
-    const segment = nonNegative(quantity.lt(upper) ? quantity.minus(lower) : upper.minus(lower));
-    total = total.plus(segment.mul(tier.unit!).plus(tier.flat!));
-    if (quantity.lte(upper)) return total;
-    lower = upper;
-  }
-  return null;
 }
 
 function validCorrectionEvent(refund: RefundRow, event: NonNullable<RefundRow["automaticCorrectionUsageEvent"]>): boolean {
@@ -452,46 +263,5 @@ function completeEvidence(refund: RefundRow): boolean {
   return refund.finalCreditQuantity !== null && refund.finalCreditQuantity > 0 && refund.expectedProviderAmount?.isFinite() === true && refund.expectedProviderCurrency !== null && refund.providerUsageQuantityBeforeCorrection?.isFinite() === true && refund.providerUsageCostBeforeCorrection?.isFinite() === true && refund.expectedProviderUsageQuantityAfterCorrection?.isFinite() === true && refund.expectedProviderUsageCostAfterCorrection?.isFinite() === true;
 }
 
-function parseDecimal(value: string | number | Prisma.Decimal | null | undefined): Prisma.Decimal | null {
-  if (value === null || value === undefined) return null;
-  try {
-    const decimal = new Prisma.Decimal(value);
-    return decimal.isFinite() ? decimal : null;
-  } catch { return null; }
-}
-
-function unsafe(reason: string): { safe: false; reason: string } { return { safe: false, reason }; }
-function nonNegative(value: Prisma.Decimal): Prisma.Decimal { return value.lt(0) ? new Prisma.Decimal(0) : value; }
 function boundedReason(reason: string): string { return reason.slice(0, MAX_REASON_LENGTH); }
 function boundedPageSize(value: number): number { return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE; }
-
-function eligibleProviderAmount(
-  amount: Prisma.Decimal,
-  shopifyPartnerDevelopmentSnapshot: boolean,
-): boolean {
-  return (
-    amount.isFinite()
-    && (
-      amount.gt(0)
-      || (shopifyPartnerDevelopmentSnapshot && amount.isZero())
-    )
-  );
-}
-
-function localRefundEvidence(refund: RefundRow): { finalCreditQuantity: number; expectedProviderAmount: Prisma.Decimal; currency: string } | null {
-  if (
-    refund.purchase.currentAmount <= 0
-    || refund.purchase.creditsGranted <= 0
-    || !eligibleProviderAmount(
-      refund.purchaseProviderAmountSnapshot,
-      refund.shopifyPartnerDevelopmentSnapshot,
-    )
-  ) return null;
-  const ratio = new Prisma.Decimal(refund.purchase.currentAmount).div(refund.purchase.creditsGranted);
-  if (ratio.lte(0) || ratio.gt(1)) return null;
-  return {
-    finalCreditQuantity: refund.purchase.currentAmount,
-    expectedProviderAmount: refund.purchaseProviderAmountSnapshot.mul(ratio).toDecimalPlaces(2),
-    currency: refund.purchaseProviderCurrencySnapshot,
-  };
-}

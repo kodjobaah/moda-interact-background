@@ -71,113 +71,6 @@ function harness(row = refundRow(), providerResult = provider) {
 }
 
 describe("RecoveryCreditRefundCorrectionService", () => {
-  it("prepares an exact full-pack negative correction and freezes typed evidence atomically", async () => {
-    const test = harness();
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, prepared: 1 });
-    expect(test.database.usageEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1" }),
-    }));
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ finalCreditQuantity: 1, expectedProviderAmount: new Prisma.Decimal("1.00"), expectedProviderCurrency: "USD", providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"), expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0") }),
-    }));
-  });
-
-  it("prepares a zero-value negative correction only for a verified partner-development refund snapshot", async () => {
-    const zeroProvider = {
-      ...provider,
-      providerUsageSnapshot: [
-        {
-          handle: "pack-meter",
-          quantity: "1",
-          costAmount: "0.00",
-          costCurrency: "USD",
-        },
-      ],
-      providerUsagePricingSnapshot: [
-        {
-          handle: "pack-meter",
-          currency: "USD",
-          tiersMode: "VOLUME",
-          tiers: [{ upTo: null, amountPerUnit: "0.00", amount: "0.00" }],
-        },
-      ],
-    };
-    const test = harness(
-      refundRow({
-        shopifyPartnerDevelopmentSnapshot: true,
-        purchaseProviderAmountSnapshot: new Prisma.Decimal("0.00"),
-      }),
-      zeroProvider,
-    );
-
-    await expect(test.service.processDue()).resolves.toMatchObject({
-      selected: 1,
-      prepared: 1,
-      providerActionRequired: 0,
-    });
-    expect(test.database.usageEvent.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        create: expect.objectContaining({
-          quantity: new Prisma.Decimal("-1"),
-        }),
-      }),
-    );
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          expectedProviderAmount: new Prisma.Decimal("0.00"),
-          providerUsageCostBeforeCorrection: new Prisma.Decimal("0.00"),
-          expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-        }),
-      }),
-    );
-  });
-
-  it("does not prepare a zero-value production refund even if one reaches Background", async () => {
-    const zeroProvider = {
-      ...provider,
-      providerUsageSnapshot: [
-        {
-          handle: "pack-meter",
-          quantity: "1",
-          costAmount: "0.00",
-          costCurrency: "USD",
-        },
-      ],
-      providerUsagePricingSnapshot: [
-        {
-          handle: "pack-meter",
-          currency: "USD",
-          tiersMode: "VOLUME",
-          tiers: [{ upTo: null, amountPerUnit: "0.00", amount: "0.00" }],
-        },
-      ],
-    };
-    const test = harness(
-      refundRow({
-        shopifyPartnerDevelopmentSnapshot: false,
-        purchaseProviderAmountSnapshot: new Prisma.Decimal("0.00"),
-      }),
-      zeroProvider,
-    );
-
-    await expect(test.service.processDue()).resolves.toMatchObject({
-      selected: 1,
-      prepared: 0,
-      providerActionRequired: 1,
-    });
-    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
-  });
-
-  it("routes ambiguous live pricing to provider action before creating an event", async () => {
-    const test = harness(refundRow(), { ...provider, providerUsagePricingSnapshot: [] });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, providerActionRequired: 1 });
-    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "PROVIDER_ACTION_REQUIRED" }) }));
-  });
-
   it("completes exact reported provider proof and decrements both counters once", async () => {
     const row = refundRow({
       automaticCorrectionUsageEventId: "correction-event-1",
@@ -237,14 +130,6 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     test.database.shopEntitlementCounter.updateMany.mockResolvedValue({ count: 1 });
 
     await expect(test.service.processDue()).resolves.toMatchObject({ completed: 1 });
-  });
-
-  it("freezes a proportional amount for an unsafe partial-pack fallback", async () => {
-    const test = harness(refundRow({ purchase: { usageEventId: "purchase-event-1", status: "WITHDRAWN", currentAmount: 1, reservedAmount: 0, creditsGranted: 4 }, purchaseProviderAmountSnapshot: new Prisma.Decimal("20.00") }), { ...provider, providerUsagePricingSnapshot: [] });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ providerActionRequired: 1 });
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ finalCreditQuantity: 1, expectedProviderAmount: new Prisma.Decimal("5.00"), expectedProviderCurrency: "USD", status: "PROVIDER_ACTION_REQUIRED" }) }));
-    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
   });
 
   it("leaves a reported correction requested when the provider has not caught up", async () => {
@@ -468,32 +353,6 @@ describe("RecoveryCreditRefundCorrectionService", () => {
 
     await expect(test.service.processDue()).resolves.toMatchObject({ needsAttention: 1, reconciled: 0 });
     expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_ATTENTION", reason: "automatic-correction-provider-state-conflict" }) }));
-  });
-
-  it("rolls back the staged correction event when the refund-link CAS is lost", async () => {
-    const test = harness(refundRow());
-    let staged = false;
-    let persisted = false;
-    test.database.usageEvent.upsert.mockImplementation(async () => {
-      staged = true;
-      return { id: "correction-event-1" };
-    });
-    test.database.recoveryCreditRefund.updateMany.mockResolvedValueOnce({ count: 0 });
-    test.database.recoveryCreditRefund.findUnique.mockResolvedValue(null);
-    test.database.$transaction.mockImplementation(async (callback: (transaction: unknown) => Promise<unknown>) => {
-      try {
-        await callback(test.database);
-        persisted = staged;
-      } catch (error) {
-        staged = false;
-        throw error;
-      }
-    });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ prepared: 0, reconciled: 1 });
-    expect(staged).toBe(false);
-    expect(persisted).toBe(false);
-    expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(1);
   });
 
   it("keeps fractional PREPARE evidence immutable on linked reconciliation retry", async () => {
