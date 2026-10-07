@@ -1,55 +1,135 @@
+import { createCipheriv } from "node:crypto";
+
+import { CommerceEmbeddingPurpose } from "@prisma/client";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  loadMerchantKnowledgeEmbeddingConfig,
   MerchantKnowledgeEmbeddingConfigurationError,
   MerchantKnowledgeEmbeddingError,
   MerchantKnowledgeEmbeddingService,
 } from "../../../src/services/merchant-knowledge-embedding.js";
+import { createMerchantKnowledgeEmbeddingResolver } from "../../../src/services/merchant-knowledge-embedding-runtime.js";
 
-const validEnvironment = {
-  EMBEDDING_PROVIDER: " openai ",
-  EMBEDDING_MODEL: " text-embedding-test ",
-  EMBEDDING_DIMENSIONS: " 3 ",
-  EMBEDDING_INDEX_VERSION: " v1 ",
-  EMBEDDING_API_KEY: " secret ",
+const config = {
+  provider: "openai" as const,
+  model: "text-embedding-test",
+  dimensions: 3,
+  indexVersion: "v1",
+  apiKey: "secret",
 };
 
-describe("Merchant Knowledge embedding configuration", () => {
-  it("trims and validates only the declared embedding settings", () => {
-    expect(loadMerchantKnowledgeEmbeddingConfig(validEnvironment)).toEqual({
+function sealedRow(overrides: Record<string, unknown> = {}) {
+  const environment = "TEST" as const;
+  const purpose = CommerceEmbeddingPurpose.MERCHANT_KNOWLEDGE;
+  const provider = "openai";
+  const keyId = "active";
+  const key = Buffer.alloc(32, 7);
+  const nonce = Buffer.alloc(12, 9);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(Buffer.from(canonicalJson({
+    credentialType: "EMBEDDING",
+    environment,
+    purpose,
+    provider,
+    keyId,
+  }), "utf8"));
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from("db-secret", "utf8")),
+    cipher.final(),
+  ]);
+  return {
+    key,
+    row: {
+      id: "embedding-config-1",
+      environment,
+      purpose,
+      embeddingProvider: provider,
+      embeddingModel: " text-embedding-test ",
+      embeddingDimensions: 3,
+      embeddingIndexVersion: " v1 ",
+      ciphertext,
+      nonce,
+      authTag: cipher.getAuthTag(),
+      keyId,
+      editVersion: 2,
+      updatedByAdminId: "admin-1",
+      createdAt: new Date("2026-10-05T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-05T00:00:00.000Z"),
+      ...overrides,
+    },
+  };
+}
+
+describe("Merchant Knowledge database-backed embedding configuration", () => {
+  it("resolves the current environment/purpose row and decrypts the stored credential", async () => {
+    const { key, row } = sealedRow();
+    const findUnique = vi.fn().mockResolvedValue(row);
+    const resolver = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique } } as never,
+      environment: "TEST",
+      keyring: { active: key },
+    });
+
+    const service = await resolver.resolve();
+
+    expect(findUnique).toHaveBeenCalledWith({
+      where: {
+        environment_purpose: {
+          environment: "TEST",
+          purpose: CommerceEmbeddingPurpose.MERCHANT_KNOWLEDGE,
+        },
+      },
+    });
+    expect(service.config).toEqual({
       provider: "openai",
       model: "text-embedding-test",
       dimensions: 3,
       indexVersion: "v1",
-      apiKey: "secret",
+      apiKey: "db-secret",
     });
   });
 
-  it("rejects unsupported providers with the bounded startup code", () => {
-    expect(() => loadMerchantKnowledgeEmbeddingConfig({
-      ...validEnvironment,
-      EMBEDDING_PROVIDER: "local",
-    })).toThrowError(
-      expect.objectContaining({ code: "UNSUPPORTED_EMBEDDING_PROVIDER" }),
-    );
+  it("re-reads the database on every resolution so admin changes are hot-swappable", async () => {
+    const first = sealedRow();
+    const second = sealedRow({ embeddingModel: "text-embedding-next", editVersion: 3 });
+    const findUnique = vi.fn()
+      .mockResolvedValueOnce(first.row)
+      .mockResolvedValueOnce(second.row);
+    const resolver = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique } } as never,
+      environment: "TEST",
+      keyring: { active: first.key },
+    });
+
+    await expect(resolver.resolve()).resolves.toMatchObject({
+      config: expect.objectContaining({ model: "text-embedding-test" }),
+    });
+    await expect(resolver.resolve()).resolves.toMatchObject({
+      config: expect.objectContaining({ model: "text-embedding-next" }),
+    });
+    expect(findUnique).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["0", "-1", "1.5", "9007199254740992", ""]) (
-    "rejects invalid dimensions %s",
-    (dimensions) => {
-      expect(() => loadMerchantKnowledgeEmbeddingConfig({
-        ...validEnvironment,
-        EMBEDDING_DIMENSIONS: dimensions,
-      })).toThrow(MerchantKnowledgeEmbeddingConfigurationError);
-    },
-  );
+  it("fails closed when the database configuration is missing or cannot be decrypted", async () => {
+    const missing = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(null) } } as never,
+      environment: "TEST",
+      keyring: { active: Buffer.alloc(32, 1) },
+    });
+    await expect(missing.resolve()).rejects.toMatchObject({
+      code: "EMBEDDING_CONFIGURATION_UNAVAILABLE",
+    });
 
-  it("rejects an index version longer than 64 code points", () => {
-    expect(() => loadMerchantKnowledgeEmbeddingConfig({
-      ...validEnvironment,
-      EMBEDDING_INDEX_VERSION: "\u{1f9ed}".repeat(65),
-    })).toThrow(MerchantKnowledgeEmbeddingConfigurationError);
+    const { row } = sealedRow();
+    const wrongKey = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
+      environment: "TEST",
+      keyring: { active: Buffer.alloc(32, 3) },
+    });
+    await expect(wrongKey.resolve()).rejects.toBeInstanceOf(
+      MerchantKnowledgeEmbeddingConfigurationError,
+    );
   });
 });
 
@@ -57,7 +137,7 @@ describe("MerchantKnowledgeEmbeddingService", () => {
   it("sends the exact chunk and configured model/dimensions to OpenAI", async () => {
     const create = vi.fn().mockResolvedValue({ data: [{ embedding: [0, 1, -2] }] });
     const service = new MerchantKnowledgeEmbeddingService(
-      loadMerchantKnowledgeEmbeddingConfig(validEnvironment),
+      config,
       { embeddings: { create } },
     );
 
@@ -73,7 +153,7 @@ describe("MerchantKnowledgeEmbeddingService", () => {
     "rejects invalid vectors",
     async (...embedding) => {
       const service = new MerchantKnowledgeEmbeddingService(
-        loadMerchantKnowledgeEmbeddingConfig(validEnvironment),
+        config,
         { embeddings: { create: vi.fn().mockResolvedValue({ data: [{ embedding }] }) } },
       );
       await expect(service.embed("chunk")).rejects.toMatchObject({
@@ -85,7 +165,7 @@ describe("MerchantKnowledgeEmbeddingService", () => {
 
   it("maps provider availability errors to a bounded retryable failure", async () => {
     const service = new MerchantKnowledgeEmbeddingService(
-      loadMerchantKnowledgeEmbeddingConfig(validEnvironment),
+      config,
       { embeddings: { create: vi.fn().mockRejectedValue({ status: 503 }) } },
     );
     await expect(service.embed("chunk")).rejects.toBeInstanceOf(
