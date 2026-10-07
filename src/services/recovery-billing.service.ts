@@ -1,14 +1,4 @@
-import {
-  ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-  BILLING_SYSTEM_MESSAGE_CODES,
-  createMerchantBillingSystemSourceKey,
-  createRecoveryIdempotencyKey,
-} from "@modainteract/moda-interact-shared/billing";
-import {
-  MerchantSupportMessageKind,
-  MerchantSupportMessageState,
-} from "@prisma/client";
-import type { PrismaClient } from "@prisma/client";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
 import {
@@ -37,20 +27,14 @@ import {
   PostContractRecoveryPolicyError,
   type PostContractRecoveryPolicy,
 } from "./post-contract-recovery-policy.service.js";
+import {
+  RecoveryCapacityExhaustionNotificationService,
+  type RecoveryCapacityExhaustionNotificationDatabase,
+} from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
 
 const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
 
-type RecoveryBillingDatabase = Pick<
-  PrismaClient,
-  "$transaction" | "merchantSupportThread" | "merchantSupportMessage"
-> &
-  Partial<
-    Pick<
-      PrismaClient,
-      "shopEntitlementCounter" | "billingPeriodEntitlementCounter"
-    >
-  > &
-  Partial<Pick<PrismaClient, "merchantPromotionSelection">>;
+type RecoveryBillingDatabase = RecoveryCapacityExhaustionNotificationDatabase;
 
 type RecoveryPolicyResolver = Pick<
   typeof effectiveBillingPolicyResolver,
@@ -123,15 +107,20 @@ export type RecoveryBillingAdmissionResult =
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
 
 export class RecoveryBillingService {
+  private readonly capacityExhaustionNotification: RecoveryCapacityExhaustionNotificationService;
+
   constructor(
-    private readonly database: RecoveryBillingDatabase = prisma,
+    database: RecoveryBillingDatabase = prisma,
     private readonly policyResolver: RecoveryPolicyResolver = effectiveBillingPolicyResolver,
     private readonly reservationService: FreeReservationService = freeRecoveryReservationService,
     private readonly purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
     private readonly paidIncludedReservationService: PaidIncludedReservationService = paidIncludedRecoveryReservationService,
     private readonly promotionalReservationService: PromotionalReservationService = promotionalRecoveryReservationService,
     private readonly postContractPolicyResolver: PostContractRecoveryPolicyResolver = postContractRecoveryPolicyResolver,
-  ) {}
+  ) {
+    this.capacityExhaustionNotification =
+      new RecoveryCapacityExhaustionNotificationService(database);
+  }
 
   async admit(input: {
     shopId: string;
@@ -242,7 +231,7 @@ export class RecoveryBillingService {
           policy,
         );
         if (lifetimeFree) return lifetimeFree;
-        await this.createCapacityExhaustedMessage(input.shopId, policy);
+        await this.capacityExhaustionNotification.notify(input.shopId, policy);
         return { kind: "blocked", reason: "capacity-exhausted" };
       }
       return { kind: "blocked", reason: "reservation-in-flight" };
@@ -270,7 +259,7 @@ export class RecoveryBillingService {
       };
     }
 
-    await this.createCapacityExhaustedMessage(input.shopId, policy);
+    await this.capacityExhaustionNotification.notify(input.shopId, policy);
 
     return {
       kind: "blocked",
@@ -625,116 +614,6 @@ export class RecoveryBillingService {
     return { kind: "blocked", reason: "reservation-in-flight" };
   }
 
-  private async createCapacityExhaustedMessage(
-    shopId: string,
-    policy: EffectiveBillingPolicy,
-  ): Promise<void> {
-    const systemCode = BILLING_SYSTEM_MESSAGE_CODES.RECOVERY_CAPACITY_EXHAUSTED;
-    const purchasedCounter = this.database.shopEntitlementCounter
-      ? await this.database.shopEntitlementCounter.findUnique({
-          where: {
-            shopId_counter: { shopId, counter: "PURCHASED_RECOVERY_CREDITS" },
-          },
-          select: {
-            grantedQuantity: true,
-            committedQuantity: true,
-            reservedQuantity: true,
-            refundingQuantity: true,
-          },
-        })
-      : null;
-    const includedCounter =
-      policy.billingPeriod && this.database.billingPeriodEntitlementCounter
-        ? await this.database.billingPeriodEntitlementCounter.findUnique({
-            where: {
-              billingPeriodId_counter: {
-                billingPeriodId: policy.billingPeriod.id,
-                counter: "INCLUDED_RECOVERY_CREDITS",
-              },
-            },
-            select: {
-              grantedQuantity: true,
-              committedQuantity: true,
-              reservedQuantity: true,
-              forfeitedQuantity: true,
-            },
-          })
-        : null;
-      const selectedPromotion = this.database.merchantPromotionSelection
-        ? await this.database.merchantPromotionSelection.findUnique({
-            where: { shopId },
-            select: {
-              promotionalCreditGrant: {
-                select: {
-                  id: true,
-                  version: true,
-                  quantity: true,
-                  committedQuantity: true,
-                  reservedQuantity: true,
-                },
-              },
-            },
-          })
-        : null;
-      const selectedGrant = selectedPromotion?.promotionalCreditGrant;
-    const exhaustionLifecycle = [
-      policy.planKind,
-      policy.subscriptionId,
-      policy.billingPeriod?.id ?? "no-period",
-      policy.freeAllowance
-        ? `${policy.freeAllowance.grant}:${policy.freeAllowance.committed}:${policy.freeAllowance.reserved}`
-        : "no-free-allowance",
-      includedCounter
-        ? `${includedCounter.grantedQuantity}:${includedCounter.committedQuantity}:${includedCounter.reservedQuantity}:${includedCounter.forfeitedQuantity}`
-        : "no-included-counter",
-      purchasedCounter
-        ? `${purchasedCounter.grantedQuantity}:${purchasedCounter.committedQuantity}:${purchasedCounter.reservedQuantity}:${purchasedCounter.refundingQuantity}`
-        : "no-purchased-counter",
-      selectedGrant
-        ? `${selectedGrant.id}:${selectedGrant.version}:${selectedGrant.quantity}:${selectedGrant.committedQuantity}:${selectedGrant.reservedQuantity}`
-        : "no-selected-promotion",
-      policy.recoveryCreditPack?.shopifyEventHandle ?? "no-pack",
-    ].join("|");
-    const sourceKey = createMerchantBillingSystemSourceKey(
-      shopId,
-      systemCode,
-      exhaustionLifecycle,
-      ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-    );
-    const now = new Date();
-
-    await this.database.$transaction(async (transaction) => {
-      const thread = await transaction.merchantSupportThread.upsert({
-        where: { shopId },
-        create: { shopId },
-        update: {},
-      });
-
-      await transaction.merchantSupportMessage.upsert({
-        where: { sourceKey },
-        create: {
-          threadId: thread.id,
-          kind: MerchantSupportMessageKind.SYSTEM,
-          state: MerchantSupportMessageState.AVAILABLE,
-          originalBody:
-            policy.planKind === "FREE"
-              ? "Every applicable Free-plan recovery-capacity source is exhausted: promotional credits, purchased credits and shop-lifetime Free. New abandoned-checkout recoveries are paused. Existing conversations continue. You can manage recovery capacity or change plan."
-              : "Every applicable recovery-capacity source is exhausted: Paid monthly included where applicable, promotional credits, purchased credits and shop-lifetime Free. New abandoned-checkout recoveries are paused. Existing conversations continue. Capacity returns when any canonical source becomes available again.",
-          sourceLanguageTag: "en-GB",
-          systemCode,
-          systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
-          sourceKey,
-          availableAt: now,
-        },
-        update: {},
-      });
-
-      await transaction.merchantSupportThread.update({
-        where: { id: thread.id },
-        data: { lastMessageAt: now },
-      });
-    });
-  }
 }
 
 function isDurableCreditAdmission(

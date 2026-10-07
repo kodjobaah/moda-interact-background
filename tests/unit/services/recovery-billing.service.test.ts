@@ -36,43 +36,6 @@ function createDatabase(selectedGrant?: Record<string, unknown> | null) {
   };
 }
 
-function createIdempotentMessageDatabase(selectedGrant?: Record<string, unknown> | null) {
-  const thread = { id: "thread-1" };
-  const messages = new Map<string, { id: string }>();
-  const messageUpsert = vi.fn(async ({ where }: { where: { sourceKey: string } }) => {
-    const existing = messages.get(where.sourceKey);
-    if (existing) return existing;
-    const message = { id: `message-${messages.size + 1}` };
-    messages.set(where.sourceKey, message);
-    return message;
-  });
-
-  return {
-    usageEvent: { upsert: vi.fn(async ({ create }: { create: unknown }) => ({ id: "usage-1", ...create })) },
-    merchantSupportThread: {
-      upsert: vi.fn(async () => thread),
-      update: vi.fn(async () => thread),
-    },
-    merchantSupportMessage: { upsert: messageUpsert },
-    merchantPromotionSelection: selectedGrant === undefined
-      ? undefined
-      : {
-          findUnique: vi.fn(async () => selectedGrant ? { promotionalCreditGrant: selectedGrant } : null),
-        },
-    $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) =>
-      callback({
-        merchantSupportThread: {
-          upsert: vi.fn(async () => thread),
-          update: vi.fn(async () => thread),
-        },
-        merchantSupportMessage: { upsert: messageUpsert },
-      }),
-    ),
-    messageUpsert,
-    messages,
-  };
-}
-
 function freePolicy() {
   return {
     shopId: "shop-1",
@@ -681,150 +644,13 @@ describe("RecoveryBillingService", () => {
     expect(database.merchantSupportMessage.upsert).toHaveBeenCalledTimes(0);
     expect(database.$transaction).toHaveBeenCalledTimes(2);
     expect(database.transactionMessageUpsert).toHaveBeenCalledTimes(2);
-    expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
+    expect(database.transactionMessageUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack:1" },
-      }),
-    );
-    expect(database.transactionMessageUpsert.mock.calls[1]?.[0]).toEqual(
-      expect.objectContaining({
-        where: { sourceKey: "billing-system:shop-1:BILLING_RECOVERY_CAPACITY_EXHAUSTED:FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack:1" },
-      }),
-    );
-  });
-
-  it("deduplicates exhaustion notifications by Free allowance lifecycle", async () => {
-    const database = createIdempotentMessageDatabase();
-    const policyResolver = {
-      resolve: vi.fn()
-        .mockResolvedValueOnce(freePolicy())
-        .mockResolvedValueOnce(freePolicy())
-        .mockResolvedValueOnce({
-          ...freePolicy(),
-          subscriptionId: "subscription-2",
-          freeAllowance: { ...freePolicy().freeAllowance, grant: 4, effective: 4 },
+        create: expect.objectContaining({
+          systemCode: "BILLING_RECOVERY_CAPACITY_EXHAUSTED",
         }),
-    };
-    const reservationService = {
-      reserve: vi.fn(async () => ({ kind: "allowance-exhausted", remaining: 0 })),
-      commit: vi.fn(),
-      release: vi.fn(),
-      markAmbiguous: vi.fn(),
-    };
-    const purchasedReservationService = {
-      reserve: vi.fn(async () => ({ kind: "credits-exhausted", available: 0 })),
-      commit: vi.fn(),
-      release: vi.fn(),
-      markAmbiguous: vi.fn(),
-    };
-    const service = new RecoveryBillingService(
-      database as never,
-      policyResolver as never,
-      reservationService as never,
-      purchasedReservationService as never,
-    );
-
-    await service.admit({ shopId: "shop-1", recoveryId: "recovery-1" });
-    await service.admit({ shopId: "shop-1", recoveryId: "recovery-2" });
-    await service.admit({ shopId: "shop-1", recoveryId: "recovery-3" });
-
-    expect(database.messages.size).toBe(2);
-    expect(database.messageUpsert).toHaveBeenCalledTimes(3);
-    expect([...database.messages.keys()][0]).toContain(
-      "FREE|subscription-1|no-period|5:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack",
-    );
-    expect([...database.messages.keys()][1]).toContain(
-      "FREE|subscription-2|no-period|4:5:0|no-included-counter|no-purchased-counter|no-selected-promotion|no-pack",
-    );
-  });
-
-  it("starts a new exhaustion epoch when the selected promotional grant changes", async () => {
-    const grant = {
-      id: "grant-1",
-      version: 2,
-      quantity: 10,
-      committedQuantity: 10,
-      reservedQuantity: 0,
-    };
-    const database = createDatabase(grant);
-    const service = new RecoveryBillingService(
-      database as never,
-      { resolve: vi.fn(async () => freePolicy()) } as never,
-      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      undefined as never,
-      unavailablePromotionalReservationService() as never,
-    );
-
-    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch" });
-
-    expect(database.transactionMessageUpsert.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({
-        where: {
-          sourceKey: expect.stringContaining("grant-1:2:10:10:0"),
-        },
       }),
     );
-  });
-
-  it("deduplicates identical selected promotional grant snapshots", async () => {
-    const grant = {
-      id: "grant-1",
-      version: 2,
-      quantity: 10,
-      committedQuantity: 10,
-      reservedQuantity: 0,
-    };
-    const database = createIdempotentMessageDatabase(grant);
-    const service = new RecoveryBillingService(
-      database as never,
-      { resolve: vi.fn(async () => freePolicy()) } as never,
-      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      undefined as never,
-      unavailablePromotionalReservationService() as never,
-    );
-    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch-1" });
-    await service.admit({ shopId: "shop-1", recoveryId: "promotion-epoch-2" });
-
-    expect(database.messages.size).toBe(1);
-  });
-
-  it.each([
-    ["id", "grant-2"],
-    ["version", 3],
-    ["committedQuantity", 9],
-    ["reservedQuantity", 1],
-  ] as const)("changes the selected promotional epoch when %s changes", async (field, value) => {
-    const firstGrant = {
-      id: "grant-1",
-      version: 2,
-      quantity: 10,
-      committedQuantity: 10,
-      reservedQuantity: 0,
-    };
-    const secondGrant = { ...firstGrant, [field]: value };
-    const database = createIdempotentMessageDatabase();
-    let selectedGrant = firstGrant;
-    const service = new RecoveryBillingService(
-      {
-        ...database,
-        merchantPromotionSelection: {
-          findUnique: vi.fn(async () => ({ promotionalCreditGrant: selectedGrant })),
-        },
-      } as never,
-      { resolve: vi.fn(async () => freePolicy()) } as never,
-      { reserve: vi.fn(async () => ({ kind: "allowance-exhausted" as const, remaining: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      { reserve: vi.fn(async () => ({ kind: "credits-exhausted" as const, available: 0 })), commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() } as never,
-      undefined as never,
-      unavailablePromotionalReservationService() as never,
-    );
-
-    await service.admit({ shopId: "shop-1", recoveryId: "promotion-change-1" });
-    selectedGrant = secondGrant;
-    await service.admit({ shopId: "shop-1", recoveryId: "promotion-change-2" });
-
-    expect(database.messages.size).toBe(2);
   });
 
   it("records paid recovery usage once with the plan meter and successful initiation time", async () => {
