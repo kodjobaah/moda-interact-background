@@ -31,6 +31,19 @@ import {
   RecoveryCapacityExhaustionNotificationService,
   type RecoveryCapacityExhaustionNotificationDatabase,
 } from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
+import { RecoveryReservationLifecycleService } from "./recovery-billing/recovery-reservation-lifecycle.service.js";
+import type {
+  RecoveryBillingAdmission,
+  RecoveryBillingAdmissionResult,
+  RecoveryPolicy,
+  RecoveryProviderFailureDisposition,
+} from "./recovery-billing/recovery-billing.types.js";
+
+export type {
+  RecoveryBillingAdmission,
+  RecoveryBillingAdmissionResult,
+  RecoveryProviderFailureDisposition,
+} from "./recovery-billing/recovery-billing.types.js";
 
 const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
 
@@ -44,7 +57,6 @@ type PostContractRecoveryPolicyResolver = Pick<
   typeof postContractRecoveryPolicyResolver,
   "resolve"
 >;
-type RecoveryPolicy = EffectiveBillingPolicy | PostContractRecoveryPolicy;
 type FreeReservationService = Pick<
   typeof freeRecoveryReservationService,
   "reserve" | "reservePostContract" | "commit" | "release" | "markAmbiguous"
@@ -62,52 +74,9 @@ type PromotionalReservationService = Pick<
   "reserve" | "commit" | "release" | "markAmbiguous"
 >;
 
-export type RecoveryBillingAdmission =
-  | {
-      kind: "free";
-      sourceKey: string;
-      policy: EffectiveBillingPolicy;
-    }
-  | {
-      kind: "paid";
-      sourceKey: string;
-      policy: EffectiveBillingPolicy;
-    }
-  | {
-      kind: "purchased";
-      sourceKey: string;
-      policy: RecoveryPolicy;
-    }
-  | {
-      kind: "promotional";
-      sourceKey: string;
-      policy: EffectiveBillingPolicy;
-    }
-  | {
-      kind: "lifetime-free";
-      sourceKey: string;
-      policy: RecoveryPolicy;
-    };
-
-export type RecoveryBillingAdmissionResult =
-  | { kind: "admitted"; admission: RecoveryBillingAdmission }
-  | {
-      kind: "blocked";
-      reason:
-        | "paused"
-        | "capacity-exhausted"
-        | "reservation-in-flight"
-        | "billing-period-closing"
-        | "billing-period-reconciliation"
-        | "contract-required"
-        | "subscription-frozen"
-        | "feature-unavailable";
-    };
-
-export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
-
 export class RecoveryBillingService {
   private readonly capacityExhaustionNotification: RecoveryCapacityExhaustionNotificationService;
+  private readonly reservationLifecycle: RecoveryReservationLifecycleService;
 
   constructor(
     database: RecoveryBillingDatabase = prisma,
@@ -120,6 +89,12 @@ export class RecoveryBillingService {
   ) {
     this.capacityExhaustionNotification =
       new RecoveryCapacityExhaustionNotificationService(database);
+    this.reservationLifecycle = new RecoveryReservationLifecycleService(
+      reservationService,
+      purchasedReservationService,
+      paidIncludedReservationService,
+      promotionalReservationService,
+    );
   }
 
   async admit(input: {
@@ -385,36 +360,8 @@ export class RecoveryBillingService {
     recoveryId: string;
     occurredAt: Date;
   }): Promise<void> {
-    if (input.admission.kind === "promotional") {
-      await this.promotionalReservationService.commit({
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-        planId: input.admission.policy.planId,
-      });
-      return;
-    }
-    if (
-      input.admission.kind === "free" ||
-      input.admission.kind === "lifetime-free"
-    ) {
-      await this.reservationService.commit({
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-      });
-      return;
-    }
-
-    if (input.admission.kind === "purchased") {
-      await this.purchasedReservationService.commit({
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-      });
-      return;
-    }
-
-    await this.paidIncludedReservationService.commit({
-      shopId: input.admission.policy.shopId,
-      sourceKey: input.admission.sourceKey,
+    await this.reservationLifecycle.commit({
+      admission: input.admission,
       occurredAt: input.occurredAt,
     });
   }
@@ -423,104 +370,13 @@ export class RecoveryBillingService {
     admission: RecoveryBillingAdmission;
     error: unknown;
   }): Promise<RecoveryProviderFailureDisposition> {
-    const disposition = isDefinitiveProviderFailure(input.error)
-      ? "definitive"
-      : "ambiguous";
-
-    if (input.admission.kind === "promotional") {
-      const reservationInput = {
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-        planId: input.admission.policy.planId,
-      };
-      if (disposition === "definitive") {
-        await this.promotionalReservationService.release(reservationInput);
-      } else {
-        await this.promotionalReservationService.markAmbiguous(
-          reservationInput,
-        );
-      }
-      return disposition;
-    }
-
-    if (input.admission.kind === "purchased") {
-      const reservationInput = {
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-      };
-      if (disposition === "definitive") {
-        await this.purchasedReservationService.release(reservationInput);
-      } else {
-        await this.purchasedReservationService.markAmbiguous(reservationInput);
-      }
-      return disposition;
-    }
-
-    if (input.admission.kind === "paid") {
-      const reservationInput = {
-        shopId: input.admission.policy.shopId,
-        sourceKey: input.admission.sourceKey,
-      };
-      if (disposition === "definitive") {
-        await this.paidIncludedReservationService.release(reservationInput);
-      } else {
-        await this.paidIncludedReservationService.markAmbiguous(
-          reservationInput,
-        );
-      }
-      return disposition;
-    }
-
-    if (
-      input.admission.kind !== "free" &&
-      input.admission.kind !== "lifetime-free"
-    )
-      return disposition;
-
-    const reservationInput = {
-      shopId: input.admission.policy.shopId,
-      sourceKey: input.admission.sourceKey,
-    };
-
-    if (disposition === "definitive") {
-      await this.reservationService.release(reservationInput);
-      return disposition;
-    }
-
-    await this.reservationService.markAmbiguous(reservationInput);
-    return disposition;
+    return this.reservationLifecycle.handleProviderFailure(input);
   }
 
   async releaseBeforeProvider(
     admission: RecoveryBillingAdmission,
   ): Promise<void> {
-    if (admission.kind === "promotional") {
-      await this.promotionalReservationService.release({
-        shopId: admission.policy.shopId,
-        sourceKey: admission.sourceKey,
-        planId: admission.policy.planId,
-      });
-      return;
-    }
-    if (admission.kind === "purchased") {
-      await this.purchasedReservationService.release({
-        shopId: admission.policy.shopId,
-        sourceKey: admission.sourceKey,
-      });
-      return;
-    }
-    if (admission.kind === "paid") {
-      await this.paidIncludedReservationService.release({
-        shopId: admission.policy.shopId,
-        sourceKey: admission.sourceKey,
-      });
-      return;
-    }
-    if (admission.kind !== "free" && admission.kind !== "lifetime-free") return;
-    await this.reservationService.release({
-      shopId: admission.policy.shopId,
-      sourceKey: admission.sourceKey,
-    });
+    await this.reservationLifecycle.release(admission);
   }
 
   private async tryPurchasedAdmission(
@@ -629,18 +485,6 @@ function isPostContractRecoveryPolicy(
   policy: RecoveryPolicy,
 ): policy is PostContractRecoveryPolicy {
   return "mode" in policy && policy.mode === "POST_CONTRACT_DURABLE_CREDITS";
-}
-
-function isDefinitiveProviderFailure(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    error.name === "WhatsAppServiceError" &&
-    "code" in error &&
-    (error.code === "configuration-missing" ||
-      error.code === "provider-rejected")
-  );
 }
 
 function isOwnedBy(
