@@ -1,7 +1,6 @@
 import {
   RecoveryCreditPurchaseStatus,
   RecoveryCreditRefundStatus,
-  ShopifyReportState,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
@@ -19,13 +18,16 @@ import {
   RefundProviderStateService,
 } from "./recovery-credit-refund-correction/refund-provider-state.service.js";
 import {
+  RefundReconciliationService,
+  type RefundReconciliationOutcome,
+} from "./recovery-credit-refund-correction/refund-reconciliation.service.js";
+import {
   refundSelect,
   type RefundRow,
 } from "./recovery-credit-refund-correction/refund-correction.types.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
-const MAX_REASON_LENGTH = 1000;
 const LIVE_RECOVERY_CREDIT_REFUND_STATUSES = [
   RecoveryCreditRefundStatus.REQUESTED,
   RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
@@ -44,19 +46,23 @@ export type RecoveryCreditRefundCorrectionResult = {
 };
 
 export class RecoveryCreditRefundCorrectionService {
-  private readonly providerState: RefundProviderStateService;
   private readonly preparation: RefundPreparationService;
-  private readonly completion: RefundCompletionService;
+  private readonly reconciliation: RefundReconciliationService;
 
   constructor(
     private readonly database: RefundDatabase = prisma,
     partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
-    private readonly now: () => Date = () => new Date(),
+    now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
   ) {
-    this.providerState = new RefundProviderStateService(database, partner);
-    this.preparation = new RefundPreparationService(database, this.providerState, now);
-    this.completion = new RefundCompletionService(database, now);
+    const providerState = new RefundProviderStateService(database, partner);
+    const completion = new RefundCompletionService(database, now);
+    this.preparation = new RefundPreparationService(database, providerState, now);
+    this.reconciliation = new RefundReconciliationService(
+      database,
+      providerState,
+      completion,
+    );
   }
 
   async processDue(): Promise<RecoveryCreditRefundCorrectionResult> {
@@ -82,7 +88,7 @@ export class RecoveryCreditRefundCorrectionService {
       let outcome: CorrectionOutcome;
       try {
         outcome = refund.automaticCorrectionUsageEventId
-          ? await this.reconcile(refund)
+          ? await this.reconciliation.reconcile(refund)
           : await this.prepare(refund);
       } catch (error) {
         outcome = refund.automaticCorrectionUsageEventId
@@ -109,41 +115,9 @@ export class RecoveryCreditRefundCorrectionService {
     const result = await this.preparation.prepare(refund);
     if (result.kind === "prepared") return "prepared";
     if (result.kind === "provider-action-required") return "provider-action-required";
-    return result.refund ? this.reconcile(result.refund) : "reconciled";
-  }
-
-  private async reconcile(refund: RefundRow): Promise<CorrectionOutcome> {
-    const event = refund.automaticCorrectionUsageEvent;
-    if (!event || !validCorrectionEvent(refund, event) || !completeEvidence(refund)) {
-      await this.markNeedsAttention(refund, "automatic-correction-evidence-incomplete");
-      return "needs-attention";
-    }
-    if (event.shopifyReportState === ShopifyReportState.NEEDS_ATTENTION) {
-      await this.markNeedsAttention(refund, "automatic-correction-provider-needs-attention");
-      return "needs-attention";
-    }
-    if (event.shopifyReportState !== ShopifyReportState.REPORTED) return "reconciled";
-
-    const proof = await this.providerState.read(refund);
-    if (!proof.safe) {
-      await this.markNeedsAttention(refund, proof.reason);
-      return "needs-attention";
-    }
-    const sameCurrency = proof.currency === refund.expectedProviderCurrency;
-    const matchesBefore = sameCurrency
-      && proof.quantity.equals(refund.providerUsageQuantityBeforeCorrection!)
-      && proof.cost.equals(refund.providerUsageCostBeforeCorrection!);
-    const matchesExpectedAfter = sameCurrency
-      && proof.quantity.equals(refund.expectedProviderUsageQuantityAfterCorrection!)
-      && proof.cost.equals(refund.expectedProviderUsageCostAfterCorrection!);
-
-    if (matchesExpectedAfter) {
-      const completed = await this.completion.complete(refund, proof.currency);
-      return completed ? "completed" : "reconciled";
-    }
-    if (matchesBefore) return "reconciled";
-    await this.markNeedsAttention(refund, "automatic-correction-provider-state-conflict");
-    return "needs-attention";
+    return result.refund
+      ? this.reconciliation.reconcile(result.refund)
+      : "reconciled";
   }
 
   private async hasEarlierLiveMeterMutation(refund: RefundRow): Promise<boolean> {
@@ -173,27 +147,19 @@ export class RecoveryCreditRefundCorrectionService {
     });
     return Boolean(unresolvedPurchase);
   }
-
-  private async markNeedsAttention(refund: RefundRow, reason: string): Promise<void> {
-    await this.database.recoveryCreditRefund.updateMany({
-      where: { id: refund.id, status: RecoveryCreditRefundStatus.REQUESTED, automaticCorrectionUsageEventId: { not: null } },
-      data: { status: RecoveryCreditRefundStatus.NEEDS_ATTENTION, reason: boundedReason(reason) },
-    });
-  }
 }
 
-type CorrectionOutcome = "prepared" | "reconciled" | "completed" | "provider-action-required" | "needs-attention";
+type CorrectionOutcome =
+  | RefundReconciliationOutcome
+  | "prepared"
+  | "provider-action-required";
+
 function refundMeterKey(refund: Pick<RefundRow, "shopId" | "eventHandleSnapshot">): string {
   return JSON.stringify([refund.shopId, refund.eventHandleSnapshot]);
 }
 
-function validCorrectionEvent(refund: RefundRow, event: NonNullable<RefundRow["automaticCorrectionUsageEvent"]>): boolean {
-  return event.id === refund.automaticCorrectionUsageEventId && event.sourceType === "RECOVERY_CREDIT_REFUND" && event.sourceId === refund.id && event.correctionOfUsageEventId === refund.purchase.usageEventId && event.shopifyEventHandle === refund.eventHandleSnapshot && event.quantity.isFinite() && event.quantity.lt(0) && !event.quantity.isZero() && Boolean(event.shopifyIdempotencyKey);
+function boundedPageSize(value: number): number {
+  return Number.isInteger(value) && value > 0
+    ? Math.min(value, MAX_PAGE_SIZE)
+    : DEFAULT_PAGE_SIZE;
 }
-
-function completeEvidence(refund: RefundRow): boolean {
-  return refund.finalCreditQuantity !== null && refund.finalCreditQuantity > 0 && refund.expectedProviderAmount?.isFinite() === true && refund.expectedProviderCurrency !== null && refund.providerUsageQuantityBeforeCorrection?.isFinite() === true && refund.providerUsageCostBeforeCorrection?.isFinite() === true && refund.expectedProviderUsageQuantityAfterCorrection?.isFinite() === true && refund.expectedProviderUsageCostAfterCorrection?.isFinite() === true;
-}
-
-function boundedReason(reason: string): string { return reason.slice(0, MAX_REASON_LENGTH); }
-function boundedPageSize(value: number): number { return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE; }

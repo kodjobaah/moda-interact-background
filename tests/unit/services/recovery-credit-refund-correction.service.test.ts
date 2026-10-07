@@ -101,42 +101,6 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     await expect(test.service.processDue()).resolves.toMatchObject({ completed: 1 });
   });
 
-  it("leaves a reported correction requested when the provider has not caught up", async () => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("1.00"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
-    });
-    const test = harness(row);
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, reconciled: 1, completed: 0 });
-    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("moves a linked provider-needs-attention event to refund NEEDS_ATTENTION", async () => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("1.00"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "NEEDS_ATTENTION" },
-    });
-    const test = harness(row);
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, needsAttention: 1 });
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_ATTENTION" }) }));
-  });
-
   it("reloads and reconciles when a concurrent prepare loses the refund-link CAS", async () => {
     const initial = refundRow();
     const linked = refundRow({
@@ -264,64 +228,6 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     expect(test.database.usageEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ quantity: new Prisma.Decimal("-1") }),
     }));
-  });
-
-  it("classifies exact before state as reconciled without changing the refund", async () => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("1.00"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
-    });
-    const test = harness(row);
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ reconciled: 1, completed: 0 });
-    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["quantity", { quantity: "0.5", costAmount: "0.50" }],
-    ["cost", { quantity: "0", costAmount: "0.50" }],
-    ["currency", { quantity: "0", costAmount: "0.00", costCurrency: "EUR" }],
-  ])("marks a third provider %s value as a conflict", async (_kind, usage) => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("1.00"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("1"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("1.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("0"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("0.00"),
-      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-1"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
-    });
-    const test = harness(row, { ...provider, providerUsageSnapshot: [{ handle: "pack-meter", costCurrency: "USD", ...usage }] });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ needsAttention: 1 });
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_ATTENTION", reason: "automatic-correction-provider-state-conflict" }) }));
-  });
-
-  it("classifies an unsafe fractional partial-pack provider state as a conflict", async () => {
-    const row = refundRow({
-      automaticCorrectionUsageEventId: "correction-event-1",
-      finalCreditQuantity: 1,
-      expectedProviderAmount: new Prisma.Decimal("0.25"),
-      expectedProviderCurrency: "USD",
-      providerUsageQuantityBeforeCorrection: new Prisma.Decimal("4.00"),
-      providerUsageCostBeforeCorrection: new Prisma.Decimal("4.00"),
-      expectedProviderUsageQuantityAfterCorrection: new Prisma.Decimal("3.75"),
-      expectedProviderUsageCostAfterCorrection: new Prisma.Decimal("3.75"),
-      automaticCorrectionUsageEvent: { id: "correction-event-1", quantity: new Prisma.Decimal("-0.25"), correctionOfUsageEventId: "purchase-event-1", sourceType: "RECOVERY_CREDIT_REFUND", sourceId: "refund-1", shopifyEventHandle: "pack-meter", shopifyIdempotencyKey: "shopify-key", shopifyReportState: "REPORTED" },
-    });
-    const test = harness(row, { ...provider, providerUsageSnapshot: [{ handle: "pack-meter", quantity: "3.50", costAmount: "3.50", costCurrency: "USD" }], providerUsagePricingSnapshot: [] });
-
-    await expect(test.service.processDue()).resolves.toMatchObject({ needsAttention: 1, reconciled: 0 });
-    expect(test.database.recoveryCreditRefund.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_ATTENTION", reason: "automatic-correction-provider-state-conflict" }) }));
   });
 
   it("keeps fractional PREPARE evidence immutable on linked reconciliation retry", async () => {
