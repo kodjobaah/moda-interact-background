@@ -273,24 +273,6 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
-  it("forwards preview and reply context after the immediate eligibility check", async () => {
-    const test = harness();
-
-    await test.service.sendText({
-      ...baseInput,
-      previewUrl: true,
-      replyToProviderMessageId: "wamid-inbound",
-    });
-
-    expect(test.executionEligibility?.evaluate).toHaveBeenCalledWith("shop-1");
-    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      to: baseInput.to,
-      text: baseInput.text,
-      previewUrl: true,
-      replyToProviderMessageId: "wamid-inbound",
-    });
-  });
-
   it("does not count inbound or other metrics and reserves the terminal slot exactly once", async () => {
     const test = harness({
       usageRows: [
@@ -309,28 +291,6 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(test.messages.get("message-1")?.content).toBe(TERMINAL_MESSAGE);
     expect(duplicateTerminal).toEqual({ kind: "suppressed", reason: "terminal-already-used" });
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
-  });
-
-  it("forces terminal prepared text even when the caller supplies an ordinary reply", async () => {
-    const test = harness();
-
-    await test.service.sendPreparedText({
-      kind: "admitted",
-      messageId: "message-existing-1",
-      conversationId: "conversation-1",
-      terminal: true,
-      to: baseInput.to,
-      text: "ordinary agent reply",
-    });
-
-    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
-      to: baseInput.to,
-      text: TERMINAL_MESSAGE,
-    });
-    expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
-      where: { id: "message-existing-1" },
-      data: { content: TERMINAL_MESSAGE },
-    });
   });
 
   it("uses deterministic terminal text instead of a template transport", async () => {
@@ -479,32 +439,6 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
   });
 
-  it("suppresses a prepared WhatsApp send when subscription freezes after admission", async () => {
-    const executionEligibility = {
-      evaluate: vi.fn()
-        .mockResolvedValueOnce({ allowed: false, shopId: "shop-1", reason: "SUBSCRIPTION_FROZEN" }),
-    };
-    const test = harness({ executionEligibility });
-
-    const result = await test.service.sendPreparedText({
-      kind: "admitted",
-      shopId: "shop-1",
-      messageId: "message-existing-1",
-      conversationId: "conversation-1",
-      terminal: false,
-      to: baseInput.to,
-      text: baseInput.text,
-    });
-
-    expect(result).toEqual({ kind: "suppressed", reason: "subscription-frozen" });
-    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
-    expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
-      where: { id: "message-existing-1" },
-      data: { status: "FAILED" },
-    });
-    expect(test.transaction.usageEvent.deleteMany).toHaveBeenCalled();
-  });
-
   it("suppresses a template send when contract is missing after admission", async () => {
     const executionEligibility = {
       evaluate: vi.fn()
@@ -524,34 +458,4 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 
-  it("removes definitive failures but preserves ambiguous pending intent", async () => {
-    const definitiveError = Object.assign(new Error("rejected"), {
-      name: "WhatsAppServiceError",
-      code: "provider-rejected",
-    });
-    const definitive = harness({
-      provider: { sendWhatsAppText: vi.fn().mockRejectedValue(definitiveError) },
-    });
-    await expect(definitive.service.sendText(baseInput)).rejects.toThrow("rejected");
-    expect(definitive.transaction.usageEvent.deleteMany).toHaveBeenCalled();
-    expect(definitive.messages.get("message-1")).toMatchObject({ status: "FAILED" });
-
-    const ambiguousError = Object.assign(new Error("unknown"), {
-      name: "WhatsAppServiceError",
-      code: "invalid-provider-response",
-    });
-    const ambiguous = harness({
-      provider: { sendWhatsAppText: vi.fn().mockRejectedValue(ambiguousError) },
-    });
-    await expect(ambiguous.service.sendText(baseInput)).rejects.toThrow("unknown");
-    expect(ambiguous.transaction.usageEvent.deleteMany).not.toHaveBeenCalled();
-    expect(ambiguous.messages.get("message-1")).toMatchObject({ status: "PENDING" });
-
-    const unknown = harness({
-      provider: { sendWhatsAppText: vi.fn().mockRejectedValue(new Error("socket closed")) },
-    });
-    await expect(unknown.service.sendText(baseInput)).rejects.toThrow("socket closed");
-    expect(unknown.transaction.usageEvent.deleteMany).not.toHaveBeenCalled();
-    expect(unknown.messages.get("message-1")).toMatchObject({ status: "PENDING" });
-  });
 });

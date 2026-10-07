@@ -1,6 +1,5 @@
 import {
   CheckoutRecoveryStatus,
-  MessageSenderType,
   MessageStatus,
   Prisma,
   UsageMetric,
@@ -24,22 +23,25 @@ import {
   type PostContractRecoveryPolicy,
 } from "./post-contract-recovery-policy.service.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
-import type {
-  ShopExecutionDenialReason,
-  ShopExecutionEligibilityService,
-} from "./shop-execution-eligibility.service.js";
+import type { ShopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
+import type { SendTemplateInput, SendTextInput } from "../integration/whatsapp/types.js";
+import {
+  OutboundMessageDeliveryService,
+  TERMINAL_MESSAGE,
+} from "./outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import type {
-  SendMessageResult,
-  SendTemplateInput,
-  SendTextInput,
-} from "../integration/whatsapp/types.js";
+  OutboundAdmissionInput,
+  OutboundAdmissionResult,
+} from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
+export type {
+  OutboundAdmissionInput,
+  OutboundAdmissionResult,
+  OutboundSuppressionReason,
+} from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
 const PENDING_CONTENT = "[Pending automated WhatsApp message]";
-const TERMINAL_MESSAGE =
-  "I am unable to continue this conversation right now. Please try again later.";
-
 type AdmissionDatabase = Pick<
   PrismaClient,
   | "$transaction"
@@ -54,51 +56,29 @@ type PolicyResolverFactory = (
 type Transaction = Prisma.TransactionClient;
 type OutboundPolicy = EffectiveBillingPolicy | PostContractRecoveryPolicy;
 
-export type OutboundAdmissionInput = {
-  shopId: string;
-  conversationId: string;
-  idempotencyKey: string;
-  senderType: Extract<MessageSenderType, "AGENT" | "AUTOMATION">;
-  content?: string;
-  recoveryCreditSourceKey?: string;
-};
-
-export type OutboundAdmissionResult =
-  | {
-      kind: "admitted";
-      shopId: string;
-      messageId: string;
-      conversationId: string;
-      terminal: boolean;
-      executionScope?: "general" | "recovery";
-    }
-  | { kind: "suppressed"; reason: OutboundSuppressionReason };
-
-export type OutboundSuppressionReason =
-  | "paused"
-  | "normal-cap-reached"
-  | "terminal-already-used"
-  | "duplicate"
-  | "conversation-invalid"
-  | "shop-unavailable"
-  | "contract-required"
-  | "subscription-frozen";
-
 export class OutboundWhatsAppAdmissionService {
+  private readonly delivery: OutboundMessageDeliveryService;
+
   constructor(
     private readonly database: AdmissionDatabase = prisma,
     private readonly createPolicyResolver: PolicyResolverFactory = (client) =>
       new EffectiveBillingPolicyResolver(client),
-    private readonly provider = whatsAppService,
+    provider = whatsAppService,
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
-    private readonly executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate"> =
+    executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate"> =
       shopExecutionEligibilityService,
     private readonly createPostContractPolicyResolver = (client: Prisma.TransactionClient) =>
       new PostContractRecoveryPolicyResolver(client),
-  ) {}
+  ) {
+    this.delivery = new OutboundMessageDeliveryService(
+      database,
+      provider,
+      executionEligibility,
+    );
+  }
 
   getProviderAccountId(): string {
-    return this.provider.getProviderAccountId();
+    return this.delivery.getProviderAccountId();
   }
 
   async findExistingAdmission(idempotencyKey: string) {
@@ -149,110 +129,22 @@ export class OutboundWhatsAppAdmissionService {
     const admission = await this.reserve(input);
     if (admission.kind !== "admitted") return admission;
 
-    try {
-      const execution =
-        admission.executionScope === "recovery"
-          ? await this.executionEligibility.evaluate(
-              admission.shopId,
-              undefined,
-              "recovery",
-            )
-          : await this.executionEligibility.evaluate(admission.shopId);
-      if (!execution.allowed) {
-        await this.failPrepared(admission.messageId);
-        return { kind: "suppressed", reason: suppressionReason(execution.reason) };
-      }
-      const result = admission.terminal
-        ? await this.provider.sendWhatsAppText({
-            to: input.to,
-            text: TERMINAL_MESSAGE,
-          })
-        : await this.provider.sendWhatsAppTemplate({
-            to: input.to,
-            templateName: input.templateName,
-            languageCode: input.languageCode,
-            ...(input.bodyParameters
-              ? { bodyParameters: input.bodyParameters }
-              : {}),
-            ...(input.imageHeader ? { imageHeader: input.imageHeader } : {}),
-            ...(input.dynamicUrlButton
-              ? { dynamicUrlButton: input.dynamicUrlButton }
-              : {}),
-          });
-      await this.markSent(admission.messageId, result.providerMessageId);
-      return admission;
-    } catch (error) {
-      await this.markProviderFailure(admission.messageId, error);
-      throw error;
-    }
+    return this.delivery.sendPreparedTemplate(admission, input);
   }
 
-  async sendPreparedText({
-    messageId,
-    shopId,
-    conversationId,
-    terminal,
-    executionScope = "general",
-    to,
-    text,
-    previewUrl,
-    replyToProviderMessageId,
-  }: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
-    to: string;
-    text: string;
-    previewUrl?: boolean;
-    replyToProviderMessageId?: string;
-  }): Promise<OutboundAdmissionResult> {
-    const outboundText = terminal ? TERMINAL_MESSAGE : text;
-    const execution =
-      executionScope === "recovery"
-        ? await this.executionEligibility.evaluate(
-            shopId,
-            undefined,
-            "recovery",
-          )
-        : await this.executionEligibility.evaluate(shopId);
-    if (!execution.allowed) {
-      await this.failPrepared(messageId);
-      return { kind: "suppressed", reason: suppressionReason(execution.reason) };
-    }
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: { content: outboundText },
-    });
-
-    try {
-      const result = await this.provider.sendWhatsAppText({
-        to,
-        text: outboundText,
-        ...(previewUrl !== undefined ? { previewUrl } : {}),
-        ...(replyToProviderMessageId
-          ? { replyToProviderMessageId }
-          : {}),
-      });
-      await this.markSent(messageId, result.providerMessageId);
-      return {
-        kind: "admitted",
-        shopId,
-        messageId,
-        conversationId,
-        terminal,
-        executionScope,
-      };
-    } catch (error) {
-      await this.markProviderFailure(messageId, error);
-      throw error;
-    }
+  async sendPreparedText(
+    input: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
+      to: string;
+      text: string;
+      previewUrl?: boolean;
+      replyToProviderMessageId?: string;
+    },
+  ): Promise<OutboundAdmissionResult> {
+    return this.delivery.sendPreparedText(input);
   }
 
   async failPrepared(messageId: string): Promise<void> {
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: { status: MessageStatus.FAILED },
-    });
-    await this.database.usageEvent.deleteMany({
-      where: { sourceId: messageId, metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE },
-    });
+    await this.delivery.failPrepared(messageId);
   }
 
   private async reserveInTransaction(
@@ -393,35 +285,6 @@ export class OutboundWhatsAppAdmissionService {
     };
   }
 
-  private async markSent(messageId: string, providerMessageId: string): Promise<void> {
-    await this.database.$transaction(async (transaction) => {
-      await transaction.conversationMessage.update({
-        where: { id: messageId },
-        data: { providerMessageId, status: MessageStatus.SENT, sentAt: new Date() },
-      });
-      const message = await transaction.conversationMessage.findUnique({
-        where: { id: messageId },
-        select: { conversationId: true },
-      });
-      if (message) {
-        await transaction.conversation.update({
-          where: { id: message.conversationId },
-          data: { lastMessageAt: new Date() },
-        });
-      }
-    });
-  }
-
-  private async markProviderFailure(messageId: string, error: unknown): Promise<void> {
-    const definitive =
-      error instanceof Error &&
-      error.name === "WhatsAppServiceError" &&
-      ["configuration-missing", "provider-rejected"].includes(
-        (error as Error & { code?: string }).code ?? "",
-      );
-    if (definitive) await this.failPrepared(messageId);
-  }
-
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
@@ -462,12 +325,6 @@ async function hasDurableRecoveryReservation(
     (reservation.counter?.counter === "PURCHASED_RECOVERY_CREDITS" ||
       reservation.counter?.counter === "LIFETIME_FREE_RECOVERY_CREDITS")
   );
-}
-
-function suppressionReason(reason: ShopExecutionDenialReason): OutboundSuppressionReason {
-  if (reason === "CONTRACT_REQUIRED") return "contract-required";
-  if (reason === "SUBSCRIPTION_FROZEN") return "subscription-frozen";
-  return "shop-unavailable";
 }
 
 function quantityFor(
