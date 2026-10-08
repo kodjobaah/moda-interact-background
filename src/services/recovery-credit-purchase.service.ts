@@ -223,7 +223,7 @@ export class RecoveryCreditPurchaseService {
           };
         }
 
-        const candidatesByHandle = new Map<string, typeof candidates>();
+        const candidatesByHandle = new Map<string | null, typeof candidates>();
         for (const candidate of candidates) {
           const sameHandle = candidatesByHandle.get(candidate.shopifyEventHandleSnapshot) ?? [];
           sameHandle.push(candidate);
@@ -243,11 +243,25 @@ export class RecoveryCreditPurchaseService {
         let grantedQuantity = 0;
         let failedProof = false;
         for (const candidate of candidates) {
+          // Legacy/incomplete purchase evidence cannot prove a provider-confirmed grant.
+          if (
+            candidate.providerSubscriptionIdSnapshot === null ||
+            candidate.shopifyPlanHandleSnapshot === null ||
+            candidate.shopifyEventHandleSnapshot === null ||
+            candidate.billingPeriodId === null ||
+            candidate.providerUsageQuantityBeforeSnapshot === null ||
+            candidate.providerUsageCostBeforeSnapshot === null
+          ) {
+            failedProof = true;
+            continue;
+          }
           const candidateUsage = input.providerUsageSnapshot?.find(
             (usage) => usage.handle === candidate.shopifyEventHandleSnapshot,
           );
           const candidateUnits = candidateUsage
-            ? parseProviderQuantity(candidateUsage.quantity as number | string | Prisma.Decimal)
+            ? (candidateUsage.quantity === null
+              ? null
+              : parseProviderQuantity(candidateUsage.quantity))
             : providerUnits;
           const hasExactProviderUsage = input.providerUsageSnapshot === undefined
             ? candidate.shopifyEventHandleSnapshot === input.packMeterHandle

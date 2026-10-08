@@ -493,6 +493,9 @@ async function selectOldestSpendableLot(
   for (const lot of lots) {
     if (
       currentContext &&
+      lot.providerSubscriptionIdSnapshot !== null &&
+      lot.shopifyPlanHandleSnapshot !== null &&
+      lot.billingPeriodId !== null &&
       isSameShopifyPurchaseProviderContext(
         {
           providerContextIdentity: lot.providerSubscriptionIdSnapshot,

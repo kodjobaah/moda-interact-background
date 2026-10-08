@@ -291,7 +291,7 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
       workerSource.indexOf("const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw"),
       workerSource.indexOf("const route = await recoveryRoutingService.resolveInboundMessage"),
     );
-    expect(admissionBlock).toMatch(/if \(abuse\.kind !== "allowed"\) return;/);
+    expect(admissionBlock).toMatch(/if \(abuse\.kind !== "allowed"\) \{[\s\S]*?\breturn;\s*\}/);
     expect(admissionBlock).not.toMatch(/receiveMessage|runCommerceAgent|sendPreparedText/);
   });
 

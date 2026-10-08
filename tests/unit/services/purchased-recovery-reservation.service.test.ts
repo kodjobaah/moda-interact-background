@@ -224,6 +224,45 @@ describe("PurchasedRecoveryReservationService", () => {
     ]));
   });
 
+  it.each([
+    "providerSubscriptionIdSnapshot",
+    "shopifyPlanHandleSnapshot",
+    "billingPeriodId",
+  ])("treats a spendable purchase lot missing %s as historical", async (field) => {
+    const { service, state } = createHarness(2, [
+      {
+        id: "current-lot",
+        creditsGranted: 1,
+        activatedAt: new Date("2026-09-01T00:00:00.000Z"),
+        createdAt: new Date("2026-09-01T00:00:00.000Z"),
+        providerSubscriptionIdSnapshot: "subscription-current",
+        shopifyPlanHandleSnapshot: "growth",
+        billingPeriodId: "period-current",
+      },
+      {
+        id: "incomplete-lot",
+        creditsGranted: 1,
+        activatedAt: new Date("2026-09-02T00:00:00.000Z"),
+        createdAt: new Date("2026-09-02T00:00:00.000Z"),
+        providerSubscriptionIdSnapshot: "subscription-current",
+        shopifyPlanHandleSnapshot: "growth",
+        billingPeriodId: "period-current",
+      },
+    ], {
+      status: "ACTIVE",
+      providerSubscriptionId: "subscription-current",
+      observedShopifyPlanHandle: "growth",
+      currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+      currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+      billingPeriodId: "period-current",
+      plan: { active: true },
+    });
+    Object.assign(state.lots[1]!, { [field]: null });
+
+    await expect(service.reserve({ shopId: "shop-1", sourceKey: `purchased:missing:${field}` }))
+      .resolves.toMatchObject({ kind: "reserved", reservation: { purchasedCreditPurchaseId: "incomplete-lot" } });
+  });
+
   it("derives native App Pricing context with a nullable legacy provider id", async () => {
     const currentPeriodStart = new Date("2026-09-01T00:00:00.000Z");
     const currentPeriodEnd = new Date("2026-10-01T00:00:00.000Z");

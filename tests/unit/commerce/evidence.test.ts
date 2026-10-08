@@ -55,8 +55,8 @@ const result = (data: unknown): CommerceToolResult => ({
 const canonicalFixture = JSON.parse(
   readFileSync(
     resolve(
-      process.cwd(),
-      "../../moda-interact-workspace-task-ARCH-020-BACKGROUND-002/docs/architecture/ARCH-020-evidence-contract-fixtures.json",
+      process.env.MODA_WORKSPACE_ROOT ?? resolve(process.cwd(), ".."),
+      "docs/architecture/ARCH-020-evidence-contract-fixtures.json",
     ),
     "utf8",
   ),

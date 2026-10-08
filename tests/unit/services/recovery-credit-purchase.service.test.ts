@@ -258,6 +258,47 @@ describe("RecoveryCreditPurchaseService", () => {
     expect(test.counter.grantedQuantity).toBe(12);
   });
 
+  it.each([
+    "providerSubscriptionIdSnapshot",
+    "shopifyPlanHandleSnapshot",
+    "shopifyEventHandleSnapshot",
+    "billingPeriodId",
+    "providerUsageQuantityBeforeSnapshot",
+    "providerUsageCostBeforeSnapshot",
+  ])("fails closed for a REQUESTED purchase missing %s", async (field) => {
+    const test = harness();
+    Object.assign(test.purchases[0]!, { [field]: null });
+
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerUsageSnapshot: [{
+        handle: "pack-meter",
+        quantity: "3",
+        costAmount: "12.50",
+        costCurrency: "USD",
+      }],
+    })).resolves.toMatchObject({
+      activatedCount: 0,
+      discrepancy: { kind: "ambiguous" },
+    });
+    expect(test.counter.grantedQuantity).toBe(0);
+    expect(test.purchases[0]).toMatchObject({ status: "REQUESTED", currentAmount: 0 });
+  });
+
+  it("does not treat an absent provider quantity as proof of a credit purchase", async () => {
+    const test = harness();
+    await expect(test.service.reconcileProviderConfirmed({
+      ...input,
+      providerUsageSnapshot: [{
+        handle: "pack-meter",
+        quantity: null,
+        costAmount: "12.50",
+        costCurrency: "USD",
+      }],
+    })).resolves.toMatchObject({ activatedCount: 0, discrepancy: { kind: "ambiguous" } });
+    expect(test.counter.grantedQuantity).toBe(0);
+  });
+
   it("activates sequential purchases with the same event handle from successive baselines", async () => {
     const test = harness([{ id: "purchase-1", creditsGranted: 5, beforeQuantity: "0", createdAt: new Date("2026-09-08T10:00:00.000Z") }]);
 
