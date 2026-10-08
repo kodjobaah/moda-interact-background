@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingRecoveryCandidate } from "../../../../src/domain/pending-recovery-candidate.js";
 import type { NormalizedAbandonedCheckout } from "../../../../src/domain/abandoned-checkout.js";
 import { RecoveryMaterializationService } from "../../../../src/services/checkout-recovery/recovery-materialization.service.js";
+import { ShopExecutionEligibilityService } from "../../../../src/services/shop-execution-eligibility.service.js";
 
 const candidate: PendingRecoveryCandidate = {
   shopId: "shop-1",
@@ -145,6 +146,37 @@ describe("RecoveryMaterializationService", () => {
     });
     expect(harness.order).toEqual(["eligibility"]);
     expect(harness.abandonedCheckoutLookup.resolveShopDomain).not.toHaveBeenCalled();
+  });
+
+  it("materializes a Woo FROZEN candidate through recovery-scoped eligibility", async () => {
+    const eligibility = new ShopExecutionEligibilityService({
+      subscription: {
+        findUnique: vi.fn(async () => ({
+          status: "FROZEN",
+          lastProviderLifecycleState: null,
+          shop: {
+            status: "ACTIVE",
+            onboardingCompleted: true,
+            platform: "WOOCOMMERCE",
+          },
+        })),
+      },
+    } as never);
+    const harness = createHarness();
+    const service = new RecoveryMaterializationService({
+      executionEligibility: eligibility,
+      abandonedCheckoutLookup: harness.abandonedCheckoutLookup,
+      pendingRecoveryCandidate: harness.pendingRecoveryCandidate,
+      findLatestRecovery: harness.findLatestRecovery,
+      snapshotBuilder: harness.snapshotBuilder,
+      initiate: harness.initiate,
+    });
+
+    await expect(service.materialize(candidate)).resolves.toEqual({
+      outcome: "recovery-created",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.initiate).toHaveBeenCalledOnce();
   });
 
   it("rechecks eligibility under the checkout lock before reading the order tombstone", async () => {

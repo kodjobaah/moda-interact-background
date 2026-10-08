@@ -112,6 +112,25 @@ describe("ShopifyUsageEventPublisherService", () => {
       ]);
   });
 
+  it("never selects Woo usage marked NOT_APPLICABLE for Shopify publication", async () => {
+    const test = harness([
+      usageRow({
+        id: "woo-usage-1",
+        provider: "WOOCOMMERCE",
+        shopifyReportState: "NOT_APPLICABLE",
+        shopifyEventHandle: null,
+        shopifyIdempotencyKey: null,
+      }),
+    ]);
+
+    await expect(test.service.publishDue()).resolves.toMatchObject({
+      selected: 0,
+      claimed: 0,
+      reported: 0,
+    });
+    expect(test.provider.createBillingEvent).not.toHaveBeenCalled();
+  });
+
   it("publishes fractional correction quantities without rounding", async () => {
     const test = harness([usageRow({ quantity: -0.25 })]);
 

@@ -111,6 +111,7 @@ export function registerSchedulingCases(context: CandidateFacadeContext) {
     prismaMock.shop.findUnique.mockResolvedValueOnce({
       id: "shop_1",
       status: "ACTIVE",
+      platform: "SHOPIFY",
       subscription: { status: "FROZEN" },
       settings: { recoveryDelayMinutes: 45 },
     });
@@ -130,6 +131,49 @@ export function registerSchedulingCases(context: CandidateFacadeContext) {
     expect(queueInstance.addCalls).toHaveLength(0);
     expect(redisMock.set).not.toHaveBeenCalled();
     expect(redisMock.zadd).not.toHaveBeenCalled();
+  });
+
+  it("schedules a Woo frozen checkout into recovery candidate processing", async () => {
+    prismaMock.shop.findUnique.mockResolvedValueOnce({
+      id: "shop_1",
+      status: "ACTIVE",
+      platform: "WOOCOMMERCE",
+      subscription: { status: "FROZEN" },
+      settings: { recoveryDelayMinutes: 45 },
+    });
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_woo_frozen",
+      cartToken: "cart_woo_frozen",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+    });
+
+    expect(result.outcome).toBe("enqueued");
+    expect(queueInstance.addCalls).toHaveLength(1);
+  });
+
+  it("refreshes a Woo frozen candidate from checkout updates", async () => {
+    prismaMock.shop.findUnique.mockResolvedValueOnce({
+      id: "shop_1",
+      status: "ACTIVE",
+      platform: "WOOCOMMERCE",
+      subscription: { status: "FROZEN" },
+      settings: { recoveryDelayMinutes: 45 },
+    });
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_woo_update",
+      cartToken: "cart_woo_update",
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: "2026-08-28T00:00:00Z",
+      activityAt: "2026-08-28T00:15:00Z",
+    });
+
+    expect(result.outcome).toBe("enqueued");
+    expect(queueInstance.addCalls).toHaveLength(1);
   });
 
   it("refreshes an existing delayed candidate idempotently", async () => {

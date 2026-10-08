@@ -9,6 +9,7 @@ type ShopExecutionClient = Partial<Pick<PrismaClient, "shop">> &
 export type ShopExecutionRecord = {
   id: string;
   status: "ACTIVE" | "UNINSTALLED" | "SUSPENDED";
+  platform: "SHOPIFY" | "WOOCOMMERCE";
   onboardingCompleted?: boolean;
   subscription: {
     status: string;
@@ -41,6 +42,7 @@ export class ShopExecutionEligibilityService {
       select: {
         id: true,
         status: true,
+        platform: true,
         onboardingCompleted: true,
         subscription: {
           select: {
@@ -55,13 +57,14 @@ export class ShopExecutionEligibilityService {
 
   async resolveShopById(
     shopId: string,
-  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "onboardingCompleted" | "subscription"> | null> {
+  ): Promise<Pick<ShopExecutionRecord, "id" | "status" | "platform" | "onboardingCompleted" | "subscription"> | null> {
     if (!this.client.shop) return null;
     return this.client.shop.findUnique({
       where: { id: shopId },
       select: {
         id: true,
         status: true,
+        platform: true,
         onboardingCompleted: true,
         subscription: {
           select: {
@@ -110,6 +113,7 @@ export class ShopExecutionEligibilityService {
           select: {
             status: true,
             onboardingCompleted: true,
+            platform: true,
           },
         },
       },
@@ -121,6 +125,7 @@ export class ShopExecutionEligibilityService {
       {
         id: shopId,
         status: subscription.shop.status,
+        platform: subscription.shop.platform,
         onboardingCompleted: subscription.shop.onboardingCompleted,
         subscription: {
           status: subscription.status,
@@ -134,7 +139,7 @@ export class ShopExecutionEligibilityService {
   evaluateResolvedShop(
     shop: Pick<
       ShopExecutionRecord,
-      "id" | "status" | "onboardingCompleted" | "subscription"
+      "id" | "status" | "platform" | "onboardingCompleted" | "subscription"
     >,
     scope: ShopExecutionScope = "general",
   ): ShopExecutionDecision {
@@ -156,6 +161,9 @@ export class ShopExecutionEligibilityService {
       return { allowed: false, shopId: shop.id, reason: "CONTRACT_REQUIRED" };
     }
     if (shop.subscription.status === SubscriptionProjectionStatus.FROZEN) {
+      if (scope === "recovery" && shop.platform === "WOOCOMMERCE") {
+        return { allowed: true, shopId: shop.id };
+      }
       return { allowed: false, shopId: shop.id, reason: "SUBSCRIPTION_FROZEN" };
     }
     if (shop.subscription.status === SubscriptionProjectionStatus.SYNC_ERROR) {

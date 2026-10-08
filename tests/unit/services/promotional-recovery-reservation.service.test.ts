@@ -25,6 +25,7 @@ type HarnessOptions = {
   grantShopId?: string;
   selected?: boolean;
   paused?: boolean;
+  provider?: "SHOPIFY" | "WOOCOMMERCE";
 };
 
 function createHarness(options: HarnessOptions = {}) {
@@ -60,6 +61,7 @@ function createHarness(options: HarnessOptions = {}) {
   };
 
   const transaction = {
+    shop: { findUnique: vi.fn(async () => ({ platform: options.provider ?? "SHOPIFY" })) },
     merchantPromotionSelection: {
       findUnique: vi.fn(async () => options.selected === false ? null : {
         shopId,
@@ -243,8 +245,8 @@ describe("PromotionalRecoveryReservationService", () => {
     await expect(harness.service.commit(input("non-promo"))).rejects.toBeInstanceOf(PromotionalRecoveryReservationError);
   });
 
-  it("commits once, records a non-Shopify usage event, and exhausts only at zero", async () => {
-    const harness = createHarness({ quantity: 2 });
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("writes explicit %s provider on promotional usage", async (provider) => {
+    const harness = createHarness({ quantity: 2, provider });
     await harness.service.reserve(input());
     await expect(harness.service.commit(input())).resolves.toMatchObject({ kind: "committed" });
     expect(harness.state.grant).toMatchObject({ committedQuantity: 1, reservedQuantity: 0, exhaustedAt: null });
@@ -252,6 +254,7 @@ describe("PromotionalRecoveryReservationService", () => {
     expect(harness.state.usageEvents[0]).toMatchObject({
       metric: "RECOVERY_CONVERSATION",
       sourceType: "PROMOTIONAL_RECOVERY_CREDITS",
+      provider,
       shopifyReportState: "NOT_APPLICABLE",
     });
     await expect(harness.service.commit(input())).resolves.toMatchObject({ kind: "already-committed" });

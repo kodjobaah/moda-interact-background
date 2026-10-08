@@ -126,14 +126,10 @@ export class PendingRecoveryCandidateService {
     if (shop.status !== "ACTIVE") {
       return { outcome: "discarded-shop-unavailable", shopDomain };
     }
-    const execution = await shopExecutionEligibilityService.evaluate(
-      shop.id,
-      shop.status,
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(
+      shop,
       "recovery",
     );
-    if (shop.subscription?.status === "FROZEN") {
-      return { outcome: "discarded-subscription-frozen", shopDomain };
-    }
     if (!execution.allowed) {
       if (execution.reason === "SUBSCRIPTION_FROZEN") {
         return { outcome: "discarded-subscription-frozen", shopDomain };

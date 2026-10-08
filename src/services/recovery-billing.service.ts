@@ -143,7 +143,8 @@ export class RecoveryBillingService {
 
     if (
       policy.planKind === "PAID_METERED" &&
-      policy.billingPeriod?.phase === "EXPIRED_RECONCILING"
+      policy.billingPeriod?.phase === "EXPIRED_RECONCILING" &&
+      policy.platform !== "WOOCOMMERCE"
     ) {
       return { kind: "blocked", reason: "billing-period-reconciliation" };
     }
@@ -215,7 +216,8 @@ export class RecoveryBillingService {
 
     if (
       current.planKind === "PAID_METERED" &&
-      current.billingPeriod?.phase === "EXPIRED_RECONCILING"
+      current.billingPeriod?.phase === "EXPIRED_RECONCILING" &&
+      current.platform !== "WOOCOMMERCE"
     ) {
       await this.releaseBeforeProvider(input.admission);
       return { kind: "blocked", reason: "billing-period-reconciliation" };
@@ -232,6 +234,17 @@ export class RecoveryBillingService {
     }
 
     if (
+      current.platform === "WOOCOMMERCE" &&
+      (current.subscriptionStatus === "FROZEN" ||
+        current.billingPeriod?.phase === "EXPIRED_RECONCILING") &&
+      (input.admission.kind === "promotional" ||
+        input.admission.kind === "purchased" ||
+        input.admission.kind === "lifetime-free")
+    ) {
+      return { kind: "admitted", admission: input.admission };
+    }
+
+    if (
       input.admission.kind === "free" ||
       input.admission.kind === "lifetime-free" ||
       input.admission.kind === "purchased"
@@ -242,6 +255,7 @@ export class RecoveryBillingService {
     if (
       input.admission.kind === "paid" &&
       current.planKind === "PAID_METERED" &&
+      current.subscriptionStatus !== "FROZEN" &&
       current.billingPeriod?.phase === "ACTIVE" &&
       current.billingPeriod.id === input.admission.policy.billingPeriod?.id
     ) {

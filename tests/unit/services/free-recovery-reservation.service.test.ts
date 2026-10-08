@@ -31,7 +31,7 @@ const policy = {
   policyVersions: { platform: 1, shopOverride: null, plan: new Date() },
 } as EffectiveBillingPolicy;
 
-function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
+function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy, provider = "SHOPIFY") {
   const state = {
     counter: {
       id: "counter-1",
@@ -47,6 +47,7 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy) {
   };
 
   const transaction = {
+    shop: { findUnique: vi.fn(async () => ({ platform: provider })) },
     shopEntitlementCounter: {
       findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
         select?.counter
@@ -125,8 +126,8 @@ describe("FreeRecoveryReservationService", () => {
     expect(transaction.shopEntitlementCounter.updateMany).toHaveBeenCalledOnce();
   });
 
-  it("commits one usage event and makes commit replay terminal", async () => {
-    const { service, transaction, state } = createHarness();
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("writes explicit %s provider on lifetime Free usage", async (provider) => {
+    const { service, transaction, state } = createHarness(policy, provider);
     await service.reserve({ shopId: "shop-1", sourceKey: "recovery:2" });
 
     await expect(service.commit({ shopId: "shop-1", sourceKey: "recovery:2" })).resolves.toMatchObject({ kind: "committed" });
@@ -135,6 +136,7 @@ describe("FreeRecoveryReservationService", () => {
     expect(state.usageEvent).toMatchObject({
       idempotencyKey: "recovery:shop-1:recovery:2",
       metric: "RECOVERY_CONVERSATION",
+      provider,
       shopifyReportState: "NOT_APPLICABLE",
     });
     expect(transaction.usageEvent.create).toHaveBeenCalledTimes(1);

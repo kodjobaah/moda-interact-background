@@ -28,6 +28,12 @@ import {
   type BillingPolicyClient,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
+import {
+  availablePaidIncludedQuantity,
+  isValidPaidIncludedAllowanceCounter,
+  type PaidIncludedAllowanceCounter,
+} from "./recovery-billing/paid-included-allowance.js";
+import { resolveRecoveryUsageProvider } from "./recovery-billing/usage-event-provider.js";
 
 export type PaidIncludedRecoveryReservationInput = {
   shopId: string;
@@ -182,7 +188,7 @@ export class PaidIncludedRecoveryReservationService {
         createError: (message) => new PaidIncludedRecoveryReservationError(message),
       });
       if (transition.kind === "apply") {
-        const available = availableQuantity(periodCounter);
+        const available = availablePaidIncludedQuantity(periodCounter);
         if (available < quantity) return replayOutcome(existing, sourceKey, counter);
         const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
           where: { id: periodCounter.id, version: periodCounter.version },
@@ -199,7 +205,7 @@ export class PaidIncludedRecoveryReservationService {
     }
 
     const periodCounter = await this.requireCounter(transaction, period);
-    const available = availableQuantity(periodCounter);
+    const available = availablePaidIncludedQuantity(periodCounter);
     if (available < quantity) return { kind: "allowance-exhausted", remaining: available, policy };
 
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
@@ -297,6 +303,7 @@ export class PaidIncludedRecoveryReservationService {
     if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const idempotencyKey = createRecoveryIdempotencyKey(input.shopId, input.sourceKey);
+    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
     const usageEvent = await transaction.usageEvent.create({
       data: {
         shopId: input.shopId,
@@ -307,9 +314,16 @@ export class PaidIncludedRecoveryReservationService {
         sourceType: "PAID_RECOVERY_CONVERSATION",
         sourceId: input.sourceKey,
         occurredAt: input.occurredAt ?? now,
-        shopifyReportState: ShopifyReportState.PENDING,
-        shopifyEventHandle: await this.readPaidUsageEventHandle(transaction, input.shopId),
-        shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey),
+        provider,
+        shopifyReportState: provider === "SHOPIFY"
+          ? ShopifyReportState.PENDING
+          : ShopifyReportState.NOT_APPLICABLE,
+        shopifyEventHandle: provider === "SHOPIFY"
+          ? await this.readPaidUsageEventHandle(transaction, input.shopId)
+          : null,
+        shopifyIdempotencyKey: provider === "SHOPIFY"
+          ? createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey)
+          : null,
       },
     });
     const committed = await transaction.usageReservation.update({
@@ -417,7 +431,7 @@ export class PaidIncludedRecoveryReservationService {
     if (!counter || counter.shopId !== period.shopId || counter.billingPeriodId !== period.id) {
       throw new PaidIncludedRecoveryReservationError("Included recovery period counter does not exist");
     }
-    validateCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity);
+    validateCounter(counter);
     return counter;
   }
 
@@ -436,7 +450,7 @@ export class PaidIncludedRecoveryReservationService {
     if (!counter || counter.shopId !== shopId) {
       throw new PaidIncludedRecoveryReservationError("Reservation billing period counter does not exist");
     }
-    validateCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity);
+    validateCounter(counter);
     return counter;
   }
 
@@ -487,15 +501,10 @@ export class PaidIncludedRecoveryReservationService {
 }
 
 
-function validateCounter(granted: number, committed: number, reserved: number, forfeited: number): void {
-  for (const value of [granted, committed, reserved, forfeited]) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities are invalid");
+function validateCounter(counter: PaidIncludedAllowanceCounter): void {
+  if (!isValidPaidIncludedAllowanceCounter(counter)) {
+    throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities are invalid");
   }
-  if (committed + reserved + forfeited > granted) throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities exceed the grant");
-}
-
-function availableQuantity(counter: { grantedQuantity: number; committedQuantity: number; reservedQuantity: number; forfeitedQuantity: number }): number {
-  return counter.grantedQuantity - counter.committedQuantity - counter.reservedQuantity - counter.forfeitedQuantity;
 }
 
 function replayOutcome(

@@ -14,7 +14,7 @@ const now = new Date("2026-09-15T00:00:00.000Z");
 
 type Harness = ReturnType<typeof createHarness>;
 
-function createHarness(grantedQuantity = 1) {
+function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | null = null, provider = "SHOPIFY") {
   const state = {
     period: {
       id: "period-1",
@@ -36,6 +36,7 @@ function createHarness(grantedQuantity = 1) {
       billingPeriodId: "period-1",
       counter: "INCLUDED_RECOVERY_CREDITS",
       grantedQuantity,
+      currentAllowanceQuantity,
       committedQuantity: 0,
       reservedQuantity: 0,
       forfeitedQuantity: 0,
@@ -48,6 +49,7 @@ function createHarness(grantedQuantity = 1) {
   };
 
   const transaction = {
+    shop: { findUnique: vi.fn(async () => ({ platform: provider })) },
     subscription: {
       findUnique: vi.fn(async (args: { select?: { plan?: unknown } }) => {
         if (args.select?.plan) {
@@ -122,6 +124,7 @@ function createHarness(grantedQuantity = 1) {
         shopId: state.counter.shopId,
         billingPeriodId: state.counter.billingPeriodId,
         grantedQuantity: state.counter.grantedQuantity,
+        currentAllowanceQuantity: state.counter.currentAllowanceQuantity,
         committedQuantity: state.counter.committedQuantity,
         reservedQuantity: state.counter.reservedQuantity,
         forfeitedQuantity: state.counter.forfeitedQuantity,
@@ -183,6 +186,52 @@ describe("PaidIncludedRecoveryReservationService", () => {
     expect(harness.state.reservations.size).toBe(0);
   });
 
+  it("uses current allowance and includes forfeited usage when reserving", async () => {
+    const harness = createHarness(10, 4);
+    harness.state.counter.committedQuantity = 1;
+    harness.state.counter.reservedQuantity = 1;
+    harness.state.counter.forfeitedQuantity = 1;
+
+    await expect(reserve(harness)).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.state.counter.reservedQuantity).toBe(2);
+  });
+
+  it("exposes an allowance increase without resetting usage or BillingPeriod identity", async () => {
+    const harness = createHarness(10, 4);
+    harness.state.counter.committedQuantity = 1;
+    harness.state.counter.forfeitedQuantity = 1;
+    await reserve(harness, "recovery-before-upgrade");
+    harness.state.counter.currentAllowanceQuantity = 5;
+
+    await expect(reserve(harness, "recovery-after-upgrade")).resolves.toMatchObject({ kind: "reserved" });
+    expect(harness.state.period.id).toBe("period-1");
+    expect(harness.state.counter).toMatchObject({
+      grantedQuantity: 10,
+      currentAllowanceQuantity: 5,
+      committedQuantity: 1,
+      reservedQuantity: 2,
+      forfeitedQuantity: 1,
+    });
+  });
+
+  it("allows an existing reservation to commit after allowance is downgraded", async () => {
+    const harness = createHarness(10);
+    await reserve(harness);
+    harness.state.counter.currentAllowanceQuantity = 0;
+
+    await expect(harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    })).resolves.toMatchObject({ kind: "committed" });
+    expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+  });
+
+  it("rejects a current allowance above the high-water grant", async () => {
+    const harness = createHarness(1, 2);
+
+    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+  });
+
   it("fails closed when the included counter is missing", async () => {
     const harness = createHarness();
     harness.state.counter = null as never;
@@ -225,18 +274,25 @@ describe("PaidIncludedRecoveryReservationService", () => {
     expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
   });
 
-  it("creates one exact paid pending UsageEvent on commit", async () => {
-    const harness = createHarness();
+  it.each([
+    ["SHOPIFY", "PENDING", "paid-meter"],
+    ["WOOCOMMERCE", "NOT_APPLICABLE", null],
+  ])("writes provider-specific paid UsageEvent evidence for %s", async (provider, reportState, eventHandle) => {
+    const harness = createHarness(1, null, provider);
     await reserve(harness);
     await harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" });
     expect(harness.state.usageEvents).toHaveLength(1);
     expect(harness.state.usageEvents[0]).toMatchObject({
       billingPeriodId: "period-1",
       metric: "RECOVERY_CONVERSATION",
-      shopifyReportState: "PENDING",
-      shopifyEventHandle: "paid-meter",
+      provider,
+      shopifyReportState: reportState,
+      shopifyEventHandle: eventHandle,
       quantity: 1,
     });
+    if (provider === "WOOCOMMERCE") {
+      expect(harness.state.usageEvents[0].shopifyIdempotencyKey).toBeNull();
+    }
   });
 
   it("does not create a second event or increment on duplicate commit", async () => {

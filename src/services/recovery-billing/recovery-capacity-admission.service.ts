@@ -80,7 +80,8 @@ export class RecoveryCapacityAdmissionService {
 
     if (
       policy.planKind === "PAID_METERED" &&
-      policy.billingPeriod?.phase === "ACTIVE"
+      policy.billingPeriod?.phase === "ACTIVE" &&
+      policy.subscriptionStatus !== "FROZEN"
     ) {
       const paid = await this.paidIncludedReservationService.reserve(
         input.outreachAttemptId
@@ -106,7 +107,8 @@ export class RecoveryCapacityAdmissionService {
 
     if (
       policy.planKind === "PAID_METERED" &&
-      policy.billingPeriod?.phase === "DRAINING"
+      policy.billingPeriod?.phase === "DRAINING" &&
+      policy.subscriptionStatus !== "FROZEN"
     ) {
       return { kind: "blocked", reason: "billing-period-closing" };
     }

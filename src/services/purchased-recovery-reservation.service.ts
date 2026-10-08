@@ -14,6 +14,7 @@ import {
 } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
+import { resolveRecoveryUsageProvider } from "./recovery-billing/usage-event-provider.js";
 import {
   DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
   RecoveryReservationConcurrencyConflict,
@@ -302,6 +303,7 @@ export class PurchasedRecoveryReservationService {
     });
     if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
+    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
     const usageEvent = await transaction.usageEvent.create({
       data: {
         shopId: input.shopId,
@@ -310,6 +312,7 @@ export class PurchasedRecoveryReservationService {
         idempotencyKey: createRecoveryIdempotencyKey(input.shopId, input.sourceKey),
         sourceType: "PURCHASED_RECOVERY_CREDITS",
         sourceId: reservation.id,
+        provider,
         shopifyReportState: ShopifyReportState.NOT_APPLICABLE,
       },
     });
