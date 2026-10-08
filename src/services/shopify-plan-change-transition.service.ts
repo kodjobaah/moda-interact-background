@@ -4,14 +4,12 @@ import {
   BillingPeriodStatus,
   BillingPlanKind,
   Prisma,
-  ShopifyReportState,
-  UsageReservationReleaseReason,
-  UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
+import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
 
 type TransitionDatabase = Pick<PrismaClient, "$transaction">;
 type Transition = Prisma.TransactionClient;
@@ -93,7 +91,14 @@ export class ShopifyPlanChangeTransitionService {
 
     if (!start || !end) {
       if (subscription.billingPeriod) {
-        await closePeriod(transaction, subscription.billingPeriod.id, subscription.billingPeriod.periodEnd, subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE);
+        await closeBillingPeriod(transaction, {
+          billingPeriodId: subscription.billingPeriod.id,
+          planKind: subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE,
+          closedAt: subscription.billingPeriod.periodEnd,
+          closeReason: BillingPeriodCloseReason.PLAN_CHANGED,
+          openPeriodFailureMessage: "Billing period was not open while applying plan change",
+          providerResponseSummary: "Billing period closed before Shopify App Event report",
+        });
       }
       await transaction.subscription.update({
         where: { id: subscription.id },
@@ -129,7 +134,14 @@ export class ShopifyPlanChangeTransitionService {
     }
 
     if (subscription.billingPeriod) {
-      await closePeriod(transaction, subscription.billingPeriod.id, subscription.billingPeriod.periodEnd, subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE);
+      await closeBillingPeriod(transaction, {
+        billingPeriodId: subscription.billingPeriod.id,
+        planKind: subscription.billingPeriod.planKindSnapshot ?? subscription.plan?.kind ?? BillingPlanKind.FREE,
+        closedAt: subscription.billingPeriod.periodEnd,
+        closeReason: BillingPeriodCloseReason.PLAN_CHANGED,
+        openPeriodFailureMessage: "Billing period was not open while applying plan change",
+        providerResponseSummary: "Billing period closed before Shopify App Event report",
+      });
     }
     const period = successor ?? await transaction.billingPeriod.create({
       data: {
@@ -180,23 +192,6 @@ export class ShopifyPlanChangeTransitionService {
     });
     return { kind: "transitioned", billingPeriodId: period.id, nextReconcileAt, planKind: input.plan.kind };
   }
-}
-
-async function closePeriod(transaction: Transition, billingPeriodId: string, closedAt: Date, planKind: BillingPlanKind): Promise<void> {
-  await transaction.usageEvent.updateMany({ where: { billingPeriodId, shopifyReportState: { in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE] } }, data: { shopifyReportState: ShopifyReportState.NEEDS_ATTENTION, nextReportAt: null, providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT", providerResponseSummary: "Billing period closed before Shopify App Event report" } });
-  if (planKind === BillingPlanKind.PAID_METERED) {
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({ where: { billingPeriodId_counter: { billingPeriodId, counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } } });
-    if (!counter) throw new Error("Paid billing period included-credit counter is missing");
-    const reserved = await transaction.usageReservation.aggregate({ where: { billingPeriodEntitlementCounterId: counter.id, status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] } }, _sum: { quantity: true } });
-    const quantity = Number(reserved._sum.quantity ?? 0);
-    const forfeitable = counter.grantedQuantity - counter.committedQuantity - counter.forfeitedQuantity;
-    if (forfeitable < 0 || quantity !== counter.reservedQuantity) throw new Error("Paid billing period included-credit counter is inconsistent");
-    await transaction.usageReservation.updateMany({ where: { billingPeriodEntitlementCounterId: counter.id, status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] } }, data: { status: UsageReservationStatus.RELEASED, releaseReason: UsageReservationReleaseReason.PERIOD_CLOSED } });
-    const updated = await transaction.billingPeriodEntitlementCounter.updateMany({ where: { id: counter.id, version: counter.version, reservedQuantity: counter.reservedQuantity }, data: { reservedQuantity: { decrement: quantity }, forfeitedQuantity: { increment: forfeitable }, version: { increment: 1 } } });
-    if (updated.count !== 1) throw new Error("Paid billing period included-credit counter changed during close");
-  }
-  const closed = await transaction.billingPeriod.updateMany({ where: { id: billingPeriodId, status: BillingPeriodStatus.OPEN }, data: { status: BillingPeriodStatus.CLOSED, closedAt, closeReason: BillingPeriodCloseReason.PLAN_CHANGED } });
-  if (closed.count !== 1) throw new Error("Billing period was not open while applying plan change");
 }
 
 async function lockSubscription(transaction: Transition, subscriptionId: string): Promise<void> {

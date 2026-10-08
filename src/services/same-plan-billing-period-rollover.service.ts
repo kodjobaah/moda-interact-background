@@ -4,14 +4,12 @@ import {
   BillingPeriodStatus,
   BillingPlanKind,
   Prisma,
-  ShopifyReportState,
-  UsageReservationReleaseReason,
-  UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
+import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
 
 type RolloverDatabase = Pick<PrismaClient, "$transaction">;
 type RolloverTransaction = Prisma.TransactionClient;
@@ -151,7 +149,14 @@ export class SamePlanBillingPeriodRolloverService {
       };
     }
 
-    await finalizeOldPeriod(transaction, currentPeriod.id, input.plan.kind, currentPeriod.periodEnd);
+    await closeBillingPeriod(transaction, {
+      billingPeriodId: currentPeriod.id,
+      planKind: input.plan.kind,
+      closedAt: currentPeriod.periodEnd,
+      closeReason: BillingPeriodCloseReason.RENEWED_SAME_PLAN,
+      openPeriodFailureMessage: "Billing period was not open while closing",
+      providerResponseSummary: "Billing period closed before Shopify App Event report",
+    });
     const successor = existingSuccessor ?? await transaction.billingPeriod.create({
       data: {
         shopId: input.shopId,
@@ -227,79 +232,6 @@ export class SamePlanBillingPeriodRolloverService {
 
     return { kind: "transitioned", billingPeriodId: successor.id, nextReconcileAt, planKind: input.plan.kind };
   }
-}
-
-async function finalizeOldPeriod(
-  transaction: RolloverTransaction,
-  billingPeriodId: string,
-  planKind: BillingPlanKind,
-  periodEnd: Date,
-): Promise<void> {
-  await transaction.usageEvent.updateMany({
-    where: {
-      billingPeriodId,
-      shopifyReportState: { in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE] },
-    },
-    data: {
-      shopifyReportState: ShopifyReportState.NEEDS_ATTENTION,
-      nextReportAt: null,
-      providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT",
-      providerResponseSummary: "Billing period closed before Shopify App Event report",
-    },
-  });
-  if (planKind === BillingPlanKind.PAID_METERED) {
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-      where: {
-        billingPeriodId_counter: {
-          billingPeriodId,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-        },
-      },
-    });
-    if (!counter) throw new Error("Paid billing period included-credit counter is missing");
-    const reserved = await transaction.usageReservation.aggregate({
-      where: {
-        billingPeriodEntitlementCounterId: counter.id,
-        status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] },
-      },
-      _sum: { quantity: true },
-    });
-    const reservedQuantity = Number(reserved._sum.quantity ?? 0);
-    const forfeitableAfterRelease = counter.grantedQuantity - counter.committedQuantity - counter.forfeitedQuantity;
-    if (forfeitableAfterRelease < 0 || reservedQuantity !== counter.reservedQuantity) {
-      throw new Error("Paid billing period included-credit counter is inconsistent");
-    }
-    await transaction.usageReservation.updateMany({
-      where: {
-        billingPeriodEntitlementCounterId: counter.id,
-        status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] },
-      },
-      data: { status: UsageReservationStatus.RELEASED, releaseReason: UsageReservationReleaseReason.PERIOD_CLOSED },
-    });
-    const updated = await transaction.billingPeriodEntitlementCounter.updateMany({
-      where: { id: counter.id, version: counter.version, reservedQuantity: counter.reservedQuantity },
-      data: {
-        reservedQuantity: { decrement: reservedQuantity },
-        forfeitedQuantity: { increment: forfeitableAfterRelease },
-        version: { increment: 1 },
-      },
-    });
-    if (updated.count !== 1) throw new Error("Paid billing period included-credit counter changed during close");
-    const closedCounter = await transaction.billingPeriodEntitlementCounter.findUnique({ where: { id: counter.id } });
-    if (!closedCounter || closedCounter.reservedQuantity !== 0 || closedCounter.committedQuantity + closedCounter.forfeitedQuantity !== closedCounter.grantedQuantity) {
-      throw new Error("Paid billing period included-credit counter did not close cleanly");
-    }
-  }
-
-  const closed = await transaction.billingPeriod.updateMany({
-    where: { id: billingPeriodId, status: BillingPeriodStatus.OPEN },
-    data: {
-      status: BillingPeriodStatus.CLOSED,
-      closedAt: periodEnd,
-      closeReason: BillingPeriodCloseReason.RENEWED_SAME_PLAN,
-    },
-  });
-  if (closed.count !== 1) throw new Error("Billing period was not open while closing");
 }
 
 async function lockSubscription(transaction: RolloverTransaction, subscriptionId: string): Promise<void> {

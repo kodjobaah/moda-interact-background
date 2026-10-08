@@ -1,13 +1,9 @@
 import {
   BillingPeriodCloseReason,
-  BillingPeriodEntitlementCounterKind,
   BillingPeriodStatus,
   BillingPlanKind,
   Prisma,
-  ShopifyReportState,
   SubscriptionProjectionStatus,
-  UsageReservationReleaseReason,
-  UsageReservationStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
@@ -23,7 +19,7 @@ import { recoveryCapacityResumeService } from "./recovery-capacity-resume.servic
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transition.service.js";
-
+import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
 
 type LifecycleDatabase = Pick<PrismaClient, "$transaction">;
 type ResumeService = Pick<typeof recoveryCapacityResumeService, "schedule">;
@@ -310,13 +306,13 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       if (!established && subscription.status === SubscriptionProjectionStatus.NO_CONTRACT) return;
       const period = subscription.billingPeriod;
       if (period?.status === BillingPeriodStatus.OPEN) {
-        await transaction.usageEvent.updateMany({
-          where: { billingPeriodId: period.id, shopifyReportState: { in: [ShopifyReportState.PENDING, ShopifyReportState.RETRYABLE] } },
-          data: { shopifyReportState: ShopifyReportState.NEEDS_ATTENTION, nextReportAt: null, providerErrorCode: "PERIOD_CLOSED_BEFORE_REPORT" },
+        await closeBillingPeriod(transaction, {
+          billingPeriodId: period.id,
+          planKind: period.planKindSnapshot ?? BillingPlanKind.FREE,
+          closedAt: now,
+          closeReason: BillingPeriodCloseReason.CONTRACT_ENDED,
+          openPeriodFailureMessage: "Billing period was not open while closing contract",
         });
-        if (period.planKindSnapshot === BillingPlanKind.PAID_METERED) await closePaidPeriod(transaction, period.id);
-        const closed = await transaction.billingPeriod.updateMany({ where: { id: period.id, status: BillingPeriodStatus.OPEN }, data: { status: BillingPeriodStatus.CLOSED, closedAt: now, closeReason: BillingPeriodCloseReason.CONTRACT_ENDED } });
-        if (closed.count !== 1) throw new Error("Billing period was not open while closing contract");
       }
       await transaction.subscription.update({
         where: { id: subscriptionId },
@@ -382,20 +378,6 @@ function isSameEvent(persistedAt: Date | null, persistedId: string | null, incom
 
 function lifecycleErrorCleared(code: string | null): boolean {
   return code === "UNFROZEN_LIVE_CONTRACT_PENDING" || code === "PROVIDER_STATE_UNRESOLVED" || code === "PARTNER_API_ERROR";
-}
-
-async function closePaidPeriod(transaction: Prisma.TransactionClient, billingPeriodId: string): Promise<void> {
-  const counter = await transaction.billingPeriodEntitlementCounter.findUnique({ where: { billingPeriodId_counter: { billingPeriodId, counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS } } });
-  if (!counter) throw new Error("Paid billing period included-credit counter is missing");
-  const reservations = await transaction.usageReservation.aggregate({ where: { billingPeriodEntitlementCounterId: counter.id, status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] } }, _sum: { quantity: true } });
-  const reserved = Number(reservations._sum.quantity ?? 0);
-  const forfeitable = counter.grantedQuantity - counter.committedQuantity - counter.forfeitedQuantity;
-  if (forfeitable < 0 || reserved !== counter.reservedQuantity) throw new Error("Paid billing period included-credit counter is inconsistent");
-  await transaction.usageReservation.updateMany({ where: { billingPeriodEntitlementCounterId: counter.id, status: { in: [UsageReservationStatus.RESERVED, UsageReservationStatus.AMBIGUOUS] } }, data: { status: UsageReservationStatus.RELEASED, releaseReason: UsageReservationReleaseReason.PERIOD_CLOSED } });
-  const updated = await transaction.billingPeriodEntitlementCounter.updateMany({ where: { id: counter.id, version: counter.version, reservedQuantity: counter.reservedQuantity }, data: { reservedQuantity: { decrement: reserved }, forfeitedQuantity: { increment: forfeitable }, version: { increment: 1 } } });
-  if (updated.count !== 1) throw new Error("Paid billing period included-credit counter changed during close");
-  const closed = await transaction.billingPeriodEntitlementCounter.findUnique({ where: { id: counter.id } });
-  if (!closed || closed.reservedQuantity !== 0 || closed.committedQuantity + closed.forfeitedQuantity !== closed.grantedQuantity) throw new Error("Paid billing period included-credit counter did not close cleanly");
 }
 
 async function lockSubscription(transaction: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
