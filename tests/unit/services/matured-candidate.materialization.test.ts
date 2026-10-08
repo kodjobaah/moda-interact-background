@@ -41,13 +41,10 @@ const hoisted = vi.hoisted(() => {
       })),
     },
     conversationMessageServiceMock: {
-      buildRecoveryMessage: vi.fn(() => "Hello!"),
       buildRecoveryTemplateDescriptor: vi.fn(
         ({ purpose, templateName, canonicalLanguageTag, providerLanguageCode }) =>
           `[WhatsApp template sent; purpose=${purpose}; template=${templateName}; canonicalLanguage=${canonicalLanguageTag}; providerLanguage=${providerLanguageCode}]`,
       ),
-      createPendingRecoveryMessage: vi.fn(async () => ({ id: "message-1" })),
-      markMessageSent: vi.fn(async () => ({})),
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),
@@ -63,36 +60,17 @@ const hoisted = vi.hoisted(() => {
         sentAt: new Date("2026-09-16T10:00:00Z"),
       })),
       sendTemplate: vi.fn(async (input: { conversationId: string; content: string; to: string; templateName: string; languageCode: string }) => {
-        const message = await hoisted.conversationMessageServiceMock.createPendingRecoveryMessage(
-          input.conversationId,
-          input.content,
-        );
-        try {
-          const result = await hoisted.whatsAppServiceMock.sendWhatsAppTemplate({
-            to: input.to,
-            templateName: input.templateName,
-            languageCode: input.languageCode,
-          });
-          await hoisted.conversationMessageServiceMock.markMessageSent(
-            message.id,
-            result.providerMessageId,
-          );
-          return {
-            kind: "admitted" as const,
-            messageId: message.id,
-            conversationId: input.conversationId,
-            terminal: false,
-          };
-        } catch (error) {
-          const code = (error as { code?: string }).code;
-          if (code !== "invalid-provider-response") {
-            await hoisted.prismaMock.conversationMessage.update({
-              where: { id: message.id },
-              data: { status: "FAILED" },
-            });
-          }
-          throw error;
-        }
+        await hoisted.whatsAppServiceMock.sendWhatsAppTemplate({
+          to: input.to,
+          templateName: input.templateName,
+          languageCode: input.languageCode,
+        });
+        return {
+          kind: "admitted" as const,
+          messageId: "message-1",
+          conversationId: input.conversationId,
+          terminal: false,
+        };
       }),
     },
     whatsappTemplateSelectorMock: {
@@ -388,7 +366,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     expect(result.outcome).toBe("recovery-created");
     expect(conversationServiceMock.getOrCreateRecoveryConversation).not.toHaveBeenCalled();
-    expect(conversationMessageServiceMock.createPendingRecoveryMessage).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
@@ -405,7 +383,6 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(conversationMessageServiceMock.buildRecoveryMessage).not.toHaveBeenCalled();
     expect(
       conversationMessageServiceMock.buildRecoveryTemplateDescriptor,
     ).toHaveBeenCalledWith({
@@ -414,17 +391,17 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       canonicalLanguageTag: "fr-CA",
       providerLanguageCode: "fr_CA_CUSTOM",
     });
-    expect(
-      conversationMessageServiceMock.createPendingRecoveryMessage,
-    ).toHaveBeenCalledWith(
-      "conversation-recovery-1",
-      expect.stringContaining(
-        "[WhatsApp template sent; purpose=checkout-recovery; template=checkout_recovery_fr_ca; canonicalLanguage=fr-CA; providerLanguage=fr_CA_CUSTOM]",
-      ),
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-recovery-1",
+        content: expect.stringContaining(
+          "[WhatsApp template sent; purpose=checkout-recovery; template=checkout_recovery_fr_ca; canonicalLanguage=fr-CA; providerLanguage=fr_CA_CUSTOM]",
+        ),
+      }),
     );
-    expect(
-      conversationMessageServiceMock.createPendingRecoveryMessage.mock.calls[0]?.[1],
-    ).not.toContain("Hello!");
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate.mock.calls[0]?.[0]?.content).not.toContain(
+      "Hello!",
+    );
   });
 
   it.each([
@@ -436,10 +413,10 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     await service.materializeMaturedCandidate(candidate);
 
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
-    expect(conversationMessageServiceMock.createPendingRecoveryMessage).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
   });
 
-  it("marks the pending message failed when the provider rejects a template", async () => {
+  it("routes a definitive provider rejection through recovery billing", async () => {
     whatsAppServiceMock.sendWhatsAppTemplate.mockRejectedValue(
       Object.assign(new Error("bounded provider rejection"), {
         name: "WhatsAppServiceError",
@@ -450,15 +427,15 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     await expect(service.materializeMaturedCandidate(candidate)).rejects.toThrow(
       "bounded provider rejection",
     );
-    expect(prismaMock.conversationMessage.update).toHaveBeenCalledWith(
+    expect(recoveryBillingServiceMock.handleProviderFailure).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { status: "FAILED" },
+        error: expect.objectContaining({ code: "provider-rejected" }),
       }),
     );
   });
 
   it.each(["free", "paid"] as const)(
-    "keeps a %s recovery message pending after an ambiguous provider response",
+    "routes a %s ambiguous provider response through recovery billing",
     async (kind) => {
       recoveryBillingServiceMock.admit.mockResolvedValueOnce({
         kind: "admitted",
@@ -487,7 +464,6 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
           error: expect.objectContaining({ code: "invalid-provider-response" }),
         }),
       );
-      expect(prismaMock.conversationMessage.update).not.toHaveBeenCalled();
     },
   );
 

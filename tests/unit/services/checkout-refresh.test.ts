@@ -52,9 +52,10 @@ const hoisted = vi.hoisted(() => {
       })),
     },
     conversationMessageServiceMock: {
-      buildRecoveryMessage: vi.fn(() => "Hello!"),
-      createPendingRecoveryMessage: vi.fn(async () => ({ id: "message-1" })),
-      markMessageSent: vi.fn(async () => ({})),
+      buildRecoveryTemplateDescriptor: vi.fn(
+        ({ purpose, templateName, canonicalLanguageTag, providerLanguageCode }) =>
+          `[WhatsApp template sent; purpose=${purpose}; template=${templateName}; canonicalLanguage=${canonicalLanguageTag}; providerLanguage=${providerLanguageCode}]`,
+      ),
     },
     whatsAppServiceMock: {
       sendWhatsAppText: vi.fn(async () => ({ providerMessageId: "wamid-1" })),

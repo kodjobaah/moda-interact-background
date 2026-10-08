@@ -21,6 +21,10 @@ import {
 } from "./translation-runtime-config.js";
 import { translationItemRetryDisposition } from "./translation-batch-runtime/item-retry.js";
 import { applyTranslationProviderResults } from "./translation-batch-runtime/provider-results.js";
+import {
+  StoreCategoryTranslationRunStateService,
+  type StoreCategoryTranslationRunStateTransaction,
+} from "./store-category-translation/translation-run-state.service.js";
 
 type ResultBatch = {
   id: string;
@@ -38,10 +42,7 @@ type ExpectedItem = {
   translationItemId: string;
 };
 
-type ResultTransaction = {
-  $queryRaw<T>(query: Prisma.Sql): Promise<T>;
-  $executeRaw(query: Prisma.Sql): Promise<number>;
-};
+type ResultTransaction = StoreCategoryTranslationRunStateTransaction;
 
 type ResultDatabase = {
   $transaction<T>(callback: (transaction: ResultTransaction) => Promise<T>): Promise<T>;
@@ -70,18 +71,21 @@ export class StoreCategoryTranslationBatchResultsService {
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
   private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver;
+  private readonly runStateService: StoreCategoryTranslationRunStateService;
 
   constructor(options: {
     database?: ResultDatabase;
     providerFactory?: ProviderFactory;
     runtimeConfig?: TranslationRuntimeConfigReader;
     credentialResolverFactory?: () => TranslationProviderCredentialResolver;
+    runStateService?: StoreCategoryTranslationRunStateService;
   } = {}) {
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) =>
       createOpenAITranslationProvider(providerOptions));
     this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
     this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.runStateService = options.runStateService ?? new StoreCategoryTranslationRunStateService(this.database);
   }
 
   async apply(input: { translationBatchId: string }): Promise<StoreCategoryTranslationBatchResultsResult> {
@@ -228,46 +232,12 @@ export class StoreCategoryTranslationBatchResultsService {
         WHERE "id" = ${batchId} AND "status" = 'PROVIDER_COMPLETED'
       `);
 
-      const counts = await transaction.$queryRaw<Array<{
-        total: bigint;
-        available: bigint;
-        failed: bigint;
-        pending: bigint;
-      }>>(Prisma.sql`
-        SELECT
-          COUNT(*)::bigint AS "total",
-          COUNT(*) FILTER (WHERE "status" = 'AVAILABLE')::bigint AS "available",
-          COUNT(*) FILTER (WHERE "status" = 'FAILED')::bigint AS "failed",
-          COUNT(*) FILTER (WHERE "status" = 'PENDING')::bigint AS "pending"
-        FROM "commerce"."CommerceStoreCategoryTranslationItem"
-        WHERE "runId" = ${runId}
-      `);
-      const count = counts[0];
-      if (!count) return;
-      if (Number(count.failed) > 0) {
-        await transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationRun"
-          SET "status" = 'FAILED', "failureCode" = 'TRANSLATION_ITEM_FAILED',
-            "completedAt" = NOW(), "updatedAt" = NOW()
-          WHERE "id" = ${runId} AND "status" = 'PROCESSING'
-        `);
-      } else if (
-        Number(count.total) > 0 &&
-        Number(count.available) === Number(count.total) &&
-        Number(count.pending) === 0
-      ) {
-        const ready = await transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationRun"
-          SET "status" = 'READY_TO_PUBLISH', "readyToPublishAt" = NOW(),
-            "failureCode" = NULL, "updatedAt" = NOW()
-          WHERE "id" = ${runId} AND "status" = 'PROCESSING'
-        `);
-        if (ready === 1) {
-          logger.info("background.store_category_translation.run_ready_to_publish", {
-            runId,
-            localeItemCount: Number(count.total),
-          });
-        }
+      const transition = await this.runStateService.advance(runId, transaction);
+      if (transition.status === "READY_TO_PUBLISH") {
+        logger.info("background.store_category_translation.run_ready_to_publish", {
+          runId,
+          localeItemCount: transition.localeItemCount,
+        });
       }
     });
   }

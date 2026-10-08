@@ -902,36 +902,6 @@ describe("pending recovery candidate service", () => {
     expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.has(result.jobId)).toBe(true);
   });
 
-  it("locks activity mutation and re-resolves after lock acquisition", async () => {
-    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
-      shopDomain: "shop.myshopify.com",
-      checkoutToken: "checkout_lock",
-      cartToken: "cart_lock",
-      abandonedCheckoutUrl: null,
-      checkoutCreatedAt: null,
-      activityAt: "2026-08-28T00:00:00.000Z",
-      
-    });
-    const lockSpy = vi
-      .spyOn(serviceModule.pendingRecoveryCandidateService, "withCheckoutLock")
-      .mockImplementation(async (_shopId, _checkoutToken, callback) => {
-        queueInstance.jobs.delete(result.jobId);
-        return callback();
-      });
-
-    const refreshed = await serviceModule.pendingRecoveryCandidateService.refreshCandidateActivity({
-      shopId: "shop_1",
-      checkoutToken: "checkout_lock",
-      cartToken: null,
-      activityAt: "2026-08-28T01:00:00.000Z",
-      isEmpty: false,
-    });
-
-    expect(lockSpy).toHaveBeenCalledWith("shop_1", "checkout_lock", expect.any(Function));
-    expect(refreshed).toEqual({ outcome: "not-found" });
-    lockSpy.mockRestore();
-  });
-
   it.each(["delayed", "waiting", "active", "failed", "completed", "missing"] as const)(
     "returns the bounded refresh result for a %s candidate",
     async (state) => {

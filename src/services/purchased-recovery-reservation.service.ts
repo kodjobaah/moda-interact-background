@@ -14,8 +14,16 @@ import {
 } from "@modainteract/moda-interact-shared/billing";
 
 import prisma from "../lib/db.js";
-
-const MAX_TRANSACTION_RETRIES = 3;
+import {
+  DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
+  RecoveryReservationConcurrencyConflict,
+  assertRecoveryReservationShop,
+  isRecoveryReservationUniqueConflict,
+  recoveryReservationReplayKind,
+  recoveryReservationTransitionDecision,
+  validateRecoveryReservationQuantity,
+  withRecoveryReservationRetry,
+} from "./recovery-reservation/reservation-lifecycle.js";
 
 export type PurchasedRecoveryReservationInput = {
   shopId: string;
@@ -49,16 +57,14 @@ type ReservationDatabase = Pick<
   "$transaction" | "usageReservation" | "shopEntitlementCounter" | "usageEvent" | "recoveryCreditRefund" | "subscription"
 > & Pick<PrismaClient, "recoveryCreditPurchase">;
 
-class ReservationConcurrencyConflict extends Error {}
-
 export class PurchasedRecoveryReservationService {
   constructor(
     private readonly database: ReservationDatabase = prisma,
-    private readonly maxRetries = MAX_TRANSACTION_RETRIES,
+    private readonly maxRetries = DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
   ) {}
 
   async reserve(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.reserveInTransaction(transaction, input, quantity),
@@ -68,7 +74,7 @@ export class PurchasedRecoveryReservationService {
   }
 
   async commit(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.commitInTransaction(transaction, input, quantity),
@@ -78,7 +84,7 @@ export class PurchasedRecoveryReservationService {
   }
 
   async release(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.releaseInTransaction(transaction, input, quantity),
@@ -88,7 +94,7 @@ export class PurchasedRecoveryReservationService {
   }
 
   async markAmbiguous(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
-    validateQuantity(input.quantity);
+    validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.markAmbiguousInTransaction(transaction, input),
@@ -106,12 +112,16 @@ export class PurchasedRecoveryReservationService {
       where: { sourceKey: input.sourceKey },
     });
     if (existing) {
-      assertReservationShop(existing, input.shopId);
+      assertRecoveryReservationShop(existing, input.shopId, (message) => new PurchasedRecoveryReservationError(message));
       const counter = await this.readReservationCounter(transaction, existing);
-      if (existing.status === UsageReservationStatus.RELEASED && counter === "PURCHASED_RECOVERY_CREDITS") {
-        if (existing.quantity !== quantity) {
-          throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
-        }
+      if (counter === "PURCHASED_RECOVERY_CREDITS") {
+        const transition = recoveryReservationTransitionDecision({
+          reservation: existing,
+          transition: "reactivate",
+          requestedQuantity: quantity,
+          createError: (message) => new PurchasedRecoveryReservationError(message),
+        });
+        if (transition.kind === "replay") return replayOutcome(existing, counter);
         const purchasedCounter = await transaction.shopEntitlementCounter.findUnique({
           where: { id: existing.counterId ?? "" },
         });
@@ -137,7 +147,7 @@ export class PurchasedRecoveryReservationService {
             version: { increment: 1 },
           },
         });
-        if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
         const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
           where: {
             id: lot.id,
@@ -148,7 +158,7 @@ export class PurchasedRecoveryReservationService {
           },
           data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
         });
-        if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
+        if (updatedLot.count !== 1) throw new RecoveryReservationConcurrencyConflict();
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
           data: { status: UsageReservationStatus.RESERVED, purchasedCreditPurchaseId: lot.id },
@@ -175,7 +185,7 @@ export class PurchasedRecoveryReservationService {
           },
         });
       } catch (error) {
-        if (isUniqueConflict(error)) throw new ReservationConcurrencyConflict();
+        if (isRecoveryReservationUniqueConflict(error)) throw new RecoveryReservationConcurrencyConflict();
         throw error;
       }
     }
@@ -198,7 +208,7 @@ export class PurchasedRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updated.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updated.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const updatedLot = await transaction.recoveryCreditPurchase.updateMany({
       where: {
@@ -210,7 +220,7 @@ export class PurchasedRecoveryReservationService {
       },
       data: { reservedAmount: { increment: quantity }, version: { increment: 1 } },
     });
-    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedLot.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const reservation = await transaction.usageReservation.create({
       data: {
@@ -230,11 +240,14 @@ export class PurchasedRecoveryReservationService {
     quantity: number,
   ): Promise<PurchasedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "commit",
+      requestedQuantity: quantity,
+      createError: (message) => new PurchasedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
-    }
-    if (reservation.quantity !== quantity) {
-      throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
 
     const counterId = reservation.counterId;
@@ -261,7 +274,7 @@ export class PurchasedRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedLot.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     if (completesPurchase) {
       if (wasWithdrawn) {
@@ -287,7 +300,7 @@ export class PurchasedRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const usageEvent = await transaction.usageEvent.create({
       data: {
@@ -316,14 +329,14 @@ export class PurchasedRecoveryReservationService {
     quantity: number,
   ): Promise<PurchasedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status === UsageReservationStatus.COMMITTED) {
-      throw new PurchasedRecoveryReservationError("Committed reservations cannot be released");
-    }
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "release",
+      requestedQuantity: quantity,
+      createError: (message) => new PurchasedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
-    }
-    if (reservation.quantity !== quantity) {
-      throw new PurchasedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
 
     const counterId = reservation.counterId;
@@ -343,7 +356,7 @@ export class PurchasedRecoveryReservationService {
       },
       data: { reservedAmount: { decrement: quantity }, version: { increment: 1 } },
     });
-    if (updatedLot.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedLot.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const updatedCounter = await transaction.shopEntitlementCounter.updateMany({
       where: {
@@ -359,7 +372,7 @@ export class PurchasedRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const released = await transaction.usageReservation.update({
       where: { id: reservation.id },
@@ -373,7 +386,12 @@ export class PurchasedRecoveryReservationService {
     input: PurchasedRecoveryReservationInput,
   ): Promise<PurchasedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "ambiguous",
+      createError: (message) => new PurchasedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, "PURCHASED_RECOVERY_CREDITS");
     }
     const ambiguous = await transaction.usageReservation.update({
@@ -391,9 +409,7 @@ export class PurchasedRecoveryReservationService {
       where: { sourceKey: input.sourceKey },
     });
     if (!reservation) throw new PurchasedRecoveryReservationError("Reservation does not exist");
-    if (reservation.shopId !== input.shopId) {
-      throw new PurchasedRecoveryReservationError("Reservation belongs to another shop");
-    }
+    assertRecoveryReservationShop(reservation, input.shopId, (message) => new PurchasedRecoveryReservationError(message));
     return reservation;
   }
 
@@ -415,24 +431,14 @@ export class PurchasedRecoveryReservationService {
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (!isRetryableConflict(error) || attempt === this.maxRetries - 1) throw error;
-      }
-    }
-    throw new PurchasedRecoveryReservationError("Reservation retry limit exceeded");
+    return withRecoveryReservationRetry({
+      operation,
+      maxRetries: this.maxRetries,
+      createRetryLimitError: (message) => new PurchasedRecoveryReservationError(message),
+    });
   }
 }
 
-function validateQuantity(quantity: number | undefined): number {
-  const value = quantity ?? 1;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new PurchasedRecoveryReservationError("Reservation quantity must be a positive safe integer");
-  }
-  return value;
-}
 
 type PurchaseLot = Awaited<ReturnType<PrismaClient["recoveryCreditPurchase"]["findUnique"]>>;
 
@@ -558,32 +564,9 @@ function spendableLotQuantity(lot: NonNullable<PurchaseLot>): number {
 }
 
 function replayOutcome(reservation: UsageReservation, counter: ReservationCounter): PurchasedReservationOutcome {
-  switch (reservation.status) {
-    case UsageReservationStatus.RESERVED:
-      return { kind: "already-reserved", reservation, counter };
-    case UsageReservationStatus.COMMITTED:
-      return { kind: "already-committed", reservation, counter };
-    case UsageReservationStatus.RELEASED:
-      return { kind: "already-released", reservation, counter };
-    case UsageReservationStatus.AMBIGUOUS:
-      return { kind: "already-ambiguous", reservation, counter };
-  }
+  return { kind: recoveryReservationReplayKind(reservation.status), reservation, counter };
 }
 
-function assertReservationShop(reservation: UsageReservation, shopId: string): void {
-  if (reservation.shopId !== shopId) {
-    throw new PurchasedRecoveryReservationError("Reservation belongs to another shop");
-  }
-}
 
-function isUniqueConflict(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
-}
-
-function isRetryableConflict(error: unknown): boolean {
-  return error instanceof ReservationConcurrencyConflict ||
-    (error instanceof Prisma.PrismaClientKnownRequestError &&
-      (error.code === "P2002" || error.code === "P2034"));
-}
 
 export const purchasedRecoveryReservationService = new PurchasedRecoveryReservationService();

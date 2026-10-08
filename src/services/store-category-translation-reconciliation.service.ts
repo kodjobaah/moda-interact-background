@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import { Prisma } from "@prisma/client";
 import { Queue } from "bullmq";
 import { CommerceEnvironmentSchema, type CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
@@ -35,6 +33,8 @@ import {
 } from "./translation-runtime-config.js";
 import { ensureDeterministicTranslationQueueJob } from "./translation-batch-runtime/queue-job-repair.js";
 import { routeTranslationBatchCorrelation } from "./translation-batch-runtime/provider-correlation.js";
+import { StoreCategoryTranslationRunStateService } from "./store-category-translation/translation-run-state.service.js";
+import { StoreCategoryTranslationBatchAssemblyService } from "./store-category-translation/translation-batch-assembly.service.js";
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -60,13 +60,6 @@ type BatchRecoveryRow = {
   errorFileId: string | null;
 };
 
-type RunCounts = {
-  total: bigint;
-  available: bigint;
-  failed: bigint;
-  pending: bigint;
-};
-
 function defaultCredentialResolver(): TranslationProviderCredentialResolver {
   return createTranslationProviderCredentialResolver({
     db: prisma,
@@ -89,6 +82,8 @@ export class StoreCategoryTranslationReconciliationService {
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
   private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver;
+  private readonly runStateService: StoreCategoryTranslationRunStateService;
+  private readonly batchAssemblyService: StoreCategoryTranslationBatchAssemblyService;
 
   constructor(options: {
     queue?: ReconciliationQueue;
@@ -96,6 +91,8 @@ export class StoreCategoryTranslationReconciliationService {
     providerFactory?: ProviderFactory;
     runtimeConfig?: TranslationRuntimeConfigReader;
     credentialResolverFactory?: () => TranslationProviderCredentialResolver;
+    runStateService?: StoreCategoryTranslationRunStateService;
+    batchAssemblyService?: StoreCategoryTranslationBatchAssemblyService;
   } = {}) {
     this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
       connection: connectionRedis,
@@ -105,6 +102,8 @@ export class StoreCategoryTranslationReconciliationService {
       createOpenAITranslationProvider(providerOptions));
     this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
     this.credentialResolverFactory = options.credentialResolverFactory ?? defaultCredentialResolver;
+    this.runStateService = options.runStateService ?? new StoreCategoryTranslationRunStateService(this.database);
+    this.batchAssemblyService = options.batchAssemblyService ?? new StoreCategoryTranslationBatchAssemblyService(this.database);
   }
 
   async reconcile(
@@ -157,10 +156,20 @@ export class StoreCategoryTranslationReconciliationService {
         result.runsFailed += 1;
         continue;
       }
-      const batchId = await this.assembleBatch(run.id, snapshot.translationBatchMaxRequests);
-      if (batchId) {
+      const assembled = await this.batchAssemblyService.assemble(
+        run.id,
+        snapshot.translationBatchMaxRequests,
+      );
+      if (assembled) {
+        logger.info("background.store_category_translation.batch_assembled", {
+          runId: run.id,
+          batchId: assembled.batchId,
+          provider: assembled.provider,
+          model: assembled.model,
+          itemCount: assembled.itemCount,
+        });
         result.batchesAssembled += 1;
-        result.repairedJobs += await this.ensureSubmitJob(batchId);
+        result.repairedJobs += await this.ensureSubmitJob(assembled.batchId);
       }
     }
 
@@ -201,121 +210,23 @@ export class StoreCategoryTranslationReconciliationService {
     await this.queue.close?.();
   }
 
-  private async assembleBatch(runId: string, limit: number): Promise<string | null> {
-    const assembled = await this.database.$transaction(async (transaction) => {
-      const runs = await transaction.$queryRaw<Array<{ id: string; provider: string; providerModelId: string }>>(Prisma.sql`
-        SELECT "id", "provider", "providerModelId"
-        FROM "commerce"."CommerceStoreCategoryTranslationRun"
-        WHERE "id" = ${runId} AND "status" = 'PROCESSING'
-        FOR UPDATE
-      `);
-      const run = runs[0];
-      if (!run) return null;
-
-      const candidates = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-        SELECT "id"
-        FROM "commerce"."CommerceStoreCategoryTranslationItem"
-        WHERE "runId" = ${runId}
-          AND "status" = 'PENDING'
-          AND "currentBatchId" IS NULL
-          AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= NOW())
-        ORDER BY "createdAt", "id"
-        FOR UPDATE SKIP LOCKED
-        LIMIT ${limit}
-      `);
-      if (candidates.length === 0) return null;
-
-      const batchId = randomUUID();
-      await transaction.$executeRaw(Prisma.sql`
-        INSERT INTO "commerce"."CommerceStoreCategoryTranslationBatch" (
-          "id", "runId", "provider", "model", "status", "updatedAt"
-        ) VALUES (
-          ${batchId}, ${runId}, ${run.provider}, ${run.providerModelId}, 'READY', NOW()
-        )
-      `);
-
-      for (const candidate of candidates) {
-        const providerCustomId = `store-category-${candidate.id}-${batchId}`;
-        await transaction.$executeRaw(Prisma.sql`
-          INSERT INTO "commerce"."CommerceStoreCategoryTranslationBatchItem" (
-            "id", "batchId", "translationItemId", "providerCustomId"
-          ) VALUES (
-            ${randomUUID()}, ${batchId}, ${candidate.id}, ${providerCustomId}
-          )
-        `);
-        await transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationItem"
-          SET "currentBatchId" = ${batchId}, "updatedAt" = NOW()
-          WHERE "id" = ${candidate.id}
-            AND "status" = 'PENDING'
-            AND "currentBatchId" IS NULL
-        `);
-      }
-      return { batchId, itemCount: candidates.length, provider: run.provider, model: run.providerModelId };
-    });
-
-    if (assembled) {
-      logger.info("background.store_category_translation.batch_assembled", {
-        runId,
-        batchId: assembled.batchId,
-        provider: assembled.provider,
-        model: assembled.model,
-        itemCount: assembled.itemCount,
-      });
-    }
-    return assembled?.batchId ?? null;
-  }
-
   private async advanceRunState(runId: string): Promise<"PROCESSING" | "READY_TO_PUBLISH" | "FAILED"> {
-    return this.database.$transaction(async (transaction) => {
-      const rows = await transaction.$queryRaw<RunCounts[]>(Prisma.sql`
-        SELECT
-          COUNT(*)::bigint AS "total",
-          COUNT(*) FILTER (WHERE "status" = 'AVAILABLE')::bigint AS "available",
-          COUNT(*) FILTER (WHERE "status" = 'FAILED')::bigint AS "failed",
-          COUNT(*) FILTER (WHERE "status" = 'PENDING')::bigint AS "pending"
-        FROM "commerce"."CommerceStoreCategoryTranslationItem"
-        WHERE "runId" = ${runId}
-      `);
-      const count = rows[0];
-      if (!count || Number(count.total) === 0) return "PROCESSING";
-
-      if (Number(count.failed) > 0) {
-        const changed = await transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationRun"
-          SET "status" = 'FAILED', "failureCode" = 'TRANSLATION_ITEM_FAILED',
-            "completedAt" = NOW(), "updatedAt" = NOW()
-          WHERE "id" = ${runId} AND "status" = 'PROCESSING'
-        `);
-        if (changed === 1) {
-          logger.error("background.store_category_translation.run_failed", {
-            runId,
-            failureCode: "TRANSLATION_ITEM_FAILED",
-          });
-          return "FAILED";
-        }
-      }
-
-      if (
-        Number(count.available) === Number(count.total) &&
-        Number(count.pending) === 0
-      ) {
-        const changed = await transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationRun"
-          SET "status" = 'READY_TO_PUBLISH', "readyToPublishAt" = NOW(),
-            "failureCode" = NULL, "updatedAt" = NOW()
-          WHERE "id" = ${runId} AND "status" = 'PROCESSING'
-        `);
-        if (changed === 1) {
-          logger.info("background.store_category_translation.run_ready_to_publish", {
-            runId,
-            localeItemCount: Number(count.total),
-          });
-          return "READY_TO_PUBLISH";
-        }
-      }
-      return "PROCESSING";
-    });
+    const transition = await this.runStateService.advance(runId);
+    if (transition.status === "FAILED") {
+      logger.error("background.store_category_translation.run_failed", {
+        runId,
+        failureCode: transition.failureCode,
+      });
+      return "FAILED";
+    }
+    if (transition.status === "READY_TO_PUBLISH") {
+      logger.info("background.store_category_translation.run_ready_to_publish", {
+        runId,
+        localeItemCount: transition.localeItemCount,
+      });
+      return "READY_TO_PUBLISH";
+    }
+    return "PROCESSING";
   }
 
   private async loadRecoverableBatches(

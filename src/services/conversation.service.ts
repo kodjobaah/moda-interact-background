@@ -465,60 +465,6 @@ export class ConversationService {
   }
 
   /**
-   * Persist an outbound agent response BEFORE
-   * sending it to WhatsApp.
-   */
-  async createPendingAgentMessage(conversationId: string, content: string) {
-    return prisma.conversationMessage.create({
-      data: {
-        conversationId,
-
-        direction: "OUTBOUND",
-
-        senderType: "AGENT",
-
-        status: "PENDING",
-
-        content,
-      },
-    });
-  }
-
-  /**
-   * Once Meta accepts the outbound message,
-   * attach the wamid to our persisted message.
-   */
-  async markMessageSent(messageId: string, providerMessageId: string) {
-    return prisma.conversationMessage.update({
-      where: {
-        id: messageId,
-      },
-
-      data: {
-        providerMessageId,
-        status: "SENT",
-        sentAt: new Date(),
-      },
-    });
-  }
-
-  /**
-   * Mark which inbound version the agent has
-   * successfully dealt with.
-   */
-  async markProcessed(conversationId: string, version: number) {
-    return prisma.conversation.update({
-      where: {
-        id: conversationId,
-      },
-
-      data: {
-        lastProcessedVersion: version,
-      },
-    });
-  }
-
-  /**
    * Convert our domain representation into the
    * format expected by the agent.
    *

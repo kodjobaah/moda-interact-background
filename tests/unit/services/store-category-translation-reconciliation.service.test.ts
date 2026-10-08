@@ -112,4 +112,51 @@ describe("StoreCategoryTranslationReconciliationService provider correlation", (
     expect(result.repairedJobs).toBe(0);
     expect(queue.add).not.toHaveBeenCalled();
   });
+  it("assembles a PROCESSING run through the batch assembly service and restores its submit job", async () => {
+    const database = {
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: "run-1" }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+      $executeRaw: vi.fn(),
+      $transaction: vi.fn(),
+    };
+    const queue = createQueue();
+    const runStateService = {
+      advance: vi.fn().mockResolvedValue({ status: "PROCESSING" }),
+    };
+    const batchAssemblyService = {
+      assemble: vi.fn().mockResolvedValue({
+        batchId: "batch-1",
+        itemCount: 2,
+        provider: "openai",
+        model: "model-1",
+      }),
+    };
+    const service = new StoreCategoryTranslationReconciliationService({
+      database: database as any,
+      queue: queue as any,
+      runStateService: runStateService as any,
+      batchAssemblyService: batchAssemblyService as any,
+    });
+
+    const result = await service.reconcile(backgroundRuntimeConfig());
+
+    expect(batchAssemblyService.assemble).toHaveBeenCalledWith(
+      "run-1",
+      backgroundRuntimeConfig().translationBatchMaxRequests,
+    );
+    expect(result.batchesAssembled).toBe(1);
+    expect(result.repairedJobs).toBe(1);
+    expect(queue.add).toHaveBeenCalledWith(
+      "store-category-translation-batch-submit",
+      expect.objectContaining({ translationBatchId: "batch-1" }),
+      expect.objectContaining({ jobId: expect.stringContaining("store-category-translation-batch-submit-batch-1") }),
+    );
+  });
+
 });

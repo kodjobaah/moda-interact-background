@@ -10,7 +10,6 @@ import type {
   OrderCompletedContractInput,
 } from "../events/shopify-contract-adapter.js";
 import { conversationService } from "./conversation.service.js";
-import { conversationMessageService } from "./conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "./outbound-whatsapp-admission.service.js";
 import { whatsappTemplateSelectorService } from "./whatsapp-template-selector.service.js";
 import {

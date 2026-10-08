@@ -15,12 +15,19 @@ import {
 
 import prisma from "../lib/db.js";
 import {
+  DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
+  RecoveryReservationConcurrencyConflict,
+  assertRecoveryReservationShop,
+  recoveryReservationReplayKind,
+  recoveryReservationTransitionDecision,
+  validateRecoveryReservationQuantity,
+  withRecoveryReservationRetry,
+} from "./recovery-reservation/reservation-lifecycle.js";
+import {
   EffectiveBillingPolicyResolver,
   type BillingPolicyClient,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
-
-const MAX_TRANSACTION_RETRIES = 3;
 
 export type PaidIncludedRecoveryReservationInput = {
   shopId: string;
@@ -64,7 +71,6 @@ export class PaidIncludedRecoveryReservationError extends Error {
   }
 }
 
-class ReservationConcurrencyConflict extends Error {}
 type ReservationTransaction = Prisma.TransactionClient;
 type ReservationDatabase = Pick<
   PrismaClient,
@@ -86,7 +92,7 @@ type CurrentPeriod = {
 export class PaidIncludedRecoveryReservationService {
   constructor(
     private readonly database: ReservationDatabase = prisma,
-    private readonly maxRetries = MAX_TRANSACTION_RETRIES,
+    private readonly maxRetries = DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES,
     private readonly now: () => Date = () => new Date(),
     private readonly createPolicyResolver: PolicyResolverFactory = (client) =>
       new EffectiveBillingPolicyResolver(client),
@@ -97,7 +103,7 @@ export class PaidIncludedRecoveryReservationService {
       ({ recoveryId: string } | { sourceKey: string }) &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.reserveInTransaction(transaction, input, quantity),
@@ -110,7 +116,7 @@ export class PaidIncludedRecoveryReservationService {
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
       Pick<PaidIncludedRecoveryReservationInput, "quantity"> & { occurredAt?: Date },
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.commitInTransaction(transaction, input, quantity),
@@ -123,7 +129,7 @@ export class PaidIncludedRecoveryReservationService {
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    const quantity = validateQuantity(input.quantity);
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.releaseInTransaction(transaction, input, quantity),
@@ -136,7 +142,7 @@ export class PaidIncludedRecoveryReservationService {
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
   ): Promise<PaidIncludedReservationOutcome> {
-    validateQuantity(input.quantity);
+    validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
         (transaction) => this.markAmbiguousInTransaction(transaction, input),
@@ -163,23 +169,26 @@ export class PaidIncludedRecoveryReservationService {
     const existing = await transaction.usageReservation.findUnique({ where: { sourceKey } });
 
     if (existing) {
-      assertReservationShop(existing, input.shopId);
+      assertRecoveryReservationShop(existing, input.shopId, (message) => new PaidIncludedRecoveryReservationError(message));
       const periodCounter = await this.requireCounter(transaction, period);
       if (existing.billingPeriodEntitlementCounterId !== periodCounter.id) {
         throw new PaidIncludedRecoveryReservationError("Reservation belongs to another billing period counter");
       }
       const counter = await this.readCounter(transaction, existing);
-      if (existing.status === UsageReservationStatus.RELEASED) {
-        if (existing.quantity !== quantity) {
-          throw new PaidIncludedRecoveryReservationError("Reservation quantity does not match the requested transition");
-        }
+      const transition = recoveryReservationTransitionDecision({
+        reservation: existing,
+        transition: "reactivate",
+        requestedQuantity: quantity,
+        createError: (message) => new PaidIncludedRecoveryReservationError(message),
+      });
+      if (transition.kind === "apply") {
         const available = availableQuantity(periodCounter);
         if (available < quantity) return replayOutcome(existing, sourceKey, counter);
         const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
           where: { id: periodCounter.id, version: periodCounter.version },
           data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
         });
-        if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+        if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
         const reactivated = await transaction.usageReservation.update({
           where: { id: existing.id },
           data: { status: UsageReservationStatus.RESERVED, releaseReason: null },
@@ -197,7 +206,7 @@ export class PaidIncludedRecoveryReservationService {
       where: { id: periodCounter.id, version: periodCounter.version },
       data: { reservedQuantity: { increment: quantity }, version: { increment: 1 } },
     });
-    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const reservation = await transaction.usageReservation.create({
       data: {
@@ -225,11 +234,14 @@ export class PaidIncludedRecoveryReservationService {
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "commit",
+      requestedQuantity: quantity,
+      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
-    }
-    if (reservation.quantity !== quantity) {
-      throw new PaidIncludedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
     if (!reservation.billingPeriodEntitlementCounterId || reservation.counterId || reservation.purchasedCreditPurchaseId) {
       throw new PaidIncludedRecoveryReservationError("Reservation is not a paid included reservation");
@@ -282,7 +294,7 @@ export class PaidIncludedRecoveryReservationService {
         version: { increment: 1 },
       },
     });
-    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const idempotencyKey = createRecoveryIdempotencyKey(input.shopId, input.sourceKey);
     const usageEvent = await transaction.usageEvent.create({
@@ -313,21 +325,21 @@ export class PaidIncludedRecoveryReservationService {
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status === UsageReservationStatus.COMMITTED) {
-      throw new PaidIncludedRecoveryReservationError("Committed reservations cannot be released");
-    }
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "release",
+      requestedQuantity: quantity,
+      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
-    }
-    if (reservation.quantity !== quantity) {
-      throw new PaidIncludedRecoveryReservationError("Reservation quantity does not match the requested transition");
     }
     const counter = await this.requireReservationCounter(transaction, reservation, input.shopId);
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
       where: { id: counter.id, version: counter.version, reservedQuantity: { gte: quantity } },
       data: { reservedQuantity: { decrement: quantity }, version: { increment: 1 } },
     });
-    if (updatedCounter.count !== 1) throw new ReservationConcurrencyConflict();
+    if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
     const released = await transaction.usageReservation.update({
       where: { id: reservation.id },
       data: { status: UsageReservationStatus.RELEASED },
@@ -340,7 +352,12 @@ export class PaidIncludedRecoveryReservationService {
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">>,
   ): Promise<PaidIncludedReservationOutcome> {
     const reservation = await this.requireReservation(transaction, input);
-    if (reservation.status !== UsageReservationStatus.RESERVED) {
+    const transition = recoveryReservationTransitionDecision({
+      reservation,
+      transition: "ambiguous",
+      createError: (message) => new PaidIncludedRecoveryReservationError(message),
+    });
+    if (transition.kind === "replay") {
       return replayOutcome(reservation, input.sourceKey, "INCLUDED_RECOVERY_CREDITS");
     }
     await this.requireOpenReservationCounter(transaction, reservation, input.shopId);
@@ -445,7 +462,7 @@ export class PaidIncludedRecoveryReservationService {
   private async requireReservation(transaction: ReservationTransaction, input: { shopId: string; sourceKey: string }) {
     const reservation = await transaction.usageReservation.findUnique({ where: { sourceKey: input.sourceKey } });
     if (!reservation) throw new PaidIncludedRecoveryReservationError("Reservation does not exist");
-    assertReservationShop(reservation, input.shopId);
+    assertRecoveryReservationShop(reservation, input.shopId, (message) => new PaidIncludedRecoveryReservationError(message));
     return reservation;
   }
 
@@ -461,22 +478,14 @@ export class PaidIncludedRecoveryReservationService {
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (!isRetryableConflict(error) || attempt === this.maxRetries - 1) throw error;
-      }
-    }
-    throw new PaidIncludedRecoveryReservationError("Reservation retry limit exceeded");
+    return withRecoveryReservationRetry({
+      operation,
+      maxRetries: this.maxRetries,
+      createRetryLimitError: (message) => new PaidIncludedRecoveryReservationError(message),
+    });
   }
 }
 
-function validateQuantity(quantity: number | undefined): number {
-  const value = quantity ?? 1;
-  if (!Number.isSafeInteger(value) || value <= 0) throw new PaidIncludedRecoveryReservationError("Reservation quantity must be a positive safe integer");
-  return value;
-}
 
 function validateCounter(granted: number, committed: number, reserved: number, forfeited: number): void {
   for (const value of [granted, committed, reserved, forfeited]) {
@@ -495,24 +504,11 @@ function replayOutcome(
   counter: ReservationCounter,
   policy?: EffectiveBillingPolicy,
 ): ReservationReplay {
-  const kind = {
-    [UsageReservationStatus.RESERVED]: "already-reserved",
-    [UsageReservationStatus.COMMITTED]: "already-committed",
-    [UsageReservationStatus.RELEASED]: "already-released",
-    [UsageReservationStatus.AMBIGUOUS]: "already-ambiguous",
-  }[reservation.status] as ReservationReplay["kind"];
+  const kind = recoveryReservationReplayKind(reservation.status);
   return policy === undefined
     ? { kind, reservation, counter, sourceKey }
     : { kind, reservation, counter, sourceKey, policy };
 }
 
-function assertReservationShop(reservation: UsageReservation, shopId: string): void {
-  if (reservation.shopId !== shopId) throw new PaidIncludedRecoveryReservationError("Reservation belongs to another shop");
-}
-
-function isRetryableConflict(error: unknown): boolean {
-  return error instanceof ReservationConcurrencyConflict ||
-    (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2002" || error.code === "P2034"));
-}
 
 export const paidIncludedRecoveryReservationService = new PaidIncludedRecoveryReservationService();

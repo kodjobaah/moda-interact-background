@@ -8,7 +8,7 @@ const { StoreCategoryTranslationBatchResultsService } =
 const batch = {
   id: "batch-1",
   runId: "run-1",
-  environment: "test",
+  environment: "TEST",
   provider: "openai",
   model: "model-1",
   status: "PROVIDER_COMPLETED",
@@ -102,7 +102,7 @@ describe("StoreCategoryTranslationBatchResultsService", () => {
     });
 
     expect(credentialResolver.resolve).toHaveBeenCalledWith({
-      environment: "test",
+      environment: "TEST",
       provider: "openai",
     });
     expect(providerFactory).toHaveBeenCalledWith({
