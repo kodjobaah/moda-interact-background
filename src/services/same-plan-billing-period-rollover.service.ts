@@ -1,7 +1,5 @@
 import {
   BillingPeriodCloseReason,
-  BillingPeriodEntitlementCounterKind,
-  BillingPeriodStatus,
   BillingPlanKind,
   Prisma,
 } from "@prisma/client";
@@ -10,6 +8,10 @@ import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
 import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
+import {
+  ensureSuccessorBillingPeriod,
+  findCompatibleSuccessorBillingPeriod,
+} from "./billing-period-transition/successor-billing-period.js";
 
 type RolloverDatabase = Pick<PrismaClient, "$transaction">;
 type RolloverTransaction = Prisma.TransactionClient;
@@ -113,34 +115,25 @@ export class SamePlanBillingPeriodRolloverService {
       throw new Error("Provider billing cycle overlaps the current local billing period");
     }
 
-    const existingSuccessor = await transaction.billingPeriod.findUnique({
-      where: {
-        shopId_periodStart_periodEnd: {
-          shopId: input.shopId,
-          periodStart: providerStart,
-          periodEnd: providerEnd,
-        },
-      },
-    });
-    if (existingSuccessor?.status === BillingPeriodStatus.CLOSED) {
-      throw new Error("Provider billing cycle already has a closed successor period");
-    }
-    if (existingSuccessor && (
-      existingSuccessor.subscriptionId !== subscription.id
-      || existingSuccessor.shopId !== input.shopId
-      || existingSuccessor.planId !== input.plan.id
-      || existingSuccessor.shopifyPlanHandleSnapshot !== input.provider.planHandle
-      || existingSuccessor.planNameSnapshot !== input.plan.name
-      || existingSuccessor.planKindSnapshot !== input.plan.kind
-      || existingSuccessor.includedRecoveryCreditsGranted !== (input.plan.kind === BillingPlanKind.PAID_METERED
+    const successorInput = {
+      shopId: input.shopId,
+      subscriptionId: subscription.id,
+      planId: input.plan.id,
+      shopifyPlanHandleSnapshot: input.provider.planHandle,
+      planNameSnapshot: input.plan.name,
+      planKindSnapshot: input.plan.kind,
+      includedRecoveryCreditsGranted: input.plan.kind === BillingPlanKind.PAID_METERED
         ? input.plan.includedRecoveryConversationAllowance ?? 0
-        : null)
-      || existingSuccessor.periodStart.getTime() !== providerStart.getTime()
-      || existingSuccessor.periodEnd.getTime() !== providerEnd.getTime()
-      || existingSuccessor.status !== BillingPeriodStatus.OPEN
-    )) {
-      throw new Error("Provider billing cycle has an incompatible successor period");
-    }
+        : null,
+      periodStart: providerStart,
+      periodEnd: providerEnd,
+      errors: {
+        closedPeriod: "Provider billing cycle already has a closed successor period",
+        incompatiblePeriod: "Provider billing cycle has an incompatible successor period",
+        incompatibleIncludedCounter: "Successor included-credit counter has an incompatible grant",
+      },
+    };
+    const existingSuccessor = await findCompatibleSuccessorBillingPeriod(transaction, successorInput);
     if (existingSuccessor && subscription.billingPeriodId === existingSuccessor.id) {
       return {
         kind: "unchanged",
@@ -157,55 +150,7 @@ export class SamePlanBillingPeriodRolloverService {
       openPeriodFailureMessage: "Billing period was not open while closing",
       providerResponseSummary: "Billing period closed before Shopify App Event report",
     });
-    const successor = existingSuccessor ?? await transaction.billingPeriod.create({
-      data: {
-        shopId: input.shopId,
-        subscriptionId: subscription.id,
-        planId: input.plan.id,
-        shopifyPlanHandleSnapshot: input.provider.planHandle,
-        planNameSnapshot: input.plan.name,
-        planKindSnapshot: input.plan.kind,
-        includedRecoveryCreditsGranted: input.plan.kind === BillingPlanKind.PAID_METERED
-          ? input.plan.includedRecoveryConversationAllowance ?? 0
-          : null,
-        periodStart: providerStart,
-        periodEnd: providerEnd,
-        status: BillingPeriodStatus.OPEN,
-      },
-    });
-
-    if (input.plan.kind === BillingPlanKind.PAID_METERED) {
-      const existingCounter = await transaction.billingPeriodEntitlementCounter.findUnique({
-        where: {
-          billingPeriodId_counter: {
-            billingPeriodId: successor.id,
-            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          },
-        },
-      });
-      const expectedGrant = input.plan.includedRecoveryConversationAllowance ?? 0;
-      if (existingCounter && existingCounter.grantedQuantity !== expectedGrant) {
-        throw new Error("Successor included-credit counter has an incompatible grant");
-      }
-      await transaction.billingPeriodEntitlementCounter.upsert({
-        where: {
-          billingPeriodId_counter: {
-            billingPeriodId: successor.id,
-            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          },
-        },
-        update: {},
-        create: {
-          shopId: input.shopId,
-          billingPeriodId: successor.id,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
-          grantedQuantity: expectedGrant,
-          committedQuantity: 0,
-          reservedQuantity: 0,
-          forfeitedQuantity: 0,
-        },
-      });
-    }
+    const successor = await ensureSuccessorBillingPeriod(transaction, successorInput, existingSuccessor);
 
     const nextReconcileAt = input.plan.kind === BillingPlanKind.FREE && !input.plan.recoveryCreditPackEnabled
       ? null

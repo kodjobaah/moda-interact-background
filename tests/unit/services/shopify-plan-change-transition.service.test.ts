@@ -114,7 +114,7 @@ describe("ShopifyPlanChangeTransitionService", () => {
   });
 
   it("reuses a matching successor without resetting its included usage", async () => {
-    const successor = { id: "period-new", subscriptionId: "subscription-1", planId: "paid-new", shopifyPlanHandleSnapshot: "paid-new", planNameSnapshot: "Paid New", planKindSnapshot: "PAID_METERED", includedRecoveryCreditsGranted: 100, status: "OPEN" };
+    const successor = { id: "period-new", shopId: "shop-1", subscriptionId: "subscription-1", planId: "paid-new", shopifyPlanHandleSnapshot: "paid-new", planNameSnapshot: "Paid New", planKindSnapshot: "PAID_METERED", includedRecoveryCreditsGranted: 100, periodStart: newStart, periodEnd: newEnd, status: "OPEN" };
     const test = harness(
       "PAID_METERED",
       successor,
