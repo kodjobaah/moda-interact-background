@@ -512,6 +512,25 @@ describe("EffectiveBillingPolicyResolver", () => {
       .rejects.toThrow("paid plan usage event handle is missing");
   });
 
+  it("preserves the effective billing error for invalid outbound overrides", async () => {
+    const fake = client({
+      shopBillingPolicyOverride: {
+        findUnique: async () => ({
+          outboundSoftLimit: 9,
+          outboundHardLimit: 8,
+          expiresAt: null,
+        }),
+      },
+    });
+
+    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
+      .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
+        name: "EffectiveBillingPolicyError",
+        reason: "INVALID_CONFIGURATION",
+        message: "Invalid billing policy for shop shop-1: shop soft limit exceeds shop hard limit",
+      });
+  });
+
   it("fails closed for missing contracts and invalid limits", async () => {
     const noContract = client({
       subscription: {

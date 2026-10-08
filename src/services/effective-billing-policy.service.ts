@@ -7,6 +7,10 @@ import {
 import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import prisma from "../lib/db.js";
+import {
+  resolveOutboundLimits,
+  validateTerminalMessageReservedSlots,
+} from "./billing-policy/outbound-limits.js";
 
 export type BillingPolicyFailureReason =
   | "NO_CONTRACT"
@@ -214,6 +218,7 @@ export class EffectiveBillingPolicyResolver {
       platformPolicy.defaultOutboundHardLimit,
       platformPolicy.absoluteOutboundHardLimit,
       activeOverride,
+      invalidConfiguration,
     );
 
     const optedInFeatureKeys = new Set(
@@ -280,6 +285,7 @@ export class EffectiveBillingPolicyResolver {
       activeOverride?.terminalMessageReservedSlots ??
         platformPolicy.terminalMessageReservedSlots,
       limits.hard,
+      invalidConfiguration,
     );
 
     return {
@@ -467,63 +473,6 @@ function getBillingPeriodPhase(
   return "ACTIVE";
 }
 
-function resolveOutboundLimits(
-  shopId: string,
-  platformSoft: number,
-  platformDefaultHard: number,
-  absoluteHard: number,
-  override: { outboundSoftLimit: number | null; outboundHardLimit: number | null } | null,
-): { soft: number; hard: number } {
-  const validatedPlatformSoft = validateMinimumInteger(
-    shopId,
-    "platform soft limit",
-    platformSoft,
-    1,
-  );
-  const validatedPlatformHard = validateMinimumInteger(
-    shopId,
-    "platform default hard limit",
-    platformDefaultHard,
-    2,
-  );
-  const validatedAbsoluteHard = validateMinimumInteger(
-    shopId,
-    "platform absolute hard limit",
-    absoluteHard,
-    2,
-  );
-  if (validatedPlatformSoft > validatedPlatformHard) {
-    throw invalidConfiguration(shopId, "platform soft limit exceeds platform hard limit");
-  }
-
-  const overrideHard = override?.outboundHardLimit;
-  const overrideSoft = override?.outboundSoftLimit;
-  if (overrideHard !== null && overrideHard !== undefined) {
-    validateMinimumInteger(shopId, "shop hard limit", overrideHard, 2);
-  }
-  if (overrideSoft !== null && overrideSoft !== undefined) {
-    validateMinimumInteger(shopId, "shop soft limit", overrideSoft, 1);
-  }
-  if (
-    overrideSoft !== null &&
-    overrideSoft !== undefined &&
-    overrideHard !== null &&
-    overrideHard !== undefined &&
-    overrideSoft > overrideHard
-  ) {
-    throw invalidConfiguration(shopId, "shop soft limit exceeds shop hard limit");
-  }
-
-  const requestedHardLimit = overrideHard ?? validatedPlatformHard;
-  const hard = Math.min(requestedHardLimit, validatedAbsoluteHard);
-  const requestedSoftLimit = overrideSoft ?? validatedPlatformSoft;
-  const soft = Math.min(requestedSoftLimit, hard);
-  if (soft < 1 || hard < 2 || soft > hard) {
-    throw invalidConfiguration(shopId, "effective outbound limits are invalid");
-  }
-  return { soft, hard };
-}
-
 function validatePositiveInteger(shopId: string, label: string, value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw invalidConfiguration(shopId, `${label} must be a finite positive integer`);
@@ -531,35 +480,9 @@ function validatePositiveInteger(shopId: string, label: string, value: number): 
   return value;
 }
 
-function validateMinimumInteger(
-  shopId: string,
-  label: string,
-  value: number,
-  minimum: number,
-): number {
-  if (!Number.isSafeInteger(value) || value < minimum) {
-    throw invalidConfiguration(shopId, `${label} must be a finite integer of at least ${minimum}`);
-  }
-  return value;
-}
-
 function validateNonNegativeInteger(shopId: string, label: string, value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw invalidConfiguration(shopId, `${label} must be a finite non-negative integer`);
-  }
-  return value;
-}
-
-function validateTerminalMessageReservedSlots(
-  shopId: string,
-  value: number,
-  effectiveHardLimit: number,
-): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value >= effectiveHardLimit) {
-    throw invalidConfiguration(
-      shopId,
-      "terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",
-    );
   }
   return value;
 }

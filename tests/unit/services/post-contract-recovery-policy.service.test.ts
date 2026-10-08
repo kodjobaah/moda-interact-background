@@ -122,4 +122,33 @@ describe("PostContractRecoveryPolicyResolver", () => {
       terminalMessageReservedSlots: 2,
     });
   });
+  it("preserves the post-contract error for invalid outbound overrides", async () => {
+    await expect(new PostContractRecoveryPolicyResolver(client({
+      override: {
+        outboundSoftLimit: 9,
+        outboundHardLimit: 8,
+        expiresAt: null,
+      },
+    })).resolve("shop-1", now)).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
+      name: "PostContractRecoveryPolicyError",
+      reason: "INVALID_CONFIGURATION",
+      message: "Invalid post-contract recovery policy for shop shop-1: shop soft limit exceeds shop hard limit",
+    });
+  });
+
+  it("preserves the post-contract error for invalid terminal reserved slots", async () => {
+    await expect(new PostContractRecoveryPolicyResolver(client({
+      override: {
+        outboundSoftLimit: null,
+        outboundHardLimit: null,
+        terminalMessageReservedSlots: 15,
+        expiresAt: null,
+      },
+    })).resolve("shop-1", now)).rejects.toMatchObject<Partial<PostContractRecoveryPolicyError>>({
+      name: "PostContractRecoveryPolicyError",
+      reason: "INVALID_CONFIGURATION",
+      message: "Invalid post-contract recovery policy for shop shop-1: terminalMessageReservedSlots must be at least 1 and less than the effective hard limit",
+    });
+  });
+
 });
