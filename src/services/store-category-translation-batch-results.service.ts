@@ -19,8 +19,8 @@ import {
   currentTranslationRuntimeConfig,
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
-import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
-import { assertExactTranslationBatchResultMembership } from "./translation-batch-runtime/result-membership.js";
+import { translationItemRetryDisposition } from "./translation-batch-runtime/item-retry.js";
+import { applyTranslationProviderResults } from "./translation-batch-runtime/provider-results.js";
 
 type ResultBatch = {
   id: string;
@@ -97,31 +97,21 @@ export class StoreCategoryTranslationBatchResultsService {
       provider: batch.provider,
     });
     const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
-    const resultFileIds = [batch.outputFileId, batch.errorFileId].filter(
-      (fileId): fileId is string => Boolean(fileId),
-    );
-    if (resultFileIds.length === 0) {
-      throw new Error(`Store Category translation Batch ${batch.id} has no provider result file`);
-    }
-
-    const resultFiles = await Promise.all(resultFileIds.map((fileId) => provider.readOutputFile(fileId)));
-    const results = resultFiles.flat();
-    const expected = await this.loadExpectedItems(batch.id);
-    assertExactTranslationBatchResultMembership(
-      expected.map((item) => item.providerCustomId),
-      results,
-      {
+    const { applied } = await applyTranslationProviderResults({
+      provider,
+      outputFileId: batch.outputFileId,
+      errorFileId: batch.errorFileId,
+      missingResultFileMessage: `Store Category translation Batch ${batch.id} has no provider result file`,
+      loadExpectedProviderCustomIds: async () =>
+        (await this.loadExpectedItems(batch.id)).map((item) => item.providerCustomId),
+      membershipMessages: {
         countMismatch: "Store Category translation Batch output does not contain exactly one result per expected item",
         unknownProviderCustomId: (providerCustomId) =>
           `Unknown Store Category translation provider custom ID: ${providerCustomId}`,
         duplicateProviderCustomId: "Store Category translation Batch output contains duplicate provider custom IDs",
       },
-    );
-
-    let applied = 0;
-    for (const result of results) {
-      if (await this.applyResult(batch.id, result)) applied += 1;
-    }
+      applyResult: (result) => this.applyResult(batch.id, result),
+    });
 
     await this.completeBatchAndAdvanceRun(batch.id, batch.runId);
     logger.info("background.store_category_translation.batch_completed", {
@@ -195,15 +185,19 @@ export class StoreCategoryTranslationBatchResultsService {
       }
 
       const config = currentTranslationRuntimeConfig(this.runtimeConfig);
-      const retryable = isTranslationProviderFailureRetryable(result.failureCode);
-      const retry = retryable && record.retryCount < config.translationMaxAutoRetries;
+      const disposition = translationItemRetryDisposition({
+        failureCode: result.failureCode,
+        retryCount: record.retryCount,
+        maxAutoRetries: config.translationMaxAutoRetries,
+        retryDelaySeconds: config.translationResultRetrySeconds,
+      });
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationItem"
         SET
-          "status" = CAST(${retry ? "PENDING" : "FAILED"} AS "commerce"."CommerceStoreCategoryTranslationItemStatus"),
+          "status" = CAST(${disposition.status} AS "commerce"."CommerceStoreCategoryTranslationItemStatus"),
           "currentBatchId" = NULL,
-          "retryCount" = "retryCount" + ${retry ? 1 : 0},
-          "nextAttemptAt" = ${retry ? new Date(Date.now() + config.translationResultRetrySeconds * 1000) : null},
+          "retryCount" = "retryCount" + ${disposition.retryIncrement},
+          "nextAttemptAt" = ${disposition.nextAttemptAt},
           "failureCode" = ${result.failureCode ?? "provider-result-failed"},
           "updatedAt" = NOW()
         WHERE "id" = ${record.translationItemId}
@@ -283,5 +277,12 @@ export const storeCategoryTranslationBatchResultsService =
   new StoreCategoryTranslationBatchResultsService();
 
 export const storeCategoryTranslationResultsTestInternals = {
-  resultFailureIsRetryable: isTranslationProviderFailureRetryable,
+  resultFailureIsRetryable: (failureCode: string | null) =>
+    translationItemRetryDisposition({
+      failureCode,
+      retryCount: 0,
+      maxAutoRetries: 1,
+      retryDelaySeconds: 1,
+      nowMs: 0,
+    }).shouldRetry,
 };

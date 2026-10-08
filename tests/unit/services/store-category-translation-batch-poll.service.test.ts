@@ -94,3 +94,53 @@ describe("StoreCategoryTranslationBatchPollService terminal retry policy", () =>
     expect(itemUpdate.values).toContain("invalid-request");
   });
 });
+
+describe("StoreCategoryTranslationBatchPollService provider read boundary", () => {
+  it("reschedules when credential resolution fails before provider retrieval", async () => {
+    const transaction = {
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{
+          id: "batch-1",
+          runId: "run-1",
+          categoryId: "category-1",
+          environment: "TEST",
+          provider: "openai",
+          model: "gpt-test",
+          providerBatchId: "provider-batch-1",
+          status: "SUBMITTED",
+          pollSequence: 3,
+        }])
+        .mockResolvedValueOnce([{ pollSequence: 4, nextPollAt: new Date("2026-10-08T09:01:00.000Z") }]),
+      $executeRaw: vi.fn(),
+    };
+    const database = {
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    };
+    const providerFactory = vi.fn();
+    const queue = { add: vi.fn().mockResolvedValue(undefined) };
+    const service = new StoreCategoryTranslationBatchPollService({
+      database: database as any,
+      providerFactory: providerFactory as any,
+      queue: queue as any,
+      runtimeConfig: {
+        current: () => backgroundRuntimeConfig({ translationPollIntervalSeconds: 60 }),
+      },
+      credentialResolverFactory: () => ({
+        resolve: vi.fn().mockRejectedValue(new Error("credential unavailable")),
+      }) as any,
+    });
+
+    await expect(service.poll({
+      schemaVersion: 1,
+      translationBatchId: "batch-1",
+      pollSequence: 3,
+    })).resolves.toEqual({ status: "rescheduled", batchId: "batch-1", pollSequence: 4 });
+
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledWith(
+      "store-category-translation-batch-poll",
+      expect.objectContaining({ translationBatchId: "batch-1", pollSequence: 4 }),
+      expect.objectContaining({ delay: 60_000 }),
+    );
+  });
+});

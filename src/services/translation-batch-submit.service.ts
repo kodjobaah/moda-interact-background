@@ -21,10 +21,10 @@ import {
 } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 import {
-  classifyTranslationSubmissionFailure,
   translationSubmissionFailureCode,
   type TranslationSubmitFailureClassification,
 } from "./translation-batch-runtime/failure-policy.js";
+import { submitTranslationProviderBatch } from "./translation-batch-runtime/provider-submission.js";
 
 export type SubmitFailureClassification = TranslationSubmitFailureClassification;
 
@@ -121,39 +121,33 @@ export class TranslationBatchSubmitService {
       return { status: "skipped", batchId: claimed.id };
     }
 
-    let inputFileId = claimed.inputFileId;
-    try {
-      if (!inputFileId) {
-        try {
-          const requests = await this.loadRequests(claimed.id);
-          const prepared = await provider.prepareBatchInput(requests);
-          inputFileId = prepared.inputFileId;
-          await this.persistInputFileId(claimed.id, inputFileId);
-        } catch (error) {
-          await this.persistFailure(
-            claimed,
-            classifyTranslationSubmissionFailure(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
-            error,
-            runtimeConfig,
-          );
-          return { status: "skipped", batchId: claimed.id };
-        }
-      }
+    const submission = await submitTranslationProviderBatch({
+      logicalBatchId: claimed.id,
+      inputFileId: claimed.inputFileId,
+      provider,
+      loadRequests: () => this.loadRequests(claimed.id),
+      persistInputFileId: (inputFileId) => this.persistInputFileId(claimed.id, inputFileId),
+      persistSubmitted: ({ providerBatchId, inputFileId }) =>
+        this.persistSubmitted(claimed.id, providerBatchId, inputFileId, runtimeConfig),
+    });
 
-      const providerBatch = await provider.createBatch(claimed.id, inputFileId);
-      await this.persistSubmitted(claimed.id, providerBatch.providerBatchId, inputFileId, runtimeConfig);
-      await this.enqueuePoll(claimed.id, 1, runtimeConfig);
-      return {
-        status: "claimed",
-        batchId: claimed.id,
-        providerBatchId: providerBatch.providerBatchId,
-      };
-    } catch (error) {
-      const classification = classifyTranslationSubmissionFailure(error, "AMBIGUOUS_CREATE");
-      await this.persistFailure(claimed, classification, error, runtimeConfig);
-      if (classification === "AMBIGUOUS_CREATE") throw error;
+    if (submission.kind === "failed") {
+      await this.persistFailure(
+        claimed,
+        submission.classification,
+        submission.error,
+        runtimeConfig,
+      );
+      if (submission.classification === "AMBIGUOUS_CREATE") throw submission.error;
       return { status: "skipped", batchId: claimed.id };
     }
+
+    await this.enqueuePoll(claimed.id, 1, runtimeConfig);
+    return {
+      status: "claimed",
+      batchId: claimed.id,
+      providerBatchId: submission.providerBatchId,
+    };
   }
 
   private async claimReadyBatch(batchId: string): Promise<BatchToSubmit | null> {

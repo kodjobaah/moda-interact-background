@@ -34,6 +34,10 @@ import {
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
 import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
+import {
+  pollTranslationProviderBatch,
+  translationTerminalItemDisposition,
+} from "./translation-batch-runtime/provider-poll.js";
 
 type PollBatch = {
   id: string;
@@ -131,114 +135,128 @@ export class StoreCategoryTranslationBatchPollService {
     ) {
       return { status: "stale", batchId: input.translationBatchId };
     }
+    const providerBatchId = batch.providerBatchId;
     const runtimeConfig = currentTranslationRuntimeConfig(this.runtimeConfig);
 
-    let providerBatch;
-    try {
-      const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-      const apiKey = await this.credentialResolverFactory().resolve({
-        environment,
-        provider: batch.provider,
-      });
-      const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
-      providerBatch = await provider.retrieveBatch(batch.providerBatchId);
-    } catch (error) {
-      const schedule = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
-      await this.enqueuePoll(batch.id, schedule.pollSequence, runtimeConfig.translationPollIntervalSeconds);
-      logger.warn("background.store_category_translation.batch_poll_failed", {
-        runId: batch.runId,
-        batchId: batch.id,
-        pollSequence: schedule.pollSequence,
-        nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
-      });
-      return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
-    }
-
-    if (providerBatch.status === "nonterminal") {
-      const schedule = await this.advanceNonterminal(batch, runtimeConfig);
-      await this.enqueuePoll(
-        batch.id,
-        schedule.pollSequence,
-        runtimeConfig.translationPollIntervalSeconds,
-      );
-      logger.info("background.store_category_translation.batch_polled", {
-        runId: batch.runId,
-        categoryId: batch.categoryId,
-        batchId: batch.id,
-        providerBatchId: batch.providerBatchId,
-        provider: batch.provider,
-        model: batch.model,
-        providerStatus: providerBatch.providerStatus,
-        normalizedStatus: providerBatch.status,
-        providerResponse: providerResponseSummary(providerBatch),
-        pollSequence: batch.pollSequence,
-        nextPollSequence: schedule.pollSequence,
-        nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
-        pollIntervalSeconds: runtimeConfig.translationPollIntervalSeconds,
-      });
-      return {
-        status: "rescheduled",
-        batchId: batch.id,
-        pollSequence: schedule.pollSequence,
-      };
-    }
-
-    if (providerBatch.status === "completed") {
-      const updated = await this.database.$transaction(async (transaction) =>
-        transaction.$executeRaw(Prisma.sql`
-          UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
-          SET
-            "status" = 'PROVIDER_COMPLETED',
-            "outputFileId" = ${providerBatch.outputFileId},
-            "errorFileId" = ${providerBatch.errorFileId},
-            "lastPolledAt" = NOW(),
-            "nextPollAt" = NULL,
-            "failureCode" = NULL,
-            "updatedAt" = NOW()
-          WHERE "id" = ${batch.id}
-            AND "status" = 'SUBMITTED'
-            AND "pollSequence" = ${batch.pollSequence}
-        `));
-      if (updated !== 1) return { status: "stale", batchId: batch.id };
-      logger.info("background.store_category_translation.batch_polled", {
-        runId: batch.runId,
-        categoryId: batch.categoryId,
-        batchId: batch.id,
-        providerBatchId: batch.providerBatchId,
-        provider: batch.provider,
-        model: batch.model,
-        providerStatus: providerBatch.providerStatus,
-        normalizedStatus: providerBatch.status,
-        providerResponse: providerResponseSummary(providerBatch),
-        pollSequence: batch.pollSequence,
-        outputFileAvailable: Boolean(providerBatch.outputFileId),
-        errorFileAvailable: Boolean(providerBatch.errorFileId),
-      });
-      await this.enqueueResults(batch.id);
-      return { status: "completed", batchId: batch.id };
-    }
-
-    const terminalApplied = await this.persistTerminalBatch(
-      batch,
-      providerBatch.status,
-      providerBatch.failureCode,
-      runtimeConfig,
-    );
-    if (!terminalApplied) return { status: "stale", batchId: batch.id };
-    logger.warn("background.store_category_translation.batch_polled", {
-      runId: batch.runId,
-      categoryId: batch.categoryId,
-      batchId: batch.id,
-      providerBatchId: batch.providerBatchId,
-      provider: batch.provider,
-      model: batch.model,
-      providerStatus: providerBatch.providerStatus,
-      normalizedStatus: providerBatch.status,
-      providerResponse: providerResponseSummary(providerBatch),
-      pollSequence: batch.pollSequence,
+    return pollTranslationProviderBatch({
+      retrieve: async () => {
+        const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
+        const apiKey = await this.credentialResolverFactory().resolve({
+          environment,
+          provider: batch.provider,
+        });
+        const provider = this.providerFactory({
+          provider: batch.provider,
+          model: batch.model,
+          apiKey,
+        });
+        return provider.retrieveBatch(providerBatchId);
+      },
+      onReadFailure: async (error) => {
+        const schedule = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+        await this.enqueuePoll(
+          batch.id,
+          schedule.pollSequence,
+          runtimeConfig.translationPollIntervalSeconds,
+        );
+        logger.warn("background.store_category_translation.batch_poll_failed", {
+          runId: batch.runId,
+          batchId: batch.id,
+          pollSequence: schedule.pollSequence,
+          nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
+          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        });
+        return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
+      },
+      onNonterminal: async (providerBatch) => {
+        const schedule = await this.advanceNonterminal(batch, runtimeConfig);
+        await this.enqueuePoll(
+          batch.id,
+          schedule.pollSequence,
+          runtimeConfig.translationPollIntervalSeconds,
+        );
+        logger.info("background.store_category_translation.batch_polled", {
+          runId: batch.runId,
+          categoryId: batch.categoryId,
+          batchId: batch.id,
+          providerBatchId: batch.providerBatchId,
+          provider: batch.provider,
+          model: batch.model,
+          providerStatus: providerBatch.providerStatus,
+          normalizedStatus: providerBatch.status,
+          providerResponse: providerResponseSummary(providerBatch),
+          pollSequence: batch.pollSequence,
+          nextPollSequence: schedule.pollSequence,
+          nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
+          pollIntervalSeconds: runtimeConfig.translationPollIntervalSeconds,
+        });
+        return {
+          status: "rescheduled",
+          batchId: batch.id,
+          pollSequence: schedule.pollSequence,
+        };
+      },
+      onCompleted: async (providerBatch) => {
+        const updated = await this.database.$transaction(async (transaction) =>
+          transaction.$executeRaw(Prisma.sql`
+            UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
+            SET
+              "status" = 'PROVIDER_COMPLETED',
+              "outputFileId" = ${providerBatch.outputFileId},
+              "errorFileId" = ${providerBatch.errorFileId},
+              "lastPolledAt" = NOW(),
+              "nextPollAt" = NULL,
+              "failureCode" = NULL,
+              "updatedAt" = NOW()
+            WHERE "id" = ${batch.id}
+              AND "status" = 'SUBMITTED'
+              AND "pollSequence" = ${batch.pollSequence}
+          `));
+        if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
+        logger.info("background.store_category_translation.batch_polled", {
+          runId: batch.runId,
+          categoryId: batch.categoryId,
+          batchId: batch.id,
+          providerBatchId: batch.providerBatchId,
+          provider: batch.provider,
+          model: batch.model,
+          providerStatus: providerBatch.providerStatus,
+          normalizedStatus: providerBatch.status,
+          providerResponse: providerResponseSummary(providerBatch),
+          pollSequence: batch.pollSequence,
+          outputFileAvailable: Boolean(providerBatch.outputFileId),
+          errorFileAvailable: Boolean(providerBatch.errorFileId),
+        });
+        await this.enqueueResults(batch.id);
+        return { status: "completed", batchId: batch.id } as const;
+      },
+      onTerminal: async (providerBatch) => {
+        const terminalApplied = await this.persistTerminalBatch(
+          batch,
+          providerBatch.status,
+          providerBatch.failureCode,
+          runtimeConfig,
+        );
+        if (!terminalApplied) return { status: "stale", batchId: batch.id } as const;
+        logger.warn("background.store_category_translation.batch_polled", {
+          runId: batch.runId,
+          categoryId: batch.categoryId,
+          batchId: batch.id,
+          providerBatchId: batch.providerBatchId,
+          provider: batch.provider,
+          model: batch.model,
+          providerStatus: providerBatch.providerStatus,
+          normalizedStatus: providerBatch.status,
+          providerResponse: providerResponseSummary(providerBatch),
+          pollSequence: batch.pollSequence,
+        });
+        return {
+          status: "terminal",
+          batchId: batch.id,
+          providerStatus: providerBatch.status,
+        } as const;
+      },
     });
-    return { status: "terminal", batchId: batch.id, providerStatus: providerBatch.status };
   }
 
   private async loadBatch(batchId: string): Promise<PollBatch | null> {
@@ -326,16 +344,20 @@ export class StoreCategoryTranslationBatchPollService {
         INNER JOIN "commerce"."CommerceStoreCategoryTranslationItem" t ON t."id" = i."translationItemId"
         WHERE i."batchId" = ${batch.id}
       `);
-      const retryable = isTranslationProviderFailureRetryable(failureCode);
       for (const item of items) {
-        const shouldRetry = retryable && item.retryCount < runtimeConfig.translationMaxAutoRetries;
+        const disposition = translationTerminalItemDisposition({
+          failureCode,
+          retryCount: item.retryCount,
+          maxAutoRetries: runtimeConfig.translationMaxAutoRetries,
+          retryDelaySeconds: runtimeConfig.translationResultRetrySeconds,
+        });
         await transaction.$executeRaw(Prisma.sql`
           UPDATE "commerce"."CommerceStoreCategoryTranslationItem"
           SET
-            "status" = CAST(${shouldRetry ? "PENDING" : "FAILED"} AS "commerce"."CommerceStoreCategoryTranslationItemStatus"),
+            "status" = CAST(${disposition.status} AS "commerce"."CommerceStoreCategoryTranslationItemStatus"),
             "currentBatchId" = NULL,
-            "retryCount" = "retryCount" + ${shouldRetry ? 1 : 0},
-            "nextAttemptAt" = ${shouldRetry ? new Date(Date.now() + runtimeConfig.translationResultRetrySeconds * 1000) : null},
+            "retryCount" = "retryCount" + ${disposition.retryIncrement},
+            "nextAttemptAt" = ${disposition.nextAttemptAt},
             "failureCode" = ${failureCode ?? providerStatus},
             "updatedAt" = NOW()
           WHERE "id" = ${item.translationItemId}

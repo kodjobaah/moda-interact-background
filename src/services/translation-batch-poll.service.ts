@@ -22,6 +22,10 @@ import {
 } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
+import {
+  pollTranslationProviderBatch,
+  translationTerminalItemDisposition,
+} from "./translation-batch-runtime/provider-poll.js";
 
 type PollBatch = {
   id: string;
@@ -88,54 +92,60 @@ export class TranslationBatchPollService {
     ) {
       return { status: "stale", batchId: input.translationBatchId };
     }
+    const providerBatchId = batch.providerBatchId;
     const runtimeConfig = currentTranslationRuntimeConfig(this.runtimeConfig);
 
-    let providerBatch;
-    try {
-      const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
-      providerBatch = await provider.retrieveBatch(batch.providerBatchId);
-    } catch (error) {
-      const nextSequence = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
-      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
-      console.error("translation batch poll failed", error);
-      return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
-    }
-
-    if (providerBatch.status === "nonterminal") {
-      const nextSequence = await this.advanceNonterminal(batch, runtimeConfig);
-      await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
-      return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
-    }
-
-    if (providerBatch.status === "completed") {
-      const updated = await this.database.$transaction(async (transaction) =>
-        transaction.$executeRaw(Prisma.sql`
-          UPDATE "support"."MerchantTranslationBatch"
-          SET
-            "status" = 'PROVIDER_COMPLETED',
-            "outputFileId" = ${providerBatch.outputFileId},
-            "errorFileId" = ${providerBatch.errorFileId},
-            "lastPolledAt" = NOW(),
-            "nextPollAt" = NULL,
-            "failureCode" = NULL,
-            "updatedAt" = NOW()
-          WHERE "id" = ${batch.id}
-            AND "status" = 'SUBMITTED'
-            AND "pollSequence" = ${batch.pollSequence}
-        `));
-      if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
-      await this.enqueueResults(batch.id);
-      return { status: "completed", batchId: batch.id };
-    }
-
-    const terminalApplied = await this.persistTerminalBatch(
-      batch,
-      providerBatch.status,
-      providerBatch.failureCode,
-      runtimeConfig,
-    );
-    if (!terminalApplied) return { status: "stale", batchId: batch.id };
-    return { status: "terminal", batchId: batch.id, providerStatus: providerBatch.status };
+    return pollTranslationProviderBatch({
+      retrieve: async () => {
+        const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
+        return provider.retrieveBatch(providerBatchId);
+      },
+      onReadFailure: async (error) => {
+        const nextSequence = await this.rescheduleAfterReadFailure(batch, runtimeConfig);
+        await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
+        console.error("translation batch poll failed", error);
+        return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+      },
+      onNonterminal: async () => {
+        const nextSequence = await this.advanceNonterminal(batch, runtimeConfig);
+        await this.enqueuePoll(batch.id, nextSequence, runtimeConfig);
+        return { status: "rescheduled", batchId: batch.id, pollSequence: nextSequence };
+      },
+      onCompleted: async (providerBatch) => {
+        const updated = await this.database.$transaction(async (transaction) =>
+          transaction.$executeRaw(Prisma.sql`
+            UPDATE "support"."MerchantTranslationBatch"
+            SET
+              "status" = 'PROVIDER_COMPLETED',
+              "outputFileId" = ${providerBatch.outputFileId},
+              "errorFileId" = ${providerBatch.errorFileId},
+              "lastPolledAt" = NOW(),
+              "nextPollAt" = NULL,
+              "failureCode" = NULL,
+              "updatedAt" = NOW()
+            WHERE "id" = ${batch.id}
+              AND "status" = 'SUBMITTED'
+              AND "pollSequence" = ${batch.pollSequence}
+          `));
+        if (updated !== 1) return { status: "stale", batchId: batch.id } as const;
+        await this.enqueueResults(batch.id);
+        return { status: "completed", batchId: batch.id } as const;
+      },
+      onTerminal: async (providerBatch) => {
+        const terminalApplied = await this.persistTerminalBatch(
+          batch,
+          providerBatch.status,
+          providerBatch.failureCode,
+          runtimeConfig,
+        );
+        if (!terminalApplied) return { status: "stale", batchId: batch.id } as const;
+        return {
+          status: "terminal",
+          batchId: batch.id,
+          providerStatus: providerBatch.status,
+        } as const;
+      },
+    });
   }
 
   private async loadBatch(batchId: string): Promise<PollBatch | null> {
@@ -221,23 +231,27 @@ export class TranslationBatchPollService {
         INNER JOIN "support"."MerchantSupportMessage" m ON m."id" = t."messageId"
         WHERE i."batchId" = ${batch.id}
       `);
-      const retryable = isTranslationProviderFailureRetryable(failureCode);
       for (const item of items) {
-        const shouldRetry = retryable && item.retryCount < runtimeConfig.translationMaxAutoRetries;
+        const disposition = translationTerminalItemDisposition({
+          failureCode,
+          retryCount: item.retryCount,
+          maxAutoRetries: runtimeConfig.translationMaxAutoRetries,
+          retryDelaySeconds: runtimeConfig.translationResultRetrySeconds,
+        });
         const affected = await transaction.$executeRaw(Prisma.sql`
           UPDATE "support"."MerchantMessageTranslation"
           SET
-            "status" = CAST(${shouldRetry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
+            "status" = CAST(${disposition.status} AS "support"."MerchantMessageTranslationStatus"),
             "currentBatchId" = NULL,
-            "retryCount" = "retryCount" + ${shouldRetry ? 1 : 0},
-            "nextAttemptAt" = ${shouldRetry ? new Date(Date.now() + runtimeConfig.translationResultRetrySeconds * 1000) : null},
+            "retryCount" = "retryCount" + ${disposition.retryIncrement},
+            "nextAttemptAt" = ${disposition.nextAttemptAt},
             "failureCode" = ${failureCode ?? providerStatus},
             "updatedAt" = NOW()
           WHERE "id" = ${item.translationId}
             AND "status" = 'PENDING'
             AND "currentBatchId" = ${batch.id}
         `);
-        if (affected === 1 && !shouldRetry && item.kind !== "MERCHANT") {
+        if (affected === 1 && !disposition.shouldRetry && item.kind !== "MERCHANT") {
           await transaction.$executeRaw(Prisma.sql`
             UPDATE "support"."MerchantSupportMessage"
             SET "state" = 'FAILED', "updatedAt" = NOW()

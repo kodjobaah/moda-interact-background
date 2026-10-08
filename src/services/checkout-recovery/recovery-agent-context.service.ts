@@ -37,8 +37,6 @@ export class RecoveryAgentContextService {
         totalPrice: true,
         customer: { select: { id: true, phone: true, firstName: true } },
         conversation: {
-          where: { id: conversationId },
-          take: 1,
           select: {
             id: true,
             type: true,
@@ -56,7 +54,7 @@ export class RecoveryAgentContextService {
     }
 
     const conversation = recovery.conversation;
-    if (!conversation) {
+    if (!conversation || conversation.id !== conversationId) {
       throw new Error(
         `Conversation ${conversationId} does not belong to recovery ${checkoutRecoveryId}`,
       );

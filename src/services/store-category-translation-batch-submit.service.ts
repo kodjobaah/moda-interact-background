@@ -32,10 +32,10 @@ import {
 } from "./translation-runtime-config.js";
 import { MERCHANT_COMMUNICATIONS_QUEUE_NAME } from "../domain/translation-batch.js";
 import {
-  classifyTranslationSubmissionFailure,
   translationSubmissionFailureCode,
   type TranslationSubmitFailureClassification,
 } from "./translation-batch-runtime/failure-policy.js";
+import { submitTranslationProviderBatch } from "./translation-batch-runtime/provider-submission.js";
 
 export type StoreCategorySubmitFailureClassification = TranslationSubmitFailureClassification;
 
@@ -141,64 +141,54 @@ export class StoreCategoryTranslationBatchSubmitService {
       return { status: "skipped", batchId: claimed.id };
     }
 
-    let inputFileId = claimed.inputFileId;
-    try {
-      if (!inputFileId) {
-        try {
-          const requests = await this.loadRequests(claimed.id);
-          const prepared = await provider.prepareBatchInput(requests);
-          inputFileId = prepared.inputFileId;
-          await this.persistInputFileId(claimed.id, prepared.inputFileId);
-        } catch (error) {
-          await this.persistFailure(
-            claimed,
-            classifyTranslationSubmissionFailure(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
-            error,
-            runtimeConfig,
-          );
-          return { status: "skipped", batchId: claimed.id };
+    const submission = await submitTranslationProviderBatch({
+      logicalBatchId: claimed.id,
+      inputFileId: claimed.inputFileId,
+      provider,
+      loadRequests: () => this.loadRequests(claimed.id),
+      persistInputFileId: (inputFileId) => this.persistInputFileId(claimed.id, inputFileId),
+      persistSubmitted: ({ providerBatchId, inputFileId }) =>
+        this.persistSubmitted(claimed.id, providerBatchId, inputFileId, runtimeConfig),
+      validateInputFileId: (inputFileId) => {
+        if (!inputFileId) {
+          throw new Error("Store Category translation Batch input file is unavailable");
         }
-      }
+      },
+    });
 
-      if (!inputFileId) {
-        throw new Error("Store Category translation Batch input file is unavailable");
-      }
-      const resolvedInputFileId = inputFileId;
-      const providerBatch = await provider.createBatch(claimed.id, resolvedInputFileId);
-      await this.persistSubmitted(
-        claimed.id,
-        providerBatch.providerBatchId,
-        resolvedInputFileId,
+    if (submission.kind === "failed") {
+      await this.persistFailure(
+        claimed,
+        submission.classification,
+        submission.error,
         runtimeConfig,
       );
-      await this.enqueuePoll(claimed.id, 1, runtimeConfig);
-      logger.info("background.store_category_translation.batch_submitted", {
-        runId: claimed.runId,
-        batchId: claimed.id,
-        provider: claimed.provider,
-        model: claimed.model,
-        durationMs: Date.now() - startedAt,
-      });
-      return {
-        status: "claimed",
-        batchId: claimed.id,
-        providerBatchId: providerBatch.providerBatchId,
-      };
-    } catch (error) {
-      const classification = classifyTranslationSubmissionFailure(error, "AMBIGUOUS_CREATE");
-      await this.persistFailure(claimed, classification, error, runtimeConfig);
       logger.error("background.store_category_translation.batch_submit_failed", {
         runId: claimed.runId,
         batchId: claimed.id,
         provider: claimed.provider,
         model: claimed.model,
-        failureCode: translationSubmissionFailureCode(error),
-        classification,
+        failureCode: translationSubmissionFailureCode(submission.error),
+        classification: submission.classification,
         durationMs: Date.now() - startedAt,
       });
-      if (classification === "AMBIGUOUS_CREATE") throw error;
+      if (submission.classification === "AMBIGUOUS_CREATE") throw submission.error;
       return { status: "skipped", batchId: claimed.id };
     }
+
+    await this.enqueuePoll(claimed.id, 1, runtimeConfig);
+    logger.info("background.store_category_translation.batch_submitted", {
+      runId: claimed.runId,
+      batchId: claimed.id,
+      provider: claimed.provider,
+      model: claimed.model,
+      durationMs: Date.now() - startedAt,
+    });
+    return {
+      status: "claimed",
+      batchId: claimed.id,
+      providerBatchId: submission.providerBatchId,
+    };
   }
 
   private async claimReadyBatch(batchId: string): Promise<BatchToSubmit | null> {

@@ -104,10 +104,16 @@ describe("RecoveryAgentContextService", () => {
       expect.objectContaining({
         where: { id: "recovery-1" },
         select: expect.objectContaining({
-          conversation: expect.objectContaining({
-            where: { id: "conversation-1" },
-            take: 1,
-          }),
+          conversation: {
+            select: {
+              id: true,
+              type: true,
+              summary: true,
+              inboundVersion: true,
+              languageTag: true,
+              languageSource: true,
+            },
+          },
         }),
       }),
     );
@@ -137,7 +143,7 @@ describe("RecoveryAgentContextService", () => {
     expect(harness.historyLoader).not.toHaveBeenCalled();
   });
 
-  it("rejects a conversation that is not related to the requested recovery", async () => {
+  it("rejects a missing conversation relation for the requested recovery", async () => {
     const harness = createHarness({
       durableRecovery: { ...recovery, conversation: null },
     });
@@ -147,6 +153,23 @@ describe("RecoveryAgentContextService", () => {
       conversationId: "foreign-conversation",
     })).rejects.toThrow(
       "Conversation foreign-conversation does not belong to recovery recovery-1",
+    );
+    expect(harness.historyLoader).not.toHaveBeenCalled();
+  });
+
+  it("rejects a different conversation related to the requested recovery", async () => {
+    const harness = createHarness({
+      durableRecovery: {
+        ...recovery,
+        conversation: { ...conversation, id: "some-other-conversation" },
+      },
+    });
+
+    await expect(harness.service.getAgentContext({
+      checkoutRecoveryId: "recovery-1",
+      conversationId: "conversation-1",
+    })).rejects.toThrow(
+      "Conversation conversation-1 does not belong to recovery recovery-1",
     );
     expect(harness.historyLoader).not.toHaveBeenCalled();
   });

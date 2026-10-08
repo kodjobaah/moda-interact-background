@@ -3,8 +3,8 @@ import { createOpenAITranslationProvider, type TranslationProvider, type Transla
 import prisma from "../lib/db.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
-import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
-import { assertExactTranslationBatchResultMembership } from "./translation-batch-runtime/result-membership.js";
+import { translationItemRetryDisposition } from "./translation-batch-runtime/item-retry.js";
+import { applyTranslationProviderResults } from "./translation-batch-runtime/provider-results.js";
 
 type ResultBatch = {
   id: string;
@@ -77,33 +77,21 @@ export class TranslationBatchResultsService {
     }
 
     const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
-    const resultFileIds = [batch.outputFileId, batch.errorFileId].filter(
-      (fileId): fileId is string => Boolean(fileId),
-    );
-    if (resultFileIds.length === 0) {
-      throw new Error(`Translation Batch ${batch.id} has no provider result file`);
-    }
-    const resultFiles = await Promise.all(
-      resultFileIds.map((fileId) => provider.readOutputFile(fileId)),
-    );
-    const results = resultFiles.flat();
-    const expected = await this.loadExpectedItems(batch.id);
-    assertExactTranslationBatchResultMembership(
-      expected.map((item) => item.providerCustomId),
-      results,
-      {
+    const { applied } = await applyTranslationProviderResults({
+      provider,
+      outputFileId: batch.outputFileId,
+      errorFileId: batch.errorFileId,
+      missingResultFileMessage: `Translation Batch ${batch.id} has no provider result file`,
+      loadExpectedProviderCustomIds: async () =>
+        (await this.loadExpectedItems(batch.id)).map((item) => item.providerCustomId),
+      membershipMessages: {
         countMismatch: "Translation Batch output does not contain exactly one result per expected item",
         unknownProviderCustomId: (providerCustomId) =>
           `Unknown translation Batch provider custom ID: ${providerCustomId}`,
         duplicateProviderCustomId: "Translation Batch output contains duplicate provider custom IDs",
       },
-    );
-
-    let applied = 0;
-    for (const result of results) {
-      const changed = await this.applyResult(batch.id, result);
-      if (changed) applied += 1;
-    }
+      applyResult: (result) => this.applyResult(batch.id, result),
+    });
 
     await this.completeBatch(batch.id);
     return { status: "completed", batchId: batch.id, applied };
@@ -179,15 +167,19 @@ export class TranslationBatchResultsService {
       }
 
       const config = currentTranslationRuntimeConfig(this.runtimeConfig);
-      const retryable = isTranslationProviderFailureRetryable(result.failureCode);
-      const retry = retryable && record.retryCount < config.translationMaxAutoRetries;
+      const disposition = translationItemRetryDisposition({
+        failureCode: result.failureCode,
+        retryCount: record.retryCount,
+        maxAutoRetries: config.translationMaxAutoRetries,
+        retryDelaySeconds: config.translationResultRetrySeconds,
+      });
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantMessageTranslation"
         SET
-          "status" = CAST(${retry ? "PENDING" : "FAILED"} AS "support"."MerchantMessageTranslationStatus"),
+          "status" = CAST(${disposition.status} AS "support"."MerchantMessageTranslationStatus"),
           "currentBatchId" = NULL,
-          "retryCount" = "retryCount" + ${retry ? 1 : 0},
-          "nextAttemptAt" = ${retry ? new Date(Date.now() + config.translationResultRetrySeconds * 1000) : null},
+          "retryCount" = "retryCount" + ${disposition.retryIncrement},
+          "nextAttemptAt" = ${disposition.nextAttemptAt},
           "failureCode" = ${result.failureCode ?? "provider-result-failed"},
           "updatedAt" = NOW()
         WHERE "id" = ${record.translationId}
@@ -195,7 +187,7 @@ export class TranslationBatchResultsService {
             AND "currentBatchId" = ${batchId}
       `);
       if (affected !== 1) return false;
-      if (!retry && record.kind !== "MERCHANT") {
+      if (!disposition.shouldRetry && record.kind !== "MERCHANT") {
         await transaction.$executeRaw(Prisma.sql`
           UPDATE "support"."MerchantSupportMessage"
           SET "state" = 'FAILED', "updatedAt" = NOW()
@@ -267,5 +259,12 @@ async function markMessageAvailable(
 export const translationBatchResultsService = new TranslationBatchResultsService();
 
 export const translationBatchResultsTestInternals = {
-  resultFailureIsRetryable: isTranslationProviderFailureRetryable,
+  resultFailureIsRetryable: (failureCode: string | null) =>
+    translationItemRetryDisposition({
+      failureCode,
+      retryCount: 0,
+      maxAutoRetries: 1,
+      retryDelaySeconds: 1,
+      nowMs: 0,
+    }).shouldRetry,
 };
