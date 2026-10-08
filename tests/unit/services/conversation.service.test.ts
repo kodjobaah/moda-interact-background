@@ -348,14 +348,14 @@ describe("ConversationService turn state", () => {
 
 describe("A1 shop language recovery initialization", () => {
  it.each(["en-GB", "fr"])("initializes %s from shared Shop context without ShopSettings", async (languageTag) => {
-  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{defaultLanguageTag:languageTag}});
+  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{id:"shop-1",defaultLanguageTag:languageTag}});
   prismaMock.conversation.upsert.mockClear();
   await new ConversationService().getOrCreateRecoveryConversation("recovery-1",{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"});
-  expect(prismaMock.checkoutRecovery.findUniqueOrThrow).toHaveBeenCalledWith({where:{id:"recovery-1"},select:{shop:{select:{defaultLanguageTag:true}}}});
-  expect(prismaMock.conversation.upsert).toHaveBeenCalledWith({where:{checkoutRecoveryId:"recovery-1"},create:{checkoutRecoveryId:"recovery-1",type:"RECOVERY",languageTag,languageSource:"MERCHANT_DEFAULT",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"},update:{}});
+  expect(prismaMock.checkoutRecovery.findUniqueOrThrow).toHaveBeenCalledWith({where:{id:"recovery-1"},select:{shop:{select:{id:true,defaultLanguageTag:true}}}});
+  expect(prismaMock.conversation.upsert).toHaveBeenCalledWith({where:{checkoutRecoveryId:"recovery-1"},create:{shopId:"shop-1",checkoutRecoveryId:"recovery-1",type:"RECOVERY",languageTag,languageSource:"MERCHANT_DEFAULT",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"},update:{}});
  });
  it.each([null,"invalid_@@"])("L02 missing/invalid shop has no invented locale (%s)", async(defaultLanguageTag)=>{
-  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{defaultLanguageTag}});
+  prismaMock.checkoutRecovery.findUniqueOrThrow.mockResolvedValue({shop:{id:"shop-1",defaultLanguageTag}});
   await new ConversationService().getOrCreateRecoveryConversation("recovery-1");
   expect(prismaMock.conversation.upsert).toHaveBeenLastCalledWith(expect.objectContaining({create:expect.objectContaining({languageTag:null,languageSource:null}),update:{}}));
  });

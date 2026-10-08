@@ -197,6 +197,7 @@ async function seedConversation(label: string): Promise<SeededConversation> {
   await database.conversation.create({
     data: {
       id: conversationId,
+      shopId,
       checkoutRecoveryId: recoveryId,
       type: "RECOVERY",
       languageTag: "en",
