@@ -14,7 +14,11 @@ const now = new Date("2026-09-15T00:00:00.000Z");
 
 type Harness = ReturnType<typeof createHarness>;
 
-function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | null = null, provider = "SHOPIFY") {
+function createHarness(
+  grantedQuantity = 1,
+  currentAllowanceQuantity: number | null = null,
+  provider: "SHOPIFY" | "WOOCOMMERCE" = "SHOPIFY",
+) {
   const state = {
     period: {
       id: "period-1",
@@ -29,6 +33,10 @@ function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | n
       billingPeriodId: "period-1" as string | null,
       currentPeriodStart: periodStart as Date | null,
       currentPeriodEnd: periodEnd as Date | null,
+    },
+    plan: {
+      kind: "PAID_METERED",
+      shopifyUsageEventHandle: provider === "SHOPIFY" ? "paid-meter" : null,
     },
     counter: {
       id: "period-counter-1",
@@ -53,7 +61,7 @@ function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | n
     subscription: {
       findUnique: vi.fn(async (args: { select?: { plan?: unknown } }) => {
         if (args.select?.plan) {
-          return { plan: { kind: "PAID_METERED", shopifyUsageEventHandle: "paid-meter" } };
+          return { plan: { ...state.plan } };
         }
         return { ...state.subscription, billingPeriod: { ...state.period } };
       }),
@@ -110,7 +118,10 @@ function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | n
   };
   const policy = {
     shopId,
+    platform: provider,
     subscriptionId,
+    subscriptionStatus: "ACTIVE" as "ACTIVE" | "FROZEN",
+    providerCoverageEndAt: null as Date | null,
     planKind: "PAID_METERED" as const,
     billingPeriod: {
       id: state.period.id,
@@ -119,6 +130,7 @@ function createHarness(grantedQuantity = 1, currentAllowanceQuantity: number | n
       start: state.period.periodStart,
       end: state.period.periodEnd,
       status: state.period.status,
+      phase: "ACTIVE" as "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING",
       includedCounter: {
         id: state.counter.id,
         shopId: state.counter.shopId,
@@ -250,6 +262,28 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
   });
 
+  it("rejects direct Woo reservations while FROZEN without changing capacity", async () => {
+    const harness = createHarness(1, null, "WOOCOMMERCE");
+    harness.policy.subscriptionStatus = "FROZEN";
+
+    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    expect(harness.state.counter.reservedQuantity).toBe(0);
+    expect(harness.state.reservations.size).toBe(0);
+    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects direct Woo reservations after provider coverage expires before local period end", async () => {
+    const harness = createHarness(1, null, "WOOCOMMERCE");
+    harness.policy.providerCoverageEndAt = new Date("2026-09-14T00:00:00.000Z");
+    harness.policy.billingPeriod.phase = "EXPIRED_RECONCILING";
+
+    await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    expect(harness.state.period.periodEnd.getTime()).toBeGreaterThan(now.getTime());
+    expect(harness.state.counter.reservedQuantity).toBe(0);
+    expect(harness.state.reservations.size).toBe(0);
+    expect(harness.transaction.billingPeriodEntitlementCounter.updateMany).not.toHaveBeenCalled();
+  });
+
   it("fails closed for subscription and period boundary mismatch", async () => {
     const harness = createHarness();
     harness.state.subscription.currentPeriodEnd = new Date("2026-10-02T00:00:00.000Z");
@@ -293,6 +327,35 @@ describe("PaidIncludedRecoveryReservationService", () => {
     if (provider === "WOOCOMMERCE") {
       expect(harness.state.usageEvents[0].shopifyIdempotencyKey).toBeNull();
     }
+  });
+
+  it("commits Woo paid included usage without a Shopify usage event handle", async () => {
+    const harness = createHarness(1, null, "WOOCOMMERCE");
+    await reserve(harness);
+
+    await expect(harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    })).resolves.toMatchObject({ kind: "committed" });
+    expect(harness.state.usageEvents[0]).toMatchObject({
+      provider: "WOOCOMMERCE",
+      shopifyReportState: "NOT_APPLICABLE",
+      shopifyEventHandle: null,
+      shopifyIdempotencyKey: null,
+    });
+  });
+
+  it("fails closed when a Shopify paid commit has no usage event handle", async () => {
+    const harness = createHarness();
+    harness.state.plan.shopifyUsageEventHandle = null;
+    await reserve(harness);
+
+    await expect(harness.service.commit({
+      shopId,
+      sourceKey: "paid-included:period-1:recovery-1",
+    })).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    expect(harness.state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+    expect(harness.state.usageEvents).toHaveLength(0);
   });
 
   it("does not create a second event or increment on duplicate commit", async () => {

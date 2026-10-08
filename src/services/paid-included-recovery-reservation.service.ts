@@ -4,6 +4,7 @@ import {
   BillingPeriodEntitlementCounterKind,
   Prisma,
   ShopifyReportState,
+  SubscriptionProjectionStatus,
   UsageMetric,
   UsageReservationStatus,
 } from "@prisma/client";
@@ -164,11 +165,22 @@ export class PaidIncludedRecoveryReservationService {
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const policyResolver = this.createPolicyResolver(transaction);
-    const policy = await policyResolver.resolve(input.shopId, this.now());
+    const now = this.now();
+    const policy = await policyResolver.resolve(input.shopId, now);
     if (policy.planKind !== BillingPlanKind.PAID_METERED) {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation requires a paid plan");
     }
-    const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, this.now());
+    if (
+      policy.platform === "WOOCOMMERCE" &&
+      (policy.subscriptionStatus === SubscriptionProjectionStatus.FROZEN ||
+        policy.billingPeriod?.phase === "EXPIRED_RECONCILING" ||
+        (policy.providerCoverageEndAt !== null && policy.providerCoverageEndAt <= now))
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Woo paid included reservation is unavailable while frozen or provider coverage is expired",
+      );
+    }
+    const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, now);
     const sourceKey = "sourceKey" in input
       ? `paid-included:${period.id}:${input.sourceKey}`
       : `paid-included:${period.id}:${input.recoveryId}`;
@@ -280,11 +292,15 @@ export class PaidIncludedRecoveryReservationService {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer current and open");
     }
 
+    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
     const plan = await transaction.subscription.findUnique({
       where: { shopId: input.shopId },
       select: { plan: { select: { kind: true, shopifyUsageEventHandle: true } } },
     });
-    if (plan?.plan?.kind !== BillingPlanKind.PAID_METERED || !plan.plan.shopifyUsageEventHandle) {
+    if (
+      plan?.plan?.kind !== BillingPlanKind.PAID_METERED ||
+      (provider === "SHOPIFY" && !plan.plan.shopifyUsageEventHandle)
+    ) {
       throw new PaidIncludedRecoveryReservationError("Paid normal usage meter is missing");
     }
 
@@ -303,7 +319,6 @@ export class PaidIncludedRecoveryReservationService {
     if (updatedCounter.count !== 1) throw new RecoveryReservationConcurrencyConflict();
 
     const idempotencyKey = createRecoveryIdempotencyKey(input.shopId, input.sourceKey);
-    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
     const usageEvent = await transaction.usageEvent.create({
       data: {
         shopId: input.shopId,
