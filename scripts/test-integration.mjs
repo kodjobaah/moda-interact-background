@@ -11,6 +11,7 @@ const defaultTests = [
   "tests/integration/background-runtime-lease-cadence.concurrency.integration.test.ts",
   "tests/integration/translation-batch-assembly.concurrency.integration.test.ts",
   "tests/integration/bullmq-telemetry.integration.test.ts",
+  "tests/integration/conversation-turn-scheduling.integration.test.ts",
 ];
 const selectedTests = process.argv.slice(2);
 
@@ -46,7 +47,11 @@ function runVitest(environment, tests) {
 }
 
 const result = await withDisposableIntegrationInfrastructure(
-  { prismaSchemaPath, cwd: repositoryRoot },
+  {
+    prismaSchemaPath,
+    cwd: repositoryRoot,
+    postgres: { image: "pgvector/pgvector:pg17" },
+  },
   async ({ environment }) => runVitest(environment, selectedTests.length > 0 ? selectedTests : defaultTests),
 );
 

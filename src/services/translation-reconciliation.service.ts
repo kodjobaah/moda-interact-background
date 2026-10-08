@@ -22,18 +22,13 @@ import { connectionRedis } from "../lib/redis.js";
 import { createOpenAITranslationProvider, type TranslationProvider } from "../providers/translation.provider.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import { ensureDeterministicTranslationQueueJob } from "./translation-batch-runtime/queue-job-repair.js";
+import { routeTranslationBatchCorrelation } from "./translation-batch-runtime/provider-correlation.js";
 
-const HEALTHY_STATES = new Set(["waiting", "delayed", "active"]);
 const TERMINAL_BATCH_STATUSES = ["FAILED", "EXPIRED", "CANCELLED"] as const;
 
 type ReconciliationQueue = Pick<Queue, "add" | "getJob"> & { close?: () => Promise<void> };
 type ReconciliationDatabase = Pick<typeof prisma, "$queryRaw" | "$executeRaw" | "$transaction">;
-
-type ExpectedJob = {
-  id: string;
-  name: string;
-  data: unknown;
-};
 
 type BatchRecoveryRow = {
   id: string;
@@ -89,7 +84,7 @@ export class TranslationReconciliationService {
       LIMIT ${snapshot.translationReconciliationPageSize}
     `);
     for (const translation of translations) {
-      result.repairedJobs += await this.ensureJob({
+      result.repairedJobs += await ensureDeterministicTranslationQueueJob(this.queue, {
         id: createTranslationDispatchJobId(translation.id),
         name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
         data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId: translation.id } satisfies TranslationDispatchJob,
@@ -164,19 +159,8 @@ export class TranslationReconciliationService {
     await this.queue.close?.();
   }
 
-  private async ensureJob(expected: ExpectedJob): Promise<number> {
-    const existing = await this.queue.getJob(expected.id);
-    if (existing) {
-      const state = await existing.getState();
-      if (HEALTHY_STATES.has(state)) return 0;
-      await existing.remove();
-    }
-    await this.queue.add(expected.name, expected.data, { jobId: expected.id });
-    return 1;
-  }
-
   private async ensureSubmitJob(batchId: string): Promise<number> {
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchSubmitJobId(batchId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_SUBMIT,
       data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batchId } satisfies TranslationBatchSubmitJob,
@@ -184,7 +168,7 @@ export class TranslationReconciliationService {
   }
 
   private async ensurePollJob(batch: Pick<BatchRecoveryRow, "id" | "pollSequence">): Promise<number> {
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchPollJobId(batch.id, batch.pollSequence),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_POLL,
       data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batch.id, pollSequence: batch.pollSequence } satisfies TranslationBatchPollJob,
@@ -192,7 +176,7 @@ export class TranslationReconciliationService {
   }
 
   private async ensureResultsJob(batchId: string): Promise<number> {
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationBatchResultsJobId(batchId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_BATCH_RESULTS,
       data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationBatchId: batchId } satisfies TranslationBatchResultsJob,
@@ -224,7 +208,8 @@ export class TranslationReconciliationService {
       return "conflict";
     }
     if (correlation.kind === "none") return "none";
-    const completed = correlation.batch.status === "completed";
+    const route = routeTranslationBatchCorrelation(correlation.batch.status);
+    const completed = route === "completed";
     const affectedRows = await this.database.$executeRaw(Prisma.sql`
       UPDATE "support"."MerchantTranslationBatch"
       SET "providerBatchId" = ${correlation.batch.providerBatchId},
@@ -281,7 +266,7 @@ export class TranslationReconciliationService {
           RETURNING "id"
         `);
         for (const translation of restored) {
-          await this.ensureJob({
+          await ensureDeterministicTranslationQueueJob(this.queue, {
             id: createTranslationDispatchJobId(translation.id),
             name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
             data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId: translation.id } satisfies TranslationDispatchJob,
@@ -365,7 +350,7 @@ export class TranslationReconciliationService {
   }
 
   private async ensureDispatchJob(translationId: string): Promise<number> {
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createTranslationDispatchJobId(translationId),
       name: MERCHANT_COMMUNICATIONS_JOB_NAMES.TRANSLATION_DISPATCH,
       data: { schemaVersion: MERCHANT_COMMUNICATIONS_SCHEMA_VERSION, translationId } satisfies TranslationDispatchJob,

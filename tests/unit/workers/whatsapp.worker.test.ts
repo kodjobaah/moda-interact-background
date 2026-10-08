@@ -3,6 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   guidance: vi.fn(),
   audio: vi.fn(),
+  logger: (() => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    logger.child.mockReturnValue(logger);
+    return logger;
+  })(),
   abuse: { admitRaw: vi.fn() },
   conversation: {
     receiveMessage: vi.fn(),
@@ -15,6 +26,12 @@ const mocks = vi.hoisted(() => ({
   eligibility: { isShopExecutionActive: vi.fn() },
 }));
 
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: vi.fn(() => mocks.logger),
+}));
+vi.mock("../../../src/runtime/deployment-environment.js", () => ({
+  resolveDeploymentEnvironmentName: vi.fn(() => "test"),
+}));
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
 vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { process: mocks.audio } }));
 vi.mock("bullmq", () => ({
@@ -147,6 +164,32 @@ describe("WhatsApp worker inbound execution gate", () => {
       occurredAt: new Date(event.occurredAt),
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+  });
+
+  it("re-enqueues the current turn version when a duplicate delivery retries after persistence", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "resolved",
+      conversationId: "conversation-1",
+      checkoutRecoveryId: "recovery-1",
+      shopId: "shop-1",
+    });
+    mocks.conversation.receiveMessage.mockResolvedValue({
+      duplicate: true,
+      version: 4,
+    });
+
+    await processInboundMessage(event);
+
+    expect(mocks.conversation.receiveMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+    expect(mocks.logger.debug).toHaveBeenCalledWith(
+      "whatsapp.inbound.duplicate_repair_requested",
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        providerMessageId: event.providerMessageId,
+        observedVersion: 4,
+      }),
+    );
   });
 
 

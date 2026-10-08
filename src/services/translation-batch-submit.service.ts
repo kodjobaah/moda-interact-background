@@ -20,12 +20,13 @@ import {
   type BackgroundRuntimeConfigSnapshot,
 } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
+import {
+  classifyTranslationSubmissionFailure,
+  translationSubmissionFailureCode,
+  type TranslationSubmitFailureClassification,
+} from "./translation-batch-runtime/failure-policy.js";
 
-
-export type SubmitFailureClassification =
-  | "DEFINITE_RETRYABLE_NOT_CREATED"
-  | "DEFINITE_TERMINAL_NOT_CREATED"
-  | "AMBIGUOUS_CREATE";
+export type SubmitFailureClassification = TranslationSubmitFailureClassification;
 
 type BatchToSubmit = {
   id: string;
@@ -50,11 +51,6 @@ type SubmissionDatabase = {
 
 type SubmissionQueue = Pick<Queue, "add">;
 
-type FailureLike = {
-  classification?: SubmitFailureClassification;
-  submissionClassification?: SubmitFailureClassification;
-};
-
 type ProviderFactory = (options: {
   provider: string;
   model: string;
@@ -76,25 +72,6 @@ export class TranslationBatchSubmissionError extends Error {
     this.name = "TranslationBatchSubmissionError";
     this.classification = classification;
   }
-}
-
-function failureClassification(
-  error: unknown,
-  fallback: SubmitFailureClassification,
-): SubmitFailureClassification {
-  if (error && typeof error === "object") {
-    const candidate = error as FailureLike;
-    if (candidate.classification) return candidate.classification;
-    if (candidate.submissionClassification) {
-      return candidate.submissionClassification;
-    }
-  }
-  return fallback;
-}
-
-function failureCode(error: unknown): string {
-  if (error instanceof Error) return error.name.slice(0, 120);
-  return "provider-submission-failed";
 }
 
 export class TranslationBatchSubmitService {
@@ -155,7 +132,7 @@ export class TranslationBatchSubmitService {
         } catch (error) {
           await this.persistFailure(
             claimed,
-            failureClassification(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
+            classifyTranslationSubmissionFailure(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
             error,
             runtimeConfig,
           );
@@ -172,7 +149,7 @@ export class TranslationBatchSubmitService {
         providerBatchId: providerBatch.providerBatchId,
       };
     } catch (error) {
-      const classification = failureClassification(error, "AMBIGUOUS_CREATE");
+      const classification = classifyTranslationSubmissionFailure(error, "AMBIGUOUS_CREATE");
       await this.persistFailure(claimed, classification, error, runtimeConfig);
       if (classification === "AMBIGUOUS_CREATE") throw error;
       return { status: "skipped", batchId: claimed.id };
@@ -285,7 +262,7 @@ export class TranslationBatchSubmitService {
         SET
           "status" = CAST(${nextStatus} AS "support"."MerchantTranslationBatchStatus"),
           "nextSubmitAt" = ${nextSubmitAt},
-          "failureCode" = ${failureCode(error)},
+          "failureCode" = ${translationSubmissionFailureCode(error)},
           "updatedAt" = NOW()
         WHERE "id" = ${batch.id} AND "status" = 'SUBMITTING'
       `);

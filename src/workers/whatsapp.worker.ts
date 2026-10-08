@@ -1,4 +1,5 @@
 import { Queue, Worker } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { observeConversationTurn } from "@modainteract/moda-interact-shared/observability/genai";
 import {
@@ -27,6 +28,12 @@ import {
 } from "../services/conversation-turn-processor.service.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+
+const logger = createLogger({
+  serviceName: "moda-messaging-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-messaging-worker",
@@ -59,6 +66,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   loadTurn: loadConversationTurn,
   runAgent: runCommerceAgent,
   getResult: (result) => result,
+  logger,
 });
 
 export function createWhatsappWorker() {
@@ -69,6 +77,12 @@ export function createWhatsappWorker() {
 
   async (job) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
+      logger.debug("whatsapp.job.started", {
+        jobId: normalizeJobId(job.id),
+        jobName: job.name,
+        attemptsMade: job.attemptsMade,
+        configuredAttempts: job.opts.attempts ?? 1,
+      });
       switch (job.name) {
         case "message-received":
           await processInboundJobData(job.data, job.id, { finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1) });
@@ -97,33 +111,70 @@ export function createWhatsappWorker() {
 );
   bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "whatsappQueueGlobalConcurrency");
   worker.on("completed", (job) => {
-    console.log(`WhatsApp job ${job.id} completed successfully`);
+    logger.debug("whatsapp.job.completed", {
+      jobId: normalizeJobId(job.id),
+      jobName: job.name,
+      attemptsMade: job.attemptsMade,
+    });
   });
   worker.on("failed", (job, error) => {
-    console.error(`WhatsApp job ${job?.id} failed`, error);
+    logger.error("whatsapp.job.failed", {
+      jobId: normalizeJobId(job?.id),
+      jobName: job?.name ?? null,
+      attemptsMade: job?.attemptsMade ?? null,
+      ...boundedError(error),
+    });
   });
   worker.on("error", (error) => {
-    console.error("WhatsApp worker error", error);
+    logger.error("whatsapp.worker.error", boundedError(error));
   });
-  console.log("WhatsApp worker started");
+  logger.info("whatsapp.worker.started", {
+    queueName: "whatsapp-events",
+    concurrency: worker.concurrency,
+  });
   return worker;
 }
 
 export {};
 export async function processInboundMessage(event: WhatsAppInboundEvent, audioOptions: { finalAttempt?: boolean } = {}) {
-  console.log("Processing WhatsApp message", event.providerMessageId);
+  logger.debug("whatsapp.inbound.processing_started", {
+    providerMessageId: event.providerMessageId,
+    contentType: event.content.type,
+  });
 
   const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
     providerMessageId: event.providerMessageId,
     customerPhone: event.customerPhone,
   });
-  if (abuse.kind !== "allowed") return;
+  if (abuse.kind !== "allowed") {
+    logger.debug("whatsapp.inbound.processing_stopped", {
+      providerMessageId: event.providerMessageId,
+      reason: "raw-abuse-admission-denied",
+    });
+    return;
+  }
 
   const route = await recoveryRoutingService.resolveInboundMessage(event);
 
-  if (route.kind === "ignored") return;
+  logger.debug("whatsapp.inbound.route_resolved", {
+    providerMessageId: event.providerMessageId,
+    routeKind: route.kind,
+    ...routeIdentifiers(route),
+  });
+
+  if (route.kind === "ignored") {
+    logger.debug("whatsapp.inbound.processing_stopped", {
+      providerMessageId: event.providerMessageId,
+      reason: "route-ignored",
+    });
+    return;
+  }
   if (route.kind === "guidance") {
     await sendRoutingGuidance(event, route.reason);
+    logger.debug("whatsapp.inbound.guidance_sent", {
+      providerMessageId: event.providerMessageId,
+      reason: route.reason,
+    });
     return;
   }
 
@@ -140,6 +191,11 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
     const result = await inboundWhatsAppAudioService.process(event, route.conversationId, audioOptions);
     if (result.kind === "completed") {
       const state = await conversationService.getTurnState(route.conversationId);
+      logger.debug("whatsapp.inbound.audio_ready_for_turn", {
+        providerMessageId: event.providerMessageId,
+        conversationId: route.conversationId,
+        observedVersion: state.inboundVersion,
+      });
       await conversationTurnProcessor.enqueue(route.conversationId, state.inboundVersion);
     } else if (result.fallback) {
       await outboundWhatsAppAdmissionService.sendText({
@@ -149,6 +205,10 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
         senderType: "AUTOMATION",
         to: event.customerPhone,
         text: result.fallback,
+      });
+      logger.debug("whatsapp.inbound.audio_fallback_sent", {
+        providerMessageId: event.providerMessageId,
+        conversationId: route.conversationId,
       });
     }
     return;
@@ -164,6 +224,13 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
       inReplyToProviderId: event.contextMessageId,
       content: `[Unsupported WhatsApp content: ${content.providerType.slice(0, 64)}]`,
       occurredAt: new Date(event.occurredAt),
+    });
+    logger.debug("whatsapp.inbound.persisted", {
+      providerMessageId: event.providerMessageId,
+      conversationId,
+      observedVersion: received.version,
+      duplicate: received.duplicate,
+      contentType: "unsupported",
     });
     if (!received.duplicate) {
       await prisma.conversationMessage.update({
@@ -185,10 +252,20 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
     occurredAt: new Date(event.occurredAt),
   });
 
-  if (received.duplicate) {
-    console.log("Ignoring duplicate WhatsApp message", event.providerMessageId);
+  logger.debug("whatsapp.inbound.persisted", {
+    providerMessageId: event.providerMessageId,
+    conversationId: route.conversationId,
+    observedVersion: received.version,
+    duplicate: received.duplicate,
+    contentType: "text",
+  });
 
-    return;
+  if (received.duplicate) {
+    logger.debug("whatsapp.inbound.duplicate_repair_requested", {
+      providerMessageId: event.providerMessageId,
+      conversationId: route.conversationId,
+      observedVersion: received.version,
+    });
   }
 
   await conversationTurnProcessor.enqueue(
@@ -204,7 +281,9 @@ function isContinuingRecoveryStatus(status: string | null | undefined): boolean 
 export async function processInboundJobData(input: unknown, jobId?: string, audioOptions: { finalAttempt?: boolean } = {}) {
   const parsed = safeParseNormalizedWhatsAppInboundMessage(input);
   if (!parsed.success) {
-    console.warn("Ignoring non-canonical WhatsApp inbound job", { jobId });
+    logger.warn("whatsapp.inbound.invalid_job", {
+      jobId: normalizeJobId(jobId),
+    });
     return;
   }
   await observeConversationTurn(
@@ -213,6 +292,37 @@ export async function processInboundJobData(input: unknown, jobId?: string, audi
     conversationTurnObservation,
   );
 }
+
+function normalizeJobId(jobId: string | undefined): string | null {
+  return typeof jobId === "string" ? jobId.slice(0, 192) : null;
+}
+
+function boundedError(error: unknown): { errorName: string; errorMessage: string } {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name.slice(0, 64),
+      errorMessage: error.message.slice(0, 256),
+    };
+  }
+
+  return {
+    errorName: "UnknownError",
+    errorMessage: String(error).slice(0, 256),
+  };
+}
+
+function routeIdentifiers(route: Awaited<ReturnType<typeof recoveryRoutingService.resolveInboundMessage>>): {
+  conversationId?: string | null;
+  checkoutRecoveryId?: string | null;
+  shopId?: string | null;
+} {
+  return {
+    ...("conversationId" in route ? { conversationId: route.conversationId ?? null } : {}),
+    ...("checkoutRecoveryId" in route ? { checkoutRecoveryId: route.checkoutRecoveryId ?? null } : {}),
+    ...("shopId" in route ? { shopId: route.shopId ?? null } : {}),
+  };
+}
+
 export async function loadConversationTurn(
   conversationId: string,
   pendingTurnStartedAt: Date,

@@ -40,6 +40,14 @@ function state(overrides: Partial<any> = {}) {
 
 function harness(overrides: Partial<any> = {}) {
   const queue = { add: vi.fn().mockResolvedValue(undefined) };
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  };
+  logger.child.mockReturnValue(logger);
   const conversation = {
     getTurnState: vi.fn().mockResolvedValue(state()),
     claimTurn: vi.fn().mockResolvedValue(true),
@@ -98,6 +106,7 @@ function harness(overrides: Partial<any> = {}) {
     getResult: (result: any) => result,
     now,
     runtimeConfig,
+    logger,
   });
 
   return {
@@ -109,6 +118,7 @@ function harness(overrides: Partial<any> = {}) {
     runAgent,
     loaded,
     runtimeConfig,
+    logger,
     ...overrides,
   };
 }
@@ -166,6 +176,29 @@ describe("ConversationTurnProcessor", () => {
     await test.processor.enqueue("conversation-1", 4);
 
     expect(test.queue.add.mock.calls.map((call) => call[2].delay)).toEqual([3_000, 1_000]);
+  });
+
+  it("logs and rethrows a BullMQ scheduling failure with bounded turn identifiers", async () => {
+    const test = harness({ now: () => first });
+    test.conversation.getTurnState.mockResolvedValue(
+      state({ lastInboundAt: first, pendingTurnStartedAt: first }),
+    );
+    test.queue.add.mockRejectedValueOnce(new Error("redis unavailable"));
+
+    await expect(test.processor.enqueue("conversation-1", 3)).rejects.toThrow(
+      "redis unavailable",
+    );
+
+    expect(test.logger.error).toHaveBeenCalledWith(
+      "whatsapp.turn.schedule_failed",
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        observedVersion: 3,
+        jobId: "conversation-turn__conversation-1__3",
+        errorName: "Error",
+        errorMessage: "redis unavailable",
+      }),
+    );
   });
 
   it("keeps the processing lease system-managed", () => {

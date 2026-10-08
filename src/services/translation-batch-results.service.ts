@@ -3,7 +3,8 @@ import { createOpenAITranslationProvider, type TranslationProvider, type Transla
 import prisma from "../lib/db.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
-
+import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
+import { assertExactTranslationBatchResultMembership } from "./translation-batch-runtime/result-membership.js";
 
 type ResultBatch = {
   id: string;
@@ -46,17 +47,6 @@ type ResultDatabase = {
 
 type ProviderFactory = (options: { provider: string; model: string }) => TranslationProvider;
 
-function resultFailureIsRetryable(failureCode: string | null): boolean {
-  if (!failureCode) return true;
-  const normalized = failureCode.toLowerCase();
-  const httpStatus = normalized.match(/\bhttp[-_: ]?(\d{3})\b/)?.[1];
-  if (httpStatus) {
-    const status = Number(httpStatus);
-    return status === 429 || status >= 500;
-  }
-  return !/(auth|permission|invalid|malformed|unsupported|content_policy|bad_request)/.test(normalized);
-}
-
 export type TranslationBatchResultsResult =
   | { status: "skipped"; batchId: string }
   | { status: "completed"; batchId: string; applied: number };
@@ -98,7 +88,16 @@ export class TranslationBatchResultsService {
     );
     const results = resultFiles.flat();
     const expected = await this.loadExpectedItems(batch.id);
-    this.validateMembership(expected, results);
+    assertExactTranslationBatchResultMembership(
+      expected.map((item) => item.providerCustomId),
+      results,
+      {
+        countMismatch: "Translation Batch output does not contain exactly one result per expected item",
+        unknownProviderCustomId: (providerCustomId) =>
+          `Unknown translation Batch provider custom ID: ${providerCustomId}`,
+        duplicateProviderCustomId: "Translation Batch output contains duplicate provider custom IDs",
+      },
+    );
 
     let applied = 0;
     for (const result of results) {
@@ -127,22 +126,6 @@ export class TranslationBatchResultsService {
       FROM "support"."MerchantTranslationBatchItem"
       WHERE "batchId" = ${batchId}
     `));
-  }
-
-  private validateMembership(expected: ExpectedItem[], results: TranslationProviderResult[]): void {
-    const expectedIds = new Map(expected.map((item) => [item.providerCustomId, item.translationId]));
-    const seenIds = new Set<string>();
-    if (results.length !== expected.length) {
-      throw new Error("Translation Batch output does not contain exactly one result per expected item");
-    }
-    for (const result of results) {
-      if (!expectedIds.has(result.providerCustomId)) {
-        throw new Error(`Unknown translation Batch provider custom ID: ${result.providerCustomId}`);
-      }
-      if (!seenIds.add(result.providerCustomId)) {
-        throw new Error("Translation Batch output contains duplicate provider custom IDs");
-      }
-    }
   }
 
   private async applyResult(batchId: string, result: TranslationProviderResult): Promise<boolean> {
@@ -196,7 +179,7 @@ export class TranslationBatchResultsService {
       }
 
       const config = currentTranslationRuntimeConfig(this.runtimeConfig);
-      const retryable = resultFailureIsRetryable(result.failureCode);
+      const retryable = isTranslationProviderFailureRetryable(result.failureCode);
       const retry = retryable && record.retryCount < config.translationMaxAutoRetries;
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "support"."MerchantMessageTranslation"
@@ -283,4 +266,6 @@ async function markMessageAvailable(
 
 export const translationBatchResultsService = new TranslationBatchResultsService();
 
-export const translationBatchResultsTestInternals = { resultFailureIsRetryable };
+export const translationBatchResultsTestInternals = {
+  resultFailureIsRetryable: isTranslationProviderFailureRetryable,
+};

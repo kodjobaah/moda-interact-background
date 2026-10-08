@@ -19,6 +19,8 @@ import {
   currentTranslationRuntimeConfig,
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
+import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
+import { assertExactTranslationBatchResultMembership } from "./translation-batch-runtime/result-membership.js";
 
 type ResultBatch = {
   id: string;
@@ -57,17 +59,6 @@ function defaultCredentialResolver(): TranslationProviderCredentialResolver {
     db: prisma,
     keyring: readCommerceCredentialKeyring(),
   });
-}
-
-function resultFailureIsRetryable(failureCode: string | null): boolean {
-  if (!failureCode) return true;
-  const normalized = failureCode.toLowerCase();
-  const httpStatus = normalized.match(/\bhttp[-_: ]?(\d{3})\b/)?.[1];
-  if (httpStatus) {
-    const status = Number(httpStatus);
-    return status === 429 || status >= 500;
-  }
-  return !/(auth|permission|invalid|malformed|unsupported|content_policy|bad_request)/.test(normalized);
 }
 
 export type StoreCategoryTranslationBatchResultsResult =
@@ -116,7 +107,16 @@ export class StoreCategoryTranslationBatchResultsService {
     const resultFiles = await Promise.all(resultFileIds.map((fileId) => provider.readOutputFile(fileId)));
     const results = resultFiles.flat();
     const expected = await this.loadExpectedItems(batch.id);
-    this.validateMembership(expected, results);
+    assertExactTranslationBatchResultMembership(
+      expected.map((item) => item.providerCustomId),
+      results,
+      {
+        countMismatch: "Store Category translation Batch output does not contain exactly one result per expected item",
+        unknownProviderCustomId: (providerCustomId) =>
+          `Unknown Store Category translation provider custom ID: ${providerCustomId}`,
+        duplicateProviderCustomId: "Store Category translation Batch output contains duplicate provider custom IDs",
+      },
+    );
 
     let applied = 0;
     for (const result of results) {
@@ -153,22 +153,6 @@ export class StoreCategoryTranslationBatchResultsService {
       FROM "commerce"."CommerceStoreCategoryTranslationBatchItem"
       WHERE "batchId" = ${batchId}
     `));
-  }
-
-  private validateMembership(expected: ExpectedItem[], results: TranslationProviderResult[]): void {
-    const expectedIds = new Set(expected.map((item) => item.providerCustomId));
-    const seenIds = new Set<string>();
-    if (results.length !== expected.length) {
-      throw new Error("Store Category translation Batch output does not contain exactly one result per expected item");
-    }
-    for (const result of results) {
-      if (!expectedIds.has(result.providerCustomId)) {
-        throw new Error(`Unknown Store Category translation provider custom ID: ${result.providerCustomId}`);
-      }
-      if (!seenIds.add(result.providerCustomId)) {
-        throw new Error("Store Category translation Batch output contains duplicate provider custom IDs");
-      }
-    }
   }
 
   private async applyResult(batchId: string, result: TranslationProviderResult): Promise<boolean> {
@@ -211,7 +195,7 @@ export class StoreCategoryTranslationBatchResultsService {
       }
 
       const config = currentTranslationRuntimeConfig(this.runtimeConfig);
-      const retryable = resultFailureIsRetryable(result.failureCode);
+      const retryable = isTranslationProviderFailureRetryable(result.failureCode);
       const retry = retryable && record.retryCount < config.translationMaxAutoRetries;
       const affected = await transaction.$executeRaw(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationItem"
@@ -298,4 +282,6 @@ export class StoreCategoryTranslationBatchResultsService {
 export const storeCategoryTranslationBatchResultsService =
   new StoreCategoryTranslationBatchResultsService();
 
-export const storeCategoryTranslationResultsTestInternals = { resultFailureIsRetryable };
+export const storeCategoryTranslationResultsTestInternals = {
+  resultFailureIsRetryable: isTranslationProviderFailureRetryable,
+};

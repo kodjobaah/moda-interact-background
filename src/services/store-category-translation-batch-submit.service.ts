@@ -31,11 +31,13 @@ import {
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
 import { MERCHANT_COMMUNICATIONS_QUEUE_NAME } from "../domain/translation-batch.js";
+import {
+  classifyTranslationSubmissionFailure,
+  translationSubmissionFailureCode,
+  type TranslationSubmitFailureClassification,
+} from "./translation-batch-runtime/failure-policy.js";
 
-export type StoreCategorySubmitFailureClassification =
-  | "DEFINITE_RETRYABLE_NOT_CREATED"
-  | "DEFINITE_TERMINAL_NOT_CREATED"
-  | "AMBIGUOUS_CREATE";
+export type StoreCategorySubmitFailureClassification = TranslationSubmitFailureClassification;
 
 type BatchToSubmit = {
   id: string;
@@ -68,32 +70,10 @@ type ProviderFactory = (options: {
   apiKey: string;
 }) => TranslationProvider;
 
-type FailureLike = {
-  classification?: StoreCategorySubmitFailureClassification;
-  submissionClassification?: StoreCategorySubmitFailureClassification;
-};
-
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
-
-function failureClassification(
-  error: unknown,
-  fallback: StoreCategorySubmitFailureClassification,
-): StoreCategorySubmitFailureClassification {
-  if (error && typeof error === "object") {
-    const candidate = error as FailureLike;
-    if (candidate.classification) return candidate.classification;
-    if (candidate.submissionClassification) return candidate.submissionClassification;
-  }
-  return fallback;
-}
-
-function failureCode(error: unknown): string {
-  if (error instanceof Error) return error.name.slice(0, 120);
-  return "provider-submission-failed";
-}
 
 function defaultCredentialResolver(): TranslationProviderCredentialResolver {
   return createTranslationProviderCredentialResolver({
@@ -155,7 +135,7 @@ export class StoreCategoryTranslationBatchSubmitService {
         batchId: claimed.id,
         provider: claimed.provider,
         model: claimed.model,
-        failureCode: failureCode(error),
+        failureCode: translationSubmissionFailureCode(error),
         durationMs: Date.now() - startedAt,
       });
       return { status: "skipped", batchId: claimed.id };
@@ -172,7 +152,7 @@ export class StoreCategoryTranslationBatchSubmitService {
         } catch (error) {
           await this.persistFailure(
             claimed,
-            failureClassification(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
+            classifyTranslationSubmissionFailure(error, "DEFINITE_RETRYABLE_NOT_CREATED"),
             error,
             runtimeConfig,
           );
@@ -205,14 +185,14 @@ export class StoreCategoryTranslationBatchSubmitService {
         providerBatchId: providerBatch.providerBatchId,
       };
     } catch (error) {
-      const classification = failureClassification(error, "AMBIGUOUS_CREATE");
+      const classification = classifyTranslationSubmissionFailure(error, "AMBIGUOUS_CREATE");
       await this.persistFailure(claimed, classification, error, runtimeConfig);
       logger.error("background.store_category_translation.batch_submit_failed", {
         runId: claimed.runId,
         batchId: claimed.id,
         provider: claimed.provider,
         model: claimed.model,
-        failureCode: failureCode(error),
+        failureCode: translationSubmissionFailureCode(error),
         classification,
         durationMs: Date.now() - startedAt,
       });
@@ -314,7 +294,7 @@ export class StoreCategoryTranslationBatchSubmitService {
     const nextSubmitAt = terminal || nextStatus !== "READY"
       ? null
       : new Date(Date.now() + runtimeConfig.translationSubmitRetrySeconds * 1000);
-    const code = failureCode(error);
+    const code = translationSubmissionFailureCode(error);
 
     await this.database.$transaction(async (transaction) => {
       await transaction.$executeRaw(Prisma.sql`

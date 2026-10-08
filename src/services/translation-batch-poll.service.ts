@@ -21,7 +21,7 @@ import {
   type BackgroundRuntimeConfigSnapshot,
 } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
-
+import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
 
 type PollBatch = {
   id: string;
@@ -50,17 +50,6 @@ type PollDatabase = {
 
 type PollQueue = Pick<Queue, "add">;
 type ProviderFactory = (options: { provider: string; model: string }) => TranslationProvider;
-
-function failureIsRetryable(failureCode: string | null): boolean {
-  if (!failureCode) return true;
-  const normalized = failureCode.toLowerCase();
-  const httpStatus = normalized.match(/\bhttp[-_: ]?(\d{3})\b/)?.[1];
-  if (httpStatus) {
-    const status = Number(httpStatus);
-    return status === 429 || status >= 500;
-  }
-  return !/(auth|permission|invalid|malformed|unsupported|content_policy|bad_request)/.test(normalized);
-}
 
 export type TranslationBatchPollResult =
   | { status: "stale"; batchId: string }
@@ -232,7 +221,7 @@ export class TranslationBatchPollService {
         INNER JOIN "support"."MerchantSupportMessage" m ON m."id" = t."messageId"
         WHERE i."batchId" = ${batch.id}
       `);
-      const retryable = failureIsRetryable(failureCode);
+      const retryable = isTranslationProviderFailureRetryable(failureCode);
       for (const item of items) {
         const shouldRetry = retryable && item.retryCount < runtimeConfig.translationMaxAutoRetries;
         const affected = await transaction.$executeRaw(Prisma.sql`
@@ -301,4 +290,6 @@ export class TranslationBatchPollService {
 
 export const translationBatchPollService = new TranslationBatchPollService();
 
-export const translationBatchPollTestInternals = { failureIsRetryable };
+export const translationBatchPollTestInternals = {
+  failureIsRetryable: isTranslationProviderFailureRetryable,
+};

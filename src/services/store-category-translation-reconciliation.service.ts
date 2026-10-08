@@ -33,8 +33,8 @@ import {
   currentTranslationRuntimeConfig,
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
-
-const HEALTHY_STATES = new Set(["waiting", "delayed", "active"]);
+import { ensureDeterministicTranslationQueueJob } from "./translation-batch-runtime/queue-job-repair.js";
+import { routeTranslationBatchCorrelation } from "./translation-batch-runtime/provider-correlation.js";
 
 const logger = createLogger({
   serviceName: "moda-merchant-communications-worker",
@@ -338,23 +338,12 @@ export class StoreCategoryTranslationReconciliationService {
     `);
   }
 
-  private async ensureJob(input: { id: string; name: string; data: unknown }): Promise<number> {
-    const existing = await this.queue.getJob(input.id);
-    if (existing) {
-      const state = await existing.getState();
-      if (HEALTHY_STATES.has(state)) return 0;
-      await existing.remove();
-    }
-    await this.queue.add(input.name, input.data, { jobId: input.id });
-    return 1;
-  }
-
   private async ensureSubmitJob(batchId: string): Promise<number> {
     const job: StoreCategoryTranslationBatchSubmitJob = {
       schemaVersion: STORE_CATEGORY_TRANSLATION_SCHEMA_VERSION,
       translationBatchId: batchId,
     };
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createStoreCategoryTranslationBatchSubmitJobId(batchId),
       name: STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_SUBMIT,
       data: job,
@@ -367,7 +356,7 @@ export class StoreCategoryTranslationReconciliationService {
       translationBatchId: batch.id,
       pollSequence: batch.pollSequence,
     };
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createStoreCategoryTranslationBatchPollJobId(batch.id, batch.pollSequence),
       name: STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_POLL,
       data: job,
@@ -379,7 +368,7 @@ export class StoreCategoryTranslationReconciliationService {
       schemaVersion: STORE_CATEGORY_TRANSLATION_SCHEMA_VERSION,
       translationBatchId: batchId,
     };
-    return this.ensureJob({
+    return ensureDeterministicTranslationQueueJob(this.queue, {
       id: createStoreCategoryTranslationBatchResultsJobId(batchId),
       name: STORE_CATEGORY_TRANSLATION_JOB_NAMES.BATCH_RESULTS,
       data: job,
@@ -414,7 +403,8 @@ export class StoreCategoryTranslationReconciliationService {
     }
     if (correlation.kind === "none") return "none";
 
-    if (correlation.batch.status === "completed") {
+    const route = routeTranslationBatchCorrelation(correlation.batch.status);
+    if (route === "completed") {
       const changed = await this.database.$executeRaw(Prisma.sql`
         UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
         SET "providerBatchId" = ${correlation.batch.providerBatchId},
@@ -429,36 +419,15 @@ export class StoreCategoryTranslationReconciliationService {
       return changed === 1 ? "completed" : "stale";
     }
 
-    if (correlation.batch.status === "nonterminal") {
-      const changed = await this.database.$executeRaw(Prisma.sql`
-        UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
-        SET "providerBatchId" = ${correlation.batch.providerBatchId},
-            "inputFileId" = COALESCE("inputFileId", ${correlation.batch.inputFileId}),
-            "status" = 'SUBMITTED', "nextPollAt" = NOW(), "failureCode" = NULL,
-            "updatedAt" = NOW()
-        WHERE "id" = ${batch.id} AND "status" = 'SUBMISSION_UNKNOWN'
-      `);
-      return changed === 1 ? "poll" : "stale";
-    }
-
-    const terminalCode = correlation.batch.failureCode ?? correlation.batch.status;
-    const terminalStatus = correlation.batch.status.toUpperCase();
     const changed = await this.database.$executeRaw(Prisma.sql`
       UPDATE "commerce"."CommerceStoreCategoryTranslationBatch"
       SET "providerBatchId" = ${correlation.batch.providerBatchId},
           "inputFileId" = COALESCE("inputFileId", ${correlation.batch.inputFileId}),
-          "status" = CAST(${terminalStatus} AS "commerce"."CommerceStoreCategoryTranslationBatchStatus"),
-          "failureCode" = ${terminalCode}, "completedAt" = NOW(), "updatedAt" = NOW()
+          "status" = 'SUBMITTED', "nextPollAt" = NOW(), "failureCode" = NULL,
+          "updatedAt" = NOW()
       WHERE "id" = ${batch.id} AND "status" = 'SUBMISSION_UNKNOWN'
     `);
-    if (changed !== 1) return "stale";
-    await this.database.$executeRaw(Prisma.sql`
-      UPDATE "commerce"."CommerceStoreCategoryTranslationItem"
-      SET "status" = 'FAILED', "currentBatchId" = NULL,
-          "failureCode" = ${terminalCode}, "nextAttemptAt" = NULL, "updatedAt" = NOW()
-      WHERE "currentBatchId" = ${batch.id} AND "status" = 'PENDING'
-    `);
-    return "stale";
+    return changed === 1 ? "poll" : "stale";
   }
 }
 

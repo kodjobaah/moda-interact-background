@@ -4,6 +4,10 @@ import type {
 } from "./conversation.service.js";
 import { DelayedError } from "bullmq";
 import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
+import {
   runCommerceAgentAfterAdmission,
   type OutboundAdmissionResult,
 } from "./outbound-whatsapp-admission.service.js";
@@ -15,6 +19,7 @@ import {
   backgroundRuntimeConfigService,
   type BackgroundRuntimeConfigSnapshot,
 } from "../runtime/background-runtime-config.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 export const PROCESSING_LEASE_MS = 120_000;
 
@@ -117,11 +122,13 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
   };
   now?: () => Date;
   runtimeConfig?: RuntimeConfigReader;
+  logger?: StructuredLogger;
 };
 
 export class ConversationTurnProcessor<TContext, TResult> {
   private readonly now: () => Date;
   private readonly runtimeConfig: RuntimeConfigReader;
+  private readonly logger: StructuredLogger;
 
   constructor(
     private readonly dependencies: ConversationTurnProcessorDependencies<
@@ -131,15 +138,34 @@ export class ConversationTurnProcessor<TContext, TResult> {
   ) {
     this.now = dependencies.now ?? (() => new Date());
     this.runtimeConfig = dependencies.runtimeConfig ?? backgroundRuntimeConfigService;
+    this.logger = dependencies.logger ?? createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: resolveDeploymentEnvironmentName(),
+    });
   }
 
   async enqueue(
     conversationId: string,
     observedVersion: number,
   ): Promise<void> {
+    this.logger.debug("whatsapp.turn.enqueue_requested", {
+      conversationId,
+      observedVersion,
+    });
     const state =
       await this.dependencies.conversation.getTurnState(conversationId);
-    if (!state.pendingTurnStartedAt || !state.lastInboundAt) return;
+    if (!state.pendingTurnStartedAt || !state.lastInboundAt) {
+      this.logger.debug("whatsapp.turn.enqueue_skipped", {
+        conversationId,
+        observedVersion,
+        inboundVersion: state.inboundVersion,
+        lastProcessedVersion: state.lastProcessedVersion,
+        reason: !state.pendingTurnStartedAt
+          ? "no-pending-turn"
+          : "no-last-inbound-at",
+      });
+      return;
+    }
 
     const now = this.now().getTime();
     const delay = settleDelay(
@@ -154,9 +180,24 @@ export class ConversationTurnProcessor<TContext, TResult> {
     { conversationId, observedVersion }: ConversationTurnJob,
     activeJob?: ActiveTurnJob,
   ): Promise<void> {
+    this.logger.debug("whatsapp.turn.processing_started", {
+      conversationId,
+      observedVersion,
+      jobId: activeJob?.id ?? null,
+    });
     const state =
       await this.dependencies.conversation.getTurnState(conversationId);
-    if (isStale(state, observedVersion)) return;
+    const staleReason = turnStaleReason(state, observedVersion);
+    if (staleReason) {
+      this.logger.debug("whatsapp.turn.stale", {
+        conversationId,
+        observedVersion,
+        inboundVersion: state.inboundVersion,
+        lastProcessedVersion: state.lastProcessedVersion,
+        reason: staleReason,
+      });
+      return;
+    }
 
     const now = this.now();
     const delay = settleDelay(
@@ -165,6 +206,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
       currentConversationRuntimeConfig(this.runtimeConfig),
     );
     if (delay > 0) {
+      this.logger.debug("whatsapp.turn.quiet_window_wait", {
+        conversationId,
+        observedVersion,
+        delayMs: delay,
+      });
       await this.schedule(conversationId, observedVersion, delay, activeJob);
       return;
     }
@@ -176,9 +222,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
         now,
       ))
     ) {
+      this.logger.debug("whatsapp.turn.claim_deferred", {
+        conversationId,
+        observedVersion,
+        retryDelayMs: 250,
+      });
       await this.schedule(conversationId, observedVersion, 250, activeJob);
       return;
     }
+
+    this.logger.debug("whatsapp.turn.claimed", {
+      conversationId,
+      observedVersion,
+      processingStartedAt: now.toISOString(),
+    });
 
     let admission: Admitted | null = null;
     let providerSendAttempted = false;
@@ -200,8 +257,23 @@ export class ConversationTurnProcessor<TContext, TResult> {
         state.pendingTurnStartedAt as Date,
       );
 
+      this.logger.debug("whatsapp.turn.context_loaded", {
+        conversationId,
+        observedVersion,
+        conversationType: loaded.conversationType,
+        checkoutRecoveryId: loaded.checkoutRecoveryId,
+        handledWithoutAgent: loaded.handledWithoutAgent === true,
+        clarificationRequired: Boolean(loaded.clarificationText),
+        shopUnavailable: loaded.shopUnavailable === true,
+      });
+
       if (loaded.shopUnavailable) {
         await this.finishInactiveTurn(conversationId, observedVersion);
+        this.logger.debug("whatsapp.turn.completed", {
+          conversationId,
+          observedVersion,
+          outcome: "shop-unavailable",
+        });
         return;
       }
 
@@ -215,6 +287,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
         checkoutRecoveryId: loaded.checkoutRecoveryId,
       });
       if (abuse.kind !== "allowed") {
+        this.logger.debug("whatsapp.turn.suppressed", {
+          conversationId,
+          observedVersion,
+          reason: abuse.reason,
+        });
         await this.finishSuppressedTurn(conversationId, observedVersion);
         return;
       }
@@ -224,6 +301,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
           conversationId,
           observedVersion,
         );
+        this.logger.debug("whatsapp.turn.completed", {
+          conversationId,
+          observedVersion,
+          outcome: "handled-without-agent",
+        });
         return;
       }
 
@@ -240,6 +322,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
             conversationId,
             observedVersion,
           );
+          this.logger.debug("whatsapp.turn.completed", {
+            conversationId,
+            observedVersion,
+            outcome: "clarification-suppressed",
+          });
           return;
         }
         admission = clarification;
@@ -252,6 +339,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
           conversationId,
           observedVersion,
         );
+        this.logger.debug("whatsapp.turn.completed", {
+          conversationId,
+          observedVersion,
+          outcome: "clarification-sent",
+        });
         return;
       }
 
@@ -266,9 +358,19 @@ export class ConversationTurnProcessor<TContext, TResult> {
           conversationId,
           observedVersion,
         );
+        this.logger.debug("whatsapp.turn.completed", {
+          conversationId,
+          observedVersion,
+          outcome: "outbound-admission-suppressed",
+        });
         return;
       }
       admission = reserved;
+
+      this.logger.debug("whatsapp.turn.agent_started", {
+        conversationId,
+        observedVersion,
+      });
 
       const result = await runCommerceAgentAfterAdmission({
         admission: reserved,
@@ -283,10 +385,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
           conversationId,
           observedVersion,
         );
+        this.logger.debug("whatsapp.turn.completed", {
+          conversationId,
+          observedVersion,
+          outcome: "terminal-admission-response",
+        });
         return;
       }
 
       const agentResult = this.dependencies.getResult(result);
+
+      this.logger.debug("whatsapp.turn.agent_completed", {
+        conversationId,
+        observedVersion,
+      });
 
       if (
         await this.dependencies.conversation.hasChanged(
@@ -301,6 +413,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
         );
         const latest =
           await this.dependencies.conversation.getTurnState(conversationId);
+        this.logger.debug("whatsapp.turn.changed_during_processing", {
+          conversationId,
+          observedVersion,
+          latestInboundVersion: latest.inboundVersion,
+        });
         await this.enqueue(conversationId, latest.inboundVersion);
         return;
       }
@@ -322,7 +439,17 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         observedVersion,
       );
+      this.logger.debug("whatsapp.turn.completed", {
+        conversationId,
+        observedVersion,
+        outcome: "agent-response-sent",
+      });
     } catch (error) {
+      this.logger.error("whatsapp.turn.processing_failed", {
+        conversationId,
+        observedVersion,
+        ...boundedError(error),
+      });
       if (admission && !providerSendAttempted && !reservationFailed) {
         await failPrepared(admission.messageId).catch(() => undefined);
       }
@@ -341,23 +468,50 @@ export class ConversationTurnProcessor<TContext, TResult> {
     activeJob?: ActiveTurnJob,
   ): Promise<void> {
     const jobId = `conversation-turn__${conversationId}__${observedVersion}`;
-    if (activeJob?.id === jobId) {
-      await activeJob.moveToDelayed(
-        Date.now() + Math.max(0, delay),
-        activeJob.token,
-      );
-      throw new DelayedError();
-    }
+    const boundedDelay = Math.max(0, delay);
+    try {
+      if (activeJob?.id === jobId) {
+        await activeJob.moveToDelayed(
+          Date.now() + boundedDelay,
+          activeJob.token,
+        );
+        this.logger.debug("whatsapp.turn.rescheduled", {
+          conversationId,
+          observedVersion,
+          jobId,
+          delayMs: boundedDelay,
+          schedulingMode: "active-job",
+        });
+        throw new DelayedError();
+      }
 
-    await this.dependencies.queue.add(
-      "process-conversation-turn",
-      { conversationId, observedVersion },
-      {
+      await this.dependencies.queue.add(
+        "process-conversation-turn",
+        { conversationId, observedVersion },
+        {
+          jobId,
+          delay: boundedDelay,
+          removeOnComplete: true,
+        },
+      );
+      this.logger.debug("whatsapp.turn.scheduled", {
+        conversationId,
+        observedVersion,
         jobId,
-        delay: Math.max(0, delay),
-        removeOnComplete: true,
-      },
-    );
+        delayMs: boundedDelay,
+        schedulingMode: "queue-add",
+      });
+    } catch (error) {
+      if (error instanceof DelayedError) throw error;
+      this.logger.error("whatsapp.turn.schedule_failed", {
+        conversationId,
+        observedVersion,
+        jobId,
+        delayMs: boundedDelay,
+        ...boundedError(error),
+      });
+      throw error;
+    }
   }
 
   private async finishSuppressedTurn(
@@ -403,15 +557,28 @@ export class ConversationTurnProcessor<TContext, TResult> {
   }
 }
 
-function isStale(
+function turnStaleReason(
   state: ConversationTurnState,
   observedVersion: number,
-): boolean {
-  return (
-    observedVersion < state.inboundVersion ||
-    observedVersion <= state.lastProcessedVersion ||
-    state.pendingTurnStartedAt === null
-  );
+): "newer-version-exists" | "already-processed" | "no-pending-turn" | null {
+  if (observedVersion < state.inboundVersion) return "newer-version-exists";
+  if (observedVersion <= state.lastProcessedVersion) return "already-processed";
+  if (state.pendingTurnStartedAt === null) return "no-pending-turn";
+  return null;
+}
+
+function boundedError(error: unknown): { errorName: string; errorMessage: string } {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name.slice(0, 64),
+      errorMessage: error.message.slice(0, 256),
+    };
+  }
+
+  return {
+    errorName: "UnknownError",
+    errorMessage: String(error).slice(0, 256),
+  };
 }
 
 function settleDelay(

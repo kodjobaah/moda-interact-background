@@ -33,6 +33,7 @@ import {
   currentTranslationRuntimeConfig,
   type TranslationRuntimeConfigReader,
 } from "./translation-runtime-config.js";
+import { isTranslationProviderFailureRetryable } from "./translation-batch-runtime/failure-policy.js";
 
 type PollBatch = {
   id: string;
@@ -88,17 +89,6 @@ function defaultCredentialResolver(): TranslationProviderCredentialResolver {
     db: prisma,
     keyring: readCommerceCredentialKeyring(),
   });
-}
-
-function failureIsRetryable(failureCode: string | null): boolean {
-  if (!failureCode) return true;
-  const normalized = failureCode.toLowerCase();
-  const httpStatus = normalized.match(/\bhttp[-_: ]?(\d{3})\b/)?.[1];
-  if (httpStatus) {
-    const status = Number(httpStatus);
-    return status === 429 || status >= 500;
-  }
-  return !/(auth|permission|invalid|malformed|unsupported|content_policy|bad_request)/.test(normalized);
 }
 
 export type StoreCategoryTranslationBatchPollResult =
@@ -336,7 +326,7 @@ export class StoreCategoryTranslationBatchPollService {
         INNER JOIN "commerce"."CommerceStoreCategoryTranslationItem" t ON t."id" = i."translationItemId"
         WHERE i."batchId" = ${batch.id}
       `);
-      const retryable = failureIsRetryable(failureCode);
+      const retryable = isTranslationProviderFailureRetryable(failureCode);
       for (const item of items) {
         const shouldRetry = retryable && item.retryCount < runtimeConfig.translationMaxAutoRetries;
         await transaction.$executeRaw(Prisma.sql`
@@ -398,4 +388,6 @@ export class StoreCategoryTranslationBatchPollService {
 export const storeCategoryTranslationBatchPollService =
   new StoreCategoryTranslationBatchPollService();
 
-export const storeCategoryTranslationPollTestInternals = { failureIsRetryable };
+export const storeCategoryTranslationPollTestInternals = {
+  failureIsRetryable: isTranslationProviderFailureRetryable,
+};
