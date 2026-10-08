@@ -37,7 +37,7 @@ function client(overrides: Record<string, unknown> = {}) {
         status: "ACTIVE",
         plan,
         billingPeriod: null,
-        shop: { status: "ACTIVE" },
+        shop: { status: "ACTIVE", platform: "SHOPIFY" },
       }),
     },
     platformBillingPolicy: {
@@ -55,6 +55,7 @@ function client(overrides: Record<string, unknown> = {}) {
         shopId: "shop-1",
         billingPeriodId: "period-1",
         grantedQuantity: 10,
+        currentAllowanceQuantity: null,
         committedQuantity: 2,
         reservedQuantity: 1,
         forfeitedQuantity: 0,
@@ -124,7 +125,7 @@ describe("EffectiveBillingPolicyResolver", () => {
           billingPeriodId: "period-1",
           currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
           currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
-          shop: { status: "ACTIVE" },
+          shop: { status: "ACTIVE", platform: "SHOPIFY" },
         }),
       },
     });
@@ -134,6 +135,8 @@ describe("EffectiveBillingPolicyResolver", () => {
     expect(policy.billingPeriod?.start).toEqual(new Date("2026-09-01T00:00:00.000Z"));
     expect(policy.billingPeriod?.status).toBe("OPEN");
     expect(policy.billingPeriod?.includedCounter.grantedQuantity).toBe(10);
+    expect(policy.platform).toBe("SHOPIFY");
+    expect(policy.billingPeriod?.includedCounter.currentAllowanceQuantity).toBeNull();
   });
 
   it("resolves dynamic feature activation from plan mappings and preferences", async () => {
@@ -371,7 +374,7 @@ describe("EffectiveBillingPolicyResolver", () => {
           billingPeriodId: "period-1",
           currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
           currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
-          shop: { status: "ACTIVE" },
+          shop: { status: "ACTIVE", platform: "SHOPIFY" },
         }),
       },
     });
@@ -397,6 +400,118 @@ describe("EffectiveBillingPolicyResolver", () => {
       new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
     ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
       reason: "SUBSCRIPTION_FROZEN",
+    });
+  });
+
+  it("resolves mapped Woo paid FROZEN policy for fallback capacity selection", async () => {
+    const fake = client({
+      subscription: {
+        findUnique: async () => ({
+          id: "subscription-1",
+          status: "FROZEN",
+          plan: {
+            id: "plan-paid",
+            shopifyPlanHandle: "growth",
+            kind: "PAID_METERED",
+            active: true,
+            shopifyUsageEventHandle: null,
+            updatedAt: now,
+            features: [],
+          },
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+          shop: { status: "ACTIVE", platform: "WOOCOMMERCE" },
+        }),
+      },
+      billingPeriodEntitlementCounter: {
+        findUnique: async () => ({
+          id: "period-counter-1",
+          shopId: "shop-1",
+          billingPeriodId: "period-1",
+          grantedQuantity: 10,
+          currentAllowanceQuantity: 4,
+          committedQuantity: 1,
+          reservedQuantity: 1,
+          forfeitedQuantity: 1,
+        }),
+      },
+    });
+
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    expect(policy).toMatchObject({
+      platform: "WOOCOMMERCE",
+      subscriptionStatus: "FROZEN",
+      planKind: "PAID_METERED",
+      billingPeriod: {
+        phase: "ACTIVE",
+        includedCounter: {
+          grantedQuantity: 10,
+          currentAllowanceQuantity: 4,
+          committedQuantity: 1,
+          reservedQuantity: 1,
+          forfeitedQuantity: 1,
+        },
+      },
+    });
+  });
+
+  it("expires Woo included capacity when provider coverage ends before BillingPeriod", async () => {
+    const fake = client({
+      subscription: {
+        findUnique: async () => ({
+          id: "subscription-1",
+          status: "ACTIVE",
+          plan: {
+            id: "plan-paid",
+            shopifyPlanHandle: "growth",
+            kind: "PAID_METERED",
+            active: true,
+            shopifyUsageEventHandle: "growth-usage",
+            updatedAt: now,
+            features: [],
+          },
+          billingPeriod: {
+            id: "period-1",
+            shopId: "shop-1",
+            subscriptionId: "subscription-1",
+            periodStart: new Date("2026-09-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-10-01T00:00:00.000Z"),
+            status: "OPEN",
+          },
+          billingPeriodId: "period-1",
+          currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
+          currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
+          providerCoverageEndAt: new Date("2026-09-07T00:00:00.000Z"),
+          shop: { status: "ACTIVE", platform: "WOOCOMMERCE" },
+        }),
+      },
+      billingPeriodEntitlementCounter: {
+        findUnique: async () => ({
+          id: "period-counter-1",
+          shopId: "shop-1",
+          billingPeriodId: "period-1",
+          grantedQuantity: 10,
+          currentAllowanceQuantity: null,
+          committedQuantity: 1,
+          reservedQuantity: 0,
+          forfeitedQuantity: 0,
+        }),
+      },
+    });
+
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    expect(policy).toMatchObject({
+      providerCoverageEndAt: new Date("2026-09-07T00:00:00.000Z"),
+      billingPeriod: { phase: "EXPIRED_RECONCILING" },
     });
   });
 
@@ -498,7 +613,7 @@ describe("EffectiveBillingPolicyResolver", () => {
           billingPeriodId: "period-1",
           currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"),
           currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"),
-          shop: { status: "ACTIVE" },
+          shop: { status: "ACTIVE", platform: "SHOPIFY" },
         }),
       },
     });

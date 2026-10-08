@@ -180,8 +180,8 @@ export function registerCompatibilityCases(context: CandidateFacadeContext) {
 
   it("keeps different shops in separate ordered indexes", async () => {
     prismaMock.shop.findUnique
-      .mockResolvedValueOnce({ id: "shop_1", status: "ACTIVE", settings: { recoveryDelayMinutes: 45 } })
-      .mockResolvedValueOnce({ id: "shop_2", status: "ACTIVE", settings: { recoveryDelayMinutes: 10 } });
+      .mockResolvedValueOnce({ id: "shop_1", status: "ACTIVE", platform: "SHOPIFY", subscription: { status: "ACTIVE" }, settings: { recoveryDelayMinutes: 45 } })
+      .mockResolvedValueOnce({ id: "shop_2", status: "ACTIVE", platform: "SHOPIFY", subscription: { status: "ACTIVE" }, settings: { recoveryDelayMinutes: 10 } });
 
     const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
       shopDomain: "shop.myshopify.com",

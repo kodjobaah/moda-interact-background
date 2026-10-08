@@ -113,6 +113,8 @@ const prismaMock = {
     findUnique: vi.fn(async () => ({
       id: "shop_1",
       status: "ACTIVE",
+        platform: "SHOPIFY",
+      subscription: { status: "ACTIVE" },
       settings: { recoveryDelayMinutes: 45 },
     })),
   },

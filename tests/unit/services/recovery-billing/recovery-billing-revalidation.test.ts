@@ -167,6 +167,45 @@ describe("RecoveryBillingService pre-provider revalidation", () => {
     expect(reservations.free.reserve).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["frozen", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", subscriptionStatus: "FROZEN" })],
+    ["expired", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", billingPeriod: { id: "period-1", phase: "EXPIRED_RECONCILING" } })],
+  ] as const)("releases paid included and re-admits purchased capacity after Woo becomes %s", async (_label, currentPolicy) => {
+    const reservations = reservationHarness();
+    reservations.purchased.reserve.mockResolvedValue({
+      kind: "reserved" as const,
+      reservation: {},
+      counter: "PURCHASED_RECOVERY_CREDITS" as const,
+    });
+    const h = service({ resolve: async () => currentPolicy, reservations });
+
+    await expect(h.service.revalidateBeforeProvider({
+      admission: admission("paid"),
+      recoveryId: "recovery-1",
+    })).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "purchased" },
+    });
+    expect(reservations.paid.release).toHaveBeenCalledOnce();
+    expect(reservations.paid.reserve).not.toHaveBeenCalled();
+    expect(reservations.purchased.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a reserved Woo promotional admission across a freeze race", async () => {
+    const current = paidPolicy("ACTIVE", {
+      platform: "WOOCOMMERCE",
+      subscriptionStatus: "FROZEN",
+    });
+    const h = service({ resolve: async () => current });
+    const existing = admission("promotional", current);
+
+    await expect(h.service.revalidateBeforeProvider({
+      admission: existing,
+      recoveryId: "recovery-1",
+    })).resolves.toEqual({ kind: "admitted", admission: existing });
+    expect(h.reservations.promotional.release).not.toHaveBeenCalled();
+  });
+
   it.each(["paid", "purchased"] as const)(
     "releases %s capacity during EXPIRED_RECONCILING",
     async (kind) => {

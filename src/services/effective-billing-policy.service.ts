@@ -11,6 +11,7 @@ import {
   resolveOutboundLimits,
   validateTerminalMessageReservedSlots,
 } from "./billing-policy/outbound-limits.js";
+import { isValidPaidIncludedAllowanceCounter } from "./recovery-billing/paid-included-allowance.js";
 
 export type BillingPolicyFailureReason =
   | "NO_CONTRACT"
@@ -51,6 +52,7 @@ export type PaidBillingPeriodProjection = {
     shopId: string;
     billingPeriodId: string;
     grantedQuantity: number;
+    currentAllowanceQuantity: number | null;
     committedQuantity: number;
     reservedQuantity: number;
     forfeitedQuantity: number;
@@ -72,8 +74,10 @@ export type BillingPauseReason =
 
 export type EffectiveBillingPolicy = {
   shopId: string;
+  platform: "SHOPIFY" | "WOOCOMMERCE";
   subscriptionId: string;
   subscriptionStatus: SubscriptionProjectionStatus;
+  providerCoverageEndAt: Date | null;
   planId: string;
   planHandle: string;
   planKind: BillingPlanKind;
@@ -123,7 +127,7 @@ export class EffectiveBillingPolicyResolver {
       include: {
         plan: { include: { features: { include: { feature: true } } } },
         billingPeriod: true,
-        shop: { select: { status: true } },
+        shop: { select: { status: true, platform: true } },
       },
     });
 
@@ -134,7 +138,15 @@ export class EffectiveBillingPolicyResolver {
       );
     }
 
-    if (subscription.status === SubscriptionProjectionStatus.FROZEN) {
+    const frozenWooPaid = subscription.status === SubscriptionProjectionStatus.FROZEN
+      && subscription.shop.platform === "WOOCOMMERCE"
+      && subscription.plan?.kind === BillingPlanKind.PAID_METERED
+      && subscription.plan.active;
+
+    if (
+      subscription.status === SubscriptionProjectionStatus.FROZEN
+      && !frozenWooPaid
+    ) {
       throw new EffectiveBillingPolicyError(
         "SUBSCRIPTION_FROZEN",
         `Shop ${shopId} subscription is frozen`,
@@ -152,7 +164,7 @@ export class EffectiveBillingPolicyResolver {
       subscription.status === SubscriptionProjectionStatus.UNMAPPED ||
       !subscription.plan ||
       !subscription.plan.active ||
-      !activeSubscriptionStatuses.includes(subscription.status)
+      (!activeSubscriptionStatuses.includes(subscription.status) && !frozenWooPaid)
     ) {
       throw new EffectiveBillingPolicyError(
         "UNMAPPED_PLAN",
@@ -248,7 +260,11 @@ export class EffectiveBillingPolicyResolver {
       counter.reservedQuantity,
     );
 
-    if (plan.kind === BillingPlanKind.PAID_METERED && !plan.shopifyUsageEventHandle) {
+    if (
+      plan.kind === BillingPlanKind.PAID_METERED &&
+      subscription.shop.platform === "SHOPIFY" &&
+      !plan.shopifyUsageEventHandle
+    ) {
       throw invalidConfiguration(shopId, "paid plan usage event handle is missing");
     }
 
@@ -290,8 +306,10 @@ export class EffectiveBillingPolicyResolver {
 
     return {
       shopId,
+      platform: subscription.shop.platform,
       subscriptionId: subscription.id,
       subscriptionStatus: subscription.status,
+      providerCoverageEndAt: subscription.providerCoverageEndAt ?? null,
       planId: plan.id,
       planHandle: plan.shopifyPlanHandle,
       planKind: plan.kind,
@@ -308,12 +326,19 @@ export class EffectiveBillingPolicyResolver {
               start: subscription.billingPeriod.periodStart,
               end: subscription.billingPeriod.periodEnd,
               status: subscription.billingPeriod.status,
-              phase: getBillingPeriodPhase(subscription.billingPeriod.periodEnd, now),
+              phase: getBillingPeriodPhase(
+                subscription.billingPeriod.periodEnd,
+                now,
+                subscription.shop.platform === "WOOCOMMERCE"
+                  ? subscription.providerCoverageEndAt ?? null
+                  : null,
+              ),
               includedCounter: {
                 id: billingPeriodCounter!.id,
                 shopId: billingPeriodCounter!.shopId,
                 billingPeriodId: billingPeriodCounter!.billingPeriodId,
                 grantedQuantity: billingPeriodCounter!.grantedQuantity,
+                currentAllowanceQuantity: billingPeriodCounter!.currentAllowanceQuantity,
                 committedQuantity: billingPeriodCounter!.committedQuantity,
                 reservedQuantity: billingPeriodCounter!.reservedQuantity,
                 forfeitedQuantity: billingPeriodCounter!.forfeitedQuantity,
@@ -416,6 +441,7 @@ function validatePaidBillingPeriod(
     shopId: string;
     billingPeriodId: string;
     grantedQuantity: number;
+    currentAllowanceQuantity: number | null;
     committedQuantity: number;
     reservedQuantity: number;
     forfeitedQuantity: number;
@@ -441,20 +467,7 @@ function validatePaidBillingPeriod(
   if (!counter || counter.shopId !== shopId || counter.billingPeriodId !== period.id) {
     throw invalidConfiguration(shopId, "paid included recovery counter is missing or inconsistent");
   }
-  for (const value of [
-    counter.grantedQuantity,
-    counter.committedQuantity,
-    counter.reservedQuantity,
-    counter.forfeitedQuantity,
-  ]) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw invalidConfiguration(shopId, "paid included recovery counter quantities are invalid");
-    }
-  }
-  if (
-    counter.committedQuantity + counter.reservedQuantity + counter.forfeitedQuantity >
-    counter.grantedQuantity
-  ) {
+  if (!isValidPaidIncludedAllowanceCounter(counter)) {
     throw invalidConfiguration(shopId, "paid included recovery counter quantities exceed the grant");
   }
 }
@@ -462,11 +475,15 @@ function validatePaidBillingPeriod(
 function getBillingPeriodPhase(
   periodEnd: Date,
   now: Date,
+  providerCoverageEndAt: Date | null = null,
 ): "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING" {
-  if (now.getTime() >= periodEnd.getTime()) return "EXPIRED_RECONCILING";
+  const effectivePeriodEnd = providerCoverageEndAt && providerCoverageEndAt < periodEnd
+    ? providerCoverageEndAt
+    : periodEnd;
+  if (now.getTime() >= effectivePeriodEnd.getTime()) return "EXPIRED_RECONCILING";
   if (
     now.getTime() >=
-    periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS
+    effectivePeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS
   ) {
     return "DRAINING";
   }

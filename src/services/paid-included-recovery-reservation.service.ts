@@ -4,6 +4,7 @@ import {
   BillingPeriodEntitlementCounterKind,
   Prisma,
   ShopifyReportState,
+  SubscriptionProjectionStatus,
   UsageMetric,
   UsageReservationStatus,
 } from "@prisma/client";
@@ -28,6 +29,12 @@ import {
   type BillingPolicyClient,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
+import {
+  availablePaidIncludedQuantity,
+  isValidPaidIncludedAllowanceCounter,
+  type PaidIncludedAllowanceCounter,
+} from "./recovery-billing/paid-included-allowance.js";
+import { resolveRecoveryUsageProvider } from "./recovery-billing/usage-event-provider.js";
 
 export type PaidIncludedRecoveryReservationInput = {
   shopId: string;
@@ -158,11 +165,22 @@ export class PaidIncludedRecoveryReservationService {
     quantity: number,
   ): Promise<PaidIncludedReservationOutcome> {
     const policyResolver = this.createPolicyResolver(transaction);
-    const policy = await policyResolver.resolve(input.shopId, this.now());
+    const now = this.now();
+    const policy = await policyResolver.resolve(input.shopId, now);
     if (policy.planKind !== BillingPlanKind.PAID_METERED) {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation requires a paid plan");
     }
-    const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, this.now());
+    if (
+      policy.platform === "WOOCOMMERCE" &&
+      (policy.subscriptionStatus === SubscriptionProjectionStatus.FROZEN ||
+        policy.billingPeriod?.phase === "EXPIRED_RECONCILING" ||
+        (policy.providerCoverageEndAt !== null && policy.providerCoverageEndAt <= now))
+    ) {
+      throw new PaidIncludedRecoveryReservationError(
+        "Woo paid included reservation is unavailable while frozen or provider coverage is expired",
+      );
+    }
+    const period = await this.requireCurrentOpenPeriod(transaction, input.shopId, policy, now);
     const sourceKey = "sourceKey" in input
       ? `paid-included:${period.id}:${input.sourceKey}`
       : `paid-included:${period.id}:${input.recoveryId}`;
@@ -182,7 +200,7 @@ export class PaidIncludedRecoveryReservationService {
         createError: (message) => new PaidIncludedRecoveryReservationError(message),
       });
       if (transition.kind === "apply") {
-        const available = availableQuantity(periodCounter);
+        const available = availablePaidIncludedQuantity(periodCounter);
         if (available < quantity) return replayOutcome(existing, sourceKey, counter);
         const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
           where: { id: periodCounter.id, version: periodCounter.version },
@@ -199,7 +217,7 @@ export class PaidIncludedRecoveryReservationService {
     }
 
     const periodCounter = await this.requireCounter(transaction, period);
-    const available = availableQuantity(periodCounter);
+    const available = availablePaidIncludedQuantity(periodCounter);
     if (available < quantity) return { kind: "allowance-exhausted", remaining: available, policy };
 
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
@@ -274,11 +292,15 @@ export class PaidIncludedRecoveryReservationService {
       throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer current and open");
     }
 
+    const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
     const plan = await transaction.subscription.findUnique({
       where: { shopId: input.shopId },
       select: { plan: { select: { kind: true, shopifyUsageEventHandle: true } } },
     });
-    if (plan?.plan?.kind !== BillingPlanKind.PAID_METERED || !plan.plan.shopifyUsageEventHandle) {
+    if (
+      plan?.plan?.kind !== BillingPlanKind.PAID_METERED ||
+      (provider === "SHOPIFY" && !plan.plan.shopifyUsageEventHandle)
+    ) {
       throw new PaidIncludedRecoveryReservationError("Paid normal usage meter is missing");
     }
 
@@ -307,9 +329,16 @@ export class PaidIncludedRecoveryReservationService {
         sourceType: "PAID_RECOVERY_CONVERSATION",
         sourceId: input.sourceKey,
         occurredAt: input.occurredAt ?? now,
-        shopifyReportState: ShopifyReportState.PENDING,
-        shopifyEventHandle: await this.readPaidUsageEventHandle(transaction, input.shopId),
-        shopifyIdempotencyKey: createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey),
+        provider,
+        shopifyReportState: provider === "SHOPIFY"
+          ? ShopifyReportState.PENDING
+          : ShopifyReportState.NOT_APPLICABLE,
+        shopifyEventHandle: provider === "SHOPIFY"
+          ? await this.readPaidUsageEventHandle(transaction, input.shopId)
+          : null,
+        shopifyIdempotencyKey: provider === "SHOPIFY"
+          ? createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey)
+          : null,
       },
     });
     const committed = await transaction.usageReservation.update({
@@ -417,7 +446,7 @@ export class PaidIncludedRecoveryReservationService {
     if (!counter || counter.shopId !== period.shopId || counter.billingPeriodId !== period.id) {
       throw new PaidIncludedRecoveryReservationError("Included recovery period counter does not exist");
     }
-    validateCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity);
+    validateCounter(counter);
     return counter;
   }
 
@@ -436,7 +465,7 @@ export class PaidIncludedRecoveryReservationService {
     if (!counter || counter.shopId !== shopId) {
       throw new PaidIncludedRecoveryReservationError("Reservation billing period counter does not exist");
     }
-    validateCounter(counter.grantedQuantity, counter.committedQuantity, counter.reservedQuantity, counter.forfeitedQuantity);
+    validateCounter(counter);
     return counter;
   }
 
@@ -487,15 +516,10 @@ export class PaidIncludedRecoveryReservationService {
 }
 
 
-function validateCounter(granted: number, committed: number, reserved: number, forfeited: number): void {
-  for (const value of [granted, committed, reserved, forfeited]) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities are invalid");
+function validateCounter(counter: PaidIncludedAllowanceCounter): void {
+  if (!isValidPaidIncludedAllowanceCounter(counter)) {
+    throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities are invalid");
   }
-  if (committed + reserved + forfeited > granted) throw new PaidIncludedRecoveryReservationError("Included recovery period counter quantities exceed the grant");
-}
-
-function availableQuantity(counter: { grantedQuantity: number; committedQuantity: number; reservedQuantity: number; forfeitedQuantity: number }): number {
-  return counter.grantedQuantity - counter.committedQuantity - counter.reservedQuantity - counter.forfeitedQuantity;
 }
 
 function replayOutcome(

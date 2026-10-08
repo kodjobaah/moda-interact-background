@@ -7,6 +7,7 @@ function service(
   options: {
     onboardingCompleted?: boolean;
     lastProviderLifecycleState?: string | null;
+    platform?: "SHOPIFY" | "WOOCOMMERCE";
   } = {},
 ) {
   return new ShopExecutionEligibilityService({
@@ -17,6 +18,7 @@ function service(
           options.lastProviderLifecycleState ?? null,
         shop: {
           status: shopStatus,
+          platform: options.platform ?? "SHOPIFY",
           onboardingCompleted: options.onboardingCompleted ?? false,
         },
       }),
@@ -39,6 +41,7 @@ describe("ShopExecutionEligibilityService", () => {
       eligibility.evaluateResolvedShop({
         id: "shop-1",
         status: "ACTIVE",
+        platform: "SHOPIFY",
         subscription: { status },
       }),
     ).toEqual(expected);
@@ -96,6 +99,20 @@ describe("ShopExecutionEligibilityService", () => {
       allowed: false,
       shopId: "shop-1",
       reason: "CONTRACT_REQUIRED",
+    });
+  });
+
+  it("allows Woo FROZEN for recovery only while keeping general execution blocked", async () => {
+    const eligibility = service("FROZEN", "ACTIVE", { platform: "WOOCOMMERCE" });
+
+    await expect(eligibility.evaluate("shop-1", undefined, "recovery")).resolves.toEqual({
+      allowed: true,
+      shopId: "shop-1",
+    });
+    await expect(eligibility.evaluate("shop-1")).resolves.toEqual({
+      allowed: false,
+      shopId: "shop-1",
+      reason: "SUBSCRIPTION_FROZEN",
     });
   });
 

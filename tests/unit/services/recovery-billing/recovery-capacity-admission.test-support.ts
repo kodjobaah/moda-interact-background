@@ -22,7 +22,7 @@ export function freePolicy(overrides: Record<string, unknown> = {}) {
 }
 
 export function paidPolicy(
-  phase: "ACTIVE" | "DRAINING" = "ACTIVE",
+  phase: "ACTIVE" | "DRAINING" | "EXPIRED_RECONCILING" = "ACTIVE",
   overrides: Record<string, unknown> = {},
 ) {
   return {
@@ -30,6 +30,8 @@ export function paidPolicy(
     subscriptionId: "subscription-1",
     planId: "paid-plan",
     planKind: "PAID_METERED" as const,
+    platform: "SHOPIFY",
+    subscriptionStatus: "ACTIVE",
     features: new Set(["checkout_recovery"]),
     newRecoveriesPaused: false,
     shopifyUsageEventHandle: "recovery-conversation",

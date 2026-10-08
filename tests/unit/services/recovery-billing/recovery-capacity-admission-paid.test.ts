@@ -175,4 +175,67 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
     expect(harness.purchased.reserve).toHaveBeenCalledOnce();
     expect(harness.free.reserve).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ["Woo FROZEN", paidPolicy("ACTIVE", { platform: "WOOCOMMERCE", subscriptionStatus: "FROZEN" })],
+    ["expired Woo period", paidPolicy("EXPIRED_RECONCILING", { platform: "WOOCOMMERCE" })],
+  ] as const)("routes %s around paid included to durable fallback", async (_label, policy) => {
+    const harness = capacityHarness({
+      promotionalReserve: {
+        kind: "reserved" as const,
+        reservation: {},
+        sourceKey: "recovery:shop-1:recovery-1",
+      },
+    });
+
+    await expect(harness.service.admit(normalInput(policy))).resolves.toMatchObject({
+      kind: "admitted",
+      admission: { kind: "promotional" },
+    });
+    expect(harness.paid.reserve).not.toHaveBeenCalled();
+  });
+
+  it("uses purchased then lifetime Free when Woo FROZEN promotion is unavailable", async () => {
+    const harness = capacityHarness({
+      purchasedReserve: {
+        kind: "reserved" as const,
+        reservation: {},
+        counter: "PURCHASED_RECOVERY_CREDITS" as const,
+      },
+    });
+
+    await expect(harness.service.admit(normalInput(paidPolicy("ACTIVE", {
+      platform: "WOOCOMMERCE",
+      subscriptionStatus: "FROZEN",
+    })))).resolves.toMatchObject({ kind: "admitted", admission: { kind: "purchased" } });
+    expect(harness.paid.reserve).not.toHaveBeenCalled();
+    expect(harness.free.reserve).not.toHaveBeenCalled();
+  });
+
+  it("uses lifetime Free after all Woo FROZEN paid-ineligible sources are exhausted", async () => {
+    const harness = capacityHarness({
+      freeReserve: {
+        kind: "reserved" as const,
+        reservation: {},
+        counter: "LIFETIME_FREE_RECOVERY_CREDITS" as const,
+      },
+    });
+
+    await expect(harness.service.admit(normalInput(paidPolicy("ACTIVE", {
+      platform: "WOOCOMMERCE",
+      subscriptionStatus: "FROZEN",
+    })))).resolves.toMatchObject({ kind: "admitted", admission: { kind: "lifetime-free" } });
+    expect(harness.paid.reserve).not.toHaveBeenCalled();
+    expect(harness.purchased.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("reports capacity exhaustion rather than billing-period-closing for Woo FROZEN", async () => {
+    const harness = capacityHarness();
+
+    await expect(harness.service.admit(normalInput(paidPolicy("DRAINING", {
+      platform: "WOOCOMMERCE",
+      subscriptionStatus: "FROZEN",
+    })))).resolves.toEqual({ kind: "blocked", reason: "capacity-exhausted" });
+    expect(harness.paid.reserve).not.toHaveBeenCalled();
+  });
 });

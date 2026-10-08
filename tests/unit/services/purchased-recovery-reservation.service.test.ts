@@ -7,6 +7,7 @@ function createHarness(
   grantedQuantity = 1,
   lotInputs = [{ id: "purchase-1", creditsGranted: grantedQuantity, activatedAt: new Date("2026-09-01T00:00:00.000Z"), createdAt: new Date("2026-09-01T00:00:00.000Z") }],
   subscription: Record<string, unknown> | null = null,
+  provider = "SHOPIFY",
 ) {
   const state = {
     counter: {
@@ -33,6 +34,7 @@ function createHarness(
   };
 
   const transaction = {
+    shop: { findUnique: vi.fn(async () => ({ platform: provider })) },
     shopEntitlementCounter: {
       findUnique: vi.fn(async ({ select }: { select?: { version?: boolean; counter?: boolean } }) =>
         select?.counter
@@ -123,8 +125,8 @@ function createHarness(
 }
 
 describe("PurchasedRecoveryReservationService", () => {
-  it("reserves and commits one purchased credit exactly once", async () => {
-    const { service, transaction, state } = createHarness();
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("commits one purchased credit with explicit %s provider", async (provider) => {
+    const { service, transaction, state } = createHarness(1, undefined, null, provider);
 
     await expect(service.reserve({ shopId: "shop-1", sourceKey: "purchased:recovery-1" }))
       .resolves.toMatchObject({ kind: "reserved" });
@@ -139,6 +141,7 @@ describe("PurchasedRecoveryReservationService", () => {
       metric: "RECOVERY_CONVERSATION",
       shopifyReportState: "NOT_APPLICABLE",
       sourceType: "PURCHASED_RECOVERY_CREDITS",
+      provider,
     });
     expect(transaction.usageEvent.create).toHaveBeenCalledTimes(1);
   });

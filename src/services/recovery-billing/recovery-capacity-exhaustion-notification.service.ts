@@ -55,6 +55,7 @@ export class RecoveryCapacityExhaustionNotificationService {
             },
             select: {
               grantedQuantity: true,
+              currentAllowanceQuantity: true,
               committedQuantity: true,
               reservedQuantity: true,
               forfeitedQuantity: true,
@@ -86,7 +87,7 @@ export class RecoveryCapacityExhaustionNotificationService {
         ? `${policy.freeAllowance.grant}:${policy.freeAllowance.committed}:${policy.freeAllowance.reserved}`
         : "no-free-allowance",
       includedCounter
-        ? `${includedCounter.grantedQuantity}:${includedCounter.committedQuantity}:${includedCounter.reservedQuantity}:${includedCounter.forfeitedQuantity}`
+        ? `${includedCounter.currentAllowanceQuantity ?? includedCounter.grantedQuantity}:${includedCounter.committedQuantity}:${includedCounter.reservedQuantity}:${includedCounter.forfeitedQuantity}`
         : "no-included-counter",
       purchasedCounter
         ? `${purchasedCounter.grantedQuantity}:${purchasedCounter.committedQuantity}:${purchasedCounter.reservedQuantity}:${purchasedCounter.refundingQuantity}`

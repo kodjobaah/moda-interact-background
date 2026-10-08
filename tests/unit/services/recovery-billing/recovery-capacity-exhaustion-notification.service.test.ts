@@ -57,6 +57,7 @@ function paidPolicy() {
         shopId: "shop-1",
         billingPeriodId: "period-1",
         grantedQuantity: 100,
+        currentAllowanceQuantity: null,
         committedQuantity: 100,
         reservedQuantity: 0,
         forfeitedQuantity: 0,
@@ -259,6 +260,7 @@ describe("RecoveryCapacityExhaustionNotificationService", () => {
     const database = createDatabase({
       includedCounter: {
         grantedQuantity: 100,
+        currentAllowanceQuantity: 100,
         committedQuantity: 100,
         reservedQuantity: 0,
         forfeitedQuantity: 0,
@@ -287,5 +289,32 @@ describe("RecoveryCapacityExhaustionNotificationService", () => {
         }),
       }),
     );
+  });
+
+  it("starts a new paid exhaustion epoch when current allowance changes", async () => {
+    const database = createDatabase({
+      includedCounter: {
+        grantedQuantity: 100,
+        currentAllowanceQuantity: 100,
+        committedQuantity: 100,
+        reservedQuantity: 0,
+        forfeitedQuantity: 0,
+      },
+    });
+    const service = new RecoveryCapacityExhaustionNotificationService(database as never);
+
+    await service.notify("shop-1", paidPolicy() as never);
+    database.billingPeriodEntitlementCounter.findUnique.mockResolvedValue({
+      grantedQuantity: 100,
+      currentAllowanceQuantity: 80,
+      committedQuantity: 100,
+      reservedQuantity: 0,
+      forfeitedQuantity: 0,
+    });
+    await service.notify("shop-1", paidPolicy() as never);
+
+    expect(database.messages.size).toBe(2);
+    expect([...database.messages.keys()][0]).toContain("period-1|no-free-allowance|100:100:0:0");
+    expect([...database.messages.keys()][1]).toContain("period-1|no-free-allowance|80:100:0:0");
   });
 });

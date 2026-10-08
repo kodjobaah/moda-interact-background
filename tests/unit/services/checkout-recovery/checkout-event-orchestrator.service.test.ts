@@ -156,6 +156,7 @@ describe("CheckoutEventOrchestratorService", () => {
       select: {
         id: true,
         status: true,
+        platform: true,
         onboardingCompleted: true,
         subscription: {
           select: { status: true, lastProviderLifecycleState: true },

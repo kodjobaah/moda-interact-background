@@ -91,6 +91,7 @@ export class CheckoutEventOrchestratorService {
       select: {
         id: true,
         status: true,
+        platform: true,
         onboardingCompleted: true,
         subscription: {
           select: {
