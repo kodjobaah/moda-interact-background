@@ -65,6 +65,7 @@ describe("OpenRouter credential decryption", () => {
     ["empty ciphertext", { ...seal("credential-A"), ciphertext: Buffer.alloc(0) }, keyring],
     ["oversized ciphertext", { ...seal("credential-A"), ciphertext: Buffer.alloc(8193) }, keyring],
     ["invalid key id", { ...seal("credential-A"), keyId: " " }, keyring],
+    ["unsafe edit version", { ...seal("credential-A"), editVersion: Number.MAX_SAFE_INTEGER + 1 }, keyring],
   ])("fails bounded for %s", async (_label, row, suppliedKeyring) => {
     const findUnique = vi.fn(async () => row);
     const db = { commerceOpenRouterCredential: { findUnique } } as unknown as PrismaClient;

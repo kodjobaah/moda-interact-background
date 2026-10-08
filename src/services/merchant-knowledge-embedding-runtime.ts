@@ -1,11 +1,14 @@
-import { createDecipheriv } from "node:crypto";
-
 import {
   CommerceEmbeddingPurpose,
   type CommerceEnvironment,
   type PrismaClient,
 } from "@prisma/client";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import {
+  decryptEncryptedCredential,
+  isValidEncryptedCredentialEnvelope,
+  isValidEncryptedCredentialKey,
+} from "../security/aes-gcm-credential.js";
 
 import {
   MerchantKnowledgeEmbeddingConfigurationError,
@@ -55,17 +58,7 @@ export function createMerchantKnowledgeEmbeddingResolver(input: {
         || !Number.isSafeInteger(row.embeddingDimensions)
         || row.embeddingDimensions <= 0
         || countMerchantKnowledgeCodePoints(indexVersion) > 64
-        || !row.keyId.trim()
-        || row.keyId.length > 64
-        || !Number.isSafeInteger(row.editVersion)
-        || row.editVersion < 1
-        || !(row.ciphertext instanceof Uint8Array)
-        || row.ciphertext.byteLength < 1
-        || row.ciphertext.byteLength > 8192
-        || !(row.nonce instanceof Uint8Array)
-        || row.nonce.byteLength !== 12
-        || !(row.authTag instanceof Uint8Array)
-        || row.authTag.byteLength !== 16
+        || !isValidEncryptedCredentialEnvelope(row)
       ) {
         throw new MerchantKnowledgeEmbeddingConfigurationError(
           "INVALID_EMBEDDING_CONFIGURATION",
@@ -73,7 +66,7 @@ export function createMerchantKnowledgeEmbeddingResolver(input: {
       }
 
       const key = input.keyring[row.keyId];
-      if (!(key instanceof Uint8Array) || key.byteLength !== 32) {
+      if (!isValidEncryptedCredentialKey(key)) {
         throw new MerchantKnowledgeEmbeddingConfigurationError(
           "EMBEDDING_CONFIGURATION_UNAVAILABLE",
         );
@@ -81,31 +74,17 @@ export function createMerchantKnowledgeEmbeddingResolver(input: {
 
       let apiKey: string;
       try {
-        const decipher = createDecipheriv("aes-256-gcm", key, row.nonce);
-        decipher.setAAD(Buffer.from(canonicalJson({
-          credentialType: CREDENTIAL_TYPE,
-          environment: input.environment,
-          purpose: PURPOSE,
-          provider,
-          keyId: row.keyId,
-        }), "utf8"));
-        decipher.setAuthTag(row.authTag);
-        const plaintext = Buffer.concat([
-          decipher.update(row.ciphertext),
-          decipher.final(),
-        ]);
-        apiKey = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-        const encoded = Buffer.from(apiKey, "utf8");
-        if (
-          encoded.byteLength < 1
-          || encoded.byteLength > 8192
-          || apiKey.includes("\r")
-          || apiKey.includes("\n")
-          || apiKey.includes("\0")
-          || !encoded.equals(plaintext)
-        ) {
-          throw new Error("invalid credential");
-        }
+        apiKey = decryptEncryptedCredential({
+          envelope: row,
+          key,
+          aad: canonicalJson({
+            credentialType: CREDENTIAL_TYPE,
+            environment: input.environment,
+            purpose: PURPOSE,
+            provider,
+            keyId: row.keyId,
+          }),
+        });
       } catch {
         throw new MerchantKnowledgeEmbeddingConfigurationError(
           "EMBEDDING_CONFIGURATION_UNAVAILABLE",

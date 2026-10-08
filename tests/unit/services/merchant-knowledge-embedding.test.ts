@@ -131,6 +131,35 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
       MerchantKnowledgeEmbeddingConfigurationError,
     );
   });
+  it.each([
+    ["blank key ID", { keyId: "  " }],
+    ["unsafe edit version", { editVersion: Number.MAX_SAFE_INTEGER + 1 }],
+    ["short nonce", { nonce: Buffer.alloc(11) }],
+    ["short auth tag", { authTag: Buffer.alloc(15) }],
+    ["oversized ciphertext", { ciphertext: Buffer.alloc(8193) }],
+  ])("preserves invalid-configuration error mapping for %s", async (_label, overrides) => {
+    const { key, row } = sealedRow(overrides);
+    const resolver = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
+      environment: "TEST",
+      keyring: { active: key },
+    });
+    await expect(resolver.resolve()).rejects.toMatchObject({
+      code: "INVALID_EMBEDDING_CONFIGURATION",
+    });
+  });
+
+  it("preserves unavailable error mapping when authentication fails", async () => {
+    const { key, row } = sealedRow({ keyId: "rotated" });
+    const resolver = createMerchantKnowledgeEmbeddingResolver({
+      db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
+      environment: "TEST",
+      keyring: { rotated: key },
+    });
+    await expect(resolver.resolve()).rejects.toMatchObject({
+      code: "EMBEDDING_CONFIGURATION_UNAVAILABLE",
+    });
+  });
 });
 
 describe("MerchantKnowledgeEmbeddingService", () => {

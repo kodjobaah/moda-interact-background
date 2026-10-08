@@ -72,6 +72,20 @@ describe("translation provider credential decryption", () => {
     })).rejects.toThrow("Translation provider credential is unavailable");
   });
 
+  it("rejects a valid-looking row whose ciphertext is bound to another provider", async () => {
+    const db = {
+      commerceTranslationProviderCredential: {
+        findUnique: vi.fn(async () => ({ ...seal("translation-key"), provider: "deepl" })),
+      },
+    } as unknown as PrismaClient;
+    const resolver = createTranslationProviderCredentialResolver({ db, keyring });
+
+    await expect(resolver.resolve({
+      environment: "DEVELOPMENT",
+      provider: "deepl",
+    })).rejects.toThrow("Translation provider credential is unavailable");
+  });
+
   it("fails bounded for missing or malformed encrypted state", async () => {
     const db = {
       commerceTranslationProviderCredential: {

@@ -1,9 +1,9 @@
-import { createDecipheriv } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import {
   createCommerceTranslationProviderCredentialAad,
   type CommerceEnvironment,
 } from "@modainteract/moda-interact-shared/commerce/model";
+import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
 
 const UNAVAILABLE = "Translation provider credential is unavailable";
 
@@ -44,53 +44,15 @@ export function createTranslationProviderCredentialResolver(input: {
           throw new Error(UNAVAILABLE);
         }
 
-        const key = input.keyring[row.keyId];
-        if (
-          !key ||
-          key.byteLength !== 32 ||
-          !row.keyId.trim() ||
-          row.keyId.length > 64 ||
-          !Number.isInteger(row.editVersion) ||
-          row.editVersion < 1 ||
-          !(row.ciphertext instanceof Uint8Array) ||
-          row.ciphertext.byteLength < 1 ||
-          row.ciphertext.byteLength > 8192 ||
-          !(row.nonce instanceof Uint8Array) ||
-          row.nonce.byteLength !== 12 ||
-          !(row.authTag instanceof Uint8Array) ||
-          row.authTag.byteLength !== 16
-        ) {
-          throw new Error(UNAVAILABLE);
-        }
-
-        const decipher = createDecipheriv("aes-256-gcm", key, row.nonce);
-        decipher.setAAD(
-          Buffer.from(
-            createCommerceTranslationProviderCredentialAad({
-              environment,
-              provider: normalizedProvider,
-              keyId: row.keyId,
-            }),
-            "utf8",
-          ),
-        );
-        decipher.setAuthTag(row.authTag);
-        const plaintext = Buffer.concat([
-          decipher.update(row.ciphertext),
-          decipher.final(),
-        ]);
-        const credential = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-        const credentialBytes = Buffer.from(credential, "utf8");
-        if (
-          credentialBytes.byteLength < 1 ||
-          credentialBytes.byteLength > 8192 ||
-          credential.includes("\r") ||
-          credential.includes("\n") ||
-          credential.includes("\0") ||
-          !credentialBytes.equals(plaintext)
-        ) {
-          throw new Error(UNAVAILABLE);
-        }
+        const credential = decryptEncryptedCredential({
+          envelope: row,
+          key: input.keyring[row.keyId],
+          aad: createCommerceTranslationProviderCredentialAad({
+            environment,
+            provider: normalizedProvider,
+            keyId: row.keyId,
+          }),
+        });
         if (signal?.aborted) throw new Error(UNAVAILABLE);
         return credential;
       } catch {
