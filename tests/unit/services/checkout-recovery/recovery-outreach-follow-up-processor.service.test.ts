@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   },
   policy: { resolve: vi.fn() },
   message: { buildRecoveryTemplateDescriptor: vi.fn() },
+  recipientResolver: { resolveForCustomerInShop: vi.fn() },
   followUp: { schedule: vi.fn() },
 }));
 
@@ -41,6 +42,7 @@ vi.mock("../../../../src/services/recovery-outreach-attempt.service.js", () => (
 }));
 vi.mock("../../../../src/services/recovery-policy.service.js", () => ({ recoveryPolicyService: mocks.policy }));
 vi.mock("../../../../src/services/conversation.message.service.js", () => ({ conversationMessageService: mocks.message }));
+vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js", () => ({ recoveryRecipientResolverService: mocks.recipientResolver }));
 vi.mock("../../../../src/services/recovery-outreach-follow-up.service.js", () => ({ recoveryOutreachFollowUpService: mocks.followUp }));
 
 import type { RecoveryBillingService } from "../../../../src/services/recovery-billing.service.js";
@@ -53,13 +55,14 @@ const recovery = {
   id: "recovery-1",
   shopId: "shop-1",
   checkoutToken: "checkout-1",
+  customerId: "customer-1",
   status: "MESSAGE_SENT",
   shop: { domain: "shop.test", status: "ACTIVE" },
   outreachAttempts: [{ id: "attempt-1", sequence: 1, status: "WAITING_FOR_RESPONSE", sentAt, followUpDueAt: dueAt }],
   conversation: { id: "conversation-1", languageTag: "fr-CA", countryCode: "CA" },
   customer: { phone: "+15551234567" },
 };
-const attempt = { id: "attempt-2", sequence: 2, followUpDueAt: null };
+const attempt = { id: "attempt-2", sequence: 2, recipient: "15551234567", followUpDueAt: null };
 const admission = { kind: "paid", sourceKey: "recovery:shop-1:recovery-1" };
 const confirmedMessage = { id: "message-2", conversationId: "conversation-1", status: "SENT", sentAt: new Date("2026-09-16T11:01:00Z") };
 
@@ -101,6 +104,7 @@ beforeEach(() => {
   mocks.attempt.markEngagedFromInbound.mockResolvedValue(undefined);
   mocks.attempt.markWaitingAfterConfirmedSend.mockResolvedValue({ count: 1 });
   mocks.policy.resolve.mockResolvedValue({});
+  mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue("15551234567");
   mocks.message.buildRecoveryTemplateDescriptor.mockReturnValue("follow-up-template");
 });
 
@@ -122,6 +126,30 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     expect(mocks.prisma.conversationMessage.findFirst).not.toHaveBeenCalled();
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "+19999999999"])("uses the current Shop-scoped phone when legacy Customer.phone is %s", async (legacyPhone) => {
+    setRecovery({ ...recovery, customer: { phone: legacyPhone } });
+    const { processor } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
+
+    expect(mocks.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
+    expect(mocks.attempt.getOrCreateFollowUp).toHaveBeenCalledWith(expect.objectContaining({ recipient: "15551234567" }));
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: attempt.recipient }));
+  });
+
+  it("does not claim, create an attempt, bill, or send when no current recipient exists", async () => {
+    setRecovery();
+    mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue(null);
+    const { processor, billing } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "no-recipient" });
+
+    expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreateFollowUp).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
   it("suppresses terminal recovery after due prerequisites", async () => {

@@ -23,6 +23,20 @@ class CustomerPhoneService {
     });
   }
 
+  async getCurrentPhoneForShop(
+    customerId: string,
+    shopId: string,
+  ): Promise<CustomerPhone | null> {
+    return prisma.customerPhone.findFirst({
+      where: {
+        customerId,
+        endedAt: null,
+        customer: { shopId },
+      },
+      orderBy: { startedAt: "desc" },
+    });
+  }
+
   async setCurrentPhone({
     customerId,
     phone,

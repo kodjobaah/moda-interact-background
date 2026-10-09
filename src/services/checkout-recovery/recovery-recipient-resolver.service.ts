@@ -1,6 +1,7 @@
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
 import { customerService } from "../customer.service.js";
 import { customerPhoneService } from "../customer.phone.service.js";
+import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
 
 export class RecoveryRecipientResolverService {
   async resolve(event: RecoveryCheckoutSeed): Promise<string | null> {
@@ -8,10 +9,12 @@ export class RecoveryRecipientResolverService {
     if (!customer) return null;
 
     const currentPhone = await customerPhoneService.getCurrentPhone(customer.id);
-    if (!currentPhone) return null;
+    return canonicalizeRecoveryRecipient(currentPhone?.phone);
+  }
 
-    const digits = currentPhone.phone.replace(/\D/g, "");
-    return digits.length > 0 ? digits : null;
+  async resolveForCustomerInShop(customerId: string, shopId: string): Promise<string | null> {
+    const currentPhone = await customerPhoneService.getCurrentPhoneForShop(customerId, shopId);
+    return canonicalizeRecoveryRecipient(currentPhone?.phone);
   }
 }
 

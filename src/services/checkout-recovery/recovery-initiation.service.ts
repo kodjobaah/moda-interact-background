@@ -14,6 +14,7 @@ import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { findLatestRecovery } from "./latest-recovery.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
+import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
 
 type Recovery = NonNullable<Awaited<ReturnType<typeof prisma.checkoutRecovery.findFirst>>>;
 
@@ -125,12 +126,14 @@ export class RecoveryInitiationService {
     }
 
     const policy = await recoveryPolicyService.resolve(recovery.shopId);
+    const recipient = canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
+    if (!recipient) throw new Error("Recovery outreach recipient is unavailable");
     const attempt = await recoveryOutreachAttemptService.getOrCreate({
       recoveryId: recovery.id,
       sequence: 1,
       policy,
+      recipient,
     });
-    const recipient = resolvedRecipient ?? this.ports!.resolveRecipient(event);
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
       providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
@@ -196,7 +199,7 @@ export class RecoveryInitiationService {
         recoveryCreditSourceKey: billing.admission.sourceKey,
         senderType: "AUTOMATION",
         content,
-        to: recipient,
+        to: attempt.recipient,
         templateName: selection.providerTemplateName,
         languageCode: selection.providerLanguageCode,
       });

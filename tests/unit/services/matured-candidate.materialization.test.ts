@@ -20,6 +20,18 @@ const hoisted = vi.hoisted(() => {
         update: vi.fn(),
         updateMany: vi.fn(),
       },
+      recoveryOutreachAttempt: {
+        upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
+          id: "attempt-1",
+          status: "PENDING",
+          ...create,
+        })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        update: vi.fn(async ({ where, data }: {
+          where: { id: string };
+          data: Record<string, unknown>;
+        }) => ({ id: where.id, ...data })),
+      },
       conversation: {
         upsert: vi.fn(),
       },
