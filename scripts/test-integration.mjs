@@ -12,6 +12,7 @@ const defaultTests = [
   "tests/integration/translation-batch-assembly.concurrency.integration.test.ts",
   "tests/integration/bullmq-telemetry.integration.test.ts",
   "tests/integration/conversation-turn-scheduling.integration.test.ts",
+  "tests/integration/translation-enum-bindings.integration.test.ts",
 ];
 const selectedTests = process.argv.slice(2);
 
