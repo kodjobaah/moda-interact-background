@@ -191,6 +191,54 @@ async function cleanup(client: PrismaClient, fixtures: readonly Fixture[]): Prom
 }
 
 describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL", () => {
+  it("freezes on a current pause and reactivates on a newer paid renewal without resetting the period", async () => {
+    const client = database();
+    const fixture = await createFixture(client);
+    try {
+      await activate(client, fixture);
+      const period = await client.billingPeriod.findFirstOrThrow({ where: { shopId: fixture.shopId } });
+      await client.billingPeriodEntitlementCounter.update({
+        where: { billingPeriodId_counter: { billingPeriodId: period.id, counter: "INCLUDED_RECOVERY_CREDITS" } },
+        data: { committedQuantity: 3 },
+      });
+
+      await createReceipt(
+        client,
+        fixture,
+        "saas_billing_contract.paused",
+        wrapper(fixture.contractId, "paused", {
+          modifiedAt: "2026-10-04 09:00:00",
+          nextPaymentAt: null,
+          includeFailedIntent: true,
+        }),
+      );
+      await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
+      expect(await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } }))
+        .toMatchObject({ status: "FROZEN", currentPeriodEnd: period.periodEnd });
+
+      await createReceipt(
+        client,
+        fixture,
+        "saas_billing_contract.renewed",
+        wrapper(fixture.contractId, "active", {
+          modifiedAt: "2026-10-05 09:00:00",
+          nextPaymentAt: "2026-11-05 09:30:00",
+          includePayment: true,
+        }),
+      );
+      await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
+      expect(await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } }))
+        .toMatchObject({ status: "ACTIVE", currentPeriodEnd: period.periodEnd });
+      expect(await client.billingPeriod.findMany({ where: { shopId: fixture.shopId } })).toHaveLength(1);
+      expect(await client.billingPeriodEntitlementCounter.findUniqueOrThrow({
+        where: { billingPeriodId_counter: { billingPeriodId: period.id, counter: "INCLUDED_RECOVERY_CREDITS" } },
+      })).toMatchObject({ grantedQuantity: 10, committedQuantity: 3, currentAllowanceQuantity: null });
+    } finally {
+      await cleanup(client, [fixture]);
+      await client.$disconnect();
+    }
+  }, 30_000);
+
   it("atomically opens one exact 30-day period and serializes concurrent duplicate workers", async () => {
     const first = database();
     const second = database();
