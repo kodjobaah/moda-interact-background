@@ -11,6 +11,7 @@ import { shopExecutionEligibilityService } from "../shop-execution-eligibility.s
 import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
 import { conversationMessageService } from "../conversation.message.service.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
+import { recoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 
 export class RecoveryOutreachFollowUpProcessorService {
   constructor(
@@ -34,11 +35,10 @@ export class RecoveryOutreachFollowUpProcessorService {
             shop: { select: { domain: true, status: true } },
             outreachAttempts: { orderBy: { sequence: "asc" } },
             conversation: true,
-            customer: { select: { phone: true } },
           },
         });
         const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
-        if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation || !recovery.customer?.phone) {
+        if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation) {
           return { kind: "suppressed", reason: "not-due" } as const;
         }
         if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
@@ -57,9 +57,13 @@ export class RecoveryOutreachFollowUpProcessorService {
           await recoveryOutreachAttemptService.markEngagedFromInbound(recoveryId, engaged.createdAt);
           return { kind: "suppressed", reason: "engaged" } as const;
         }
+        const recipient = recovery.customerId
+          ? await recoveryRecipientResolverService.resolveForCustomerInShop(recovery.customerId, recovery.shopId)
+          : null;
+        if (!recipient) return { kind: "suppressed", reason: "no-recipient" } as const;
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
-          const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId) });
+          const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient });
           if (currentAttempt.status === "ENGAGED" || ("customerRespondedAt" in currentAttempt && currentAttempt.customerRespondedAt)) {
             return { kind: "suppressed", reason: "engaged" } as const;
           }
@@ -67,6 +71,7 @@ export class RecoveryOutreachFollowUpProcessorService {
         }
         const attempt = await recoveryOutreachAttemptService.getOrCreateFollowUp({
           recoveryId,
+          recipient,
           initialAttempt: initial,
         });
         const execution = await shopExecutionEligibilityService.evaluate(
@@ -120,7 +125,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             recoveryCreditSourceKey: billing.admission.sourceKey,
             senderType: "AUTOMATION",
             content,
-            to: recovery.customer.phone,
+            to: attempt.recipient,
             templateName: selection.providerTemplateName,
             languageCode: selection.providerLanguageCode,
           });

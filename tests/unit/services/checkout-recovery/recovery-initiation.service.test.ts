@@ -65,7 +65,7 @@ const recovery = {
   status: "DETECTED",
   customerId: null,
 };
-const attempt = { id: "attempt-1", sequence: 1, followUpDueAt: null };
+const attempt = { id: "attempt-1", sequence: 1, recipient: "15551234567", followUpDueAt: null };
 const admission = { kind: "paid", sourceKey: "recovery:shop-1:recovery-1" };
 const sentAt = new Date("2026-09-16T10:00:00Z");
 const confirmedMessage = {
@@ -255,6 +255,12 @@ describe("RecoveryInitiationService", () => {
       recoveryId: recovery.id,
       occurredAt: sentAt,
     });
+    expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: "15551234567",
+    }));
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      to: attempt.recipient,
+    }));
     expect(mocks.prisma.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: { id: recovery.id, status: "DETECTED" },
       data: {
@@ -264,6 +270,19 @@ describe("RecoveryInitiationService", () => {
         admissionBlockReason: null,
       },
     });
+  });
+
+  it("persists and sends the exact canonical BACKGROUND-007 recipient", async () => {
+    const { service } = createInitiation();
+
+    await service.handleCheckoutCreated(event, 1, "+1 (555) 123-4567");
+
+    expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: "15551234567",
+    }));
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      to: "15551234567",
+    }));
   });
 
   it("repairs initial follow-up scheduling for an already-sent recovery", async () => {

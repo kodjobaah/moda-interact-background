@@ -51,7 +51,9 @@ describe("recovery outreach follow-up", () => {
     };
     await expect(service.getOrCreateFollowUp({
       recoveryId: "recovery-1",
+      recipient: "15551234567",
       initialAttempt: {
+        recipient: "15551234567",
         configuredOfferMode: "FIXED",
         fixedShopifyDiscountId: "discount-1",
         offerSnapshot: { id: "discount-1", title: "Saved offer" },
@@ -59,13 +61,14 @@ describe("recovery outreach follow-up", () => {
     })).resolves.toEqual(attempt);
     expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
+        recipient: "15551234567",
         configuredOfferMode: "FIXED",
         fixedShopifyDiscountId: "discount-1",
         offerSnapshot: { id: "discount-1", title: "Saved offer" },
       }),
     }));
-    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy });
-    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy });
+    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy, recipient: "15551234567" });
+    await service.getOrCreate({ recoveryId: "recovery-1", sequence: 1, policy, recipient: "15551234567" });
     expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledTimes(3);
     await service.markEngagedForConversation("conversation-1", new Date("2026-09-16T10:01:00Z"));
     expect(database.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -78,5 +81,29 @@ describe("recovery outreach follow-up", () => {
         ],
       }),
     }));
+    });
+
+    it("does not overwrite a durable attempt recipient on replay", async () => {
+      const database = {
+        recoveryOutreachAttempt: {
+          upsert: vi.fn(async () => ({ id: "attempt-2", recipient: "15551234567" })),
+        },
+      } as any;
+      const service = new RecoveryOutreachAttemptService(database);
+
+      await service.getOrCreateFollowUp({
+        recoveryId: "recovery-1",
+        recipient: "447700900123",
+        initialAttempt: {
+          configuredOfferMode: "NONE",
+          fixedShopifyDiscountId: null,
+          offerSnapshot: null,
+        },
+      });
+
+      expect(database.recoveryOutreachAttempt.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ recipient: "447700900123" }),
+        update: {},
+      }));
     });
 });

@@ -15,6 +15,7 @@ export class RecoveryOutreachAttemptService {
     recoveryId: string;
     sequence: 1 | 2;
     policy: RecoveryPolicySnapshot;
+    recipient: string;
   }) {
     const trigger = input.sequence === 1
       ? RecoveryOutreachTrigger.INITIAL
@@ -25,6 +26,7 @@ export class RecoveryOutreachAttemptService {
         checkoutRecoveryId: input.recoveryId,
         sequence: input.sequence,
         trigger,
+        recipient: input.recipient,
         status: RecoveryOutreachStatus.PENDING,
       };
     }
@@ -39,6 +41,7 @@ export class RecoveryOutreachAttemptService {
         checkoutRecoveryId: input.recoveryId,
         sequence: input.sequence,
         trigger,
+        recipient: input.recipient,
         configuredOfferMode: input.policy.recoveryOfferMode,
         fixedShopifyDiscountId: input.policy.fixedShopifyDiscountId,
         offerSnapshot: input.policy.offerSnapshot
@@ -51,6 +54,7 @@ export class RecoveryOutreachAttemptService {
 
   async getOrCreateFollowUp(input: {
     recoveryId: string;
+    recipient: string;
     initialAttempt: {
       configuredOfferMode: RecoveryPolicySnapshot["recoveryOfferMode"];
       fixedShopifyDiscountId: string | null;
@@ -63,6 +67,7 @@ export class RecoveryOutreachAttemptService {
         checkoutRecoveryId: input.recoveryId,
         sequence: 2,
         trigger: RecoveryOutreachTrigger.NO_RESPONSE_FOLLOW_UP,
+        recipient: input.recipient,
         status: RecoveryOutreachStatus.PENDING,
       };
     }
@@ -77,6 +82,7 @@ export class RecoveryOutreachAttemptService {
         checkoutRecoveryId: input.recoveryId,
         sequence: 2,
         trigger: RecoveryOutreachTrigger.NO_RESPONSE_FOLLOW_UP,
+        recipient: input.recipient,
         configuredOfferMode: input.initialAttempt.configuredOfferMode,
         fixedShopifyDiscountId: input.initialAttempt.fixedShopifyDiscountId,
         offerSnapshot: input.initialAttempt.offerSnapshot === null
