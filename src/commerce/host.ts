@@ -359,7 +359,32 @@ async function execute(
     }
     // Recovery has no customer-preference setting. Preserve legacy storage values,
     // but do not impose their old precedence on this recovery-only runner.
-    if (!isStableLanguageSignal(context.conversation.messages.map((m) => m.content).join("\n"))) {
+    const languageMessage = context.conversation.messages
+      .map((message) => message.content)
+      .join("\n");
+    const hasDetectionCandidate =
+      envelope.detectedLanguageTag !== null ||
+      envelope.detectedLanguageConfidence !== null;
+    if (hasDetectionCandidate) {
+      logger.debug("whatsapp.language.detection_received", {
+        conversationId: current.id,
+        observedVersion: turn.inboundVersion,
+        currentLanguageTag: language.tag,
+        detectedLanguageTag: envelope.detectedLanguageTag,
+        detectedLanguageConfidence: envelope.detectedLanguageConfidence,
+      });
+    }
+    if (!isStableLanguageSignal(languageMessage)) {
+      if (hasDetectionCandidate) {
+        logger.debug("whatsapp.language.detection_rejected", {
+          conversationId: current.id,
+          observedVersion: turn.inboundVersion,
+          currentLanguageTag: language.tag,
+          detectedLanguageTag: envelope.detectedLanguageTag,
+          detectedLanguageConfidence: envelope.detectedLanguageConfidence,
+          reason: "unstable-input",
+        });
+      }
       envelope.detectedLanguageTag = null;
       envelope.detectedLanguageConfidence = null;
     }

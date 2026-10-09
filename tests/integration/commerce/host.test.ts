@@ -581,6 +581,55 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
       ),
     ).resolves.toMatchObject({ detectedLanguageTag: "en" });
   });
+  it("logs model language candidates and unstable-input rejection without customer text", async () => {
+    state.languageTag = "fr";
+    state.languageSource = "DETECTED";
+    const altered = structuredClone(context);
+    altered.conversation.messages = [{ role: "user", content: "👍" }];
+    const records: Array<Record<string, unknown>> = [];
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: "DEVELOPMENT",
+      sink: (record) => records.push(record as unknown as Record<string, unknown>),
+    });
+
+    const result = await run(
+      async () =>
+        final({ detectedLanguageTag: "en", detectedLanguageConfidence: 0.99 }),
+      altered,
+      undefined,
+      logger,
+    );
+
+    expect(result).toMatchObject({
+      detectedLanguageTag: null,
+      detectedLanguageConfidence: null,
+    });
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "whatsapp.language.detection_received",
+          data: expect.objectContaining({
+            conversationId: "conversation-fixture",
+            observedVersion: 1,
+            currentLanguageTag: "fr",
+            detectedLanguageTag: "en",
+            detectedLanguageConfidence: 0.99,
+          }),
+        }),
+        expect.objectContaining({
+          event: "whatsapp.language.detection_rejected",
+          data: expect.objectContaining({
+            conversationId: "conversation-fixture",
+            observedVersion: 1,
+            reason: "unstable-input",
+          }),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(records)).not.toContain("👍");
+  });
+
   it("P07/P08/P09/P12 preserves validated language metadata and null fallback", async () => {
     state.languageTag = "fr";
     state.languageSource = "DETECTED";
