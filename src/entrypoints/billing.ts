@@ -10,6 +10,7 @@ import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
+import { wooSubscriptionReceiptReconciliationService } from "../services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -75,6 +76,14 @@ void startReadyWorkerProcess({
         configVersion: runtimeConfig.version,
         intervalSeconds: runtimeConfig.billingReconciliationIntervalSeconds,
         shopBatchSize: runtimeConfig.billingReconciliationShopBatchSize,
+      });
+
+      const wooReceipts = await wooSubscriptionReceiptReconciliationService.reconcileBatch(
+        runtimeConfig.billingReconciliationShopBatchSize,
+      );
+      logger.info("billing.woocommerce.subscription_receipts.completed", {
+        leaseGeneration: leaseHandle.generation,
+        ...wooReceipts,
       });
 
       const reconciliation = await billingReconciliationService.reconcileOnce(runtimeConfig);
