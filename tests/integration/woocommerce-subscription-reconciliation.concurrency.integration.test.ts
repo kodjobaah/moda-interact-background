@@ -3,7 +3,7 @@ import "dotenv/config";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { Prisma, PrismaClient } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { WooSubscriptionReceiptReconciliationService } from "../../src/services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
 
@@ -13,6 +13,8 @@ const describeWithDisposableDatabase = testDatabaseUrl && process.env.MODA_DISPO
   : describe.skip;
 const now = new Date("2026-10-09T00:00:00.000Z");
 const activationAt = new Date("2026-10-01T09:30:00.000Z");
+let canonicalFreePlanId: string | null = null;
+let createdCanonicalFreePlanId: string | null = null;
 
 type Fixture = {
   shopId: string;
@@ -35,10 +37,9 @@ function database(url = testDatabaseUrl): PrismaClient {
 async function createFixture(client: PrismaClient, contractId = `contract-${randomUUID()}`): Promise<Fixture> {
   const suffix = randomUUID();
   const shopId = `woo-${suffix}`;
-  const freeHandle = `arch027-free-${suffix}`;
+  const freePlanId = await getCanonicalFreePlanId(client);
   const paidHandle = `arch027-paid-${suffix}`;
-  const [freePlan, paidPlan, cataloguePlan] = await Promise.all([
-    client.billingPlan.create({ data: { shopifyPlanHandle: freeHandle, name: "Fixture Free", kind: "FREE" } }),
+  const [paidPlan, cataloguePlan] = await Promise.all([
     client.billingPlan.create({
       data: {
         shopifyPlanHandle: paidHandle,
@@ -66,12 +67,12 @@ async function createFixture(client: PrismaClient, contractId = `contract-${rand
     data: { id: shopId, domain: `${suffix}.woo.test`, platform: "WOOCOMMERCE", status: "ACTIVE" },
   });
   const subscription = await client.subscription.create({
-    data: { shopId, planId: freePlan.id, status: "ACTIVE" },
+    data: { shopId, planId: freePlanId, status: "ACTIVE" },
   });
   const fixture: Fixture = {
     shopId,
     contractId,
-    freePlanId: freePlan.id,
+    freePlanId,
     cataloguePlanId: cataloguePlan.id,
     paidPlanId: paidPlan.id,
     subscriptionId: subscription.id,
@@ -82,6 +83,27 @@ async function createFixture(client: PrismaClient, contractId = `contract-${rand
   };
   await createOperation(client, fixture, "SUBSCRIPTION_CREATE", contractId, cataloguePlan.id, 1999, activationAt);
   return fixture;
+}
+
+async function getCanonicalFreePlanId(client: PrismaClient): Promise<string> {
+  if (canonicalFreePlanId) return canonicalFreePlanId;
+  const existing = await client.billingPlan.findMany({
+    where: { kind: "FREE", active: true },
+    select: { id: true },
+    take: 2,
+  });
+  if (existing.length > 1) throw new Error("Integration database must have one canonical active Free BillingPlan");
+  if (existing[0]) {
+    canonicalFreePlanId = existing[0].id;
+    return canonicalFreePlanId;
+  }
+  const created = await client.billingPlan.create({
+    data: { shopifyPlanHandle: `arch027-canonical-free-${randomUUID()}`, name: "Fixture Free", kind: "FREE" },
+    select: { id: true },
+  });
+  canonicalFreePlanId = created.id;
+  createdCanonicalFreePlanId = created.id;
+  return created.id;
 }
 
 async function createOperation(
@@ -140,12 +162,16 @@ function wrapper(
     nextPaymentAt?: string | null;
     endAt?: string | null;
     price?: string;
+    planName?: string;
     includePayment?: boolean;
     includeFailedIntent?: boolean;
+    paymentAt?: string;
+    paymentId?: number;
+    paymentIntentUpdatedAt?: string;
   } = {},
 ): Prisma.InputJsonValue {
   const billingIntents = input.includePayment
-    ? [{ id: 1, status: "completed", updated_at: "2026-10-01 09:29:00" }]
+    ? [{ id: 1, status: "completed", updated_at: input.paymentIntentUpdatedAt ?? "2026-10-01 09:29:00" }]
     : input.includeFailedIntent
       ? [{ id: 2, status: "failed", updated_at: input.modifiedAt ?? "2026-10-02 09:00:00" }]
       : [];
@@ -153,14 +179,14 @@ function wrapper(
     subscription: {
       id: contractId,
       status,
-      name: "Fixture plan",
+      name: input.planName ?? "Fixture Paid",
       price: input.price ?? "19.99",
       date_modified: input.modifiedAt ?? "2026-10-01 09:30:00",
       next_payment_date: input.nextPaymentAt === undefined ? "2026-11-01 09:30:00" : input.nextPaymentAt,
       end_date: input.endAt ?? null,
       billing_intents: billingIntents,
       transactions: input.includePayment
-        ? [{ id: 10, billing_intent_id: 1, completed_at: "2026-10-01 09:30:00" }]
+        ? [{ id: input.paymentId ?? 10, billing_intent_id: 1, completed_at: input.paymentAt ?? "2026-10-01 09:30:00" }]
         : [],
     },
   };
@@ -189,6 +215,19 @@ async function cleanup(client: PrismaClient, fixtures: readonly Fixture[]): Prom
   await client.billingPlan.deleteMany({ where: { shopifyPlanHandle: { in: handles } } });
   await client.merchantPricingPlan.deleteMany({ where: { shopifyPlanHandle: { in: handles } } });
 }
+
+afterAll(async () => {
+  if (!createdCanonicalFreePlanId || !testDatabaseUrl) return;
+  const client = database();
+  try {
+    const references = await client.subscription.count({ where: { planId: createdCanonicalFreePlanId } });
+    if (references === 0) {
+      await client.billingPlan.deleteMany({ where: { id: createdCanonicalFreePlanId } });
+    }
+  } finally {
+    await client.$disconnect();
+  }
+});
 
 describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL", () => {
   it("freezes on a current pause and reactivates on a newer paid renewal without resetting the period", async () => {
@@ -224,6 +263,9 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
           modifiedAt: "2026-10-05 09:00:00",
           nextPaymentAt: "2026-11-05 09:30:00",
           includePayment: true,
+          paymentAt: "2026-10-05 09:00:00",
+          paymentId: 11,
+          paymentIntentUpdatedAt: "2026-10-05 08:59:00",
         }),
       );
       await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
@@ -343,6 +385,7 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
           modifiedAt: "2026-10-05 09:00:00",
           nextPaymentAt: "2026-10-20 09:30:00",
           price: "29.99",
+          planName: "Fixture Switch",
         }),
       );
       await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
@@ -362,6 +405,9 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
           modifiedAt: "2026-10-06 09:00:00",
           nextPaymentAt: "2026-11-06 09:30:00",
           includePayment: true,
+          paymentAt: "2026-10-06 09:00:00",
+          paymentId: 12,
+          paymentIntentUpdatedAt: "2026-10-06 08:59:00",
         }),
       );
       const stalePause = await createReceipt(
@@ -428,7 +474,7 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
         client,
         fixture,
         "saas_billing_contract.updated",
-        wrapper(fixture.contractId, "active", { modifiedAt: "2026-10-08 09:00:00", price: "39.99", nextPaymentAt: "2026-10-18 09:30:00" }),
+        wrapper(fixture.contractId, "active", { modifiedAt: "2026-10-08 09:00:00", price: "39.99", planName: "Fixture Late Switch", nextPaymentAt: "2026-10-18 09:30:00" }),
       );
       await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
       const afterLateUpdate = await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } });

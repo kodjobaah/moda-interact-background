@@ -78,7 +78,7 @@ export async function processNextWooSubscriptionReceipt(
 
       const operations = await transaction.billingOperation.findMany({
         where: { shopId, kind: { in: WOO_RECURRING_OPERATION_KINDS } },
-        include: { merchantPricingPlan: { select: { shopifyPlanHandle: true } } },
+        include: { merchantPricingPlan: { select: { displayName: true, shopifyPlanHandle: true } } },
       }) as WooRecurringOperation[];
       const allReceipts = await transaction.wooCommerceBillingWebhookReceipt.findMany({
         where: { providerContractId: receipt.providerContractId, topic: { in: WOO_SUBSCRIPTION_TOPICS } },
@@ -121,7 +121,19 @@ function preserveOperationLink(
 ): string | null {
   if (receipt.billingOperationId === null) return proposedId;
   const existing = operations.find(({ id }) => id === receipt.billingOperationId);
-  if (!existing || existing.providerReference !== contractId || proposedId !== null && proposedId !== receipt.billingOperationId) {
+  const expectedKind = receipt.topic === "saas_billing_contract.activated"
+    ? "SUBSCRIPTION_CREATE"
+    : receipt.topic === "saas_billing_contract.updated"
+      ? "PLAN_SWITCH"
+      : receipt.topic === "saas_billing_contract.canceled"
+        ? "CANCEL"
+        : null;
+  if (!existing || existing.providerReference !== contractId || existing.kind !== expectedKind
+    || proposedId !== null && proposedId !== receipt.billingOperationId) {
+    throw new PermanentSubscriptionEvidenceError("RECEIPT_OPERATION_LINK_CONFLICT");
+  }
+  if (proposedId !== null && !operations.some(({ id, providerReference, kind }) =>
+    id === proposedId && providerReference === contractId && kind === expectedKind)) {
     throw new PermanentSubscriptionEvidenceError("RECEIPT_OPERATION_LINK_CONFLICT");
   }
   return receipt.billingOperationId;

@@ -1,4 +1,5 @@
 import type { FinancialEvidence } from "./subscription-evidence-reducer.js";
+import { latestCompletedBillingIntentPayment } from "./subscription-renewal-payment-evidence.js";
 
 export type WooSubscriptionTopic =
   | "saas_billing_contract.activated"
@@ -48,9 +49,14 @@ export function parseWooSubscriptionEvidence(
   }
 
   const intents = Array.isArray(contract.billing_intents) ? contract.billing_intents : [];
-  const completedIntentIds = new Set(intents
-    .filter((value): value is JsonObject => isObject(value) && value.status === "completed")
-    .map((intent) => scalarId(intent.id))
+  const intentRows = intents.filter(isObject).map((intent) => ({
+    id: scalarId(intent.id),
+    status: intent.status,
+    updatedAt: parseProviderDate(intent.updated_at),
+  }));
+  const completedIntentIds = new Set(intentRows
+    .filter(({ status }) => status === "completed")
+    .map(({ id }) => id)
     .filter((id): id is string => id !== null));
   const completedPayments = (Array.isArray(contract.transactions) ? contract.transactions : [])
     .filter(isObject)
@@ -61,8 +67,9 @@ export function parseWooSubscriptionEvidence(
     .map((transaction) => ({
       at: parseProviderDate(transaction.completed_at),
       id: scalarId(transaction.id),
+      intentId: scalarId(transaction.billing_intent_id),
     }))
-    .filter((payment): payment is { at: Date; id: string | null } => payment.at !== null);
+    .filter((payment): payment is { at: Date; id: string | null; intentId: string | null } => payment.at !== null);
 
   const providerModifiedAt = parseProviderDate(contract.date_modified);
   const nextPaymentAt = parseProviderDate(contract.next_payment_date);
@@ -78,17 +85,24 @@ export function parseWooSubscriptionEvidence(
     || topic === "saas_billing_contract.renewed"
     || topic === "saas_billing_contract.paused";
   const paymentAt = latest(completedPayments.map(({ at }) => at));
+  const renewalPayment = topic === "saas_billing_contract.renewed"
+    ? latestCompletedBillingIntentPayment(intentRows, completedPayments)
+    : null;
+  if (topic === "saas_billing_contract.renewed" && !renewalPayment) {
+    throw new PermanentSubscriptionEvidenceError("RENEWAL_PAYMENT_EVIDENCE_MISSING");
+  }
   const providerAt = topic === "saas_billing_contract.paused"
     ? latest(intents
       .filter((value): value is JsonObject => isObject(value) && value.status === "failed")
       .map((intent) => parseProviderDate(intent.updated_at))
-      .filter((value): value is Date => value !== null)) ?? providerModifiedAt
-    : providerModifiedAt ?? paymentAt;
+      .filter((value): value is Date => value !== null))
+    : topic === "saas_billing_contract.renewed"
+      ? renewalPayment!.at
+      : topic === "saas_billing_contract.activated"
+        ? activationAt
+        : providerModifiedAt ?? paymentAt;
   if (financialTopic && (!providerAt || topic !== "saas_billing_contract.paused" && !nextPaymentAt)) {
     throw new PermanentSubscriptionEvidenceError("FINANCIAL_EVIDENCE_INCOMPLETE");
-  }
-  if (topic === "saas_billing_contract.renewed" && !paymentAt) {
-    throw new PermanentSubscriptionEvidenceError("RENEWAL_PAYMENT_EVIDENCE_MISSING");
   }
 
   const termTopic = topic === "saas_billing_contract.canceled"
@@ -106,6 +120,11 @@ export function parseWooSubscriptionEvidence(
           health: topic === "saas_billing_contract.paused" ? "PAUSED" : "ACTIVE",
           providerAt: providerAt!,
           coverageEndAt: topic === "saas_billing_contract.paused" ? null : nextPaymentAt,
+          paymentId: topic === "saas_billing_contract.renewed"
+            ? renewalPayment!.id
+            : topic === "saas_billing_contract.activated"
+              ? completedPayments.find(({ at }) => at.getTime() === activationAt?.getTime())?.id ?? null
+              : completedPayments.find(({ at }) => at.getTime() === paymentAt?.getTime())?.id ?? null,
         }
       : null,
     activationAt,

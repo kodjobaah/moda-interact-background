@@ -24,11 +24,14 @@ export async function resolveContractShop(
 export function operationForReceipt(
   receipt: WooSubscriptionEvidence | undefined,
   operations: readonly WooRecurringOperation[],
-  allEvidence: readonly WooSubscriptionEvidence[],
 ): string | null {
   if (!receipt) return null;
   if (receipt.topic === "saas_billing_contract.activated") {
-    const creates = operations.filter((operation) => operation.kind === "SUBSCRIPTION_CREATE" && operation.providerReference === receipt.contractId);
+    const creates = operations.filter((operation) => operation.kind === "SUBSCRIPTION_CREATE"
+      && operation.providerReference === receipt.contractId
+      && operation.state !== "FAILED"
+      && operation.merchantPricingPlan?.displayName === receipt.planName
+      && operation.quotedAmountMinor === receipt.planPriceMinor);
     return creates.length === 1 ? creates[0]!.id : null;
   }
   if (receipt.topic === "saas_billing_contract.updated") {
@@ -36,12 +39,13 @@ export function operationForReceipt(
       contractPlanOperations(operations, receipt.contractId),
       receipt.planObservedAt,
       receipt.planPriceMinor,
+      receipt.planName,
     );
     return resolution.kind === "resolved" && resolution.operation.kind === "PLAN_SWITCH" ? resolution.operation.id : null;
   }
   if (receipt.topic === "saas_billing_contract.canceled") {
     const cancel = uniqueCancelOperation(operations, receipt.contractId);
-    return cancel && allEvidence.some(({ topic }) => topic === receipt.topic) ? cancel.id : null;
+    return cancel?.id ?? null;
   }
   return null;
 }

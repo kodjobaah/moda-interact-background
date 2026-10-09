@@ -13,6 +13,7 @@ export type RecurringIntent = {
   createdAt: Date;
   merchantPricingPlanId: string | null;
   quotedAmountMinor: number | null;
+  merchantPricingPlan: { displayName: string; shopifyPlanHandle: string } | null;
 };
 
 export type WooRecurringOperation = RecurringIntent & {
@@ -30,6 +31,7 @@ export function resolvePlanIntent(
   operations: readonly RecurringIntent[],
   providerAt: Date | null,
   providerPriceMinor: number | null,
+  providerPlanName: string | null,
 ): PlanIntentResolution {
   const candidates = operations.filter((operation) =>
     (operation.kind === "SUBSCRIPTION_CREATE" || operation.kind === "PLAN_SWITCH")
@@ -47,6 +49,9 @@ export function resolvePlanIntent(
   if (!providerAt) return { kind: "conflict", reason: "PROVIDER_SNAPSHOT_TIME_MISSING" };
   if (!operation || providerAt.getTime() < latestCreatedAt) return { kind: "stale" };
   if (!operation.merchantPricingPlanId
+    || !operation.merchantPricingPlan
+    || !providerPlanName
+    || operation.merchantPricingPlan.displayName !== providerPlanName
     || operation.quotedAmountMinor === null
     || providerPriceMinor === null
     || operation.quotedAmountMinor !== providerPriceMinor) {

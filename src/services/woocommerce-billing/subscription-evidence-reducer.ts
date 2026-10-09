@@ -2,6 +2,7 @@ export type FinancialEvidence = {
   health: "ACTIVE" | "PAUSED";
   providerAt: Date;
   coverageEndAt: Date | null;
+  paymentId: string | null;
 };
 
 export type FinancialEvidenceReduction =
@@ -23,7 +24,8 @@ export function reduceFinancialEvidence(
 
   const agrees = latest.every((evidence) =>
     evidence.health === first.health
-    && evidence.coverageEndAt?.getTime() === first.coverageEndAt?.getTime());
+    && evidence.coverageEndAt?.getTime() === first.coverageEndAt?.getTime()
+    && evidence.paymentId === first.paymentId);
   return agrees
     ? { kind: "resolved", evidence: first }
     : { kind: "conflict", reason: "CONTRADICTORY_FINANCIAL_EVIDENCE" };

@@ -14,8 +14,8 @@ export async function applyCurrentPlanIntent(
 ): Promise<string | null> {
   const resolutions = evidence
     .filter(({ topic }) => topic === "saas_billing_contract.updated" && input.current.providerSubscriptionId === input.contractId)
-    .map(({ planObservedAt, planPriceMinor }) =>
-      resolvePlanIntent(contractPlanOperations(input.operations, input.contractId), planObservedAt, planPriceMinor));
+    .map(({ planObservedAt, planPriceMinor, planName }) =>
+      resolvePlanIntent(contractPlanOperations(input.operations, input.contractId), planObservedAt, planPriceMinor, planName));
   const conflicts = resolutions.filter((value) => value.kind === "conflict");
   if (conflicts.length) throw new PermanentSubscriptionEvidenceError("PLAN_INTENT_EVIDENCE_CONFLICT");
   const resolved = resolutions.filter((value): value is Extract<typeof value, { kind: "resolved" }> => value.kind === "resolved");

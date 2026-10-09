@@ -57,12 +57,13 @@ export async function transitionWooSubscription(
   if (current.providerSubscriptionId !== input.contractId) {
     if (!canActivateCurrentFree(current) || !activation || termination.kind === "ended"
       || !latestCreateMatches(input.operations, input.contractId)) {
-      return { kind: "historical", billingOperationId: operationForReceipt(claimedEvidence, input.operations, evidence) };
+      return { kind: "historical", billingOperationId: operationForReceipt(claimedEvidence, input.operations) };
     }
     const resolution = resolvePlanIntent(
       contractPlanOperations(input.operations, input.contractId),
       activation.planObservedAt ?? activation.financial.providerAt,
       activation.planPriceMinor,
+      activation.planName,
     );
     if (resolution.kind !== "resolved" || resolution.operation.kind !== "SUBSCRIPTION_CREATE") {
       throw new PermanentSubscriptionEvidenceError(resolution.kind === "conflict" ? resolution.reason : "CREATE_INTENT_UNRESOLVED");
@@ -88,11 +89,12 @@ export async function transitionWooSubscription(
   }
   if (termination.kind === "ended") {
     await endWooPaidSubscription(transaction, current, input.contractId, termination.endAt, input.now);
-    return { kind: "projected", billingOperationId: operationForReceipt(claimedEvidence, input.operations, evidence) };
+    return { kind: "projected", billingOperationId: operationForReceipt(claimedEvidence, input.operations) };
   }
 
   const currentInput = { ...input, current };
   const planResult = await applyCurrentPlanIntent(transaction, currentInput, evidence);
+  assertRenewalPaymentIsCausal(claimedEvidence, evidence);
   const financial = reduceFinancialEvidence(evidence.flatMap(({ financial }) => financial ? [financial] : []));
   if (financial.kind === "conflict") throw new PermanentSubscriptionEvidenceError(financial.reason);
   if (financial.kind === "resolved") {
@@ -112,7 +114,7 @@ export async function transitionWooSubscription(
     });
   }
 
-  let billingOperationId = planResult;
+  const billingOperationId = operationForReceipt(claimedEvidence, input.operations);
   if (termination.kind === "scheduled") {
     await transaction.subscription.update({
       where: { id: current.id },
@@ -128,10 +130,29 @@ export async function transitionWooSubscription(
     const cancelOperation = uniqueCancelOperation(input.operations, input.contractId);
     if (cancelOperation) {
       await confirmWooOperation(transaction, cancelOperation.id);
-      billingOperationId ??= cancelOperation.id;
     }
   }
-  return { kind: billingOperationId ? "projected" : "unchanged", billingOperationId };
+  return {
+    kind: planResult || termination.kind === "scheduled" ? "projected" : billingOperationId ? "projected" : "unchanged",
+    billingOperationId,
+  };
+}
+
+export function assertRenewalPaymentIsCausal(
+  claimed: WooSubscriptionEvidence,
+  evidence: readonly WooSubscriptionEvidence[],
+): void {
+  if (claimed.topic !== "saas_billing_contract.renewed") return;
+  const payment = claimed.financial;
+  if (!payment?.paymentId) throw new PermanentSubscriptionEvidenceError("RENEWAL_PAYMENT_EVIDENCE_MISSING");
+  const priorPayments = evidence.filter(({ topic, financial }) =>
+    (topic === "saas_billing_contract.activated" || topic === "saas_billing_contract.renewed")
+    && financial !== null
+    && financial.providerAt.getTime() <= payment.providerAt.getTime());
+  if (priorPayments.some(({ topic, financial }) => financial?.providerAt.getTime() === payment.providerAt.getTime()
+    && (topic !== "saas_billing_contract.renewed" || financial.paymentId !== payment.paymentId))) {
+    throw new PermanentSubscriptionEvidenceError("RENEWAL_PAYMENT_NOT_CURRENT");
+  }
 }
 
 function terminationObservations(evidence: readonly WooSubscriptionEvidence[]) {
