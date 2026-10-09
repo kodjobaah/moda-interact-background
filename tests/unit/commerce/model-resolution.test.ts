@@ -315,7 +315,7 @@ describe("resolveProductionCommerceModel", () => {
     await expect(resolve(disabled.db)).rejects.toThrow("Commerce model is unavailable");
   });
 
-  it("rejects malformed persisted model configuration without mutating selections", async () => {
+  it("preserves malformed persisted model configuration errors without mutating selections", async () => {
     const f = fixture();
     const before = structuredClone({
       shop: f.state.shopConfiguration,
@@ -326,11 +326,25 @@ describe("resolveProductionCommerceModel", () => {
       ...model("platform-model"),
       configuration: { api_key: "not-allowed" },
     });
-    await expect(resolve(f.db)).rejects.toThrow("Commerce model is unavailable");
+    const failure = await resolve(f.db).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).not.toBe("Commerce model is unavailable");
     expect({
       shop: f.state.shopConfiguration,
       platform: f.state.platformConfiguration,
       plans: [...f.state.plans],
     }).toEqual(before);
+  });
+
+  it("preserves unexpected database failures for operational diagnosis", async () => {
+    const f = fixture();
+    const databaseFailure = new Error("database connection failed");
+    f.transaction.shop.findUnique.mockRejectedValueOnce(databaseFailure);
+
+    await expect(resolve(f.db)).rejects.toBe(databaseFailure);
   });
 });

@@ -26,93 +26,89 @@ export async function resolveProductionCommerceModel(input: {
   environment: CommerceEnvironment;
   shopId: string;
 }): Promise<ResolvedProductionCommerceModel> {
-  try {
-    const environment = CommerceEnvironmentSchema.parse(input.environment);
-    return await input.db.$transaction(
-      async (transaction) => {
-        const shop = await transaction.shop.findUnique({
-          where: { id: input.shopId },
-          select: { id: true },
-        });
-        if (!shop) throw new Error(UNAVAILABLE);
+  const environment = CommerceEnvironmentSchema.parse(input.environment);
+  return await input.db.$transaction(
+    async (transaction) => {
+      const shop = await transaction.shop.findUnique({
+        where: { id: input.shopId },
+        select: { id: true },
+      });
+      if (!shop) throw new Error(UNAVAILABLE);
 
-        const shopConfiguration = await transaction.commerceAgentConfiguration.findFirst({
-          where: { environment, scope: "SHOP", shopId: input.shopId },
-          select: { modelId: true },
-        });
-        if (shopConfiguration?.modelId) {
-          const model = await readResolvedModel(
-            transaction,
-            shopConfiguration.modelId,
-            environment,
-            input.shopId,
-            "SHOP",
-          );
-          return result("SHOP", input.shopId, null, null, model);
-        }
-
-        const subscription = await transaction.subscription.findUnique({
-          where: { shopId: shop.id },
-          select: {
-            status: true,
-            planId: true,
-            plan: { select: { shopifyPlanHandle: true } },
-          },
-        });
-        if (
-          subscription &&
-          (subscription.status === "ACTIVE" || subscription.status === "TRIALING") &&
-          subscription.planId &&
-          subscription.plan
-        ) {
-          const plan = await transaction.merchantPricingPlan.findUnique({
-            where: { shopifyPlanHandle: subscription.plan.shopifyPlanHandle },
-            select: { id: true, shopifyPlanHandle: true, commerceModelId: true },
-          });
-          if (plan) {
-            const assignment = CommercePricingPlanModelAssignmentSchema.parse({
-              merchantPricingPlanId: plan.id,
-              shopifyPlanHandle: plan.shopifyPlanHandle,
-              modelId: plan.commerceModelId,
-            });
-            if (assignment.modelId !== null) {
-              const model = await readResolvedModel(
-                transaction,
-                assignment.modelId,
-                environment,
-                input.shopId,
-                "PLATFORM",
-              );
-              return result(
-                "PRICING_PLAN",
-                input.shopId,
-                assignment.merchantPricingPlanId,
-                assignment.shopifyPlanHandle,
-                model,
-              );
-            }
-          }
-        }
-
-        const platformConfiguration = await transaction.commerceAgentConfiguration.findFirst({
-          where: { environment, scope: "PLATFORM", shopId: null },
-          select: { modelId: true },
-        });
-        if (!platformConfiguration?.modelId) throw new Error(UNAVAILABLE);
+      const shopConfiguration = await transaction.commerceAgentConfiguration.findFirst({
+        where: { environment, scope: "SHOP", shopId: input.shopId },
+        select: { modelId: true },
+      });
+      if (shopConfiguration?.modelId) {
         const model = await readResolvedModel(
           transaction,
-          platformConfiguration.modelId,
+          shopConfiguration.modelId,
           environment,
           input.shopId,
-          "PLATFORM",
+          "SHOP",
         );
-        return result("PLATFORM", null, null, null, model);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
-    );
-  } catch {
-    throw new Error(UNAVAILABLE);
-  }
+        return result("SHOP", input.shopId, null, null, model);
+      }
+
+      const subscription = await transaction.subscription.findUnique({
+        where: { shopId: shop.id },
+        select: {
+          status: true,
+          planId: true,
+          plan: { select: { shopifyPlanHandle: true } },
+        },
+      });
+      if (
+        subscription &&
+        (subscription.status === "ACTIVE" || subscription.status === "TRIALING") &&
+        subscription.planId &&
+        subscription.plan
+      ) {
+        const plan = await transaction.merchantPricingPlan.findUnique({
+          where: { shopifyPlanHandle: subscription.plan.shopifyPlanHandle },
+          select: { id: true, shopifyPlanHandle: true, commerceModelId: true },
+        });
+        if (plan) {
+          const assignment = CommercePricingPlanModelAssignmentSchema.parse({
+            merchantPricingPlanId: plan.id,
+            shopifyPlanHandle: plan.shopifyPlanHandle,
+            modelId: plan.commerceModelId,
+          });
+          if (assignment.modelId !== null) {
+            const model = await readResolvedModel(
+              transaction,
+              assignment.modelId,
+              environment,
+              input.shopId,
+              "PLATFORM",
+            );
+            return result(
+              "PRICING_PLAN",
+              input.shopId,
+              assignment.merchantPricingPlanId,
+              assignment.shopifyPlanHandle,
+              model,
+            );
+          }
+        }
+      }
+
+      const platformConfiguration = await transaction.commerceAgentConfiguration.findFirst({
+        where: { environment, scope: "PLATFORM", shopId: null },
+        select: { modelId: true },
+      });
+      if (!platformConfiguration?.modelId) throw new Error(UNAVAILABLE);
+      const model = await readResolvedModel(
+        transaction,
+        platformConfiguration.modelId,
+        environment,
+        input.shopId,
+        "PLATFORM",
+      );
+      return result("PLATFORM", null, null, null, model);
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
 }
 
 type Transaction = Prisma.TransactionClient;
