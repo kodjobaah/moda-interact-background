@@ -11,26 +11,25 @@ export class RecoveryOutreachAttemptService {
     }).recoveryOutreachAttempt;
   }
 
+  private requireAttemptModel() {
+    const model = this.attemptModel;
+    if (!model) {
+      throw new Error("Recovery outreach attempt persistence is unavailable");
+    }
+    return model;
+  }
+
   async getOrCreate(input: {
     recoveryId: string;
     sequence: 1 | 2;
     policy: RecoveryPolicySnapshot;
     recipient: string;
   }) {
+    const attemptModel = this.requireAttemptModel();
     const trigger = input.sequence === 1
       ? RecoveryOutreachTrigger.INITIAL
       : RecoveryOutreachTrigger.NO_RESPONSE_FOLLOW_UP;
-    if (!this.attemptModel) {
-      return {
-        id: `recovery-outreach:${input.recoveryId}:${input.sequence}`,
-        checkoutRecoveryId: input.recoveryId,
-        sequence: input.sequence,
-        trigger,
-        recipient: input.recipient,
-        status: RecoveryOutreachStatus.PENDING,
-      };
-    }
-    return this.attemptModel.upsert({
+    return attemptModel.upsert({
       where: {
         checkoutRecoveryId_sequence: {
           checkoutRecoveryId: input.recoveryId,
@@ -61,17 +60,8 @@ export class RecoveryOutreachAttemptService {
       offerSnapshot: unknown;
     };
   }) {
-    if (!this.attemptModel) {
-      return {
-        id: `recovery-outreach:${input.recoveryId}:2`,
-        checkoutRecoveryId: input.recoveryId,
-        sequence: 2,
-        trigger: RecoveryOutreachTrigger.NO_RESPONSE_FOLLOW_UP,
-        recipient: input.recipient,
-        status: RecoveryOutreachStatus.PENDING,
-      };
-    }
-    return this.attemptModel.upsert({
+    const attemptModel = this.requireAttemptModel();
+    return attemptModel.upsert({
       where: {
         checkoutRecoveryId_sequence: {
           checkoutRecoveryId: input.recoveryId,

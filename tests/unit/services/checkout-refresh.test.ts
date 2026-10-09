@@ -19,6 +19,13 @@ const hoisted = vi.hoisted(() => {
         upsert: vi.fn(),
         update: vi.fn(),
       },
+      recoveryOutreachAttempt: {
+        upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
+          id: "attempt-1",
+          status: "PENDING",
+          ...create,
+        })),
+      },
       conversationMessage: {
         findMany: vi.fn(),
         create: vi.fn(),

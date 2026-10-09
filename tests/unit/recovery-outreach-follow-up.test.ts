@@ -4,6 +4,35 @@ import { RecoveryOutreachAttemptService } from "../../src/services/recovery-outr
 import { safeParseEffectiveRecoveryPolicy } from "@modainteract/moda-interact-shared/recovery-policy";
 
 describe("recovery outreach follow-up", () => {
+  it("fails closed when durable attempt persistence is unavailable", async () => {
+    const service = new RecoveryOutreachAttemptService({} as any);
+    const policy = {
+      recoveryDelayMinutes: 30,
+      recoveryOfferMode: "NONE" as const,
+      fixedShopifyDiscountId: null,
+      followUpEnabled: true,
+      followUpDelayMinutes: 60,
+      source: "MERCHANT" as const,
+      offerSnapshot: null,
+    };
+
+    await expect(service.getOrCreate({
+      recoveryId: "recovery-1",
+      sequence: 1,
+      policy,
+      recipient: "15551234567",
+    })).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
+    await expect(service.getOrCreateFollowUp({
+      recoveryId: "recovery-1",
+      recipient: "15551234567",
+      initialAttempt: {
+        configuredOfferMode: "NONE",
+        fixedShopifyDiscountId: null,
+        offerSnapshot: null,
+      },
+    })).rejects.toThrow("Recovery outreach attempt persistence is unavailable");
+  });
+
   it("uses the exact deterministic sequence-two job identity", () => {
     expect(createRecoveryOutreachFollowUpJobId({ checkoutRecoveryId: "recovery-1", sequence: 2 }))
       .toBe("recovery-outreach-follow-up:recovery-1:2");
