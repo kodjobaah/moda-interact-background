@@ -67,6 +67,9 @@ export class RecoveryInitiationService {
 
   resolveRecipient(event: RecoveryCheckoutSeed): string {
     if (event.customer.phone) return event.customer.phone;
+    if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+      throw new Error("TEST_WHATSAPP_RECIPIENT is only available in development or test");
+    }
     const testRecipient = process.env.TEST_WHATSAPP_RECIPIENT;
     if (!testRecipient) {
       throw new Error("No customer phone and TEST_WHATSAPP_RECIPIENT is not configured");
@@ -100,7 +103,7 @@ export class RecoveryInitiationService {
     });
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1) {
+  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1, resolvedRecipient?: string) {
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
       throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
@@ -127,7 +130,7 @@ export class RecoveryInitiationService {
       sequence: 1,
       policy,
     });
-    const recipient = this.ports!.resolveRecipient(event);
+    const recipient = resolvedRecipient ?? this.ports!.resolveRecipient(event);
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
       providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),

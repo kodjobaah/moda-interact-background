@@ -6,9 +6,11 @@ import type { PendingRecoveryCandidateService } from "../pending-recovery-candid
 import type { ShopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import type { RecoverySnapshotBuilderService } from "./recovery-snapshot-builder.service.js";
 import type { findLatestRecovery } from "./latest-recovery.js";
+import type { RecoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 
 export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string }
+  | { outcome: "deferred-no-recipient"; checkoutToken: string }
   | { outcome: "no-op-existing"; checkoutToken: string; status: string }
   | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
   | { outcome: "discarded-not-found"; checkoutToken: string }
@@ -28,7 +30,8 @@ type RecoveryMaterializationDependencies = {
   pendingRecoveryCandidate: Pick<PendingRecoveryCandidateService, "withCheckoutLock" | "hasOrderProcessed">;
   findLatestRecovery: typeof findLatestRecovery;
   snapshotBuilder: Pick<RecoverySnapshotBuilderService, "build">;
-  initiate: (seed: RecoveryCheckoutSeed, generation?: number) => Promise<unknown>;
+  recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
+  initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string) => Promise<unknown>;
 };
 
 export class RecoveryMaterializationService {
@@ -119,11 +122,11 @@ export class RecoveryMaterializationService {
         }
 
         const seed = await this.dependencies.snapshotBuilder.build(candidate, shopDomain, checkout);
-        if (generation === 1) {
-          await this.dependencies.initiate(seed);
-        } else {
-          await this.dependencies.initiate(seed, generation);
+        const recipient = await this.dependencies.recipientResolver.resolve(seed);
+        if (!recipient) {
+          return { outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken } as const;
         }
+        await this.dependencies.initiate(seed, generation, recipient);
 
         return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
       },

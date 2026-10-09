@@ -138,6 +138,26 @@ describe("findLatestRecovery", () => {
 });
 
 describe("RecoveryInitiationService", () => {
+  it("does not use the test recipient override in production", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousTestRecipient = process.env.TEST_WHATSAPP_RECIPIENT;
+    process.env.NODE_ENV = "production";
+    process.env.TEST_WHATSAPP_RECIPIENT = "15550000000";
+    const { service } = createInitiation();
+
+    try {
+      expect(() => service.resolveRecipient({
+        ...event,
+        customer: { ...event.customer, phone: null },
+      })).toThrow("TEST_WHATSAPP_RECIPIENT is only available in development or test");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousTestRecipient === undefined) delete process.env.TEST_WHATSAPP_RECIPIENT;
+      else process.env.TEST_WHATSAPP_RECIPIENT = previousTestRecipient;
+    }
+  });
+
   it("durably blocks capacity-exhausted admissions without a failure code", async () => {
     const { service, billing, ports } = createInitiation({
       billing: { admit: vi.fn(async () => ({ kind: "blocked" as const, reason: "capacity-exhausted" })) },

@@ -27,6 +27,7 @@ import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recover
 import { RecoveryOutreachFollowUpProcessorService } from "./checkout-recovery/recovery-outreach-follow-up-processor.service.js";
 import { recoverySnapshotBuilderService } from "./checkout-recovery/recovery-snapshot-builder.service.js";
 import { RecoveryMaterializationService } from "./checkout-recovery/recovery-materialization.service.js";
+import { recoveryRecipientResolverService } from "./checkout-recovery/recovery-recipient-resolver.service.js";
 import type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
 export type { MaturedCandidateMaterializationResult } from "./checkout-recovery/recovery-materialization.service.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
@@ -74,9 +75,8 @@ export class CheckoutRecoveryService {
       pendingRecoveryCandidate: pendingRecoveryCandidateService,
       findLatestRecovery,
       snapshotBuilder: this.snapshotBuilderService,
-      initiate: (seed, generation) => generation === undefined
-        ? this.handleCheckoutCreated(seed)
-        : this.handleCheckoutCreated(seed, generation),
+      recipientResolver: recoveryRecipientResolverService,
+      initiate: (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
     });
     this.checkoutEventOrchestrator = new CheckoutEventOrchestratorService(
       prisma,
@@ -178,8 +178,8 @@ export class CheckoutRecoveryService {
     return this.orderRecoveryCorrelationService.handleOrderCompleted(event);
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1) {
-    return this.initiationService.handleCheckoutCreated(event, generation);
+  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1, resolvedRecipient?: string) {
+    return this.initiationService.handleCheckoutCreated(event, generation, resolvedRecipient);
   }
 
   async processRecoveryOutreachFollowUp(recoveryId: string) {

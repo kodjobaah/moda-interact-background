@@ -79,6 +79,12 @@ function createHarness(options: {
       return { shop: candidate.shopDomain, checkoutToken: candidate.checkoutToken } as never;
     }),
   };
+  const recipientResolver = {
+    resolve: vi.fn(async () => {
+      order.push("recipient");
+      return "15551234567" as string | null;
+    }),
+  };
   const initiate = vi.fn(async () => {
     order.push("initiate");
   });
@@ -88,6 +94,7 @@ function createHarness(options: {
     pendingRecoveryCandidate,
     findLatestRecovery,
     snapshotBuilder,
+    recipientResolver,
     initiate,
   });
   return {
@@ -98,6 +105,7 @@ function createHarness(options: {
     pendingRecoveryCandidate,
     findLatestRecovery,
     snapshotBuilder,
+    recipientResolver,
     initiate,
   };
 }
@@ -120,6 +128,7 @@ describe("RecoveryMaterializationService", () => {
       "latest-generation",
       "provider-lookup",
       "snapshot",
+      "recipient",
       "initiate",
     ]);
     expect(harness.abandonedCheckoutLookup.lookup).toHaveBeenCalledExactlyOnceWith({
@@ -130,8 +139,14 @@ describe("RecoveryMaterializationService", () => {
       abandonedCheckoutUrl: candidate.abandonedCheckoutUrl,
       checkoutCreatedAt: candidate.checkoutCreatedAt,
     });
-    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ checkoutToken: candidate.checkoutToken }));
-    expect(harness.initiate.mock.calls[0]).toHaveLength(1);
+    expect(harness.recipientResolver.resolve).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+    );
+    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+      1,
+      "15551234567",
+    );
   });
 
   it("discards before domain resolution when initial eligibility fails", async () => {
@@ -169,6 +184,7 @@ describe("RecoveryMaterializationService", () => {
       pendingRecoveryCandidate: harness.pendingRecoveryCandidate,
       findLatestRecovery: harness.findLatestRecovery,
       snapshotBuilder: harness.snapshotBuilder,
+      recipientResolver: harness.recipientResolver,
       initiate: harness.initiate,
     });
 
@@ -245,6 +261,17 @@ describe("RecoveryMaterializationService", () => {
     expect(harness.initiate).not.toHaveBeenCalled();
   });
 
+  it("defers a missing recipient without initiating recovery", async () => {
+    const harness = createHarness();
+    harness.recipientResolver.resolve.mockResolvedValueOnce(null);
+
+    await expect(harness.service.materialize(candidate)).resolves.toEqual({
+      outcome: "deferred-no-recipient",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
   it("keeps provider errors retryable by throwing without snapshot or initiation", async () => {
     const harness = createHarness({ lookupOutcome: { kind: "provider-error", message: "Shopify unavailable" } });
 
@@ -272,6 +299,10 @@ describe("RecoveryMaterializationService", () => {
     const result = await harness.service.materialize(candidate);
 
     expect(result.outcome).toBe("recovery-created");
-    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ checkoutToken: candidate.checkoutToken }), 5);
+    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+      5,
+      "15551234567",
+    );
   });
 });
