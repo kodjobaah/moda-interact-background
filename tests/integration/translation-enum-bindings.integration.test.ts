@@ -15,7 +15,8 @@ import { TranslationReconciliationService } from "../../src/services/translation
 import { backgroundRuntimeConfig } from "../helpers/background-runtime-config.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-const describeWithDatabase = testDatabaseUrl ? describe : describe.skip;
+const disposableIntegrationEnabled = process.env.MODA_DISPOSABLE_INTEGRATION === "1";
+const describeWithDatabase = testDatabaseUrl && disposableIntegrationEnabled ? describe : describe.skip;
 const runtimeConfig = {
   current: () =>
     backgroundRuntimeConfig({

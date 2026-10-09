@@ -35,6 +35,9 @@ const hoisted = vi.hoisted(() => {
     customerServiceMock: {
       resolveCustomer: vi.fn(async () => null),
     },
+    customerPhoneServiceMock: {
+      getCurrentPhone: vi.fn(async () => ({ phone: "+15551234567" })),
+    },
     conversationServiceMock: {
       getOrCreateRecoveryConversation: vi.fn(async (recoveryId: string) => ({
         id: `conversation-${recoveryId}`,
@@ -136,6 +139,9 @@ vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
 vi.mock("../../../src/services/customer.service.js", () => ({
   customerService: hoisted.customerServiceMock,
 }));
+vi.mock("../../../src/services/customer.phone.service.js", () => ({
+  customerPhoneService: hoisted.customerPhoneServiceMock,
+}));
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: hoisted.conversationServiceMock,
 }));
@@ -216,6 +222,8 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     executionEligibilityMock.evaluate.mockResolvedValue({ allowed: true, shopId: "shop_1" });
+    customerServiceMock.resolveCustomer.mockResolvedValue({ id: "customer_1" } as never);
+    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
     whatsappTemplateSelectorMock.select.mockResolvedValue({
       outcome: "selected",
       canonicalLanguageTag: "en-GB",
@@ -251,6 +259,11 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       status: "DETECTED",
         ...data,
     }));
+      prismaMock.checkoutRecovery.update.mockImplementation(async ({ data }) => ({
+        id: "recovery-1",
+        status: "DETECTED",
+        ...data,
+      }));
   });
 
   it("creates a recovery from current Shopify data when the lookup is found and recoverable", async () => {
@@ -289,6 +302,38 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     // The recovery-message workflow should run for a newly materialized recovery.
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "15551234567" }),
+    );
+  });
+
+  it("defers a matured candidate with no current CustomerPhone before creating recovery or billing state", async () => {
+    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValueOnce(null as never);
+
+    const result = await service.materializeMaturedCandidate(candidate);
+
+    expect(result).toEqual({ outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken });
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("uses current CustomerPhone when the checkout snapshot has no phone", async () => {
+    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValueOnce({ phone: "+44 (0)20 7946 0958" } as never);
+    lookupServiceMock.lookup.mockResolvedValueOnce({
+      kind: "found",
+      checkout: { ...recoverableCheckout, customer: { ...recoverableCheckout.customer, phone: null } },
+    });
+
+    await service.materializeMaturedCandidate(candidate);
+
+    expect(customerServiceMock.resolveCustomer).toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "4402079460958" }),
+    );
   });
 
   it("discards an inactive matured candidate before resolving Shopify data", async () => {
