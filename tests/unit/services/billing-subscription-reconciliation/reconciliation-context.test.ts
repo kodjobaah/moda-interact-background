@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ShopPlatform } from "@prisma/client";
 import { ReconciliationContextService } from "../../../../src/services/billing-subscription-reconciliation/reconciliation-context.js";
 
 describe("ReconciliationContextService", () => {
@@ -12,7 +13,7 @@ describe("ReconciliationContextService", () => {
 
     await expect(service.loadShop("shop-1")).resolves.toBe(shopRow);
     expect(shopFindUnique).toHaveBeenCalledExactlyOnceWith({
-      where: { id: "shop-1" },
+      where: { id: "shop-1", platform: ShopPlatform.SHOPIFY },
       select: {
         id: true,
         status: true,

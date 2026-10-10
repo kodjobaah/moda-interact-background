@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ShopPlatform } from "@prisma/client";
 
 import { BillingReconciliationService } from "../../../src/services/billing-reconciliation.service.js";
 import { SamePlanBillingPeriodRolloverService } from "../../../src/services/same-plan-billing-period-rollover.service.js";
@@ -673,6 +674,15 @@ describe("BillingReconciliationService", () => {
     await service.reconcileOnce(2);
     await service.reconcileOnce(2);
     await service.reconcileOnce(2);
+
+    for (const [query] of database.shop.findMany.mock.calls) {
+      expect(query.where).toMatchObject({
+        platform: ShopPlatform.SHOPIFY,
+        shopifyShopId: { not: null },
+        status: "ACTIVE",
+      });
+    }
+    expect(database.shop.findMany.mock.calls.some(([query]) => query.where.id?.gt)).toBe(true);
 
     expect(partner.getSubscriptionReconciliationSnapshot.mock.calls.map(([shopifyShopId]) => shopifyShopId)).toEqual([
       "gid://shopify/Shop/A",

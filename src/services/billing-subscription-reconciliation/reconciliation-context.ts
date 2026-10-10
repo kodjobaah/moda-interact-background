@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import { ShopPlatform, type Prisma, type PrismaClient } from "@prisma/client";
 
 const shopReconciliationSelect = {
   id: true,
@@ -43,7 +43,7 @@ export class ReconciliationContextService {
 
   async loadShop(shopId: string) {
     return this.database.shop.findUnique({
-      where: { id: shopId },
+      where: { id: shopId, platform: ShopPlatform.SHOPIFY },
       select: shopReconciliationSelect,
     });
   }
