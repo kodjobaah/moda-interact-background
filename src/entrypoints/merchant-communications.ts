@@ -7,6 +7,7 @@ import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lea
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
 import { storeCategoryTranslationReconciliationService } from "../services/store-category-translation-reconciliation.service.js";
+import { merchantPricingTranslationReconciliationService } from "../services/merchant-pricing-translation-reconciliation.service.js";
 import { storeCategoryTranslationPublicationService } from "../services/store-category-translation-publication.service.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
@@ -34,6 +35,7 @@ void startReadyWorkerProcess({
         const reconciliationOutcomes = await Promise.allSettled([
           translationReconciliationService.reconcile(undefined, snapshot),
           storeCategoryTranslationReconciliationService.reconcile(snapshot),
+          merchantPricingTranslationReconciliationService.reconcile(snapshot),
         ]);
         const publicationOutcomes = await Promise.allSettled([
           storeCategoryTranslationPublicationService.reconcile(
@@ -67,6 +69,7 @@ void startReadyWorkerProcess({
         () => backgroundRuntimeConfigService.close(),
         () => translationReconciliationService.close(),
         () => storeCategoryTranslationReconciliationService.close(),
+        () => merchantPricingTranslationReconciliationService.close(),
         closeWorkerObservability,
         closeQueuePerformanceTelemetry,
       ],
