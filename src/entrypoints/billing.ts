@@ -10,11 +10,41 @@ import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
+import { wooSubscriptionReceiptReconciliationService } from "../services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
+
+export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
+  runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  leaseHandle: { generation: number },
+  reconcileGlobalBilling: (config: BackgroundRuntimeConfigSnapshot) => Promise<T>,
+): Promise<T> {
+  let wooReceipts: Awaited<ReturnType<typeof wooSubscriptionReceiptReconciliationService.reconcileBatch>> | undefined;
+  try {
+    wooReceipts = await wooSubscriptionReceiptReconciliationService.reconcileBatch(
+      runtimeConfig.billingReconciliationShopBatchSize,
+    );
+  } catch (error) {
+    logger.error("billing.woocommerce.subscription_receipts.failed", {
+      leaseGeneration: leaseHandle.generation,
+      configVersion: runtimeConfig.version,
+      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+    });
+  }
+
+  if (wooReceipts !== undefined) {
+    logger.info("billing.woocommerce.subscription_receipts.completed", {
+      leaseGeneration: leaseHandle.generation,
+      ...wooReceipts,
+    });
+  }
+
+  return reconcileGlobalBilling(runtimeConfig);
+}
 
 function reportBillingReconciliationFailure(error: unknown): void {
   const message = error instanceof Error ? error.message.slice(0, 256) : "unknown failure";
@@ -77,7 +107,11 @@ void startReadyWorkerProcess({
         shopBatchSize: runtimeConfig.billingReconciliationShopBatchSize,
       });
 
-      const reconciliation = await billingReconciliationService.reconcileOnce(runtimeConfig);
+      const reconciliation = await reconcileWooReceiptsAndGlobalBillingScan(
+        runtimeConfig,
+        leaseHandle,
+        (config) => billingReconciliationService.reconcileOnce(config),
+      );
       logger.info("billing.reconciliation.global_scan_completed", {
         leaseGeneration: leaseHandle.generation,
         subscriptionsScanned: reconciliation.subscriptionsScanned,
