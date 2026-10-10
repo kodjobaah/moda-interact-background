@@ -4,7 +4,7 @@ import {
   createBillingSubscriptionReconcileJobId,
   type BillingSubscriptionReconcileJob,
 } from "@modainteract/moda-interact-shared/billing";
-import { BillingPlanKind, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
+import { BillingPlanKind, ShopPlatform, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -45,6 +45,7 @@ export class ReconciliationQueueService {
   async reconstruct(): Promise<number> {
     const rows = await this.database.shop.findMany({
       where: {
+        platform: ShopPlatform.SHOPIFY,
         AND: [
           { OR: [
             { status: "ACTIVE" },
