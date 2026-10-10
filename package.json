@@ -27,7 +27,8 @@
     "prisma:validate": "prisma validate --schema database/prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema database/prisma/schema.prisma",
     "test:arch029-store-category-translation-runtime": "node scripts/validate-arch029-store-category-translation-runtime.mjs",
-    "test:arch029-store-category-translation-publication": "node scripts/validate-arch029-store-category-translation-publication.mjs"
+    "test:arch029-store-category-translation-publication": "node scripts/validate-arch029-store-category-translation-publication.mjs",
+    "test:arch031-merchant-pricing-translation-runtime": "vitest run tests/unit/domain/merchant-pricing-translation.test.ts tests/unit/services/merchant-pricing-translation tests/unit/services/merchant-pricing-translation-batch-submit.service.test.ts tests/unit/services/merchant-pricing-translation-batch-results.service.test.ts tests/unit/services/merchant-pricing-translation-runtime-wiring.test.ts tests/unit/services/merchant-pricing-translation-reconciliation.service.test.ts tests/unit/services/merchant-pricing-translation-batch-poll.service.test.ts"
   },
   "keywords": [],
   "author": "",
