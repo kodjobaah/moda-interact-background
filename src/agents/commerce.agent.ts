@@ -27,6 +27,10 @@ export async function runCommerceAgent(
     async () => {
       const environment = resolveCommerceEnvironment();
       const db = dependencies.db ?? prisma;
+      const logger = dependencies.logger ?? createLogger({
+        serviceName: "moda-messaging-worker",
+        environment,
+      });
       let model = dependencies.model;
       let modelSelection;
       if (!model) {
@@ -41,14 +45,13 @@ export async function runCommerceAgent(
           environment,
           shopId: context.shopId,
           credentialResolver,
+          logger,
+          conversationId: context.conversation.conversationId,
+          inboundVersion: context.conversation.version,
         });
         model = productionModel;
         modelSelection = productionModel.selection;
       }
-      const logger = dependencies.logger ?? createLogger({
-        serviceName: "moda-messaging-worker",
-        environment,
-      });
       return executeCommerceHost(context, {
         model,
         logger,
