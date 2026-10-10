@@ -34,35 +34,64 @@ function database(url = testDatabaseUrl): PrismaClient {
   return new PrismaClient({ datasourceUrl: url });
 }
 
+// ARCH-014 validates contiguous catalogue positions and all 20 translations
+// at transaction commit. Each test plan must satisfy both invariants.
+const catalogueLocales = [
+  "cs", "da", "de", "en", "es", "fi", "fr", "it", "ja", "ko", "nb", "nl", "pl",
+  "pt-BR", "pt-PT", "sv", "th", "tr", "zh-Hans", "zh-Hant",
+] as const;
+
+async function createPaidFixturePlan(
+  client: PrismaClient,
+  input: { handle: string; name: string; credits: number; amountMinor: number },
+) {
+  return client.$transaction(async (tx) => {
+    // Fixture setup runs sequentially in this targeted disposable test suite.
+    // Appending to the current catalogue preserves the global 0..N-1 positions.
+    const cataloguePosition = await tx.merchantPricingPlan.count();
+    const cataloguePlan = await tx.merchantPricingPlan.create({
+      data: {
+        id: `catalogue-${randomUUID()}`,
+        shopifyPlanHandle: input.handle,
+        displayName: input.name,
+        planKind: "PAID_METERED",
+        cataloguePosition,
+        includedRecoveryCredits: input.credits,
+        allowancePeriod: "EVERY_30_DAYS",
+        billingPeriod: "EVERY_30_DAYS",
+        recurringAmountMinor: input.amountMinor,
+        currency: "USD",
+        translations: {
+          create: catalogueLocales.map((locale) => ({
+            locale,
+            merchantDescription: `${input.name} integration fixture`,
+          })),
+        },
+      },
+    });
+    const paidPlan = await tx.billingPlan.create({
+      data: {
+        shopifyPlanHandle: input.handle,
+        name: input.name,
+        kind: "PAID_METERED",
+        includedRecoveryConversationAllowance: input.credits,
+      },
+    });
+    return { cataloguePlan, paidPlan };
+  });
+}
+
 async function createFixture(client: PrismaClient, contractId = `contract-${randomUUID()}`): Promise<Fixture> {
   const suffix = randomUUID();
   const shopId = `woo-${suffix}`;
   const freePlanId = await getCanonicalFreePlanId(client);
   const paidHandle = `arch027-paid-${suffix}`;
-  const [paidPlan, cataloguePlan] = await Promise.all([
-    client.billingPlan.create({
-      data: {
-        shopifyPlanHandle: paidHandle,
-        name: "Fixture Paid",
-        kind: "PAID_METERED",
-        includedRecoveryConversationAllowance: 10,
-      },
-    }),
-    client.merchantPricingPlan.create({
-      data: {
-        id: `catalogue-${suffix}`,
-        shopifyPlanHandle: paidHandle,
-        displayName: "Fixture Paid",
-        planKind: "PAID_METERED",
-        cataloguePosition: 1,
-        includedRecoveryCredits: 10,
-        allowancePeriod: "EVERY_30_DAYS",
-        billingPeriod: "EVERY_30_DAYS",
-        recurringAmountMinor: 1999,
-        currency: "USD",
-      },
-    }),
-  ]);
+  const { paidPlan, cataloguePlan } = await createPaidFixturePlan(client, {
+    handle: paidHandle,
+    name: "Fixture Paid",
+    credits: 10,
+    amountMinor: 1999,
+  });
   await client.shop.create({
     data: { id: shopId, domain: `${suffix}.woo.test`, platform: "WOOCOMMERCE", status: "ACTIVE" },
   });
@@ -79,7 +108,7 @@ async function createFixture(client: PrismaClient, contractId = `contract-${rand
     receiptIds: [],
     operationIds: [],
     periodIds: [],
-    planHandles: [freeHandle, paidHandle],
+    planHandles: [paidHandle],
   };
   await createOperation(client, fixture, "SUBSCRIPTION_CREATE", contractId, cataloguePlan.id, 1999, activationAt);
   return fixture;
@@ -350,27 +379,11 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
         where: { billingPeriodId_counter: { billingPeriodId: originalPeriod.id, counter: "INCLUDED_RECOVERY_CREDITS" } },
         data: { committedQuantity: 2, forfeitedQuantity: 1 },
       });
-      const secondCatalogue = await client.merchantPricingPlan.create({
-        data: {
-          id: `catalogue-switch-${randomUUID()}`,
-          shopifyPlanHandle: `arch027-switch-${randomUUID()}`,
-          displayName: "Fixture Switch",
-          planKind: "PAID_METERED",
-          cataloguePosition: 2,
-          includedRecoveryCredits: 20,
-          allowancePeriod: "EVERY_30_DAYS",
-          billingPeriod: "EVERY_30_DAYS",
-          recurringAmountMinor: 2999,
-          currency: "USD",
-        },
-      });
-      const secondPaid = await client.billingPlan.create({
-        data: {
-          shopifyPlanHandle: secondCatalogue.shopifyPlanHandle,
-          name: "Fixture Switch",
-          kind: "PAID_METERED",
-          includedRecoveryConversationAllowance: 20,
-        },
+      const { cataloguePlan: secondCatalogue, paidPlan: secondPaid } = await createPaidFixturePlan(client, {
+        handle: `arch027-switch-${randomUUID()}`,
+        name: "Fixture Switch",
+        credits: 20,
+        amountMinor: 2999,
       });
       fixture.planHandles.push(secondCatalogue.shopifyPlanHandle);
       fixture.planHandles.push(secondPaid.shopifyPlanHandle);
@@ -450,22 +463,11 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
       expect(scheduled.currentPeriodEnd).toEqual(originalPeriod.periodEnd);
       expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: canceled } })).toMatchObject({ billingOperationId: cancelOperationId });
 
-      const laterCatalogue = await client.merchantPricingPlan.create({
-        data: {
-          id: `catalogue-late-${randomUUID()}`,
-          shopifyPlanHandle: `arch027-late-${randomUUID()}`,
-          displayName: "Fixture Late Switch",
-          planKind: "PAID_METERED",
-          cataloguePosition: 3,
-          includedRecoveryCredits: 30,
-          allowancePeriod: "EVERY_30_DAYS",
-          billingPeriod: "EVERY_30_DAYS",
-          recurringAmountMinor: 3999,
-          currency: "USD",
-        },
-      });
-      const laterPaid = await client.billingPlan.create({
-        data: { shopifyPlanHandle: laterCatalogue.shopifyPlanHandle, name: "Fixture Late Switch", kind: "PAID_METERED", includedRecoveryConversationAllowance: 30 },
+      const { cataloguePlan: laterCatalogue, paidPlan: laterPaid } = await createPaidFixturePlan(client, {
+        handle: `arch027-late-${randomUUID()}`,
+        name: "Fixture Late Switch",
+        credits: 30,
+        amountMinor: 3999,
       });
       fixture.planHandles.push(laterCatalogue.shopifyPlanHandle);
       fixture.planHandles.push(laterPaid.shopifyPlanHandle);
@@ -548,6 +550,39 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
     }
   }, 30_000);
 
+  it("quarantines uncorrelated receipts without retrying or violating the processing-state constraint", async () => {
+    const client = database();
+    const unknownContract = `unknown-contract-${randomUUID()}`;
+    const missingContract = await client.wooCommerceBillingWebhookReceipt.create({
+      data: {
+        topic: "saas_billing_contract.updated",
+        providerContractId: null,
+        payloadSha256: randomBytes(32),
+        normalizedPayload: { subscription: { id: "missing-contract" } },
+      },
+    });
+    const uncorrelated = await client.wooCommerceBillingWebhookReceipt.create({
+      data: {
+        topic: "saas_billing_contract.updated",
+        providerContractId: unknownContract,
+        payloadSha256: randomBytes(32),
+        normalizedPayload: wrapper(unknownContract, "active"),
+      },
+    });
+    try {
+      const service = new WooSubscriptionReceiptReconciliationService(client, () => now);
+      expect(await service.reconcileBatch(10)).toMatchObject({ claimed: 2, needsAttention: 2 });
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: missingContract.id } }))
+        .toMatchObject({ processedAt: null, processingError: "PROVIDER_CONTRACT_ID_MISSING" });
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: uncorrelated.id } }))
+        .toMatchObject({ processedAt: null, processingError: "CONTRACT_NOT_CORRELATED" });
+      expect(await service.reconcileBatch(10)).toMatchObject({ claimed: 0 });
+    } finally {
+      await client.wooCommerceBillingWebhookReceipt.deleteMany({ where: { id: { in: [missingContract.id, uncorrelated.id] } } });
+      await client.$disconnect();
+    }
+  }, 30_000);
+
   it("isolates historical contracts and permanently records contradictory authenticated financial evidence", async () => {
     const client = database();
     const historical = await createFixture(client);
@@ -594,8 +629,12 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
       expect(frozen).toMatchObject({ status: "FROZEN", lastSyncErrorCode: "CONTRADICTORY_FINANCIAL_EVIDENCE", lastSyncErrorAt: now });
       for (const id of [firstConflict, secondConflict, refunded]) {
         expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id } }))
-          .toMatchObject({ processedAt: now, processingError: "CONTRADICTORY_FINANCIAL_EVIDENCE" });
+          .toMatchObject({ processedAt: now, processingError: null });
       }
+      expect(await client.billingOperation.findUniqueOrThrow({ where: { id: conflict.operationIds[0]! } }))
+        .toMatchObject({ lastErrorCode: "CONTRADICTORY_FINANCIAL_EVIDENCE" });
+      expect(await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10))
+        .toMatchObject({ claimed: 0 });
       expect(await client.recoveryCreditRefund.count({ where: { shopId: conflict.shopId } })).toBe(0);
     } finally {
       await cleanup(client, [historical, conflict]);

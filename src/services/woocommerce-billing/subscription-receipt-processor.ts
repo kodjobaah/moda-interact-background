@@ -51,19 +51,19 @@ export async function processNextWooSubscriptionReceipt(
       claimedId = receipt.id;
       contractId = receipt.providerContractId;
       if (!receipt.providerContractId) {
-        await quarantineWooReceipt(transaction, receipt.id, "PROVIDER_CONTRACT_ID_MISSING", now);
+        await quarantineWooReceipt(transaction, receipt.id, "PROVIDER_CONTRACT_ID_MISSING");
         return "attention";
       }
 
       const shopId = await resolveContractShop(transaction, receipt.providerContractId);
       if (!shopId) {
-        await quarantineWooReceipt(transaction, receipt.id, "CONTRACT_NOT_CORRELATED", now);
+        await quarantineWooReceipt(transaction, receipt.id, "CONTRACT_NOT_CORRELATED");
         return "attention";
       }
       await lockShop(transaction, shopId);
       const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { platform: true } });
       if (shop?.platform !== ShopPlatform.WOOCOMMERCE) {
-        await quarantineWooReceipt(transaction, receipt.id, "CONTRACT_SHOP_PLATFORM_MISMATCH", now);
+        await quarantineWooReceipt(transaction, receipt.id, "CONTRACT_SHOP_PLATFORM_MISMATCH");
         return "attention";
       }
 

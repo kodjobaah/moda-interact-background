@@ -30,11 +30,12 @@ export async function quarantineWooReceipt(
   transaction: Prisma.TransactionClient,
   receiptId: string,
   code: string,
-  processedAt: Date,
 ): Promise<void> {
+  // A quarantined receipt remains unprocessed but is excluded by the claim's
+  // processingError IS NULL predicate. The DB forbids an error with processedAt.
   const updated = await transaction.wooCommerceBillingWebhookReceipt.updateMany({
     where: { id: receiptId, processedAt: null, processingError: null },
-    data: { processedAt, processingError: code.slice(0, 128) },
+    data: { processingError: code.slice(0, 128) },
   });
   if (updated.count !== 1) throw new Error("Woo subscription receipt quarantine was lost before completion");
 }
@@ -48,11 +49,11 @@ export async function recordPermanentWooReceiptConflict(
 ): Promise<WooReceiptProcessingOutcome> {
   return database.$transaction(async (transaction) => {
     const receipt = await transaction.wooCommerceBillingWebhookReceipt.findUnique({ where: { id: receiptId } });
-    if (!receipt || receipt.processedAt) return "empty";
+    if (!receipt || receipt.processedAt || receipt.processingError) return "empty";
     const contractId = receipt.providerContractId ?? knownContractId;
     const shopId = contractId ? await resolveContractShop(transaction, contractId) : null;
     if (!shopId) {
-      await quarantineWooReceipt(transaction, receiptId, code, now);
+      await quarantineWooReceipt(transaction, receiptId, code);
       return "attention";
     }
 
@@ -85,9 +86,11 @@ export async function recordPermanentWooReceiptConflict(
       },
       data: { lastErrorCode: code.slice(0, 128) },
     });
+    // The permanent reason is recorded on the Subscription and matching
+    // BillingOperations above. Processed receipts must have no processingError.
     await transaction.wooCommerceBillingWebhookReceipt.update({
       where: { id: receiptId },
-      data: { processedAt: now, processingError: code.slice(0, 128) },
+      data: { processedAt: now, processingError: null },
     });
     return subscription ? "attention" : "historical";
   });
