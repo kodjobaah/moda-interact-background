@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ConversationLanguageService,
-  type LanguageDetector,
 } from "../../../src/services/conversation-language.service.js";
 import { ConversationService } from "../../../src/services/conversation.service.js";
 
@@ -54,13 +53,13 @@ describe("ConversationService language persistence", () => {
       }),
     );
 
-    const detector: LanguageDetector = {
-      detect: vi
-        .fn()
-        .mockResolvedValue({ languageTag: "fr-FR", confidence: 0.96 }),
-    };
+    const serviceLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+    } as any;
     const service = new ConversationService(
-      new ConversationLanguageService(detector),
+      new ConversationLanguageService(),
+      serviceLogger,
     );
 
     await service.receiveMessage({
@@ -99,15 +98,13 @@ describe("ConversationService language persistence", () => {
         languageTag: true,
         languageSource: true,
         checkoutRecoveryId: true,
-        checkoutRecoveryId: true,
       },
     });
-    expect(detector.detect).not.toHaveBeenCalled();
-
     prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
       inboundVersion: 2,
       languageTag: "en-GB",
       languageSource: "SHOPIFY",
+      checkoutRecoveryId: "recovery-1",
     });
     prismaMock.conversation.updateMany.mockResolvedValue({ count: 1 });
 
@@ -124,6 +121,58 @@ describe("ConversationService language persistence", () => {
       where: { id: "conversation-1", inboundVersion: 2, processingInboundVersion: 2, processingStartedAt: { gt: expect.any(Date) } },
       data: { languageTag: "fr", languageSource: "DETECTED" },
     });
+    expect(serviceLogger.info).toHaveBeenCalledWith(
+      "whatsapp.language.changed",
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        observedVersion: 2,
+        previousLanguageTag: "en-GB",
+        languageTag: "fr",
+        languageSource: "detected",
+      }),
+    );
+  });
+
+  it("logs a bounded rejection at exactly 80% without persisting the language", async () => {
+    const serviceLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+    } as any;
+    const service = new ConversationService(
+      new ConversationLanguageService(),
+      serviceLogger,
+    );
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+      inboundVersion: 2,
+      languageTag: "en-GB",
+      languageSource: "SHOPIFY",
+      checkoutRecoveryId: "recovery-1",
+    });
+    prismaMock.conversation.updateMany.mockClear();
+
+    await expect(
+      service.applyDetectedLanguage({
+        conversationId: "conversation-1",
+        version: 2,
+        message: "Bonjour, pouvez-vous m'aider avec ma commande ?",
+        detectedLanguageTag: "fr",
+        detectedLanguageConfidence: 0.8,
+      }),
+    ).resolves.toBe(false);
+
+    expect(prismaMock.conversation.updateMany).not.toHaveBeenCalled();
+    expect(serviceLogger.debug).toHaveBeenCalledWith(
+      "whatsapp.language.detection_rejected",
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        observedVersion: 2,
+        currentLanguageTag: "en-GB",
+        detectedLanguageTag: "fr",
+        detectedLanguageConfidence: 0.8,
+        reason: "low-confidence",
+      }),
+    );
+    expect(serviceLogger.info).not.toHaveBeenCalled();
   });
 
   it("persists a provider duplicate only once", async () => {
@@ -360,6 +409,6 @@ describe("A1 shop language recovery initialization", () => {
   expect(prismaMock.conversation.upsert).toHaveBeenLastCalledWith(expect.objectContaining({create:expect.objectContaining({languageTag:null,languageSource:null}),update:{}}));
  });
  it("L03 preserves established French on the next initial-resolution pass",async()=>{
-  expect(await new ConversationLanguageService().resolveInitial({currentLanguageTag:"fr",currentLanguageSource:"detected",merchantLanguageTag:"en-GB"})).toMatchObject({languageTag:"fr",languageSource:"detected",changed:false});
+  expect(new ConversationLanguageService().resolveInitialLanguage({currentLanguageTag:"fr",currentLanguageSource:"detected",merchantLanguageTag:"en-GB"})).toMatchObject({languageTag:"fr",languageSource:"detected",changed:false});
  });
 });

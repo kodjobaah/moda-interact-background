@@ -1,5 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
-import type { CommerceModelInvoker, ModelRequest, ModelStep } from "@modainteract/moda-interact-shared/commerce/runner";
+import {
+  CommerceModelInvocationFailure,
+  type CommerceModelInvoker,
+  type ModelRequest,
+  type ModelStep,
+} from "@modainteract/moda-interact-shared/commerce/runner";
+import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { OpenRouterCredentialResolutionFailure } from "../../../src/commerce/openrouter-credential-failure.js";
 import type { ResolvedCommerceModel } from "@modainteract/moda-interact-shared/commerce/model";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -68,6 +75,9 @@ function dependencies(credentials: string[]) {
 const createInvoker = (options: {
   credentialResolver: OpenRouterCredentialResolver;
   createClient: (options: any) => CommerceModelInvoker;
+  logger?: StructuredLogger;
+  conversationId?: string;
+  inboundVersion?: number;
 }) => createProductionCommerceModelInvoker({
   db: {} as PrismaClient,
   environment: "DEVELOPMENT",
@@ -99,6 +109,7 @@ describe("createProductionCommerceModelInvoker", () => {
         configurationSchemaVersion: 1,
         configuration: { temperature: 0.2 },
         credential: "credential-A",
+        onDiagnostic: expect.any(Function),
       },
       {
         provider: "openai",
@@ -106,6 +117,7 @@ describe("createProductionCommerceModelInvoker", () => {
         configurationSchemaVersion: 1,
         configuration: { temperature: 0.2 },
         credential: "credential-B",
+        onDiagnostic: expect.any(Function),
       },
     ]);
     expect(deps.created[0]?.client.invoke).toHaveBeenCalledWith(
@@ -142,14 +154,150 @@ describe("createProductionCommerceModelInvoker", () => {
     expect(deps.createClient).not.toHaveBeenCalled();
   });
 
-  it("maps Shared provider failures to a bounded non-sensitive error", async () => {
+  it("classifies an unexpected provider exception without leaking the provider payload", async () => {
     const deps = dependencies(["credential-A"]);
     deps.createClient.mockImplementation(() => ({
       invoke: vi.fn(async () => { throw new Error("provider payload credential-A"); }),
     }));
     const invoker = await createInvoker(deps);
-    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toThrow(
-      "Commerce model invocation failed",
-    );
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      name: "CommerceModelInvocationFailure",
+      message: "Commerce model unavailable",
+      diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
+    });
+  });
+});
+
+describe("production Commerce model failure diagnostics", () => {
+  const logger = () => {
+    const warn = vi.fn();
+    return { warn, value: { warn } as unknown as StructuredLogger };
+  };
+
+  it("preserves rate-limit and authentication diagnostics from the Shared model client", async () => {
+    for (const [status, reason] of [
+      [429, "PROVIDER_RATE_LIMITED"],
+      [401, "PROVIDER_AUTH_FAILED"],
+    ] as const) {
+      const deps = dependencies(["credential-A"]);
+      const logs = logger();
+      deps.createClient.mockImplementation((options: any) => ({
+        invoke: vi.fn(async () => {
+          options.onDiagnostic({ stage: "provider", reason, statusCode: status });
+          throw new CommerceModelInvocationFailure({
+            stage: "model.invoke", reasonCode: reason,
+            providerStage: "provider", statusCode: status,
+          }, new Error("provider body contains credential-A"));
+        }),
+      }));
+      const invoker = await createInvoker({
+        ...deps, logger: logs.value,
+        conversationId: "conversation-a", inboundVersion: 7,
+      });
+      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+        name: "CommerceModelInvocationFailure",
+        diagnostic: { reasonCode: reason, statusCode: status },
+      });
+      const providerLog = logs.warn.mock.calls.find(([event]) => event === "commerce.model.provider_diagnostic");
+      expect(providerLog?.[1]).toMatchObject({
+        reasonCode: reason, statusCode: status,
+        conversationId: "conversation-a", inboundVersion: 7,
+        selectionSource: "PRICING_PLAN", shopId: "shop-a",
+        reasonMessage: expect.any(String), operatorAction: expect.any(String),
+      });
+      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
+    }
+  });
+
+  it("reports a provider response validation failure without including the response body", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation((options: any) => ({
+      invoke: vi.fn(async () => {
+        options.onDiagnostic({ stage: "response", reason: "PROVIDER_RESPONSE_USAGE_INVALID" });
+        throw new CommerceModelInvocationFailure({
+          stage: "model.invoke", reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
+          providerStage: "response",
+        }, new Error("raw provider response credential-A"));
+      }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      diagnostic: { reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID" },
+    });
+    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+      ["commerce.model.provider_diagnostic", expect.objectContaining({
+        reasonCode: "PROVIDER_RESPONSE_USAGE_INVALID",
+        reasonMessage: expect.stringContaining("output-token"),
+      })],
+    ]));
+    expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
+  });
+
+  it("distinguishes missing credentials from failed database lookups", async () => {
+    for (const [reason, runnerReason] of [
+      ["CREDENTIAL_NOT_CONFIGURED", "MODEL_CREDENTIAL_INVALID"],
+      ["CREDENTIAL_LOOKUP_FAILED", "MODEL_INVOCATION_FAILED"],
+    ] as const) {
+      const deps = dependencies([]);
+      const logs = logger();
+      deps.resolve.mockRejectedValueOnce(new OpenRouterCredentialResolutionFailure(
+        reason, new Error("secret credential store error"),
+      ));
+      const invoker = await createInvoker({ ...deps, logger: logs.value });
+      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+        diagnostic: { reasonCode: runnerReason },
+      });
+      expect(deps.createClient).not.toHaveBeenCalled();
+      expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+        ["commerce.model.credential_failed", expect.objectContaining({
+          reasonCode: reason, reasonMessage: expect.any(String),
+          operatorAction: expect.any(String),
+        })],
+      ]));
+      expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("secret credential store error");
+    }
+  });
+
+  it("distinguishes client construction failures without disclosing the original error", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation(() => { throw new Error("secret construction detail"); });
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      diagnostic: { reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED" },
+    });
+    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+      ["commerce.model.invocation_failed", expect.objectContaining({
+        reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED",
+      })],
+    ]));
+    expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("secret construction detail");
+  });
+
+  it("preserves outcomes when the diagnostic logger throws", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = { warn: vi.fn(() => { throw new Error("sink is offline"); }) } as unknown as StructuredLogger;
+    deps.createClient.mockImplementation((options: any) => ({
+      invoke: vi.fn(async () => {
+        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_RATE_LIMITED", statusCode: 429 });
+        return step;
+      }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs });
+    await expect(invoker.invoke(request, new AbortController().signal)).resolves.toBe(step);
+  });
+
+  it("does not include raw provider text from unexpected exceptions", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation(() => ({
+      invoke: vi.fn(async () => { throw new Error("secret token credential-A"); }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
+    });
+    expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
   });
 });

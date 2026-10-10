@@ -116,7 +116,7 @@ describe("production worker observability startup", () => {
   it("uses the architect-approved exact shared runtime release", () => {
     expect(
       packageJson.dependencies["@modainteract/moda-interact-shared"],
-    ).toBe("1.3.0");
+    ).toBe("1.4.0");
   });
 
   it("packages every production observability preload", () => {

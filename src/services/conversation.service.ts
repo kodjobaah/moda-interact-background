@@ -8,10 +8,20 @@ import type {
 import type { MessageDirection } from "../domain/types.js";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
+import {
   ConversationLanguageService,
   conversationLanguageService,
 } from "./conversation-language.service.js";
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+
+const logger = createLogger({
+  serviceName: "moda-messaging-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 export interface ResolvedIncomingMessage {
   conversationId: string;
@@ -42,6 +52,7 @@ export interface ConversationTurnState {
 export class ConversationService {
   constructor(
     private readonly languageService: ConversationLanguageService = conversationLanguageService,
+    private readonly serviceLogger: StructuredLogger = logger,
   ) {}
 
   /**
@@ -105,7 +116,7 @@ export class ConversationService {
       },
     });
 
-    const language = await this.languageService.resolveInitial({
+    const language = this.languageService.resolveInitialLanguage({
       currentLanguageTag: currentConversation.languageTag,
       currentLanguageSource: fromPrismaLanguageSource(
         currentConversation.languageSource,
@@ -389,14 +400,33 @@ export class ConversationService {
   }): Promise<boolean> {
     const conversation = await prisma.conversation.findUniqueOrThrow({
       where: { id: conversationId },
-      select: { inboundVersion: true, languageTag: true, languageSource: true, checkoutRecoveryId: true },
+      select: {
+        inboundVersion: true,
+        languageTag: true,
+        languageSource: true,
+        checkoutRecoveryId: true,
+      },
     });
 
+    const hasDetectionCandidate =
+      detectedLanguageTag !== null || detectedLanguageConfidence !== null;
+
     if (conversation.inboundVersion !== version) {
+      if (hasDetectionCandidate) {
+        this.serviceLogger.debug("whatsapp.language.detection_rejected", {
+          conversationId,
+          observedVersion: version,
+          currentInboundVersion: conversation.inboundVersion,
+          currentLanguageTag: conversation.languageTag,
+          detectedLanguageTag,
+          detectedLanguageConfidence,
+          reason: "stale-turn",
+        });
+      }
       return false;
     }
 
-    const language = this.languageService.acceptDetectedLanguage({
+    const language = this.languageService.evaluateDetectedLanguage({
       recoveryConversation: !!conversation.checkoutRecoveryId,
       message,
       currentLanguageTag: conversation.languageTag,
@@ -408,18 +438,52 @@ export class ConversationService {
     });
 
     if (!language.changed) {
+      if (hasDetectionCandidate) {
+        this.serviceLogger.debug("whatsapp.language.detection_rejected", {
+          conversationId,
+          observedVersion: version,
+          currentLanguageTag: conversation.languageTag,
+          detectedLanguageTag,
+          detectedLanguageConfidence,
+          reason: language.reason,
+        });
+      }
       return false;
     }
 
     const updated = await prisma.conversation.updateMany({
-      where: { id: conversationId, inboundVersion: version, processingInboundVersion: version, processingStartedAt: { gt: new Date(Date.now() - 120_000) } },
+      where: {
+        id: conversationId,
+        inboundVersion: version,
+        processingInboundVersion: version,
+        processingStartedAt: { gt: new Date(Date.now() - 120_000) },
+      },
       data: {
         languageTag: language.languageTag,
         languageSource: toPrismaLanguageSource(language.languageSource),
       },
     });
 
-    return updated.count === 1;
+    if (updated.count !== 1) {
+      this.serviceLogger.debug("whatsapp.language.detection_rejected", {
+        conversationId,
+        observedVersion: version,
+        currentLanguageTag: conversation.languageTag,
+        detectedLanguageTag,
+        detectedLanguageConfidence,
+        reason: "stale-processing-lease",
+      });
+      return false;
+    }
+
+    this.serviceLogger.info("whatsapp.language.changed", {
+      conversationId,
+      observedVersion: version,
+      previousLanguageTag: conversation.languageTag,
+      languageTag: language.languageTag,
+      languageSource: language.languageSource,
+    });
+    return true;
   }
 
   /**
@@ -438,7 +502,7 @@ export class ConversationService {
       where: { id: checkoutRecoveryId },
       select: { shop: { select: { id: true, defaultLanguageTag: true } } },
     });
-    const language = await this.languageService.resolveInitial({
+    const language = this.languageService.resolveInitialLanguage({
       currentLanguageTag: null, currentLanguageSource: null,
       merchantLanguageTag: recovery.shop.defaultLanguageTag ?? null,
     });

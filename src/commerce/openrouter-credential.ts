@@ -3,9 +3,12 @@ import {
   createCommerceOpenRouterCredentialAad,
   type CommerceEnvironment,
 } from "@modainteract/moda-interact-shared/commerce/model";
-import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
-
-const UNAVAILABLE = "OpenRouter credential is unavailable";
+import {
+  decryptEncryptedCredential,
+  isValidEncryptedCredentialEnvelope,
+  isValidEncryptedCredentialKey,
+} from "../security/aes-gcm-credential.js";
+import { OpenRouterCredentialResolutionFailure } from "./openrouter-credential-failure.js";
 
 export type OpenRouterCredentialResolver = {
   resolve(input: {
@@ -20,27 +23,47 @@ export function createOpenRouterCredentialResolver(input: {
 }): OpenRouterCredentialResolver {
   return {
     async resolve({ environment, signal }): Promise<string> {
-      if (signal.aborted) throw new Error(UNAVAILABLE);
-      try {
-        const row = await input.db.commerceOpenRouterCredential.findUnique({
-          where: { environment },
-        });
-        if (signal.aborted || !row || row.environment !== environment)
-          throw new Error(UNAVAILABLE);
+      const assertCurrent = () => {
+        if (signal.aborted)
+          throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_SIGNAL_ABORTED");
+      };
+      assertCurrent();
 
-        const credential = decryptEncryptedCredential({
+      const row = await input.db.commerceOpenRouterCredential.findUnique({
+        where: { environment },
+      }).catch((error: unknown) => {
+        assertCurrent();
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_LOOKUP_FAILED", error);
+      });
+      assertCurrent();
+      if (!row)
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_NOT_CONFIGURED");
+      if (row.environment !== environment)
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVIRONMENT_MISMATCH");
+      if (!isValidEncryptedCredentialEnvelope(row))
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVELOPE_INVALID");
+      if (!Object.hasOwn(input.keyring, row.keyId))
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_KEY_MISSING");
+      const key = input.keyring[row.keyId];
+      if (!isValidEncryptedCredentialKey(key))
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_KEY_INVALID");
+
+      let credential: string;
+      try {
+        credential = decryptEncryptedCredential({
           envelope: row,
-          key: input.keyring[row.keyId],
+          key,
           aad: createCommerceOpenRouterCredentialAad({
             environment,
             keyId: row.keyId,
           }),
         });
-        if (signal.aborted) throw new Error(UNAVAILABLE);
-        return credential;
-      } catch {
-        throw new Error(UNAVAILABLE);
+      } catch (error) {
+        assertCurrent();
+        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_DECRYPTION_FAILED", error);
       }
+      assertCurrent();
+      return credential;
     },
   };
 }

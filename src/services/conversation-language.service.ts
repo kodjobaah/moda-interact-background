@@ -3,17 +3,7 @@ import {
   type InternationalContext,
 } from "@modainteract/moda-interact-shared/internationalization";
 
-export type LanguageDetectionResult = {
-  languageTag: string;
-  confidence: number;
-};
-
-export interface LanguageDetector {
-  detect(message: string): LanguageDetectionResult | Promise<LanguageDetectionResult | null> | null;
-}
-
-export type ConversationLanguageInput = {
-  message: string;
+export type InitialConversationLanguageInput = {
   currentLanguageTag: string | null;
   currentLanguageSource: InternationalContext["languageSource"];
   shopifyLanguageTag?: string | null;
@@ -37,7 +27,21 @@ export type DetectedLanguageInput = {
   detectedLanguageConfidence: number | null;
 };
 
-const DETECTION_CONFIDENCE_THRESHOLD = 0.85;
+export type DetectedLanguageDecisionReason =
+  | "accepted"
+  | "customer-explicit"
+  | "unstable-input"
+  | "invalid-tag"
+  | "invalid-confidence"
+  | "low-confidence"
+  | "same-base-language";
+
+export type DetectedLanguageEvaluation = ConversationLanguageResolution & {
+  reason: DetectedLanguageDecisionReason;
+};
+
+// Product rule: a detected language must be above 80% confidence.
+const DETECTION_CONFIDENCE_THRESHOLD = 0.8;
 
 function normalizeLanguageTag(value: string | null | undefined): string | null {
   if (!value?.trim()) {
@@ -61,20 +65,17 @@ export function isStableLanguageSignal(message: string): boolean {
   return words.length >= 2 && words.join("").length >= 8;
 }
 
-export function defaultLanguageDetector(): null {
-  return null;
-}
-
+/**
+ * Conversation language policy only.
+ *
+ * The CommerceAgent turn is the single language detector for ordinary inbound
+ * conversation traffic. This service resolves the initial/fallback language and
+ * decides whether the model's bounded detection result is safe to persist.
+ */
 export class ConversationLanguageService {
-  constructor(
-    private readonly detector: LanguageDetector = {
-      detect: defaultLanguageDetector,
-    },
-  ) {}
-
-  async resolveInitial(
-    input: Omit<ConversationLanguageInput, "message">,
-  ): Promise<ConversationLanguageResolution> {
+  resolveInitialLanguage(
+    input: InitialConversationLanguageInput,
+  ): ConversationLanguageResolution {
     const currentLanguageTag = normalizeLanguageTag(input.currentLanguageTag);
     const explicitLanguageTag = normalizeLanguageTag(input.explicitLanguageTag);
 
@@ -104,33 +105,70 @@ export class ConversationLanguageService {
     return this.result(null, null, currentLanguageTag);
   }
 
-  acceptDetectedLanguage(
+  evaluateDetectedLanguage(
     input: DetectedLanguageInput,
-  ): ConversationLanguageResolution {
+  ): DetectedLanguageEvaluation {
     const currentLanguageTag = normalizeLanguageTag(input.currentLanguageTag);
     const detectedLanguageTag = normalizeLanguageTag(input.detectedLanguageTag);
 
     if (!input.recoveryConversation && input.currentLanguageSource === "customer-explicit") {
-      return this.result(
-        currentLanguageTag,
-        input.currentLanguageSource,
-        currentLanguageTag,
-      );
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource,
+          currentLanguageTag,
+        ),
+        reason: "customer-explicit",
+      };
+    }
+
+    if (!isStableLanguageSignal(input.message)) {
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource ?? null,
+          currentLanguageTag,
+        ),
+        reason: "unstable-input",
+      };
+    }
+
+    if (!detectedLanguageTag) {
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource ?? null,
+          currentLanguageTag,
+        ),
+        reason: "invalid-tag",
+      };
     }
 
     if (
-      !isStableLanguageSignal(input.message) ||
-      !detectedLanguageTag ||
       typeof input.detectedLanguageConfidence !== "number" ||
       !Number.isFinite(input.detectedLanguageConfidence) ||
-      input.detectedLanguageConfidence < DETECTION_CONFIDENCE_THRESHOLD ||
+      input.detectedLanguageConfidence < 0 ||
       input.detectedLanguageConfidence > 1
     ) {
-      return this.result(
-        currentLanguageTag,
-        input.currentLanguageSource ?? null,
-        currentLanguageTag,
-      );
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource ?? null,
+          currentLanguageTag,
+        ),
+        reason: "invalid-confidence",
+      };
+    }
+
+    if (input.detectedLanguageConfidence <= DETECTION_CONFIDENCE_THRESHOLD) {
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource ?? null,
+          currentLanguageTag,
+        ),
+        reason: "low-confidence",
+      };
     }
 
     if (
@@ -138,64 +176,20 @@ export class ConversationLanguageService {
       new Intl.Locale(currentLanguageTag).language ===
         new Intl.Locale(detectedLanguageTag).language
     ) {
-      return this.result(
-        currentLanguageTag,
-        input.currentLanguageSource ?? null,
-        currentLanguageTag,
-      );
+      return {
+        ...this.result(
+          currentLanguageTag,
+          input.currentLanguageSource ?? null,
+          currentLanguageTag,
+        ),
+        reason: "same-base-language",
+      };
     }
 
-    return this.result(detectedLanguageTag, "detected", currentLanguageTag);
-  }
-
-  async resolve(
-    input: ConversationLanguageInput,
-  ): Promise<ConversationLanguageResolution> {
-    const currentLanguageTag = normalizeLanguageTag(input.currentLanguageTag);
-    const explicitLanguageTag = normalizeLanguageTag(input.explicitLanguageTag);
-
-    if (explicitLanguageTag) {
-      return this.result(explicitLanguageTag, "customer-explicit", currentLanguageTag);
-    }
-
-    if (isStableLanguageSignal(input.message)) {
-      const detected = await this.detector.detect(input.message);
-      const detectedLanguageTag = normalizeLanguageTag(detected?.languageTag);
-
-      if (
-        detectedLanguageTag &&
-        typeof detected?.confidence === "number" &&
-        detected.confidence >= DETECTION_CONFIDENCE_THRESHOLD
-      ) {
-        return this.result(detectedLanguageTag, "detected", currentLanguageTag);
-      }
-    }
-
-    if (currentLanguageTag) {
-      return this.result(
-        currentLanguageTag,
-        input.currentLanguageSource ?? null,
-        currentLanguageTag,
-      );
-    }
-
-    const fallbackCandidates: Array<{
-      languageTag: string | null | undefined;
-      source: NonNullable<InternationalContext["languageSource"]>;
-    }> = [
-      { languageTag: input.shopifyLanguageTag, source: "shopify" },
-      { languageTag: input.merchantLanguageTag, source: "merchant-default" },
-      { languageTag: input.platformLanguageTag, source: "platform-default" },
-    ];
-
-    for (const candidate of fallbackCandidates) {
-      const languageTag = normalizeLanguageTag(candidate.languageTag);
-      if (languageTag) {
-        return this.result(languageTag, candidate.source, currentLanguageTag);
-      }
-    }
-
-    return this.result(null, null, currentLanguageTag);
+    return {
+      ...this.result(detectedLanguageTag, "detected", currentLanguageTag),
+      reason: "accepted",
+    };
   }
 
   private result(

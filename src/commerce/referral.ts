@@ -24,7 +24,7 @@ export function renderStoreReferral(
     !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/i.test(domain)
   )
     throw new CommerceHostError("INVALID_INPUT");
-  const resolved = conversationLanguageService.acceptDetectedLanguage({
+  const resolved = conversationLanguageService.evaluateDetectedLanguage({
     message: messages.map((m) => m.content).join("\n"),
     currentLanguageTag: language.tag,
     currentLanguageSource:
