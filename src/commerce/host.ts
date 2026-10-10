@@ -23,6 +23,7 @@ import {
   mcpConfiguration,
   type McpConfiguration,
 } from "./mcp-client.js";
+import { hostDiagnostic, logCommerceHostFailure } from "./host-diagnostics.js";
 import {
   digest,
   readGrant,
@@ -59,11 +60,31 @@ export async function executeCommerceHost(
   try {
     return await execute(context, deps);
   } catch (error) {
-    if (error instanceof CommerceHostError) throw error;
-    if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
-    if (error instanceof Error && error.name === "TimeoutError")
-      throw new CommerceHostError("DEADLINE", true);
-    throw new CommerceHostError("UNAVAILABLE", true);
+    const failure = error instanceof CommerceHostError ? error
+      : deps.signal?.aborted
+        ? new CommerceHostError("CANCELLED", false,
+          hostDiagnostic("host.lifecycle", "HOST_CANCELLED"), error)
+        : error instanceof Error && error.name === "TimeoutError"
+          ? new CommerceHostError("DEADLINE", true,
+            hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"), error)
+          : new CommerceHostError("UNAVAILABLE", true,
+            hostDiagnostic("host.lifecycle", "HOST_UNEXPECTED_FAILURE", { cause: error }), error);
+    // This is an internal operational record only. No customer payload, raw
+    // exception message, grant, credentials or MCP response is logged.
+    try {
+      const logger = deps.logger ?? createLogger({
+        serviceName: "moda-messaging-worker",
+        environment: resolveCommerceEnvironment(),
+      });
+      logCommerceHostFailure(logger, failure.code, failure.retryable,
+        failure.diagnostic ?? hostDiagnostic("host.lifecycle", "HOST_UNEXPECTED_FAILURE"), {
+          shopId: context.shopId,
+          recoveryId: context.recovery.id,
+          conversationId: context.conversation.conversationId,
+          inboundVersion: context.conversation.version,
+        });
+    } catch { /* Failure reporting must not modify the underlying outcome. */ }
+    throw failure;
   }
 }
 async function execute(
@@ -87,22 +108,28 @@ async function execute(
     },
   });
   const recovery = current?.checkoutRecovery;
-  if (
-    !current ||
-    !recovery ||
-    recovery.id !== context.recovery.id ||
-    ["standalone", "product-only"].includes(recovery.id)
-  )
-    throw new CommerceHostError("DENIED");
-  if (recovery.shopId !== context.shopId || recovery.shop.domain !== context.shop)
-    throw new CommerceHostError("DENIED");
-  if (
-    current.inboundVersion !== context.conversation.version ||
-    current.processingInboundVersion !== current.inboundVersion ||
-    !current.processingStartedAt ||
-    Date.now() - current.processingStartedAt.getTime() >= 120_000
-  )
-    throw new CommerceHostError("STALE_TURN");
+  if (!current) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_CONVERSATION_MISSING"));
+  if (!recovery) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_RECOVERY_MISSING"));
+  if (recovery.id !== context.recovery.id) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_RECOVERY_MISMATCH"));
+  if (["standalone", "product-only"].includes(recovery.id))
+    throw new CommerceHostError("DENIED", false,
+      hostDiagnostic("host.authorization", "HOST_RECOVERY_UNSUPPORTED"));
+  if (recovery.shopId !== context.shopId) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"));
+  if (recovery.shop.domain !== context.shop) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_SHOP_DOMAIN_MISMATCH"));
+  if (current.inboundVersion !== context.conversation.version ||
+    current.processingInboundVersion !== current.inboundVersion)
+    throw new CommerceHostError("STALE_TURN", false,
+      hostDiagnostic("host.turn_state", "HOST_VERSION_STALE"));
+  if (!current.processingStartedAt) throw new CommerceHostError("STALE_TURN", false,
+    hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING"));
+  if (Date.now() - current.processingStartedAt.getTime() >= 120_000)
+    throw new CommerceHostError("STALE_TURN", false,
+      hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"));
   const turn = CommerceTurnIdentitySchema.parse({
     contractVersion: "commerce.v1",
     shopId: recovery.shopId,
@@ -115,12 +142,26 @@ async function execute(
     environment: resolveCommerceEnvironment(),
   });
   const config = deps.config ?? mcpConfiguration();
-  let grant = await readGrant(turn);
+  let grant: Awaited<ReturnType<typeof readGrant>>;
+  try { grant = await readGrant(turn); }
+  catch (error) {
+    if (error instanceof CommerceHostError && error.diagnostic) throw error;
+    throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+      error instanceof CommerceHostError ? error.retryable : true,
+      hostDiagnostic("host.grant", error instanceof CommerceHostError && error.code === "DENIED"
+        ? "HOST_AUTHORIZATION_DENIED" : "HOST_GRANT_READ_FAILED"), error);
+  }
   if (!grant) {
     const resolver = new CommerceMcpClient(config, turn, signal);
     try {
       await resolver.connect();
-      grant = await persistGrant(turn, await resolver.manifest());
+      try { grant = await persistGrant(turn, await resolver.manifest()); }
+      catch (error) {
+        if (error instanceof CommerceHostError && error.diagnostic) throw error;
+        throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+          error instanceof CommerceHostError ? error.retryable : true,
+          hostDiagnostic("host.grant", "HOST_GRANT_PERSIST_FAILED"), error);
+      }
     } finally {
       await resolver.close();
     }
@@ -136,8 +177,15 @@ async function execute(
     await client.connect();
     const manifest = await client.manifest();
     if (!manifestMatchesGrant(manifest, grant))
-      throw new CommerceHostError("INCOMPATIBLE_VERSION");
-    await validateRelease(manifest);
+      throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
+        hostDiagnostic("host.grant", "HOST_MANIFEST_GRANT_MISMATCH"));
+    try { await validateRelease(manifest); }
+    catch (error) {
+      if (error instanceof CommerceHostError && error.diagnostic) throw error;
+      throw new CommerceHostError(error instanceof CommerceHostError ? error.code : "UNAVAILABLE",
+        error instanceof CommerceHostError ? error.retryable : true,
+        hostDiagnostic("host.release", "HOST_RELEASE_VALIDATION_FAILED"), error);
+    }
     const descriptors = [
       ...new Map(
         manifest.capabilities.map((capability) => [
@@ -146,8 +194,21 @@ async function execute(
         ]),
       ).values(),
     ];
+    let runnerHostFailure: CommerceHostError | undefined;
+    const retain = (failure: CommerceHostError) => {
+      runnerHostFailure = failure;
+      return failure;
+    };
+    const observeMcp = async <T>(action: () => Promise<T>): Promise<T> => {
+      try { return await action(); }
+      catch (error) {
+        if (error instanceof CommerceHostError) retain(error);
+        throw error;
+      }
+    };
     const assertCurrent = async () => {
-      if (deps.signal?.aborted) throw new CommerceHostError("CANCELLED");
+      if (deps.signal?.aborted) throw retain(new CommerceHostError("CANCELLED", false,
+        hostDiagnostic("host.lifecycle", "HOST_CANCELLED")));
       signal.throwIfAborted();
       const state = await prisma.conversation.findUnique({
         where: { id: current.id },
@@ -156,19 +217,24 @@ async function execute(
           processingInboundVersion: true,
           processingStartedAt: true,
         },
+      }).catch((error: unknown) => {
+        throw retain(new CommerceHostError("UNAVAILABLE", true,
+          hostDiagnostic("host.turn_state", "HOST_STATE_LOOKUP_FAILED"), error));
       });
-      if (
-        !state ||
-        state.inboundVersion !== turn.inboundVersion ||
-        state.processingInboundVersion !== turn.inboundVersion ||
-        !state.processingStartedAt ||
-        Date.now() - state.processingStartedAt.getTime() >= 120_000
-      )
-        throw new CommerceHostError("STALE_TURN");
+      if (!state || state.inboundVersion !== turn.inboundVersion ||
+        state.processingInboundVersion !== turn.inboundVersion)
+        throw retain(new CommerceHostError("STALE_TURN", false,
+          hostDiagnostic("host.turn_state", "HOST_VERSION_STALE")));
+      if (!state.processingStartedAt)
+        throw retain(new CommerceHostError("STALE_TURN", false,
+          hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_MISSING")));
+      if (Date.now() - state.processingStartedAt.getTime() >= 120_000)
+        throw retain(new CommerceHostError("STALE_TURN", false,
+          hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED")));
     };
     const available = async (requestSignal = signal) => {
       await assertCurrent();
-      const listed = await client.tools(requestSignal);
+      const listed = await observeMcp(() => client.tools(requestSignal));
       for (const entry of listed) {
         const descriptor = descriptors.find((d) => d.name === entry.name);
         const expectedGrant = descriptor && grant.grantedTools.find(
@@ -178,20 +244,20 @@ async function execute(
             candidate.toolName === descriptor.name &&
             candidate.definitionVersion === descriptor.definitionVersion,
         );
-        if (
-          !descriptor ||
-          !expectedGrant ||
-          canonicalJson(entry) !==
-            canonicalJson({
-              name: descriptor.name,
-              description: descriptor.description,
-              inputSchema: descriptor.inputSchema,
-            })
-        )
-          throw new CommerceHostError("DENIED");
+        if (!descriptor) throw retain(new CommerceHostError("DENIED", false,
+          hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
+        if (!expectedGrant) throw retain(new CommerceHostError("DENIED", false,
+          hostDiagnostic("host.authorization", "HOST_TOOL_GRANT_MISMATCH")));
+        if (canonicalJson(entry) !== canonicalJson({
+          name: descriptor.name,
+          description: descriptor.description,
+          inputSchema: descriptor.inputSchema,
+        })) throw retain(new CommerceHostError("DENIED", false,
+          hostDiagnostic("host.authorization", "HOST_TOOL_DESCRIPTOR_CHANGED")));
       }
       if (new Set(listed.map((t) => t.name)).size !== listed.length)
-        throw new CommerceHostError("INVALID_INPUT");
+        throw retain(new CommerceHostError("INVALID_INPUT", false,
+          hostDiagnostic("mcp.tool_list", "HOST_TOOL_LIST_DUPLICATE")));
       return new Set(listed.map((t) => t.name));
     };
     await available();
@@ -298,7 +364,7 @@ async function execute(
           execute: async (args, toolSignal): Promise<CommerceToolResult> => {
             toolSignal.throwIfAborted();
             await assertCurrent();
-            const result = await client.call(descriptor.name, args, toolSignal);
+            const result = await observeMcp(() => client.call(descriptor.name, args, toolSignal));
             evidence.record(descriptor, args, result, extractEvidence);
             return result;
           },
@@ -312,8 +378,18 @@ async function execute(
         signal.reason instanceof Error &&
         signal.reason.name === "TimeoutError"
       )
-        throw new CommerceHostError("DEADLINE", true);
-      throw new CommerceHostError(result.error.code, result.error.retryable);
+        throw new CommerceHostError("DEADLINE", true,
+          hostDiagnostic("host.lifecycle", "HOST_DEADLINE_EXCEEDED"));
+      const source = runnerHostFailure?.diagnostic;
+      throw new CommerceHostError(result.error.code, result.error.retryable,
+        source ? hostDiagnostic(source.stage, source.reasonCode, {
+          ...(source.operation === undefined ? {} : { operation: source.operation }),
+          ...(source.statusCode === undefined ? {} : { statusCode: source.statusCode }),
+          cause: runnerHostFailure,
+          ...(result.error.diagnostic ? { runnerDiagnostic: result.error.diagnostic } : {}),
+        }) : hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE", {
+          ...(result.error.diagnostic ? { runnerDiagnostic: result.error.diagnostic } : {}),
+        }));
     }
     signal.throwIfAborted();
     const latest = await prisma.conversation.findUnique({
