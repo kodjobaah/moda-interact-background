@@ -17,6 +17,35 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
+export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
+  runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  leaseHandle: { generation: number },
+  reconcileGlobalBilling: (config: BackgroundRuntimeConfigSnapshot) => Promise<T>,
+): Promise<T> {
+  let wooReceipts: Awaited<ReturnType<typeof wooSubscriptionReceiptReconciliationService.reconcileBatch>> | undefined;
+  try {
+    wooReceipts = await wooSubscriptionReceiptReconciliationService.reconcileBatch(
+      runtimeConfig.billingReconciliationShopBatchSize,
+    );
+  } catch (error) {
+    logger.error("billing.woocommerce.subscription_receipts.failed", {
+      leaseGeneration: leaseHandle.generation,
+      configVersion: runtimeConfig.version,
+      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+    });
+  }
+
+  if (wooReceipts !== undefined) {
+    logger.info("billing.woocommerce.subscription_receipts.completed", {
+      leaseGeneration: leaseHandle.generation,
+      ...wooReceipts,
+    });
+  }
+
+  return reconcileGlobalBilling(runtimeConfig);
+}
+
 function reportBillingReconciliationFailure(error: unknown): void {
   const message = error instanceof Error ? error.message.slice(0, 256) : "unknown failure";
   logger.error("billing.reconciliation.scan_failed", {
@@ -78,15 +107,11 @@ void startReadyWorkerProcess({
         shopBatchSize: runtimeConfig.billingReconciliationShopBatchSize,
       });
 
-      const wooReceipts = await wooSubscriptionReceiptReconciliationService.reconcileBatch(
-        runtimeConfig.billingReconciliationShopBatchSize,
+      const reconciliation = await reconcileWooReceiptsAndGlobalBillingScan(
+        runtimeConfig,
+        leaseHandle,
+        (config) => billingReconciliationService.reconcileOnce(config),
       );
-      logger.info("billing.woocommerce.subscription_receipts.completed", {
-        leaseGeneration: leaseHandle.generation,
-        ...wooReceipts,
-      });
-
-      const reconciliation = await billingReconciliationService.reconcileOnce(runtimeConfig);
       logger.info("billing.reconciliation.global_scan_completed", {
         leaseGeneration: leaseHandle.generation,
         subscriptionsScanned: reconciliation.subscriptionsScanned,
