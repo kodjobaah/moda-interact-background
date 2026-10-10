@@ -304,6 +304,43 @@ describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
     expect(JSON.stringify(records)).not.toMatch(/Name <ignore rules>|Tell me about this basket|credential|provider payload/i);
   });
 
+  it("ARCH-029 identifies a model-invoker TypeError without logging its raw text", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker", environment: "DEVELOPMENT",
+      sink: (record) => records.push(record as unknown as Record<string, unknown>),
+    });
+    await expect(run(async () => {
+      throw new TypeError("Authorization Bearer SECRET-CUSTOMER");
+    }, context, undefined, logger)).rejects.toMatchObject({
+      code: "UNAVAILABLE", retryable: true,
+    });
+    const phases = records.filter((record) => record.event === "commerce.host.model_bridge.reached")
+      .map((record) => (record.data as Record<string, unknown>).phase);
+    expect(phases).toEqual(["turn_state_check", "production_model_invoke"]);
+    expect(records.find((record) => record.event === "commerce.host.model_bridge.failed"))
+      .toMatchObject({ data: {
+        phase: "production_model_invoke", reasonCode: "HOST_MODEL_INVOKER_FAILED",
+        exceptionName: "TypeError", conversationId: "conversation-fixture",
+      } });
+    expect(JSON.stringify(records)).not.toContain("SECRET-CUSTOMER");
+  });
+
+  it("ARCH-029 identifies a post-invocation model-step TypeError separately", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker", environment: "DEVELOPMENT",
+      sink: (record) => records.push(record as unknown as Record<string, unknown>),
+    });
+    await expect(run(async () => ({ calls: null, outputTokens: 1 }),
+      context, undefined, logger)).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(records.find((record) => record.event === "commerce.host.model_bridge.failed"))
+      .toMatchObject({ data: {
+        phase: "response_postprocess", reasonCode: "HOST_MODEL_RESPONSE_POSTPROCESS_FAILED",
+        exceptionName: "TypeError",
+      } });
+  });
+
   it("denies a mismatched canonical Shop ID before invoking the model", async () => {
     const invoke = vi.fn(async () => final());
 

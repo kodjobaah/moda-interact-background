@@ -25,6 +25,10 @@ import {
 } from "./mcp-client.js";
 import { hostDiagnostic, logCommerceHostFailure } from "./host-diagnostics.js";
 import {
+  logCommerceModelBridgeMilestone,
+  observeCommerceModelBridgePhase,
+} from "./model-bridge-diagnostics.js";
+import {
   digest,
   readGrant,
   persistGrant,
@@ -267,6 +271,12 @@ async function execute(
         current.languageSource === "CUSTOMER_EXPLICIT" ? null :
         current.languageSource?.toLowerCase().replaceAll("_", "-") ?? null,
     };
+    const modelBridgeIdentifiers = {
+      shopId: context.shopId,
+      recoveryId: recovery.id,
+      conversationId: current.id,
+      inboundVersion: current.inboundVersion,
+    };
     const result = await runCommerceTurn({
       turn,
       grant,
@@ -295,41 +305,52 @@ async function execute(
       dependencies: {
         model: {
           invoke: async (request, modelSignal) => {
-            await assertCurrent();
-            const step = await deps.model.invoke(request, modelSignal);
-            if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
-              return step;
-            const responseContract = verifyResponseContract(
-              manifest.responseContract,
-              manifest.responseContractHash,
-              digest,
+            logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "turn_state_check");
+            await observeCommerceModelBridgePhase(
+              logger, modelBridgeIdentifiers, "turn_state_check", assertCurrent,
             );
-            const parsed = finalResponseSchema(responseContract).safeParse(
-              step.calls[0].arguments,
+            logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "production_model_invoke");
+            const step = await observeCommerceModelBridgePhase(
+              logger, modelBridgeIdentifiers, "production_model_invoke",
+              () => deps.model.invoke(request, modelSignal),
             );
-            if (
-              parsed.success &&
-              parsed.data.answerKind === "ANSWER" &&
-              parsed.data.evidenceIds.length > 0 &&
-              !evidence.hasEligibleEvidence(parsed.data.evidenceIds, Date.now())
-            ) {
-              return {
-                ...step,
-                calls: [
-                  {
-                    name: "finalResponse",
-                    arguments: {
-                      ...parsed.data,
-                      answerKind: "REFER_TO_STORE",
-                      referralReason: "UNVERIFIABLE_FACTS",
-                      evidenceIds: [],
-                      details: {},
-                    },
-                  },
-                ],
-              };
-            }
-            return step;
+            return observeCommerceModelBridgePhase(
+              logger, modelBridgeIdentifiers, "response_postprocess", async () => {
+                if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
+                  return step;
+                const responseContract = verifyResponseContract(
+                  manifest.responseContract,
+                  manifest.responseContractHash,
+                  digest,
+                );
+                const parsed = finalResponseSchema(responseContract).safeParse(
+                  step.calls[0].arguments,
+                );
+                if (
+                  parsed.success &&
+                  parsed.data.answerKind === "ANSWER" &&
+                  parsed.data.evidenceIds.length > 0 &&
+                  !evidence.hasEligibleEvidence(parsed.data.evidenceIds, Date.now())
+                ) {
+                  return {
+                    ...step,
+                    calls: [
+                      {
+                        name: "finalResponse",
+                        arguments: {
+                          ...parsed.data,
+                          answerKind: "REFER_TO_STORE",
+                          referralReason: "UNVERIFIABLE_FACTS",
+                          evidenceIds: [],
+                          details: {},
+                        },
+                      },
+                    ],
+                  };
+                }
+                return step;
+              },
+            );
           },
         },
         logger: logger.child({
