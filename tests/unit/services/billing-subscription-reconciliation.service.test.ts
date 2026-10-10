@@ -1,9 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
+import { ShopPlatform } from "@prisma/client";
 import { createSubscriptionReconcilePayload, nextSubscriptionReconcileAt } from "../../../src/services/billing-subscription-reconciliation.service.js";
 import { shopifyUsageEventPublisherService } from "../../../src/services/shopify-usage-event-publisher.service.js";
 import { now, pendingEffectiveAt, defaultRuntimeConfig, harness, pendingRow, freeProvider, payload, cycleRow, establishedCurrentPlan, establishedTargetPlan, establishedProvider, establishedRow, expectNoModelMutations } from "./billing-subscription-reconciliation/facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
+  it("skips a WooCommerce job with a stale Shopify ID before contacting Partner", async () => {
+    const wooRow = { ...pendingRow(), platform: ShopPlatform.WOOCOMMERCE };
+    const test = harness({ row: wooRow });
+    // Model the Prisma id+platform filter; WooCommerce must not be returned.
+    test.database.shop.findUnique.mockImplementation(async ({ where }: { where: { id: string; platform: ShopPlatform } }) =>
+      where.id === wooRow.id && where.platform === wooRow.platform ? wooRow : null);
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.database.shop.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "shop-1", platform: ShopPlatform.SHOPIFY },
+    }));
+    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.queue.add).not.toHaveBeenCalled();
+  });
+
   it("enters fail-closed SYNC_ERROR for a provider-current target with a missing cycle", async () => {
     const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, currentPeriodStart: null, currentPeriodEnd: null }, plan: establishedCurrentPlan });
     test.database.billingPlan.findUnique

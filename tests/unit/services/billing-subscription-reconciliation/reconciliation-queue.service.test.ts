@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ShopPlatform } from "@prisma/client";
 import {
   BILLING_SUBSCRIPTION_RECONCILE_JOB_NAME,
   createBillingSubscriptionReconcileJobId,
@@ -89,6 +90,7 @@ describe("ReconciliationQueueService", () => {
     await test.service.reconstruct();
 
     const where = test.database.shop.findMany.mock.calls[0][0].where;
+    expect(where.platform).toBe(ShopPlatform.SHOPIFY);
     expect(where.AND[0].OR).toEqual([
       { status: "ACTIVE" },
       { status: "UNINSTALLED", reinstallPendingAt: { not: null } },

@@ -1,5 +1,6 @@
 import {
   BillingPlanKind,
+  ShopPlatform,
   SubscriptionProjectionStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -149,6 +150,7 @@ export class BillingReconciliationService {
   private async selectRotatingShopPage(limit: number) {
     const baseQuery = {
       where: {
+        platform: ShopPlatform.SHOPIFY,
         shopifyShopId: { not: null },
         status: "ACTIVE" as const,
       },
