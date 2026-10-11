@@ -1,5 +1,8 @@
 import prisma from "../../lib/db.js";
+import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
 import { processNextWooSubscriptionReceipt } from "./subscription-receipt-processor.js";
+
+type ResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
 
 export type WooSubscriptionReceiptBatchResult = {
   claimed: number;
@@ -12,6 +15,7 @@ export class WooSubscriptionReceiptReconciliationService {
   constructor(
     private readonly database = prisma,
     private readonly now: () => Date = () => new Date(),
+    private readonly resumeService: ResumeScheduler = recoveryCapacityResumeService,
   ) {}
 
   async reconcileBatch(limit: number): Promise<WooSubscriptionReceiptBatchResult> {
@@ -25,7 +29,7 @@ export class WooSubscriptionReceiptReconciliationService {
       needsAttention: 0,
     };
     for (let index = 0; index < limit; index += 1) {
-      const outcome = await processNextWooSubscriptionReceipt(this.database, this.now());
+      const outcome = await processNextWooSubscriptionReceipt(this.database, this.now(), this.resumeService);
       if (outcome === "empty") break;
       result.claimed += 1;
       if (outcome === "historical") result.historical += 1;
