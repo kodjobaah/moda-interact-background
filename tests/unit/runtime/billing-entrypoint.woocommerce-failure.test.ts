@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
     },
     reconcileBatch: vi.fn(),
     reconcileChargeBatch: vi.fn(),
+    reconcileChargeRefundBatch: vi.fn(),
   };
 });
 
@@ -41,6 +42,9 @@ vi.mock("../../../src/services/woocommerce-billing/subscription-receipt-reconcil
 vi.mock("../../../src/services/woocommerce-billing/charge-receipt-reconciliation.service.js", () => ({
   wooChargeReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeBatch },
 }));
+vi.mock("../../../src/services/woocommerce-billing/charge-refund-reconciliation.service.js", () => ({
+  wooChargeRefundReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeRefundBatch },
+}));
 
 import { reconcileWooReceiptsAndGlobalBillingScan } from "../../../src/entrypoints/billing.js";
 
@@ -49,6 +53,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     vi.clearAllMocks();
     mocks.events.length = 0;
     mocks.reconcileChargeBatch.mockResolvedValue({ claimed: 0, processed: 0, activated: 0, canceled: 0, retryable: 0 });
+    mocks.reconcileChargeRefundBatch.mockResolvedValue({ claimed: 0, processed: 0, retryable: 0 });
   });
 
   it("logs a rejected Woo batch and still invokes one global scan without a Woo success signal", async () => {
@@ -84,6 +89,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     expect(mocks.events).toEqual([
       "billing.woocommerce.subscription_receipts.failed",
       "billing.woocommerce.charge_receipts.completed",
+      "billing.woocommerce.charge_refund_receipts.completed",
       "global-scan",
     ]);
   });
@@ -96,6 +102,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     const leaseHandle = { generation: 13 };
     const wooResult = { claimed: 2, processed: 2, failed: 0 };
     const chargeResult = { claimed: 1, processed: 1, activated: 1, canceled: 0, retryable: 0 };
+    const refundResult = { claimed: 2, processed: 2, retryable: 0 };
     const globalScan = vi.fn(async () => {
       mocks.events.push("global-scan");
       return { subscriptionsScanned: 4 };
@@ -104,6 +111,10 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     mocks.reconcileChargeBatch.mockImplementationOnce(async () => {
       mocks.events.push("charge-receipts");
       return chargeResult;
+    });
+    mocks.reconcileChargeRefundBatch.mockImplementationOnce(async () => {
+      mocks.events.push("refund-receipts");
+      return refundResult;
     });
 
     await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
@@ -118,11 +129,17 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       leaseGeneration: 13,
       ...chargeResult,
     });
+    expect(mocks.logger.info).toHaveBeenCalledWith("billing.woocommerce.charge_refund_receipts.completed", {
+      leaseGeneration: 13,
+      ...refundResult,
+    });
     expect(globalScan).toHaveBeenCalledOnce();
     expect(mocks.events).toEqual([
       "billing.woocommerce.subscription_receipts.completed",
       "charge-receipts",
       "billing.woocommerce.charge_receipts.completed",
+      "refund-receipts",
+      "billing.woocommerce.charge_refund_receipts.completed",
       "global-scan",
     ]);
   });
@@ -139,6 +156,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     });
     mocks.reconcileBatch.mockResolvedValueOnce({ claimed: 0, processed: 0, failed: 0 });
     mocks.reconcileChargeBatch.mockRejectedValueOnce(new Error("database unavailable"));
+    mocks.reconcileChargeRefundBatch.mockRejectedValueOnce(new Error("refund database unavailable"));
 
     await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
       .resolves.toEqual({ subscriptionsScanned: 5 });
@@ -156,6 +174,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     expect(mocks.events).toEqual([
       "billing.woocommerce.subscription_receipts.completed",
       "billing.woocommerce.charge_receipts.failed",
+      "billing.woocommerce.charge_refund_receipts.failed",
       "global-scan",
     ]);
   });
