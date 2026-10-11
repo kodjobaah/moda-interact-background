@@ -38,6 +38,8 @@ function harness(status = "SENT") {
     sentAt: new Date("2026-09-08T14:59:00.000Z"),
     deliveredAt: null as Date | null,
     readAt: null as Date | null,
+    providerFailureCode: null as string | null,
+    failedAt: null as Date | null,
     conversation: {
       shopId: null,
       checkoutRecovery: { shopId: "shop-1" },
@@ -166,6 +168,76 @@ describe("WhatsAppProviderStatusService", () => {
     await test.service.process(baseEvent);
     expect(test.message.status).toBe("DELIVERED");
     expect(test.usageEvents).toHaveLength(1);
+  });
+
+  it("does not resurrect FAILED with a late SENT and stores v3 failure evidence", async () => {
+    const test = harness();
+    const failedEvent = {
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: " 131026 " },
+    };
+
+    await test.service.process(failedEvent);
+    const failedAt = test.message.failedAt;
+    await expect(
+      test.service.process({ ...baseEvent, status: "SENT" }),
+    ).resolves.toBe("ignored");
+
+    expect(test.message.status).toBe("FAILED");
+    expect(test.message.sentAt).toEqual(new Date("2026-09-08T14:59:00.000Z"));
+    expect(test.message.providerFailureCode).toBe("131026");
+    expect(test.message.failedAt).toEqual(new Date(baseEvent.occurredAt));
+    expect(failedAt).toEqual(test.message.failedAt);
+  });
+
+  it("records v2 failure time without fabricating a provider code", async () => {
+    const test = harness("PENDING");
+
+    await test.service.process({ ...baseEvent, status: "FAILED" });
+
+    expect(test.message.status).toBe("FAILED");
+    expect(test.message.failedAt).toEqual(new Date(baseEvent.occurredAt));
+    expect(test.message.providerFailureCode).toBeNull();
+  });
+
+  it("enriches null failure evidence idempotently on a replayed v3 FAILED", async () => {
+    const test = harness();
+    const v2Failure = { ...baseEvent, status: "FAILED" as const };
+    const v3Failure = {
+      ...v2Failure,
+      schemaVersion: 3 as const,
+      failure: { providerCode: "131026" },
+    };
+
+    await test.service.process(v2Failure);
+    const failedAt = test.message.failedAt;
+    await expect(test.service.process(v3Failure)).resolves.toBe("applied");
+    await test.service.process({
+      ...v3Failure,
+      failure: { providerCode: "different-code" },
+    });
+
+    expect(test.message.failedAt).toEqual(failedAt);
+    expect(test.message.providerFailureCode).toBe("131026");
+    expect(test.message.status).toBe("FAILED");
+  });
+
+  it.each([
+    ["DELIVERED", "SENT"],
+    ["READ", "SENT"],
+    ["DELIVERED", "FAILED"],
+    ["READ", "FAILED"],
+  ] as const)("ignores late %s -> %s evidence", async (currentStatus, eventStatus) => {
+    const test = harness(currentStatus);
+
+    await expect(
+      test.service.process({ ...baseEvent, status: eventStatus }),
+    ).resolves.toBe("ignored");
+
+    expect(test.message.status).toBe(currentStatus);
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
   });
 
   it("bounds unknown and invalid events without touching durable state", async () => {

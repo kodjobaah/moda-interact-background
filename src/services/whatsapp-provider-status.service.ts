@@ -10,17 +10,13 @@ import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environm
 import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
 
 import prisma from "../lib/db.js";
+import {
+  canApplyProviderStatus,
+  statusForProviderEvent,
+} from "../domain/whatsapp-provider-status-transition.js";
 
 type Database = typeof prisma;
 const MAX_TRANSACTION_RETRIES = 3;
-
-const STATUS_RANK: Record<MessageStatus, number> = {
-  PENDING: 0,
-  FAILED: 1,
-  SENT: 2,
-  DELIVERED: 3,
-  READ: 4,
-};
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -64,6 +60,8 @@ export class WhatsAppProviderStatusService {
           sentAt: true,
           deliveredAt: true,
           readAt: true,
+          providerFailureCode: true,
+          failedAt: true,
           conversation: {
             select: {
               shopId: true,
@@ -99,20 +97,24 @@ export class WhatsAppProviderStatusService {
         return "ignored";
       }
 
-      const nextStatus = statusForEvent(event.status, message.status);
+      const canApplyStatus = canApplyProviderStatus(message.status, event.status);
+      const nextStatus = statusForProviderEvent(message.status, event.status);
       const shouldRecordDelivered =
-        event.status === "DELIVERED" || event.status === "READ";
+        canApplyStatus && (event.status === "DELIVERED" || event.status === "READ");
       const becameDelivered =
         shouldRecordDelivered &&
-        STATUS_RANK[message.status] < STATUS_RANK.DELIVERED;
+        message.status !== "DELIVERED" && message.status !== "READ";
 
       const lifecycleData = lifecycleUpdate(
         message,
         nextStatus,
         occurredAt,
         event.status,
+        canApplyStatus,
+        event,
       );
-      if (Object.keys(lifecycleData).length > 0) {
+      const lifecycleChanged = Object.keys(lifecycleData).length > 0;
+      if (lifecycleChanged) {
         const updated = await transaction.conversationMessage.updateMany({
           where: {
             id: message.id,
@@ -146,11 +148,11 @@ export class WhatsAppProviderStatusService {
         messageId: message.id,
         status: event.status,
         outcome:
-          nextStatus === message.status && !becameDelivered
+          !lifecycleChanged && !becameDelivered
             ? "ignored"
             : "applied",
       });
-      return nextStatus === message.status && !becameDelivered
+      return !lifecycleChanged && !becameDelivered
         ? "ignored"
         : "applied";
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
@@ -172,49 +174,48 @@ export class WhatsAppProviderStatusService {
 
 class ProviderStatusConcurrencyConflict extends Error {}
 
-function statusForEvent(
-  eventStatus: NormalizedWhatsAppStatus["status"],
-  currentStatus: MessageStatus,
-): MessageStatus {
-  const candidate = eventStatus as MessageStatus;
-  if (
-    candidate === "FAILED" &&
-    (currentStatus === "PENDING" || currentStatus === "SENT")
-  ) {
-    return candidate;
-  }
-  return STATUS_RANK[candidate] > STATUS_RANK[currentStatus]
-    ? candidate
-    : currentStatus;
-}
-
 function lifecycleUpdate(
   message: {
     status: MessageStatus;
     sentAt: Date | null;
     deliveredAt: Date | null;
     readAt: Date | null;
+    providerFailureCode: string | null;
+    failedAt: Date | null;
   },
   nextStatus: MessageStatus,
   occurredAt: Date,
   eventStatus: NormalizedWhatsAppStatus["status"],
+  canApplyStatus: boolean,
+  event: NormalizedWhatsAppStatus,
 ): Prisma.ConversationMessageUpdateInput {
   const data: Prisma.ConversationMessageUpdateInput = {};
-  if (
-    nextStatus !== message.status &&
-    (nextStatus === "FAILED" ||
-      STATUS_RANK[nextStatus] > STATUS_RANK[message.status])
-  ) {
+  if (nextStatus !== message.status) {
     data.status = nextStatus;
   }
-  if (eventStatus === "SENT" && !message.sentAt) data.sentAt = occurredAt;
+  if (canApplyStatus && eventStatus === "SENT" && !message.sentAt) {
+    data.sentAt = occurredAt;
+  }
   if (
+    (canApplyStatus || message.status === "READ") &&
     (eventStatus === "DELIVERED" || eventStatus === "READ") &&
     !message.deliveredAt
   ) {
     data.deliveredAt = occurredAt;
   }
-  if (eventStatus === "READ" && !message.readAt) data.readAt = occurredAt;
+  if (canApplyStatus && eventStatus === "READ" && !message.readAt) {
+    data.readAt = occurredAt;
+  }
+  if (canApplyStatus && eventStatus === "FAILED") {
+    if (!message.failedAt) data.failedAt = occurredAt;
+    if (
+      !message.providerFailureCode &&
+      event.schemaVersion === 3 &&
+      event.failure
+    ) {
+      data.providerFailureCode = event.failure.providerCode;
+    }
+  }
   return data;
 }
 
