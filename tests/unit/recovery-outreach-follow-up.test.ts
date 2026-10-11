@@ -38,6 +38,20 @@ describe("recovery outreach follow-up", () => {
       .toBe("recovery-outreach-follow-up:recovery-1:2");
   });
 
+  it("gives delayed retry jobs stable deadline-specific identities", () => {
+    const input = { checkoutRecoveryId: "recovery-1", sequence: 2 as const };
+    const deadline = new Date("2026-10-12T00:00:00Z");
+
+    expect(createRecoveryOutreachFollowUpJobId(input, deadline)).toBe(
+      `recovery-outreach-follow-up:recovery-1:2--${deadline.getTime()}`,
+    );
+    expect(createRecoveryOutreachFollowUpJobId(input, deadline)).toBe(
+      createRecoveryOutreachFollowUpJobId(input, deadline),
+    );
+    expect(createRecoveryOutreachFollowUpJobId(input, new Date(deadline.getTime() + 1)))
+      .not.toBe(createRecoveryOutreachFollowUpJobId(input, deadline));
+  });
+
   it("rejects an invalid fixed policy and accepts a disabled follow-up snapshot", () => {
     expect(safeParseEffectiveRecoveryPolicy({
       recoveryDelayMinutes: 30,

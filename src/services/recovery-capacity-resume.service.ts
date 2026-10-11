@@ -31,12 +31,15 @@ function getResumeQueue(): Queue<RecoveryCapacityResumeJob> {
 }
 
 export class RecoveryCapacityResumeService {
-  async schedule(input: RecoveryCapacityResumeJob): Promise<string> {
+  async schedule(input: RecoveryCapacityResumeJob, dueAt?: Date): Promise<string> {
     const jobId = createRecoveryCapacityResumeJobId(input);
+    const options = dueAt
+      ? { jobId, delay: Math.max(0, dueAt.getTime() - Date.now()) + 1_000 }
+      : { jobId };
     await getResumeQueue().add(
       RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
       input,
-      { jobId },
+      options,
     );
     return jobId;
   }

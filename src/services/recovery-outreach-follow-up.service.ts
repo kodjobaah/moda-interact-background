@@ -11,10 +11,10 @@ function getQueue() {
 
 export const recoveryOutreachFollowUpService = {
   async schedule(input: RecoveryOutreachFollowUpJob, dueAt: Date): Promise<string> {
-    const jobId = createRecoveryOutreachFollowUpJobId(input);
+    const jobId = createRecoveryOutreachFollowUpJobId(input, dueAt);
     await getQueue().add(RECOVERY_OUTREACH_FOLLOW_UP_JOB, input, {
       jobId,
-      delay: Math.max(0, dueAt.getTime() - Date.now()),
+      delay: Math.max(0, dueAt.getTime() - Date.now()) + 1_000,
       removeOnComplete: 100,
       removeOnFail: 100,
     });

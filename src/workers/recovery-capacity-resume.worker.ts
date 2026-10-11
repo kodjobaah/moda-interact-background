@@ -35,6 +35,10 @@ export function createRecoveryCapacityResumeWorker() {
     );
     if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
 
+    if (job.data.recoveryId) {
+      return checkoutRecoveryService.resumeCapacityBlockedRecovery(job.data.recoveryId);
+    }
+
     const batchSize = backgroundRuntimeConfigService.current().recoveryResumeBatchSize;
     const recoveries = await findBlockedRecoveries(job.data.shopId, batchSize);
     let attempted = 0;

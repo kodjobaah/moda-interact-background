@@ -5,6 +5,7 @@ export const RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB =
 export type RecoveryCapacityResumeJob = {
   shopId: string;
   trigger: string;
+  recoveryId?: string;
 };
 
 export function createRecoveryCapacityResumeJobId(input: RecoveryCapacityResumeJob): string {

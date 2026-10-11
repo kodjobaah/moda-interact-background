@@ -44,7 +44,7 @@ export class RecoveryCapacityResumeProcessorService {
     if (
       !recovery ||
       recovery.status !== "DETECTED" ||
-      recovery.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
+      !isResumeEligibleBlockReason(recovery.admissionBlockReason)
     ) {
       return { kind: "ignored", reason: "not-capacity-blocked" } as const;
     }
@@ -80,7 +80,7 @@ export class RecoveryCapacityResumeProcessorService {
         if (
           !current ||
           current.status !== "DETECTED" ||
-          current.admissionBlockReason !== "RECOVERY_CAPACITY_EXHAUSTED"
+          !isResumeEligibleBlockReason(current.admissionBlockReason)
         ) {
           return { kind: "ignored", reason: "already-transitioned" } as const;
         }
@@ -144,9 +144,13 @@ export class RecoveryCapacityResumeProcessorService {
           where: { id: recovery.id },
           select: { status: true, admissionBlockReason: true },
         });
-        return after?.admissionBlockReason === "RECOVERY_CAPACITY_EXHAUSTED"
-          ? { kind: "capacity-exhausted" as const }
-          : { kind: "initiated" as const, status: after?.status ?? "DETECTED" };
+        if (after?.admissionBlockReason === "RECOVERY_CAPACITY_EXHAUSTED") {
+          return { kind: "capacity-exhausted" as const };
+        }
+        if (after?.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
+          return { kind: "suppressed" as const, reason: "WHATSAPP_RECIPIENT_SUPPRESSED" };
+        }
+        return { kind: "initiated" as const, status: after?.status ?? "DETECTED" };
       },
     );
   }
@@ -160,7 +164,9 @@ export class RecoveryCapacityResumeProcessorService {
         where: {
           id: recoveryId,
           status: "DETECTED",
-          admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+          admissionBlockReason: {
+            in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"],
+          },
         },
         data: {
           status: "CANCELLED",
@@ -182,4 +188,9 @@ export class RecoveryCapacityResumeProcessorService {
       }
     });
   }
+}
+
+function isResumeEligibleBlockReason(reason: string | null): boolean {
+  return reason === "RECOVERY_CAPACITY_EXHAUSTED" ||
+    reason === "WHATSAPP_RECIPIENT_SUPPRESSED";
 }

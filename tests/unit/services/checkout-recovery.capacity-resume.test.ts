@@ -289,7 +289,9 @@ describe("CheckoutRecoveryService capacity resume", () => {
       where: {
         id: "recovery-1",
         status: "DETECTED",
-        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+        admissionBlockReason: {
+          in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"],
+        },
       },
       data: {
         status: "CANCELLED",
@@ -326,7 +328,9 @@ describe("CheckoutRecoveryService capacity resume", () => {
       where: {
         id: "recovery-1",
         status: "DETECTED",
-        admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+        admissionBlockReason: {
+          in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"],
+        },
       },
       data: {
         status: "CANCELLED",

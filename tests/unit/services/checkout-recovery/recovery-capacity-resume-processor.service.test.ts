@@ -13,6 +13,10 @@ const blockedRecovery = {
   admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
   shop: { domain: "shop.example", status: "ACTIVE" },
 };
+const suppressionBlockedRecovery = {
+  ...blockedRecovery,
+  admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+};
 
 const currentCheckout = {
   createdAt: "2026-09-01T00:00:00.000Z",
@@ -233,6 +237,32 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     );
     expect(harness.initiate).toHaveBeenCalledOnce();
     expect(harness.initiate.mock.calls[0]).toHaveLength(1);
+  });
+
+  it("re-evaluates a suppression-blocked recovery from fresh checkout state under its lock", async () => {
+    const harness = createHarness({
+      reads: [
+        suppressionBlockedRecovery,
+        suppressionBlockedRecovery,
+        { status: "MESSAGE_SENT", admissionBlockReason: null },
+      ],
+    });
+
+    await expect(harness.service.resume("recovery-1")).resolves.toEqual({
+      kind: "initiated",
+      status: "MESSAGE_SENT",
+    });
+    expect(harness.order).toEqual([
+      "recovery-read",
+      "eligibility",
+      "lock",
+      "recovery-read",
+      "eligibility",
+      "lookup",
+      "recovery-read",
+    ]);
+    expect(harness.snapshotBuilder.build).toHaveBeenCalledOnce();
+    expect(harness.initiate).toHaveBeenCalledOnce();
   });
 
   it("passes later recovery generations to canonical initiation", async () => {
