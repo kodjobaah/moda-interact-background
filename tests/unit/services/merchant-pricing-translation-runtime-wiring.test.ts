@@ -20,6 +20,9 @@ describe("Merchant Pricing translation runtime wiring", () => {
     expect(entrypoint).toContain('leaseName: "TRANSLATION_RECONCILIATION"');
     expect(entrypoint).toContain("Promise.allSettled");
     expect(entrypoint).toContain("merchantPricingTranslationReconciliationService.reconcile(snapshot)");
+    expect(entrypoint).toContain(
+      "merchantPricingTranslationPublicationService.reconcile(",
+    );
     expect(entrypoint).not.toContain("MERCHANT_PRICING_TRANSLATION_RECONCILIATION");
   });
 
@@ -27,9 +30,20 @@ describe("Merchant Pricing translation runtime wiring", () => {
     const reconciliation = source("src/services/merchant-pricing-translation-reconciliation.service.ts");
     const submit = source("src/services/merchant-pricing-translation-batch-submit.service.ts");
     const results = source("src/services/merchant-pricing-translation-batch-results.service.ts");
+    const publication = source("src/services/merchant-pricing-translation-publication.service.ts");
+    const publicationPersistence = source(
+      "src/services/merchant-pricing-translation/publication-persistence.ts",
+    );
     expect(reconciliation).toContain('"billing"."MerchantPricingTranslationRun"');
     expect(submit).toContain("submitTranslationProviderBatch");
     expect(results).toContain("applyTranslationProviderResults");
     expect(results).toContain("validateMerchantPricingTranslatedText");
+    expect(publication).toContain('"billing"."MerchantPricingPlan"');
+    expect(publication).toContain("READY_TO_APPLY");
+    expect(publicationPersistence).toContain("TRANSLATION_FAILED");
+    expect(publicationPersistence).toContain('"publicationStatus" = \'READY\'');
+    expect(publication).toContain("@modainteract/moda-interact-shared/logging");
+    expect(publication).not.toContain("console.");
+    expect(publication).not.toContain("new Queue");
   });
 });
