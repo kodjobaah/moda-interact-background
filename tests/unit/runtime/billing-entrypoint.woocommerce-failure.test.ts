@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
       error: vi.fn((event: string) => events.push(event)),
     },
     reconcileBatch: vi.fn(),
+    reconcileChargeBatch: vi.fn(),
   };
 });
 
@@ -37,6 +38,9 @@ vi.mock("../../../src/runtime/queue-concurrency-controller.js", () => ({
 vi.mock("../../../src/services/woocommerce-billing/subscription-receipt-reconciliation.service.js", () => ({
   wooSubscriptionReceiptReconciliationService: { reconcileBatch: mocks.reconcileBatch },
 }));
+vi.mock("../../../src/services/woocommerce-billing/charge-receipt-reconciliation.service.js", () => ({
+  wooChargeReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeBatch },
+}));
 
 import { reconcileWooReceiptsAndGlobalBillingScan } from "../../../src/entrypoints/billing.js";
 
@@ -44,6 +48,7 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.events.length = 0;
+    mocks.reconcileChargeBatch.mockResolvedValue({ claimed: 0, processed: 0, activated: 0, canceled: 0, retryable: 0 });
   });
 
   it("logs a rejected Woo batch and still invokes one global scan without a Woo success signal", async () => {
@@ -75,7 +80,12 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     );
     expect(globalScan).toHaveBeenCalledOnce();
     expect(globalScan).toHaveBeenCalledWith(runtimeConfig);
-    expect(mocks.events).toEqual(["billing.woocommerce.subscription_receipts.failed", "global-scan"]);
+    expect(mocks.reconcileChargeBatch).toHaveBeenCalledOnce();
+    expect(mocks.events).toEqual([
+      "billing.woocommerce.subscription_receipts.failed",
+      "billing.woocommerce.charge_receipts.completed",
+      "global-scan",
+    ]);
   });
 
   it("keeps the successful Woo completion signal before one global scan", async () => {
@@ -85,11 +95,16 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
     } as never;
     const leaseHandle = { generation: 13 };
     const wooResult = { claimed: 2, processed: 2, failed: 0 };
+    const chargeResult = { claimed: 1, processed: 1, activated: 1, canceled: 0, retryable: 0 };
     const globalScan = vi.fn(async () => {
       mocks.events.push("global-scan");
       return { subscriptionsScanned: 4 };
     });
     mocks.reconcileBatch.mockResolvedValueOnce(wooResult);
+    mocks.reconcileChargeBatch.mockImplementationOnce(async () => {
+      mocks.events.push("charge-receipts");
+      return chargeResult;
+    });
 
     await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
       .resolves.toEqual({ subscriptionsScanned: 4 });
@@ -99,7 +114,49 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       ...wooResult,
     });
     expect(mocks.logger.error).not.toHaveBeenCalled();
+    expect(mocks.logger.info).toHaveBeenCalledWith("billing.woocommerce.charge_receipts.completed", {
+      leaseGeneration: 13,
+      ...chargeResult,
+    });
     expect(globalScan).toHaveBeenCalledOnce();
-    expect(mocks.events).toEqual(["billing.woocommerce.subscription_receipts.completed", "global-scan"]);
+    expect(mocks.events).toEqual([
+      "billing.woocommerce.subscription_receipts.completed",
+      "charge-receipts",
+      "billing.woocommerce.charge_receipts.completed",
+      "global-scan",
+    ]);
+  });
+
+  it("logs a rejected charge batch and still invokes one global scan", async () => {
+    const runtimeConfig = {
+      version: 9,
+      billingReconciliationShopBatchSize: 25,
+    } as never;
+    const leaseHandle = { generation: 14 };
+    const globalScan = vi.fn(async () => {
+      mocks.events.push("global-scan");
+      return { subscriptionsScanned: 5 };
+    });
+    mocks.reconcileBatch.mockResolvedValueOnce({ claimed: 0, processed: 0, failed: 0 });
+    mocks.reconcileChargeBatch.mockRejectedValueOnce(new Error("database unavailable"));
+
+    await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
+      .resolves.toEqual({ subscriptionsScanned: 5 });
+
+    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.charge_receipts.failed", {
+      leaseGeneration: 14,
+      configVersion: 9,
+      outcome: "failed",
+    });
+    expect(mocks.logger.info).not.toHaveBeenCalledWith(
+      "billing.woocommerce.charge_receipts.completed",
+      expect.anything(),
+    );
+    expect(globalScan).toHaveBeenCalledOnce();
+    expect(mocks.events).toEqual([
+      "billing.woocommerce.subscription_receipts.completed",
+      "billing.woocommerce.charge_receipts.failed",
+      "global-scan",
+    ]);
   });
 });
