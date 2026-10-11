@@ -28,6 +28,8 @@ interface RecoveryInitiationPorts {
   markRecoveryCapacityBlocked: (recoveryId: string) => Promise<unknown>;
 }
 
+export type RecoveryAdmissionGate = () => Promise<boolean>;
+
 export class RecoveryInitiationService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -114,6 +116,7 @@ export class RecoveryInitiationService {
     generation = 1,
     resolvedRecipient?: string,
     suppressionWakeupTrigger?: string,
+    admissionGate?: RecoveryAdmissionGate,
   ) {
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
@@ -151,6 +154,8 @@ export class RecoveryInitiationService {
     if (recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
       await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
     }
+
+    if (admissionGate && !(await admissionGate())) return recovery;
 
     const attempt = await recoveryOutreachAttemptService.getOrCreate({
       recoveryId: recovery.id,

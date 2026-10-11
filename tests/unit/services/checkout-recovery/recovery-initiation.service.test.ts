@@ -174,6 +174,18 @@ describe("RecoveryInitiationService", () => {
     }
   });
 
+  it("skips attempt, billable, and provider admission when the resume gate rejects", async () => {
+    const { service, billing } = createInitiation();
+    const admissionGate = vi.fn(async () => false);
+
+    await service.handleCheckoutCreated(event, 1, undefined, undefined, admissionGate);
+
+    expect(admissionGate).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("durably blocks capacity-exhausted admissions without a failure code", async () => {
     const { service, billing, ports } = createInitiation({
       billing: { admit: vi.fn(async () => ({ kind: "blocked" as const, reason: "capacity-exhausted" })) },

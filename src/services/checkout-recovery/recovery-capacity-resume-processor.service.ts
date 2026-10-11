@@ -18,7 +18,12 @@ import {
   deferRecoveryCapacityResumeUntilMature,
   isTargetedSuppressionWakeup,
 } from "./recovery-capacity-resume-maturity.js";
+import {
+  createRecoveryCapacityResumeAdmissionGate,
+  isResumeEligibleBlockReason,
+} from "./recovery-capacity-resume-admission-gate.js";
 import { prepareRecoveryCapacityResumeCheckout } from "./recovery-capacity-resume-checkout-preparation.js";
+import { terminalizeUnrecoverableBlockedRecovery } from "./recovery-capacity-resume-terminalization.js";
 
 type CheckoutLockPort = Pick<typeof pendingRecoveryCandidateService, "withCheckoutLock">;
 type ExecutionEligibilityPort = Pick<typeof shopExecutionEligibilityService, "evaluate">;
@@ -33,6 +38,7 @@ type RecoveryInitiationPort = (
   generation?: number,
   recipient?: string,
   suppressionWakeupTrigger?: string,
+  admissionGate?: () => Promise<boolean>,
 ) => Promise<unknown>;
 
 export class RecoveryCapacityResumeProcessorService {
@@ -86,7 +92,7 @@ export class RecoveryCapacityResumeProcessorService {
       return { kind: "ignored", reason: execution.reason } as const;
     }
 
-    const prepared = await this.pendingRecoveryCandidateService.withCheckoutLock(
+    const preparation = await this.pendingRecoveryCandidateService.withCheckoutLock(
       recovery.shopId,
       recovery.checkoutToken,
       async () => {
@@ -133,9 +139,9 @@ export class RecoveryCapacityResumeProcessorService {
         return deferred ?? { kind: "ready" as const, current };
       },
     );
-    if (prepared.kind !== "ready") return prepared;
+    if (preparation.kind !== "ready") return preparation;
 
-    const current = prepared.current;
+    const current = preparation.current;
     const { outcome, terminal, seed, recipient } = await prepareRecoveryCapacityResumeCheckout({
       recovery: {
         id: recovery.id,
@@ -152,7 +158,7 @@ export class RecoveryCapacityResumeProcessorService {
       recipientResolver: this.recipientResolver,
     });
 
-    return this.pendingRecoveryCandidateService.withCheckoutLock(
+    const prepared = await this.pendingRecoveryCandidateService.withCheckoutLock(
       recovery.shopId,
       recovery.checkoutToken,
       async () => {
@@ -199,7 +205,8 @@ export class RecoveryCapacityResumeProcessorService {
         if (deferred) return deferred;
 
         if (terminal) {
-          await this.terminalizeUnrecoverableBlockedRecovery(
+          await terminalizeUnrecoverableBlockedRecovery(
+            this.database,
             recovery.id,
             outcome.kind === "found" ? "Checkout completed" : "Checkout lookup not-found",
             latest.admissionBlockReason === null && isTargetedSuppressionWakeup(wakeupTrigger, recovery.id),
@@ -216,74 +223,47 @@ export class RecoveryCapacityResumeProcessorService {
           return { kind: "suppressed" as const, reason: "no-recipient" };
         }
 
-        await this.initiate(seed, latest.generation ?? 1, recipient, wakeupTrigger);
-        const after = await this.database.checkoutRecovery.findUnique({
-          where: { id: recovery.id },
-          select: { status: true, admissionBlockReason: true },
-        });
-        if (after?.admissionBlockReason === "RECOVERY_CAPACITY_EXHAUSTED") {
-          return { kind: "capacity-exhausted" as const };
-        }
-        if (after?.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
-          return { kind: "suppressed" as const, reason: "WHATSAPP_RECIPIENT_SUPPRESSED" };
-        }
-        return { kind: "initiated" as const, status: after?.status ?? "DETECTED" };
+        return {
+          kind: "ready" as const,
+          generation: latest.generation ?? 1,
+          seed,
+          recipient,
+        };
       },
     );
-  }
+    if (prepared.kind !== "ready") return prepared;
 
-  private async terminalizeUnrecoverableBlockedRecovery(
-    recoveryId: string,
-    reason: string,
-    allowUnblockedSuppressionWakeup = false,
-  ): Promise<void> {
-    await this.database.$transaction(async (transaction) => {
-      const updated = await transaction.checkoutRecovery.updateMany({
-        where: {
-          id: recoveryId,
-          status: "DETECTED",
-          ...(allowUnblockedSuppressionWakeup
-            ? {
-                OR: [
-                  { admissionBlockReason: null },
-                  { admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] } },
-                ],
-              }
-            : {
-                admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] },
-              }),
-        },
-        data: {
-          status: "CANCELLED",
-          expiredAt: new Date(),
-          admissionBlockedAt: null,
-          admissionBlockReason: null,
-        },
-      });
-      if (updated.count === 1) {
-        await transaction.checkoutRecoveryStatusHistory.create({
-          data: {
-            checkoutRecoveryId: recoveryId,
-            fromStatus: "DETECTED",
-            toStatus: "CANCELLED",
-            reason,
-            source: "recovery-capacity-resume",
-          },
-        });
-      }
+    const admissionGate = createRecoveryCapacityResumeAdmissionGate({
+      database: this.database,
+      checkoutLock: this.pendingRecoveryCandidateService,
+      eligibility: this.shopExecutionEligibilityService,
+      scheduler: this.recoveryResumeScheduler,
+      policyResolver: this.recoveryPolicyResolver,
+      recoveryId: recovery.id,
+      shopId: recovery.shopId,
+      checkoutToken: recovery.checkoutToken,
+      ...(wakeupTrigger ? { wakeupTrigger } : {}),
+      clock: this.clock,
     });
-  }
-}
+    await this.initiate(
+      prepared.seed,
+      prepared.generation,
+      prepared.recipient,
+      wakeupTrigger,
+      admissionGate.check,
+    );
+    if (admissionGate.state.outcome) return admissionGate.state.outcome;
 
-function isResumeEligibleBlockReason(
-  reason: string | null,
-  wakeupTrigger?: string,
-  recoveryId?: string,
-): boolean {
-  return reason === "RECOVERY_CAPACITY_EXHAUSTED" ||
-    reason === "WHATSAPP_RECIPIENT_SUPPRESSED" ||
-    (reason === null &&
-      typeof wakeupTrigger === "string" &&
-      typeof recoveryId === "string" &&
-      wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`));
+    const after = await this.database.checkoutRecovery.findUnique({
+      where: { id: recovery.id },
+      select: { status: true, admissionBlockReason: true },
+    });
+    if (after?.admissionBlockReason === "RECOVERY_CAPACITY_EXHAUSTED") {
+      return { kind: "capacity-exhausted" as const };
+    }
+    if (after?.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
+      return { kind: "suppressed" as const, reason: "WHATSAPP_RECIPIENT_SUPPRESSED" };
+    }
+    return { kind: "initiated" as const, status: after?.status ?? "DETECTED" };
+  }
 }

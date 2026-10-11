@@ -183,12 +183,14 @@ export class CheckoutRecoveryService {
     generation = 1,
     resolvedRecipient?: string,
     suppressionWakeupTrigger?: string,
+    admissionGate?: () => Promise<boolean>,
   ) {
     return this.initiationService.handleCheckoutCreated(
       event,
       generation,
       resolvedRecipient,
       suppressionWakeupTrigger,
+      admissionGate,
     );
   }
 
