@@ -34,6 +34,7 @@ function createHarness({
   recovery = activeRecovery,
   lookupOutcome = { kind: "found", checkout: currentCheckout },
   updatedCount = 1,
+  resumeSchedule = vi.fn(async () => "resume-1"),
 } = {}) {
   const order: string[] = [];
   const checkoutRecovery = {
@@ -90,6 +91,7 @@ function createHarness({
     findLatestRecovery as never,
     abandonedCheckoutLookupService as never,
     snapshotBuilder as never,
+    { schedule: resumeSchedule } as never,
   );
   return {
     order,
@@ -100,6 +102,7 @@ function createHarness({
     abandonedCheckoutLookupService,
     snapshotBuilder,
     service,
+    resumeSchedule,
   };
 }
 
@@ -203,6 +206,35 @@ describe("CheckoutEventOrchestratorService", () => {
     });
     expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
     expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("routes an updated unblocked DETECTED recovery to its targeted resume job", async () => {
+    const recovery = {
+      ...activeRecovery,
+      status: "DETECTED",
+      admissionBlockReason: null,
+    };
+    const harness = createHarness({ recovery });
+
+    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+      kind: "pending",
+      outcome: "suppression-resume-scheduled",
+      jobId: "resume-1",
+    });
+    expect(harness.resumeSchedule).toHaveBeenCalledWith({
+      shopId: shop.id,
+      recoveryId: recovery.id,
+      trigger: `recipient-suppression-${recovery.id}-checkout-update-${new Date(activityAt).getTime()}`,
+    });
+    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: recovery.id,
+        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+        lastExternalActivityAt: { lt: new Date(activityAt) },
+      },
+      data: { lastExternalActivityAt: new Date(activityAt) },
+    });
+    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
   });
 
   it("schedules a new pending generation from durable EXPIRED recovery state", async () => {

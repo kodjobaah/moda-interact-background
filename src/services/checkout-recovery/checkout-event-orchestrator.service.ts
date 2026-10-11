@@ -11,6 +11,9 @@ import type { pendingRecoveryCandidateService } from "../pending-recovery-candid
 import type { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import type { abandonedCheckoutLookupService } from "../abandoned-checkout-lookup.service.js";
 import type { ShopExecutionDenialReason } from "../shop-execution-eligibility.service.js";
+import {
+  recoveryCapacityResumeService,
+} from "../recovery-capacity-resume.service.js";
 
 type PendingCandidatePort = Pick<
   typeof pendingRecoveryCandidateService,
@@ -23,6 +26,7 @@ type ExecutionEligibilityPort = Pick<
 type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "lookup">;
 type LatestRecoveryLookup = typeof findLatestRecovery;
 type SnapshotLineItemSerializer = Pick<RecoverySnapshotBuilderService, "serializeLineItems">;
+type RecoveryResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -38,6 +42,7 @@ export class CheckoutEventOrchestratorService {
     private readonly findLatestRecovery: LatestRecoveryLookup,
     private readonly abandonedCheckoutLookupService: AbandonedCheckoutLookupPort,
     private readonly snapshotBuilder: SnapshotLineItemSerializer,
+    private readonly recoveryResumeScheduler: RecoveryResumeScheduler = recoveryCapacityResumeService,
   ) {}
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -140,6 +145,21 @@ export class CheckoutEventOrchestratorService {
         kind: "ignored",
         reason: `terminal-${recovery.status.toLowerCase()}`,
       } as const;
+    }
+
+    if (
+      recovery.status === "DETECTED" &&
+      (recovery.admissionBlockReason == null ||
+        recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED")
+    ) {
+      await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
+      const trigger = `recipient-suppression-${recovery.id}-checkout-update-${new Date(event.activityAt).getTime()}`;
+      const jobId = await this.recoveryResumeScheduler.schedule({
+        shopId: shop.id,
+        recoveryId: recovery.id,
+        trigger,
+      });
+      return { kind: "pending", outcome: "suppression-resume-scheduled", jobId } as const;
     }
 
     if (recovery.status === "EXPIRED") {

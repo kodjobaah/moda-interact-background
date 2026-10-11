@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecoveryCapacityResumeProcessorService } from "../../../../src/services/checkout-recovery/recovery-capacity-resume-processor.service.js";
 import { RecoveryRecipientSuppressionAdmissionService } from "../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
+import { CheckoutEventOrchestratorService } from "../../../../src/services/checkout-recovery/checkout-event-orchestrator.service.js";
 
 const schedule = vi.hoisted(() => vi.fn(async () => "job-id"));
 vi.mock("../../../../src/services/recovery-capacity-resume.service.js", () => ({
@@ -17,6 +18,7 @@ const blockedRecovery = {
   generation: 1,
   status: "DETECTED",
   admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+  updatedAt: new Date("2026-10-10T00:00:00.000Z"),
   customerId: "customer-1",
   shop: { domain: "shop.example", status: "ACTIVE" },
 };
@@ -343,7 +345,14 @@ describe("RecoveryCapacityResumeProcessorService", () => {
           blockReason = "WHATSAPP_RECIPIENT_SUPPRESSED";
           return { count: 1 };
         }),
-        findUnique: vi.fn(async () => {
+        findUnique: vi.fn(async ({ select }: { select?: Record<string, unknown> }) => {
+          if (select?.updatedAt) {
+            return {
+              status: "DETECTED",
+              admissionBlockReason: blockReason,
+              updatedAt: suppressionBlockedRecovery.updatedAt,
+            };
+          }
           const next = recoveryReads.shift();
           return next ? { ...next, admissionBlockReason: next.admissionBlockReason ?? blockReason } : null;
         }),
@@ -402,6 +411,11 @@ describe("RecoveryCapacityResumeProcessorService", () => {
   ] as const)("prevents a late suppression write after an early %s wake-up", async (_case, lookup, recipient) => {
     schedule.mockClear().mockResolvedValue("job-id");
     const until = new Date(Date.now() + 60_000);
+    let suppressionUntil: Date | null = until;
+    let currentRecipient = recipient;
+    let attempts = 0;
+    let charges = 0;
+    let sends = 0;
     let releaseBlockWrite!: () => void;
     let signalBlockWrite!: () => void;
     const blockWriteGate = new Promise<void>((resolve) => { releaseBlockWrite = resolve; });
@@ -411,7 +425,12 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       admissionBlockReason: null,
     };
     const updateMany = vi.fn(async ({ where, data }: {
-      where: { id: string; status: string; admissionBlockReason?: { in: Array<string | null> } };
+      where: {
+        id: string;
+        status: string;
+        updatedAt?: Date;
+        admissionBlockReason?: { in: Array<string | null> };
+      };
       data: Record<string, unknown>;
     }) => {
       if (where.status !== current.status || where.id !== current.id) return { count: 0 };
@@ -422,17 +441,34 @@ describe("RecoveryCapacityResumeProcessorService", () => {
         await blockWriteGate;
       }
       if (current.status !== "DETECTED") return { count: 0 };
+      if (where.updatedAt && where.updatedAt.getTime() !== current.updatedAt.getTime()) return { count: 0 };
       Object.assign(current, data);
       return { count: 1 };
     });
     const database = {
       whatsAppRecipientReachability: {
-        findUnique: vi.fn(async () => ({ suppressUntil: until })),
+        findUnique: vi.fn(async () => ({ suppressUntil: suppressionUntil })),
       },
       checkoutRecovery: {
-        findUnique: vi.fn(async () => ({ ...current })),
+        findUnique: vi.fn(async ({ select }: { select?: Record<string, unknown> }) => {
+          if (select?.updatedAt && !select?.shop) {
+            return {
+              status: current.status,
+              admissionBlockReason: current.admissionBlockReason,
+              updatedAt: current.updatedAt,
+            };
+          }
+          return { ...current };
+        }),
         updateMany,
       },
+      shop: { findUnique: vi.fn(async () => ({
+        id: "shop-1",
+        status: "ACTIVE",
+        platform: "SHOPIFY",
+        onboardingCompleted: true,
+        subscription: { status: "ACTIVE", lastProviderLifecycleState: "UPDATED" },
+      })) },
       $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) => callback({
         checkoutRecovery: { updateMany },
         checkoutRecoveryStatusHistory: { create: vi.fn(async () => ({})) },
@@ -444,7 +480,22 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     const wakeupTrigger = schedule.mock.calls[0]?.[0].trigger;
     expect(wakeupTrigger).toBeDefined();
 
-    const initiate = vi.fn(async () => undefined);
+    const initiate = vi.fn(async (
+      _seed: unknown,
+      _generation: number,
+      currentCanonicalRecipient: string,
+      wakeup?: string,
+    ) => {
+      const decision = await admission.evaluate("shop-1", currentCanonicalRecipient);
+      if (decision.kind === "suppressed") {
+        await admission.deferDetectedRecovery("recovery-1", "shop-1", decision.until, wakeup);
+        return;
+      }
+      await admission.clearDetectedSuppression("recovery-1");
+      attempts += 1;
+      charges += 1;
+      sends += 1;
+    });
     const processor = new RecoveryCapacityResumeProcessorService(
       database as never,
       { withCheckoutLock: async (_shopId: string, _token: string, callback: () => Promise<unknown>) => callback() } as never,
@@ -453,7 +504,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       { build: async () => ({ shop: "shop.example", checkoutToken: "checkout-1" }) } as never,
       initiate,
       {
-        resolve: async () => recipient,
+        resolve: async () => currentRecipient,
         resolveForCustomerInShop: async () => null,
       } as never,
       admission,
@@ -462,13 +513,57 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     const result = await processor.resume("recovery-1", wakeupTrigger);
     expect(result.kind).toBe(recipient ? "terminal" : "suppressed");
     expect(initiate).not.toHaveBeenCalled();
-    expect(current.status).toBe("CANCELLED");
+    expect(current.status).toBe(recipient ? "CANCELLED" : "DETECTED");
     expect(current.admissionBlockReason).toBeNull();
 
     releaseBlockWrite();
     await expect(originalDeferral).resolves.toBe(false);
-    expect(current.status).toBe("CANCELLED");
+    expect(current.status).toBe(recipient ? "CANCELLED" : "DETECTED");
     expect(current.admissionBlockReason).toBeNull();
+
+    if (recipient === null) {
+      expect(current.updatedAt.getTime()).toBeGreaterThan(suppressionBlockedRecovery.updatedAt.getTime());
+      const eventTime = "2026-10-11T20:00:00.000Z";
+      const checkoutEvents = new CheckoutEventOrchestratorService(
+        database as never,
+        { refreshCandidateActivity: vi.fn(async () => ({ outcome: "not-found" })) } as never,
+        { evaluateResolvedShop: vi.fn(() => ({ allowed: true, shopId: "shop-1" })) } as never,
+        vi.fn(async () => ({ ...current })) as never,
+        { lookup: vi.fn(async () => ({ kind: "found", checkout: currentCheckout })) } as never,
+        { serializeLineItems: vi.fn((items) => items) } as never,
+        { schedule } as never,
+      );
+      await expect(checkoutEvents.handleCheckoutUpdatedContract({
+        shopDomain: "shop.example",
+        checkoutToken: "checkout-1",
+        activityAt: eventTime,
+      })).resolves.toMatchObject({ kind: "pending", outcome: "suppression-resume-scheduled" });
+      const updateWakeup = schedule.mock.calls[1]?.[0];
+      expect(updateWakeup?.trigger).toContain("recipient-suppression-recovery-1-checkout-update-");
+
+      currentRecipient = "447700900123";
+      await expect(processor.resume("recovery-1", updateWakeup!.trigger)).resolves.toMatchObject({
+        kind: "suppressed",
+        reason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+      });
+      expect(initiate).toHaveBeenCalledWith(expect.any(Object), 1, currentRecipient, updateWakeup!.trigger);
+      expect(attempts).toBe(0);
+      expect(charges).toBe(0);
+      expect(sends).toBe(0);
+      expect(current.admissionBlockReason).toBe("WHATSAPP_RECIPIENT_SUPPRESSED");
+
+      suppressionUntil = new Date(Date.now() - 1_000);
+      const expiryWakeup = schedule.mock.calls[2]?.[0];
+      expect(expiryWakeup?.trigger).not.toBe(updateWakeup?.trigger);
+      await processor.resume("recovery-1", expiryWakeup!.trigger);
+      expect(initiate).toHaveBeenCalledTimes(2);
+      expect(initiate).toHaveBeenLastCalledWith(expect.any(Object), 1, currentRecipient, expiryWakeup!.trigger);
+      expect(attempts).toBe(1);
+      expect(charges).toBe(1);
+      expect(sends).toBe(1);
+      expect(current.status).toBe("DETECTED");
+      expect(current.admissionBlockReason).toBeNull();
+    }
   });
 
   it("uses the Shop-scoped stored phone when the fresh checkout has no customer phone", async () => {

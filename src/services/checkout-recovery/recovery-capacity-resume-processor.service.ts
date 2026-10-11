@@ -163,11 +163,7 @@ export class RecoveryCapacityResumeProcessorService {
           if (current.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
             await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
           } else if (isTargetedSuppressionWakeup(wakeupTrigger, recovery.id)) {
-            await this.terminalizeUnrecoverableBlockedRecovery(
-              recovery.id,
-              "No current recipient during targeted suppression resume",
-              true,
-            );
+            await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
           }
           return { kind: "suppressed" as const, reason: "no-recipient" };
         }

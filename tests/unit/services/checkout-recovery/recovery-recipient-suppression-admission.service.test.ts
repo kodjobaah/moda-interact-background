@@ -5,6 +5,11 @@ const { schedule } = vi.hoisted(() => ({ schedule: vi.fn() }));
 vi.mock("../../../../src/services/recovery-capacity-resume.service.js", () => ({
   recoveryCapacityResumeService: { schedule },
 }));
+const updatedAt = new Date("2026-10-11T00:00:00.000Z");
+
+function currentRecovery(admissionBlockReason: string | null = null) {
+  return { status: "DETECTED", admissionBlockReason, updatedAt };
+}
 
 describe("RecoveryRecipientSuppressionAdmissionService", () => {
   it("looks up only the exact Shop and canonical recipient key", async () => {
@@ -53,13 +58,16 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     schedule.mockImplementationOnce(async () => "job-1");
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
-      checkoutRecovery: { updateMany },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => currentRecovery()),
+        updateMany,
+      },
     } as never);
 
     await expect(service.deferDetectedRecovery("recovery-1", "shop-1", until)).resolves.toBe(true);
 
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: "recovery-1", status: "DETECTED" },
+      where: { id: "recovery-1", status: "DETECTED", updatedAt },
       data: {
         admissionBlockedAt: expect.any(Date),
         admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
@@ -79,7 +87,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const updateMany = vi.fn(async () => ({ count: 1 }));
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
-      checkoutRecovery: { updateMany },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => currentRecovery()),
+        updateMany,
+      },
     } as never);
 
     await expect(service.deferDetectedRecovery(
@@ -97,7 +108,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     schedule.mockClear();
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
-      checkoutRecovery: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => ({ ...currentRecovery(), status: "CANCELLED" })),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
     } as never);
 
     await expect(service.deferDetectedRecovery(
@@ -114,6 +128,7 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
       checkoutRecovery: {
+        findUnique: vi.fn(async () => currentRecovery()),
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
     } as never);
@@ -132,7 +147,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const until = new Date("2026-10-12T00:00:00Z");
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
-      checkoutRecovery: { updateMany: vi.fn(async () => ({ count: 1 })) },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => currentRecovery()),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
     } as never);
     const activeTrigger = `recipient-suppression-recovery-1-${until.getTime()}`;
 
@@ -150,7 +168,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     const updateMany = vi.fn(async () => ({ count: 1 }));
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
-      checkoutRecovery: { updateMany },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => currentRecovery("WHATSAPP_RECIPIENT_SUPPRESSED")),
+        updateMany,
+      },
     } as never);
 
     await service.clearDetectedSuppression("recovery-1");
@@ -159,9 +180,17 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       where: {
         id: "recovery-1",
         status: "DETECTED",
-        admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+        updatedAt,
+        OR: [
+          { admissionBlockReason: null },
+          { admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED" },
+        ],
       },
-      data: { admissionBlockedAt: null, admissionBlockReason: null },
+      data: {
+        admissionBlockedAt: null,
+        admissionBlockReason: null,
+        updatedAt: expect.any(Date),
+      },
     });
   });
 });

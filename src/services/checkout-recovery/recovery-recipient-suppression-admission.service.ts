@@ -39,6 +39,10 @@ export class RecoveryRecipientSuppressionAdmissionService {
     until: Date,
     wakeupTrigger?: string,
   ): Promise<boolean> {
+    const current = await this.database.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: { status: true, updatedAt: true },
+    });
     try {
       const trigger = wakeupTrigger
         ? `recipient-suppression-${recoveryId}-${until.getTime()}-${createHash("sha256").update(wakeupTrigger).digest("hex").slice(0, 12)}`
@@ -50,8 +54,13 @@ export class RecoveryRecipientSuppressionAdmissionService {
     } catch (error) {
       throw new Error(RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED, { cause: error });
     }
+    if (!current || current.status !== "DETECTED") return false;
     const blocked = await this.database.checkoutRecovery.updateMany({
-      where: { id: recoveryId, status: "DETECTED" },
+      where: {
+        id: recoveryId,
+        status: "DETECTED",
+        updatedAt: current.updatedAt,
+      },
       data: {
         admissionBlockedAt: new Date(),
         admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
@@ -62,13 +71,31 @@ export class RecoveryRecipientSuppressionAdmissionService {
   }
 
   async clearDetectedSuppression(recoveryId: string): Promise<void> {
+    const current = await this.database.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: { status: true, admissionBlockReason: true, updatedAt: true },
+    });
+    if (
+      !current ||
+      current.status !== "DETECTED" ||
+      ![null, "WHATSAPP_RECIPIENT_SUPPRESSED"].includes(current.admissionBlockReason)
+    ) return;
+
     await this.database.checkoutRecovery.updateMany({
       where: {
         id: recoveryId,
         status: "DETECTED",
-        admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+        updatedAt: current.updatedAt,
+        OR: [
+          { admissionBlockReason: null },
+          { admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED" },
+        ],
       },
-      data: { admissionBlockedAt: null, admissionBlockReason: null },
+      data: {
+        admissionBlockedAt: null,
+        admissionBlockReason: null,
+        updatedAt: new Date(Math.max(Date.now(), current.updatedAt.getTime() + 1)),
+      },
     });
   }
 }

@@ -14,12 +14,20 @@ const hoisted = vi.hoisted(() => ({
       id: "recovery-1",
       customerId: null,
       admissionBlockReason: null,
+      updatedAt: new Date("2026-10-11T00:00:00.000Z"),
     };
     return hoisted.durableRecovery;
   }),
   updateRecoveryMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     if (hoisted.durableRecovery) {
-      hoisted.durableRecovery = { ...hoisted.durableRecovery, ...data };
+      hoisted.durableRecovery = {
+        ...hoisted.durableRecovery,
+        ...data,
+        updatedAt: new Date(Math.max(
+          Date.now(),
+          (hoisted.durableRecovery.updatedAt as Date).getTime() + 1,
+        )),
+      };
     }
     return { count: 1 };
   }),
@@ -67,6 +75,7 @@ vi.mock("../../../src/lib/db.js", () => ({
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
+      findUnique: vi.fn(async () => hoisted.durableRecovery),
       updateMany: hoisted.updateRecoveryMany,
     },
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
@@ -169,7 +178,10 @@ describe("pending recovery candidate worker", () => {
   it("retries a persisted DETECTED recovery after enqueue failure and rechecks suppression before admission", async () => {
     const admission = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
-      checkoutRecovery: { updateMany: hoisted.updateRecoveryMany },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => hoisted.durableRecovery),
+        updateMany: hoisted.updateRecoveryMany,
+      },
     } as never);
     const billing = {
       admit: hoisted.billingAdmit,
