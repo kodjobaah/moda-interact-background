@@ -70,11 +70,13 @@ void startReadyWorkerProcess({
       { createBillingReconciliationService },
       { RecoveryCreditRefundCorrectionService },
       { PromotionSelectionExpiryReconciliationService },
+      { wooPaidEntitlementTimeReconciliationService },
     ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
       import("../services/recovery-credit-refund-correction.service.js"),
       import("../services/promotion-selection-expiry-reconciliation.service.js"),
+      import("../services/woocommerce-billing/paid-entitlement-time-reconciliation.service.js"),
     ]);
     const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
@@ -112,6 +114,15 @@ void startReadyWorkerProcess({
         leaseHandle,
         (config) => billingReconciliationService.reconcileOnce(config),
       );
+
+      const wooEntitlements = await wooPaidEntitlementTimeReconciliationService.reconcileOnce(
+        runtimeConfig.billingReconciliationShopBatchSize,
+      );
+      logger.info("billing.woocommerce.paid_entitlement.reconciliation_completed", {
+        leaseGeneration: leaseHandle.generation,
+        ...wooEntitlements,
+      });
+
       logger.info("billing.reconciliation.global_scan_completed", {
         leaseGeneration: leaseHandle.generation,
         subscriptionsScanned: reconciliation.subscriptionsScanned,

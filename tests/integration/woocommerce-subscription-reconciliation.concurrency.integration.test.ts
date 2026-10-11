@@ -3,9 +3,10 @@ import "dotenv/config";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { Prisma, PrismaClient } from "@prisma/client";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { WooSubscriptionReceiptReconciliationService } from "../../src/services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
+import { WooPaidEntitlementTimeReconciliationService } from "../../src/services/woocommerce-billing/paid-entitlement-time-reconciliation.service.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDisposableDatabase = testDatabaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
@@ -297,13 +298,132 @@ describeWithDisposableDatabase("Woo recurring receipt reconciliation PostgreSQL"
           paymentIntentUpdatedAt: "2026-10-05 08:59:00",
         }),
       );
-      await new WooSubscriptionReceiptReconciliationService(client, () => now).reconcileBatch(10);
+      const resume = { schedule: vi.fn(async ({ shopId }: { shopId: string }) => {
+        const committedSubscription = await client.subscription.findUniqueOrThrow({ where: { shopId } });
+        expect(committedSubscription.status).toBe("ACTIVE");
+        return "resume-job";
+      }) };
+      await new WooSubscriptionReceiptReconciliationService(client, () => now, resume).reconcileBatch(10);
       expect(await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } }))
         .toMatchObject({ status: "ACTIVE", currentPeriodEnd: period.periodEnd });
+      expect(resume.schedule).toHaveBeenCalledWith({ shopId: fixture.shopId, trigger: "woo-provider-restored" });
       expect(await client.billingPeriod.findMany({ where: { shopId: fixture.shopId } })).toHaveLength(1);
       expect(await client.billingPeriodEntitlementCounter.findUniqueOrThrow({
         where: { billingPeriodId_counter: { billingPeriodId: period.id, counter: "INCLUDED_RECOVERY_CREDITS" } },
       })).toMatchObject({ grantedQuantity: 10, committedQuantity: 3, currentAllowanceQuantity: null });
+    } finally {
+      await cleanup(client, [fixture]);
+      await client.$disconnect();
+    }
+  }, 30_000);
+
+  it("opens one exact Moda window under concurrent scans despite a different Woo payment date", async () => {
+    const first = database();
+    const second = database();
+    const fixture = await createFixture(first);
+    const providerCoverageEnd = new Date("2026-12-01T09:30:00.000Z");
+    const modaBoundary = new Date(activationAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+    try {
+      await createReceipt(
+        first,
+        fixture,
+        "saas_billing_contract.activated",
+        wrapper(fixture.contractId, "active", {
+          includePayment: true,
+          nextPaymentAt: "2026-12-01 09:30:00",
+        }),
+      );
+      await new WooSubscriptionReceiptReconciliationService(first, () => now).reconcileBatch(10);
+      const resumeFirst = { schedule: vi.fn(async () => "resume-first") };
+      const resumeSecond = { schedule: vi.fn(async () => "resume-second") };
+      const results = await Promise.all([
+        new WooPaidEntitlementTimeReconciliationService(first, resumeFirst, () => modaBoundary).reconcileOnce(10),
+        new WooPaidEntitlementTimeReconciliationService(second, resumeSecond, () => modaBoundary).reconcileOnce(10),
+      ]);
+
+      const subscription = await first.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } });
+      const periods = await first.billingPeriod.findMany({
+        where: { shopId: fixture.shopId },
+        orderBy: { periodStart: "asc" },
+        include: { entitlementCounters: true },
+      });
+      expect(results.reduce((count, result) => count + result.rolledOver, 0)).toBe(1);
+      expect(subscription).toMatchObject({
+        billingPeriodId: periods[1]?.id,
+        currentPeriodStart: modaBoundary,
+        currentPeriodEnd: new Date(modaBoundary.getTime() + 30 * 24 * 60 * 60 * 1000),
+      });
+      expect(subscription.providerCoverageEndAt).toEqual(providerCoverageEnd);
+      expect(subscription.currentPeriodEnd).not.toEqual(providerCoverageEnd);
+      expect(periods).toHaveLength(2);
+      expect(periods[0]).toMatchObject({ status: "CLOSED", closeReason: "RENEWED_SAME_PLAN" });
+      expect(periods[1]).toMatchObject({
+        status: "OPEN",
+        periodStart: modaBoundary,
+        periodEnd: new Date(modaBoundary.getTime() + 30 * 24 * 60 * 60 * 1000),
+        includedRecoveryCreditsGranted: 10,
+      });
+      expect(periods[1]?.entitlementCounters[0]).toMatchObject({ grantedQuantity: 10, currentAllowanceQuantity: 10 });
+      expect(resumeFirst.schedule.mock.calls.length + resumeSecond.schedule.mock.calls.length).toBe(1);
+    } finally {
+      await cleanup(first, [fixture]);
+      await Promise.all([first.$disconnect(), second.$disconnect()]);
+    }
+  }, 30_000);
+
+  it("finalizes a missed cancellation deadline and treats a late prepaid-term receipt as historical", async () => {
+    const client = database();
+    const fixture = await createFixture(client);
+    const coverageEnd = new Date("2026-10-15T09:30:00.000Z");
+    const reconcileAt = new Date("2026-10-16T09:30:00.000Z");
+    try {
+      await activate(client, fixture);
+      const lifetimeCounter = await client.shopEntitlementCounter.create({
+        data: { shopId: fixture.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 5, committedQuantity: 2 },
+      });
+      await client.subscription.update({
+        where: { id: fixture.subscriptionId },
+        data: { cancelAtPeriodEnd: true, providerCoverageEndAt: coverageEnd, nextReconcileAt: coverageEnd },
+      });
+      const resume = { schedule: vi.fn() };
+      const result = await new WooPaidEntitlementTimeReconciliationService(
+        client,
+        resume,
+        () => reconcileAt,
+      ).reconcileOnce(10);
+
+      expect(result).toMatchObject({ selected: 1, ended: 1, errors: 0 });
+      const freeSubscription = await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } });
+      const period = await client.billingPeriod.findFirstOrThrow({ where: { shopId: fixture.shopId } });
+      expect(freeSubscription).toMatchObject({
+        status: "ACTIVE",
+        planId: fixture.freePlanId,
+        providerSubscriptionId: null,
+        providerCoverageEndAt: null,
+        billingPeriodId: null,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        cancelAtPeriodEnd: false,
+      });
+      expect(period).toMatchObject({ status: "CLOSED", closeReason: "CONTRACT_ENDED", periodEnd: coverageEnd });
+      expect(await client.shopEntitlementCounter.findUniqueOrThrow({ where: { id: lifetimeCounter.id } }))
+        .toMatchObject({ grantedQuantity: 5, committedQuantity: 2 });
+      expect(resume.schedule).not.toHaveBeenCalled();
+
+      const lateReceipt = await createReceipt(
+        client,
+        fixture,
+        "saas_billing_contract.prepaid_term_ended",
+        wrapper(fixture.contractId, "expired", {
+          modifiedAt: "2026-10-15 09:30:00",
+          endAt: "2026-10-15 09:30:00",
+        }),
+      );
+      await new WooSubscriptionReceiptReconciliationService(client, () => reconcileAt).reconcileBatch(10);
+      expect(await client.subscription.findUniqueOrThrow({ where: { id: fixture.subscriptionId } }))
+        .toMatchObject({ status: "ACTIVE", planId: fixture.freePlanId, providerSubscriptionId: null });
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: lateReceipt } }))
+        .toMatchObject({ processedAt: reconcileAt, processingError: null });
     } finally {
       await cleanup(client, [fixture]);
       await client.$disconnect();

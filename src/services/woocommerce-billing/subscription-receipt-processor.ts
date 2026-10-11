@@ -4,6 +4,7 @@ import {
 import { Prisma, type PrismaClient } from "@prisma/client";
 
 import { lockShop, lockSubscription } from "../billing-subscription-reconciliation/locking.js";
+import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
 import { completeWooReceipt, quarantineWooReceipt, recordPermanentWooReceiptConflict, type WooReceiptProcessingOutcome } from "./subscription-receipt-bookkeeping.js";
 import { resolveContractShop } from "./subscription-receipt-operation-correlation.js";
 import {
@@ -23,14 +24,18 @@ type ReceiptRow = {
   billingOperationId: string | null;
 };
 type ClaimRow = Pick<ReceiptRow, "id" | "topic" | "providerContractId" | "normalizedPayload" | "billingOperationId">;
+type ResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
+
 export async function processNextWooSubscriptionReceipt(
   database: PrismaClient,
   now: Date,
+  resumeService: ResumeScheduler = recoveryCapacityResumeService,
 ): Promise<WooReceiptProcessingOutcome> {
   let claimedId: string | null = null;
   let contractId: string | null = null;
+  let resumeShopId: string | null = null;
   try {
-    return await database.$transaction(async (transaction) => {
+    const outcome = await database.$transaction(async (transaction) => {
       const [receipt] = await transaction.$queryRaw<ClaimRow[]>(Prisma.sql`
         SELECT "id", "topic", "providerContractId", "normalizedPayload", "billingOperationId"
         FROM "woocommerce"."WooCommerceBillingWebhookReceipt"
@@ -95,8 +100,37 @@ export async function processNextWooSubscriptionReceipt(
       });
       const operationId = preserveOperationLink(receipt, result.billingOperationId, operations, receipt.providerContractId);
       await completeWooReceipt(transaction, receipt.id, now, operationId);
+      if (current.status === "FROZEN" && result.kind !== "historical") {
+        const restored = await transaction.subscription.findUnique({
+          where: { id: current.id },
+          select: {
+            status: true,
+            plan: { select: { kind: true } },
+            providerSubscriptionId: true,
+            providerCoverageEndAt: true,
+          },
+        });
+        if (restored?.status === "ACTIVE"
+          && restored.plan?.kind === "PAID_METERED"
+          && restored.providerSubscriptionId === receipt.providerContractId
+          && restored.providerCoverageEndAt !== null
+          && restored.providerCoverageEndAt.getTime() > now.getTime()) {
+          resumeShopId = shopId;
+        }
+      }
       return result.kind === "historical" ? "historical" : "processed";
     });
+    if (resumeShopId) {
+      try {
+        await resumeService.schedule({ shopId: resumeShopId, trigger: "woo-provider-restored" });
+      } catch (error) {
+        console.warn("Woo recovery capacity resume enqueue failed", {
+          shopId: resumeShopId,
+          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        });
+      }
+    }
+    return outcome;
   } catch (error) {
     if (!(error instanceof PermanentSubscriptionEvidenceError) || !claimedId) throw error;
     return recordPermanentWooReceiptConflict(database, claimedId, contractId, error.code, now);

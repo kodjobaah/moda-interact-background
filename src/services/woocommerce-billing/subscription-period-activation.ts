@@ -8,6 +8,7 @@ import type { Prisma } from "@prisma/client";
 
 import { PermanentSubscriptionEvidenceError } from "./subscription-receipt-evidence.js";
 import type { CurrentWooSubscription, WooPaidPlan } from "./subscription-period-projection.js";
+import { nextWooEntitlementReconciliationAt } from "./paid-entitlement-window.js";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -69,6 +70,7 @@ export async function activateWooPaidSubscription(
       billingPeriodId: period.id,
       currentPeriodStart: periodStart,
       currentPeriodEnd: periodEnd,
+      nextReconcileAt: nextWooEntitlementReconciliationAt(periodEnd, coverageEndAt),
       lastSyncedAt: now,
       lastSyncErrorCode: null,
       lastSyncErrorAt: null,
