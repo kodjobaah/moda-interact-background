@@ -11,6 +11,9 @@ const activeRecovery = {
   id: "recovery-1",
   status: "ENGAGED",
   cartToken: "cart-1",
+  currency: "CAD",
+  totalPrice: "17.00",
+  lineItems: [{ title: "Durable Shopify item", quantity: 1 }],
   checkoutUrl: "https://shop.myshopify.com/recover?key=durable",
   detectedAt: new Date("2026-09-01T08:00:00.000Z"),
 };
@@ -35,9 +38,15 @@ function createHarness({
   lookupOutcome = { kind: "found", checkout: currentCheckout },
   updatedCount = 1,
   resumeSchedule = vi.fn(async () => "resume-1"),
+  latestActivity = new Date(activityAt),
+  recoveryDelayMinutes = 30,
 } = {}) {
   const order: string[] = [];
   const checkoutRecovery = {
+    findUnique: vi.fn(async () => {
+      order.push("latest-activity-read");
+      return { lastExternalActivityAt: latestActivity };
+    }),
     updateMany: vi.fn(async () => {
       order.push("activity-or-refresh-write");
       return { count: updatedCount };
@@ -84,6 +93,9 @@ function createHarness({
   const snapshotBuilder = {
     serializeLineItems: vi.fn((lineItems) => lineItems),
   };
+  const recoveryPolicyResolver = {
+    resolve: vi.fn(async () => ({ recoveryDelayMinutes })),
+  };
   const service = new CheckoutEventOrchestratorService(
     database as never,
     pendingRecoveryCandidateService as never,
@@ -92,6 +104,7 @@ function createHarness({
     abandonedCheckoutLookupService as never,
     snapshotBuilder as never,
     { schedule: resumeSchedule } as never,
+    recoveryPolicyResolver as never,
   );
   return {
     order,
@@ -103,6 +116,7 @@ function createHarness({
     snapshotBuilder,
     service,
     resumeSchedule,
+    recoveryPolicyResolver,
   };
 }
 
@@ -208,13 +222,18 @@ describe("CheckoutEventOrchestratorService", () => {
     expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
 
-  it("routes an updated unblocked DETECTED recovery to its targeted resume job", async () => {
+  it("refreshes an updated DETECTED recovery before scheduling policy-delayed re-entry", async () => {
     const recovery = {
       ...activeRecovery,
       status: "DETECTED",
       admissionBlockReason: null,
     };
-    const harness = createHarness({ recovery });
+    const latestActivity = new Date(activityAt);
+    const harness = createHarness({ recovery, latestActivity, recoveryDelayMinutes: 45 });
+    harness.resumeSchedule.mockImplementation(async () => {
+      harness.order.push("resume-schedule");
+      return "resume-1";
+    });
 
     await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
       kind: "pending",
@@ -224,8 +243,8 @@ describe("CheckoutEventOrchestratorService", () => {
     expect(harness.resumeSchedule).toHaveBeenCalledWith({
       shopId: shop.id,
       recoveryId: recovery.id,
-      trigger: `recipient-suppression-${recovery.id}-checkout-update-${new Date(activityAt).getTime()}`,
-    });
+      trigger: `recipient-suppression-${recovery.id}-checkout-update-${latestActivity.getTime()}`,
+    }, new Date(latestActivity.getTime() + 45 * 60_000));
     expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: {
         id: recovery.id,
@@ -234,7 +253,22 @@ describe("CheckoutEventOrchestratorService", () => {
       },
       data: { lastExternalActivityAt: new Date(activityAt) },
     });
-    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(harness.abandonedCheckoutLookupService.lookup).toHaveBeenCalledOnce();
+    expect(harness.database.$transaction).toHaveBeenCalledOnce();
+    expect(harness.database.checkoutRecovery.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: recovery.id, status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] } },
+      data: {
+        currency: currentCheckout.currencyCode,
+        totalPrice: currentCheckout.totalPrice,
+        checkoutUrl: currentCheckout.abandonedCheckoutUrl,
+        lineItems: currentCheckout.lineItems,
+      },
+    });
+    expect(harness.order.indexOf("transaction")).toBeLessThan(harness.order.indexOf("latest-activity-read"));
+    expect(harness.order.lastIndexOf("activity-or-refresh-write")).toBeLessThan(
+      harness.order.indexOf("resume-schedule"),
+    );
+    expect(harness.recoveryPolicyResolver.resolve).toHaveBeenCalledWith(shop.id);
   });
 
   it("schedules a new pending generation from durable EXPIRED recovery state", async () => {

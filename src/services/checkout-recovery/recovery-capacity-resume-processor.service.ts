@@ -5,6 +5,8 @@ import type { abandonedCheckoutLookupService } from "../abandoned-checkout-looku
 import type { pendingRecoveryCandidateService } from "../pending-recovery-candidate.service.js";
 import type { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import type { recoverySnapshotBuilderService } from "./recovery-snapshot-builder.service.js";
+import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
+import { recoveryPolicyService } from "../recovery-policy.service.js";
 import {
   recoveryRecipientResolverService,
   type RecoveryRecipientResolverService,
@@ -20,6 +22,8 @@ type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "
 type RecoverySnapshotBuilderPort = Pick<typeof recoverySnapshotBuilderService, "build">;
 type RecoveryRecipientResolverPort = Pick<RecoveryRecipientResolverService, "resolve" | "resolveForCustomerInShop">;
 type SuppressionAdmissionPort = Pick<RecoveryRecipientSuppressionAdmissionService, "clearDetectedSuppression">;
+type RecoveryResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
+type RecoveryPolicyResolver = Pick<typeof recoveryPolicyService, "resolve">;
 type RecoveryInitiationPort = (
   seed: RecoveryCheckoutSeed,
   generation?: number,
@@ -37,6 +41,9 @@ export class RecoveryCapacityResumeProcessorService {
     private readonly initiate: RecoveryInitiationPort,
     private readonly recipientResolver: RecoveryRecipientResolverPort = recoveryRecipientResolverService,
     private readonly suppressionAdmission: SuppressionAdmissionPort = recoveryRecipientSuppressionAdmissionService,
+    private readonly recoveryResumeScheduler: RecoveryResumeScheduler = recoveryCapacityResumeService,
+    private readonly recoveryPolicyResolver: RecoveryPolicyResolver = recoveryPolicyService,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   async resume(recoveryId: string, wakeupTrigger?: string) {
@@ -91,6 +98,7 @@ export class RecoveryCapacityResumeProcessorService {
             detectedAt: true,
             generation: true,
             customerId: true,
+            lastExternalActivityAt: true,
           },
         });
         if (
@@ -107,6 +115,22 @@ export class RecoveryCapacityResumeProcessorService {
         );
         if (!lockedExecution.allowed) {
           return { kind: "ignored", reason: lockedExecution.reason } as const;
+        }
+
+        if (isTargetedSuppressionWakeup(wakeupTrigger, recoveryId)) {
+          const policy = await this.recoveryPolicyResolver.resolve(recovery.shopId);
+          const maturityAt = new Date(
+            current.lastExternalActivityAt.getTime() + policy.recoveryDelayMinutes * 60_000,
+          );
+          if (maturityAt > this.clock()) {
+            const trigger = `recipient-suppression-${recovery.id}-maturity-${current.lastExternalActivityAt.getTime()}`;
+            await this.recoveryResumeScheduler.schedule({
+              shopId: recovery.shopId,
+              recoveryId: recovery.id,
+              trigger,
+            }, maturityAt);
+            return { kind: "deferred-activity", dueAt: maturityAt } as const;
+          }
         }
 
         const outcome = await this.abandonedCheckoutLookupService.lookup({

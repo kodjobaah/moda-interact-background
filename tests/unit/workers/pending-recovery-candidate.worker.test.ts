@@ -32,6 +32,7 @@ const hoisted = vi.hoisted(() => ({
     return { count: 1 };
   }),
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
+  findRecovery: vi.fn(async () => hoisted.durableRecovery),
   findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
   scheduleResume: vi.fn(async () => "resume-job"),
   redis: {
@@ -75,7 +76,7 @@ vi.mock("../../../src/lib/db.js", () => ({
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
-      findUnique: vi.fn(async () => hoisted.durableRecovery),
+      findUnique: hoisted.findRecovery,
       updateMany: hoisted.updateRecoveryMany,
     },
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
@@ -126,7 +127,11 @@ import {
 import { createPendingRecoveryCandidateWorker } from "../../../src/workers/pending-recovery-candidate.worker.js";
 import { RecoveryMaterializationService } from "../../../src/services/checkout-recovery/recovery-materialization.service.js";
 import { RecoveryInitiationService } from "../../../src/services/checkout-recovery/recovery-initiation.service.js";
-import { RecoveryRecipientSuppressionAdmissionService, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED } from "../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
+import {
+  RecoveryRecipientSuppressionAdmissionService,
+  RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
+  RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
+} from "../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 import { findLatestRecovery } from "../../../src/services/checkout-recovery/latest-recovery.js";
 import { CheckoutOrderGuardService } from "../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
@@ -138,6 +143,7 @@ describe("pending recovery candidate worker", () => {
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     hoisted.findLatestRecovery.mockClear();
+    hoisted.findRecovery.mockReset().mockImplementation(async () => hoisted.durableRecovery);
     hoisted.findSuppression.mockReset().mockResolvedValue({
       suppressUntil: new Date("2026-10-12T00:00:00Z"),
     });
@@ -175,11 +181,11 @@ describe("pending recovery candidate worker", () => {
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
   });
 
-  it("retries a persisted DETECTED recovery after enqueue failure and rechecks suppression before admission", async () => {
+  it("retries a persisted DETECTED recovery after enqueue and version-read failures", async () => {
     const admission = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
       checkoutRecovery: {
-        findUnique: vi.fn(async () => hoisted.durableRecovery),
+        findUnique: hoisted.findRecovery,
         updateMany: hoisted.updateRecoveryMany,
       },
     } as never);
@@ -292,6 +298,65 @@ describe("pending recovery candidate worker", () => {
       hoisted.createRecovery.mock.calls[0]?.[0].data.generation,
     );
     expect(hoisted.scheduleResume).toHaveBeenCalledTimes(2);
+    expect(hoisted.durableRecovery).toMatchObject({
+      id: "recovery-1",
+      status: "DETECTED",
+      admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+    });
+    expect(hoisted.attemptGetOrCreate).not.toHaveBeenCalled();
+    expect(hoisted.billingAdmit).not.toHaveBeenCalled();
+    expect(hoisted.providerSend).not.toHaveBeenCalled();
+
+    hoisted.durableRecovery = null;
+    hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
+    hoisted.cleanup.mockClear();
+    hoisted.createRecovery.mockClear();
+    hoisted.updateRecoveryMany.mockClear();
+    const versionReadError = new Error("database version read unavailable");
+    hoisted.findRecovery
+      .mockReset()
+      .mockRejectedValueOnce(versionReadError)
+      .mockImplementation(async () => hoisted.durableRecovery);
+
+    let versionReadFailure: unknown;
+    try {
+      await hoisted.processor?.(firstJob);
+      throw new Error("Expected version read attempt to fail");
+    } catch (error) {
+      versionReadFailure = error;
+    }
+
+    expect(versionReadFailure).toMatchObject({
+      message: RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
+      cause: versionReadError,
+    });
+    expect(hoisted.scheduleResume).not.toHaveBeenCalled();
+    expect(hoisted.updateRecoveryMany).not.toHaveBeenCalled();
+    expect(hoisted.durableRecovery).toMatchObject({
+      id: "recovery-1",
+      status: "DETECTED",
+      admissionBlockReason: null,
+    });
+
+    const versionReadRetryJob = {
+      ...firstJob,
+      attemptsMade: 1,
+      failedReason: RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
+    };
+    await hoisted.processor?.(versionReadRetryJob);
+
+    expect(hoisted.materialize).toHaveBeenLastCalledWith(candidate, {
+      retrySuppressionAdmission: true,
+    });
+    expect(hoisted.createRecovery).toHaveBeenCalledTimes(2);
+    expect(hoisted.createRecovery.mock.calls[1]?.[0].data.generation).toBe(
+      hoisted.createRecovery.mock.calls[0]?.[0].data.generation,
+    );
+    expect(hoisted.scheduleResume).toHaveBeenCalledOnce();
+    expect(hoisted.scheduleResume).toHaveBeenCalledWith(
+      expect.objectContaining({ recoveryId: "recovery-1" }),
+      new Date("2026-10-12T00:00:00Z"),
+    );
     expect(hoisted.durableRecovery).toMatchObject({
       id: "recovery-1",
       status: "DETECTED",

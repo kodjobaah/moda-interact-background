@@ -14,6 +14,7 @@ import type { ShopExecutionDenialReason } from "../shop-execution-eligibility.se
 import {
   recoveryCapacityResumeService,
 } from "../recovery-capacity-resume.service.js";
+import { recoveryPolicyService } from "../recovery-policy.service.js";
 
 type PendingCandidatePort = Pick<
   typeof pendingRecoveryCandidateService,
@@ -27,6 +28,7 @@ type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "
 type LatestRecoveryLookup = typeof findLatestRecovery;
 type SnapshotLineItemSerializer = Pick<RecoverySnapshotBuilderService, "serializeLineItems">;
 type RecoveryResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
+type RecoveryPolicyResolver = Pick<typeof recoveryPolicyService, "resolve">;
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -43,6 +45,7 @@ export class CheckoutEventOrchestratorService {
     private readonly abandonedCheckoutLookupService: AbandonedCheckoutLookupPort,
     private readonly snapshotBuilder: SnapshotLineItemSerializer,
     private readonly recoveryResumeScheduler: RecoveryResumeScheduler = recoveryCapacityResumeService,
+    private readonly recoveryPolicyResolver: RecoveryPolicyResolver = recoveryPolicyService,
   ) {}
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -147,21 +150,6 @@ export class CheckoutEventOrchestratorService {
       } as const;
     }
 
-    if (
-      recovery.status === "DETECTED" &&
-      (recovery.admissionBlockReason == null ||
-        recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED")
-    ) {
-      await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
-      const trigger = `recipient-suppression-${recovery.id}-checkout-update-${new Date(event.activityAt).getTime()}`;
-      const jobId = await this.recoveryResumeScheduler.schedule({
-        shopId: shop.id,
-        recoveryId: recovery.id,
-        trigger,
-      });
-      return { kind: "pending", outcome: "suppression-resume-scheduled", jobId } as const;
-    }
-
     if (recovery.status === "EXPIRED") {
       const scheduled = await this.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
         shopDomain: event.shopDomain,
@@ -226,6 +214,29 @@ export class CheckoutEventOrchestratorService {
 
     if (refreshed.count === 0) {
       return { kind: "ignored", reason: "already-transitioned" } as const;
+    }
+
+    if (
+      recovery.status === "DETECTED" &&
+      (recovery.admissionBlockReason == null ||
+        recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED")
+    ) {
+      const current = await this.database.checkoutRecovery.findUnique({
+        where: { id: recovery.id },
+        select: { lastExternalActivityAt: true },
+      });
+      if (!current) return { kind: "ignored", reason: "already-transitioned" } as const;
+      const policy = await this.recoveryPolicyResolver.resolve(shop.id);
+      const dueAt = new Date(
+        current.lastExternalActivityAt.getTime() + policy.recoveryDelayMinutes * 60_000,
+      );
+      const trigger = `recipient-suppression-${recovery.id}-checkout-update-${current.lastExternalActivityAt.getTime()}`;
+      const jobId = await this.recoveryResumeScheduler.schedule({
+        shopId: shop.id,
+        recoveryId: recovery.id,
+        trigger,
+      }, dueAt);
+      return { kind: "pending", outcome: "suppression-resume-scheduled", jobId } as const;
     }
 
     return {

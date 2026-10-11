@@ -12,7 +12,10 @@ import { pendingRecoveryCandidateService } from "../services/pending-recovery-ca
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
-import { RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED } from "../services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
+import {
+  RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
+  RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
+} from "../services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
@@ -95,6 +98,10 @@ export function createPendingRecoveryCandidateWorker() {
 }
 
 function isSuppressionResumeEnqueueFailure(failedReason: string): boolean {
-  return failedReason === RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED ||
-    failedReason.startsWith(`${RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED}:`);
+  return isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED) ||
+    isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED);
+}
+
+function isRetryMarker(failedReason: string, marker: string): boolean {
+  return failedReason === marker || failedReason.startsWith(`${marker}:`);
 }

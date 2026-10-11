@@ -9,6 +9,8 @@ export type RecoveryRecipientSuppression =
 
 export const RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED =
   "RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED";
+export const RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED =
+  "RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED";
 
 type SuppressionDatabase = Pick<
   PrismaClient,
@@ -39,10 +41,15 @@ export class RecoveryRecipientSuppressionAdmissionService {
     until: Date,
     wakeupTrigger?: string,
   ): Promise<boolean> {
-    const current = await this.database.checkoutRecovery.findUnique({
-      where: { id: recoveryId },
-      select: { status: true, updatedAt: true },
-    });
+    let current;
+    try {
+      current = await this.database.checkoutRecovery.findUnique({
+        where: { id: recoveryId },
+        select: { status: true, updatedAt: true },
+      });
+    } catch (error) {
+      throw new Error(RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED, { cause: error });
+    }
     try {
       const trigger = wakeupTrigger
         ? `recipient-suppression-${recoveryId}-${until.getTime()}-${createHash("sha256").update(wakeupTrigger).digest("hex").slice(0, 12)}`

@@ -15,6 +15,7 @@ const blockedRecovery = {
   cartToken: "cart-1",
   checkoutUrl: "https://checkout/durable",
   detectedAt: new Date("2026-09-01T00:00:00.000Z"),
+  lastExternalActivityAt: new Date("2026-10-10T00:00:00.000Z"),
   generation: 1,
   status: "DETECTED",
   admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
@@ -45,6 +46,8 @@ function createHarness({
   updateCount = 1,
   resolvedRecipient = null,
   customerRecipient = "15551234567",
+  recoveryDelayMinutes = 30,
+  now = () => new Date(),
 } = {}) {
   const order: string[] = [];
   const readResults = [...reads];
@@ -124,6 +127,9 @@ function createHarness({
     initiate,
     recipientResolver as never,
     suppressionAdmission as never,
+    { schedule } as never,
+    { resolve: vi.fn(async () => ({ recoveryDelayMinutes })) } as never,
+    now,
   );
 
   return {
@@ -163,6 +169,52 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     });
     expect(harness.pendingRecoveryCandidateService.withCheckoutLock).not.toHaveBeenCalled();
     expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+  });
+
+  it("reschedules a stale targeted wake-up until the latest activity matures", async () => {
+    schedule.mockClear();
+    const latestActivity = new Date("2026-10-11T20:00:00.000Z");
+    const recentRecovery = {
+      ...suppressionBlockedRecovery,
+      lastExternalActivityAt: latestActivity,
+    };
+    let now = new Date("2026-10-11T20:15:00.000Z");
+    const harness = createHarness({
+      reads: [
+        recentRecovery,
+        recentRecovery,
+        recentRecovery,
+        recentRecovery,
+        { status: "MESSAGE_SENT", admissionBlockReason: null },
+      ],
+      now: () => now,
+      recoveryDelayMinutes: 30,
+    });
+    const staleTrigger = `recipient-suppression-recovery-1-checkout-update-${latestActivity.getTime() - 60_000}`;
+
+    await expect(harness.service.resume("recovery-1", staleTrigger)).resolves.toEqual({
+      kind: "deferred-activity",
+      dueAt: new Date(latestActivity.getTime() + 30 * 60_000),
+    });
+    const maturityJob = schedule.mock.calls[0]?.[0];
+    expect(maturityJob).toEqual({
+      shopId: "shop-1",
+      recoveryId: "recovery-1",
+      trigger: `recipient-suppression-recovery-1-maturity-${latestActivity.getTime()}`,
+    });
+    expect(schedule.mock.calls[0]?.[1]).toEqual(new Date(latestActivity.getTime() + 30 * 60_000));
+    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
+    expect(harness.initiate).not.toHaveBeenCalled();
+
+    now = new Date(latestActivity.getTime() + 30 * 60_000);
+    await harness.service.resume("recovery-1", maturityJob!.trigger);
+    expect(harness.abandonedCheckoutLookupService.lookup).toHaveBeenCalledOnce();
+    expect(harness.initiate).toHaveBeenCalledOnce();
+
+    await expect(harness.service.resume("recovery-1", maturityJob!.trigger)).resolves.toMatchObject({
+      kind: "ignored",
+    });
+    expect(harness.initiate).toHaveBeenCalledOnce();
   });
 
   it("re-reads durable block state and rechecks eligibility after acquiring the checkout lock", async () => {
@@ -423,17 +475,20 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     const current = {
       ...suppressionBlockedRecovery,
       admissionBlockReason: null,
+      lastExternalActivityAt: suppressionBlockedRecovery.lastExternalActivityAt,
     };
     const updateMany = vi.fn(async ({ where, data }: {
       where: {
         id: string;
-        status: string;
+        status: string | { in: string[] };
         updatedAt?: Date;
+        lastExternalActivityAt?: { lt: Date };
         admissionBlockReason?: { in: Array<string | null> };
       };
       data: Record<string, unknown>;
     }) => {
-      if (where.status !== current.status || where.id !== current.id) return { count: 0 };
+      const allowedStatuses = typeof where.status === "string" ? [where.status] : where.status.in;
+      if (!allowedStatuses.includes(current.status) || where.id !== current.id) return { count: 0 };
       if (where.admissionBlockReason &&
         !where.admissionBlockReason.in.includes(current.admissionBlockReason)) return { count: 0 };
       if (data.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
@@ -457,6 +512,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
               admissionBlockReason: current.admissionBlockReason,
               updatedAt: current.updatedAt,
             };
+          }
+          if (select?.lastExternalActivityAt && Object.keys(select).length === 1) {
+            return { lastExternalActivityAt: current.lastExternalActivityAt };
           }
           return { ...current };
         }),
@@ -508,6 +566,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
         resolveForCustomerInShop: async () => null,
       } as never,
       admission,
+      { schedule } as never,
+      { resolve: vi.fn(async () => ({ recoveryDelayMinutes: 30 })) } as never,
+      () => new Date("2026-10-11T21:00:00.000Z"),
     );
 
     const result = await processor.resume("recovery-1", wakeupTrigger);
@@ -532,12 +593,18 @@ describe("RecoveryCapacityResumeProcessorService", () => {
         { lookup: vi.fn(async () => ({ kind: "found", checkout: currentCheckout })) } as never,
         { serializeLineItems: vi.fn((items) => items) } as never,
         { schedule } as never,
+        { resolve: vi.fn(async () => ({ recoveryDelayMinutes: 30 })) } as never,
       );
-      await expect(checkoutEvents.handleCheckoutUpdatedContract({
+      const checkoutResult = await checkoutEvents.handleCheckoutUpdatedContract({
         shopDomain: "shop.example",
         checkoutToken: "checkout-1",
         activityAt: eventTime,
-      })).resolves.toMatchObject({ kind: "pending", outcome: "suppression-resume-scheduled" });
+      });
+      expect(checkoutResult).toEqual({
+        kind: "pending",
+        outcome: "suppression-resume-scheduled",
+        jobId: "job-id",
+      });
       const updateWakeup = schedule.mock.calls[1]?.[0];
       expect(updateWakeup?.trigger).toContain("recipient-suppression-recovery-1-checkout-update-");
 
