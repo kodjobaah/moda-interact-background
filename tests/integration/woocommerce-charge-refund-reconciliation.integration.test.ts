@@ -184,6 +184,7 @@ describeWithDisposableDatabase("Woo charge refund reconciliation PostgreSQL", ()
   it("requires an exact local hold, completes Free null-period allowance independent of money, and replays idempotently", async () => {
     const client = database();
     const fixture = await createFixture(client);
+    let malformedMoneyFixture: Fixture | undefined;
     try {
       const activationReceipt = await createReceipt(
         client, fixture, "saas_billing_contract.activated", activationPayload(fixture.contractId), receivedAt,
@@ -239,7 +240,64 @@ describeWithDisposableDatabase("Woo charge refund reconciliation PostgreSQL", ()
           expect.objectContaining({ id: firstReceipt, processedAt: expect.any(Date), processingError: null }),
           expect.objectContaining({ id: secondReceipt, processedAt: expect.any(Date), processingError: null }),
         ]));
+
+      malformedMoneyFixture = await createFixture(client);
+      const malformedActivation = await createReceipt(
+        client,
+        malformedMoneyFixture,
+        "saas_billing_contract.activated",
+        activationPayload(malformedMoneyFixture.contractId),
+        new Date(receivedAt.getTime() + 2000),
+      );
+      expect((await chargeService.reconcileBatch()).activated).toBe(1);
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: malformedActivation } }))
+        .toMatchObject({ processedAt: reconciledAt });
+
+      const malformedRefundId = await createWooRefundHold(client, malformedMoneyFixture);
+      expect(await correction.processDue()).toMatchObject({ selected: 1, providerActionRequired: 1 });
+      const malformedReceipt = await createReceipt(
+        client,
+        malformedMoneyFixture,
+        "saas_billing_contract.refunded",
+        refundPayload(malformedMoneyFixture.contractId, "malformed-money"),
+        new Date(receivedAt.getTime() + 3000),
+      );
+      expect(await receiptService.reconcileBatch()).toMatchObject({ claimed: 1, processed: 1, retryable: 0 });
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: malformedReceipt } }))
+        .toMatchObject({ processedAt: reconciledAt, processingError: null });
+      expect(await client.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: malformedMoneyFixture.purchaseId } }))
+        .toMatchObject({ status: "REFUNDED", currentAmount: 0, reservedAmount: 0, billingPeriodId: null });
+      expect(await client.recoveryCreditRefund.findUniqueOrThrow({ where: { id: malformedRefundId } }))
+        .toMatchObject({
+          status: "COMPLETED",
+          finalCreditQuantity: 10,
+          expectedProviderAmount: null,
+          providerAmount: null,
+          providerCurrency: null,
+          providerReference: malformedMoneyFixture.contractId,
+          providerActionKind: "REFUND",
+        });
+      expect(await client.shopEntitlementCounter.findUniqueOrThrow({
+        where: { shopId_counter: { shopId: malformedMoneyFixture.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
+      })).toMatchObject({ grantedQuantity: 0, refundingQuantity: 0 });
+
+      const malformedReplay = await createReceipt(
+        client,
+        malformedMoneyFixture,
+        "saas_billing_contract.refunded",
+        refundPayload(malformedMoneyFixture.contractId, "4.56"),
+        new Date(receivedAt.getTime() + 4000),
+      );
+      expect(await receiptService.reconcileBatch()).toMatchObject({ claimed: 1, processed: 1, retryable: 0 });
+      expect(await client.recoveryCreditRefund.findUniqueOrThrow({ where: { id: malformedRefundId } }))
+        .toMatchObject({ status: "COMPLETED", providerAmount: null, providerCurrency: null, finalCreditQuantity: 10 });
+      expect(await client.shopEntitlementCounter.findUniqueOrThrow({
+        where: { shopId_counter: { shopId: malformedMoneyFixture.shopId, counter: "PURCHASED_RECOVERY_CREDITS" } },
+      })).toMatchObject({ grantedQuantity: 0, refundingQuantity: 0 });
+      expect(await client.wooCommerceBillingWebhookReceipt.findUniqueOrThrow({ where: { id: malformedReplay } }))
+        .toMatchObject({ processedAt: expect.any(Date), processingError: null });
     } finally {
+      if (malformedMoneyFixture) await cleanup(client, malformedMoneyFixture);
       await cleanup(client, fixture);
       await client.$disconnect();
     }
