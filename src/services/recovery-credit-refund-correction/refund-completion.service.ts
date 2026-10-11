@@ -1,17 +1,8 @@
-import {
-  MerchantSupportMessageKind,
-  MerchantSupportMessageState,
-  RecoveryCreditPurchaseStatus,
-  RecoveryCreditRefundStatus,
-} from "@prisma/client";
+import { RecoveryCreditPurchaseStatus, RecoveryCreditRefundStatus } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import {
-  ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-  BILLING_SYSTEM_MESSAGE_CODES,
-  createMerchantBillingSystemSourceKey,
-} from "@modainteract/moda-interact-shared/billing";
 
 import type { RefundRow } from "./refund-correction.types.js";
+import { createRefundCompletionSupportMessage } from "./refund-completion-support-message.js";
 
 export class RefundCompletionService {
   constructor(
@@ -118,37 +109,11 @@ export class RefundCompletionService {
         throw new Error("automatic refund completion CAS failed");
       }
 
-      const completionTime = this.now();
-      const systemCode = BILLING_SYSTEM_MESSAGE_CODES.REFUND_COMPLETED;
-      const sourceKey = createMerchantBillingSystemSourceKey(
-        refund.shopId,
-        systemCode,
-        refund.id,
-        ARCH007_BILLING_CONTRACT_SCHEMA_VERSION,
-      );
-      const thread = await transaction.merchantSupportThread.upsert({
-        where: { shopId: refund.shopId },
-        create: { shopId: refund.shopId },
-        update: {},
-      });
-      await transaction.merchantSupportMessage.upsert({
-        where: { sourceKey },
-        create: {
-          threadId: thread.id,
-          kind: MerchantSupportMessageKind.SYSTEM,
-          state: MerchantSupportMessageState.AVAILABLE,
-          originalBody: "Your recovery-credit refund has completed. The refundable purchased credits have been removed and Shopify provider reconciliation is complete.",
-          sourceLanguageTag: "en-GB",
-          systemCode,
-          systemVersion: String(ARCH007_BILLING_CONTRACT_SCHEMA_VERSION),
-          sourceKey,
-          availableAt: completionTime,
-        },
-        update: {},
-      });
-      await transaction.merchantSupportThread.update({
-        where: { id: thread.id },
-        data: { lastMessageAt: completionTime },
+      await createRefundCompletionSupportMessage(transaction, {
+        shopId: refund.shopId,
+        refundId: refund.id,
+        body: "Your recovery-credit refund has completed. The refundable purchased credits have been removed and Shopify provider reconciliation is complete.",
+        availableAt: this.now(),
       });
       return true;
     });

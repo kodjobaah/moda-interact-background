@@ -27,9 +27,11 @@ function refundRow(overrides: Record<string, unknown> = {}) {
     id: "refund-1",
     createdAt: new Date("2026-09-01T00:00:00.000Z"),
     shopId: "shop-1",
+    provider: "SHOPIFY",
     status: "REQUESTED",
     reason: null,
     purchaseId: "purchase-1",
+    availableAmountAtRequestSnapshot: 1,
     billingPeriodIdSnapshot: "period-1",
     providerSubscriptionIdSnapshot: context,
     planHandleSnapshot: "pro-2026",
@@ -56,8 +58,16 @@ function refundRow(overrides: Record<string, unknown> = {}) {
 function harness(row = refundRow(), providerResult = provider) {
   const refundUpdate = vi.fn().mockResolvedValue({ count: 1 });
   const usageUpsert = vi.fn().mockResolvedValue({ id: "correction-event-1" });
+  const operationalLogger = { warn: vi.fn() };
   const database = {
-    recoveryCreditRefund: { findMany: vi.fn().mockResolvedValue([row]), findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn(), updateMany: refundUpdate },
+    recoveryCreditRefund: {
+      findMany: vi.fn().mockImplementation(async (args: { where: { provider: string } }) => (
+        args.where.provider === row.provider ? [row] : []
+      )),
+      findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn(),
+      updateMany: refundUpdate,
+    },
     billingPeriod: { findUnique: vi.fn().mockResolvedValue({ periodStart, periodEnd }) },
     usageEvent: { upsert: usageUpsert },
     recoveryCreditPurchase: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn(), updateMany: vi.fn() },
@@ -67,10 +77,85 @@ function harness(row = refundRow(), providerResult = provider) {
     $transaction: vi.fn().mockImplementation(async (callback: (transaction: unknown) => unknown) => callback(database)),
   };
   const partner = { getSubscriptionReconciliationSnapshot: vi.fn().mockResolvedValue({ activeSubscription: providerResult, latestLifecycleEvent: null }) };
-  return { database, partner, service: new RecoveryCreditRefundCorrectionService(database as never, partner as never) };
+  return {
+    database,
+    partner,
+    operationalLogger,
+    service: new RecoveryCreditRefundCorrectionService(
+      database as never,
+      partner as never,
+      undefined,
+      undefined,
+      operationalLogger as never,
+    ),
+  };
 }
 
 describe("RecoveryCreditRefundCorrectionService", () => {
+  it("routes Woo refund requests without invoking Shopify provider proof or correction events", async () => {
+    const row = refundRow({ provider: "WOOCOMMERCE" });
+    const test = harness(row);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({
+      selected: 1,
+      prepared: 0,
+      reconciled: 1,
+      providerActionRequired: 0,
+    });
+    expect(test.partner.getSubscriptionReconciliationSnapshot).not.toHaveBeenCalled();
+    expect(test.database.usageEvent.upsert).not.toHaveBeenCalled();
+    expect(test.database.recoveryCreditRefund.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { provider: "WOOCOMMERCE", status: "REQUESTED" },
+      take: 50,
+    }));
+  });
+
+  it("processes Shopify refunds when the independent Woo scan fails", async () => {
+    const shopifyRefund = refundRow({ provider: "SHOPIFY" });
+    const test = harness(shopifyRefund);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => {
+      if (args.where.provider === "WOOCOMMERCE") throw new Error("Woo scan unavailable");
+      return [shopifyRefund];
+    });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, prepared: 1 });
+    expect(test.operationalLogger.warn).toHaveBeenCalledWith(
+      "billing.refund_correction.woocommerce_scan_deferred",
+      { errorName: "Error" },
+    );
+  });
+
+  it("continues Shopify corrections after a Woo preparation failure without failure-state writes", async () => {
+    const wooRefund = refundRow({
+      id: "woo-refund-1",
+      provider: "WOOCOMMERCE",
+      createdAt: new Date("2026-08-31T00:00:00.000Z"),
+    });
+    const shopifyRefund = refundRow({ provider: "SHOPIFY" });
+    const test = harness(shopifyRefund);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => (
+      args.where.provider === "WOOCOMMERCE" ? [wooRefund] : [shopifyRefund]
+    ));
+    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+      code: "P2034",
+      clientVersion: "test",
+    });
+    test.database.$transaction
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 1, needsAttention: 0 });
+    expect(test.operationalLogger.warn).toHaveBeenCalledWith(
+      "billing.refund_correction.woocommerce_preparation_deferred",
+      { refundId: "woo-refund-1", errorName: "PrismaClientKnownRequestError" },
+    );
+    expect(test.database.$transaction).toHaveBeenCalledTimes(4);
+    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "NEEDS_ATTENTION" }),
+    }));
+  });
+
   it("keeps native App Pricing eligible when the legacy provider id is null", async () => {
     const nativeProvider = { ...provider, providerSubscriptionId: null };
     const context = deriveShopifyProviderContextIdentity({ providerSubscriptionId: null, planHandle: "pro-2026", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd });
@@ -136,7 +221,9 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     const oldest = refundRow({ id: "refund-oldest", createdAt: new Date("2026-09-01T00:00:00.000Z") });
     const newest = refundRow({ id: "refund-newest", createdAt: new Date("2026-09-02T00:00:00.000Z") });
     const test = harness(oldest);
-    test.database.recoveryCreditRefund.findMany.mockResolvedValue([oldest, newest]);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => (
+      args.where.provider === "SHOPIFY" ? [oldest, newest] : []
+    ));
 
     await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 1 });
     expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(1);
@@ -157,7 +244,9 @@ describe("RecoveryCreditRefundCorrectionService", () => {
         { handle: "other-meter", currency: "USD", tiersMode: "VOLUME", tiers: [{ upTo: null, amountPerUnit: "1.00", amount: "0.00" }] },
       ],
     });
-    test.database.recoveryCreditRefund.findMany.mockResolvedValue([first, second]);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => (
+      args.where.provider === "SHOPIFY" ? [first, second] : []
+    ));
 
     await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 2 });
     expect(test.database.usageEvent.upsert).toHaveBeenCalledTimes(2);
@@ -197,7 +286,9 @@ describe("RecoveryCreditRefundCorrectionService", () => {
         { handle: "other-meter", currency: "USD", tiersMode: "VOLUME", tiers: [{ upTo: null, amountPerUnit: "1.00", amount: "0.00" }] },
       ],
     });
-    test.database.recoveryCreditRefund.findMany.mockResolvedValue([first, second]);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => (
+      args.where.provider === "SHOPIFY" ? [first, second] : []
+    ));
     test.database.recoveryCreditPurchase.findFirst.mockImplementation(async (args: { where: { shopifyEventHandleSnapshot: string } }) => (
       args.where.shopifyEventHandleSnapshot === "pack-meter" ? { id: "purchase-1" } : null
     ));
@@ -251,7 +342,12 @@ describe("RecoveryCreditRefundCorrectionService", () => {
       ...provider,
       providerUsageSnapshot: [{ handle: "pack-meter", quantity: "4.00", costAmount: "4.00", costCurrency: "USD" }],
     });
-    test.database.recoveryCreditRefund.findMany.mockResolvedValueOnce([initial]).mockResolvedValueOnce([linked]);
+    let shopifyScan = 0;
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => {
+      if (args.where.provider !== "SHOPIFY") return [];
+      shopifyScan += 1;
+      return shopifyScan === 1 ? [initial] : [linked];
+    });
     test.database.usageEvent.upsert.mockResolvedValue({ id: "correction-event-1" });
 
     await expect(test.service.processDue()).resolves.toMatchObject({ prepared: 1 });

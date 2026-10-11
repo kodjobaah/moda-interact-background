@@ -43,6 +43,7 @@ export class RefundPreparationService {
   ) {}
 
   async prepare(refund: RefundRow): Promise<RefundPreparationResult> {
+    if (refund.provider !== "SHOPIFY") return { kind: "provider-action-required" };
     const proof = await this.readProof(refund);
     if (!proof.safe) {
       await this.markProviderActionRequired(refund, proof.reason);

@@ -3,7 +3,9 @@ import {
   RecoveryCreditRefundStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import {
   shopifyPartnerBillingApi,
   type ShopifyPartnerBillingProvider,
@@ -11,6 +13,9 @@ import {
 import {
   RefundCompletionService,
 } from "./recovery-credit-refund-correction/refund-completion.service.js";
+import {
+  WooRefundHoldPreparationService,
+} from "./recovery-credit-refund-correction/woocommerce-refund-hold-preparation.service.js";
 import {
   RefundPreparationService,
 } from "./recovery-credit-refund-correction/refund-preparation.service.js";
@@ -28,6 +33,10 @@ import {
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
+const logger = createLogger({
+  serviceName: "moda-billing-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 const LIVE_RECOVERY_CREDIT_REFUND_STATUSES = [
   RecoveryCreditRefundStatus.REQUESTED,
   RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
@@ -48,16 +57,19 @@ export type RecoveryCreditRefundCorrectionResult = {
 export class RecoveryCreditRefundCorrectionService {
   private readonly preparation: RefundPreparationService;
   private readonly reconciliation: RefundReconciliationService;
+  private readonly wooPreparation: WooRefundHoldPreparationService;
 
   constructor(
     private readonly database: RefundDatabase = prisma,
     partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
     now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
+    private readonly operationalLogger: StructuredLogger = logger,
   ) {
     const providerState = new RefundProviderStateService(database, partner);
     const completion = new RefundCompletionService(database, now);
     this.preparation = new RefundPreparationService(database, providerState, now);
+    this.wooPreparation = new WooRefundHoldPreparationService(database);
     this.reconciliation = new RefundReconciliationService(
       database,
       providerState,
@@ -66,12 +78,28 @@ export class RecoveryCreditRefundCorrectionService {
   }
 
   async processDue(): Promise<RecoveryCreditRefundCorrectionResult> {
-    const refunds = await this.database.recoveryCreditRefund.findMany({
-      where: { status: RecoveryCreditRefundStatus.REQUESTED },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      take: boundedPageSize(this.pageSize),
-      select: refundSelect,
-    });
+    const take = boundedPageSize(this.pageSize);
+    const [shopifyRefunds, wooRefunds] = await Promise.all([
+      this.database.recoveryCreditRefund.findMany({
+        where: { provider: "SHOPIFY", status: RecoveryCreditRefundStatus.REQUESTED },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take,
+        select: refundSelect,
+      }),
+      this.database.recoveryCreditRefund.findMany({
+        where: { provider: "WOOCOMMERCE", status: RecoveryCreditRefundStatus.REQUESTED },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take,
+        select: refundSelect,
+      }).catch((error: unknown) => {
+        this.operationalLogger.warn("billing.refund_correction.woocommerce_scan_deferred", {
+          errorName: boundedErrorName(error),
+        });
+        return [];
+      }),
+    ]);
+    const refunds = [...shopifyRefunds, ...wooRefunds]
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id));
     const result: RecoveryCreditRefundCorrectionResult = {
       selected: refunds.length,
       prepared: 0,
@@ -82,23 +110,41 @@ export class RecoveryCreditRefundCorrectionService {
     };
     const visitedMeters = new Set<string>();
     for (const refund of refunds as unknown as RefundRow[]) {
-      const meterKey = refundMeterKey(refund);
-      if (visitedMeters.has(meterKey)) continue;
-      visitedMeters.add(meterKey);
+      const isWoo = refund.provider === "WOOCOMMERCE";
+      const meterKey = isWoo ? null : refundMeterKey(refund);
+      if (meterKey && visitedMeters.has(meterKey)) continue;
+      if (meterKey) visitedMeters.add(meterKey);
       let outcome: CorrectionOutcome;
       try {
-        outcome = refund.automaticCorrectionUsageEventId
-          ? await this.reconciliation.reconcile(refund)
-          : await this.prepare(refund);
+        if (isWoo) {
+          const wooOutcome = await this.wooPreparation.prepare(refund);
+          outcome = wooOutcome === "prepared"
+            ? "provider-action-required"
+            : wooOutcome === "needs-attention" ? "needs-attention" : "reconciled";
+        } else if (refund.provider === "SHOPIFY") {
+          outcome = refund.automaticCorrectionUsageEventId
+            ? await this.reconciliation.reconcile(refund)
+            : await this.prepare(refund);
+        } else {
+          outcome = "needs-attention";
+        }
       } catch (error) {
-        outcome = refund.automaticCorrectionUsageEventId
-          ? "reconciled"
-          : "provider-action-required";
-        if (outcome === "provider-action-required") {
-          await this.preparation.markProviderActionRequired(
-            refund,
-            error instanceof Error ? error.message : "provider proof unavailable",
-          );
+        if (isWoo) {
+          this.operationalLogger.warn("billing.refund_correction.woocommerce_preparation_deferred", {
+            refundId: refund.id,
+            errorName: boundedErrorName(error),
+          });
+          outcome = "reconciled";
+        } else {
+          outcome = refund.automaticCorrectionUsageEventId
+            ? "reconciled"
+            : "provider-action-required";
+          if (outcome === "provider-action-required") {
+            await this.preparation.markProviderActionRequired(
+              refund,
+              error instanceof Error ? error.message : "provider proof unavailable",
+            );
+          }
         }
       }
       result.prepared += outcome === "prepared" ? 1 : 0;
@@ -162,4 +208,8 @@ function boundedPageSize(value: number): number {
   return Number.isInteger(value) && value > 0
     ? Math.min(value, MAX_PAGE_SIZE)
     : DEFAULT_PAGE_SIZE;
+}
+
+function boundedErrorName(error: unknown): string {
+  return error instanceof Error ? error.name.slice(0, 64) : "UnknownError";
 }

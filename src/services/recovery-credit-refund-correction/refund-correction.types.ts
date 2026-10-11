@@ -9,9 +9,11 @@ export type RefundRow = {
   id: string;
   createdAt: Date;
   shopId: string;
+  provider: string;
   status: RecoveryCreditRefundStatus;
   reason: string | null;
   purchaseId: string;
+  availableAmountAtRequestSnapshot: number;
   billingPeriodIdSnapshot: string;
   providerSubscriptionIdSnapshot: string;
   planHandleSnapshot: string;
@@ -51,9 +53,11 @@ export type RefundRow = {
 export const refundSelect = {
   id: true,
   shopId: true,
+  provider: true,
   status: true,
   reason: true,
   purchaseId: true,
+  availableAmountAtRequestSnapshot: true,
   createdAt: true,
   billingPeriodIdSnapshot: true,
   providerSubscriptionIdSnapshot: true,
