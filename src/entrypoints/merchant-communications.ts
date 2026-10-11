@@ -8,6 +8,7 @@ import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler
 import { translationReconciliationService } from "../services/translation-reconciliation.service.js";
 import { storeCategoryTranslationReconciliationService } from "../services/store-category-translation-reconciliation.service.js";
 import { merchantPricingTranslationReconciliationService } from "../services/merchant-pricing-translation-reconciliation.service.js";
+import { merchantPricingTranslationPublicationService } from "../services/merchant-pricing-translation-publication.service.js";
 import { storeCategoryTranslationPublicationService } from "../services/store-category-translation-publication.service.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 
@@ -39,6 +40,9 @@ void startReadyWorkerProcess({
         ]);
         const publicationOutcomes = await Promise.allSettled([
           storeCategoryTranslationPublicationService.reconcile(
+            snapshot.translationReconciliationPageSize,
+          ),
+          merchantPricingTranslationPublicationService.reconcile(
             snapshot.translationReconciliationPageSize,
           ),
         ]);
