@@ -65,6 +65,30 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
   return reconcileGlobalBilling(runtimeConfig);
 }
 
+export async function reconcileWooPaidEntitlementsAndContinue<T>(
+  runtimeConfig: BackgroundRuntimeConfigSnapshot,
+  leaseHandle: { generation: number },
+  reconcileWooEntitlements: () => Promise<object>,
+  continueBillingCycle: () => Promise<T>,
+): Promise<T> {
+  try {
+    const wooEntitlements = await reconcileWooEntitlements();
+    logger.info("billing.woocommerce.paid_entitlement.reconciliation_completed", {
+      leaseGeneration: leaseHandle.generation,
+      ...wooEntitlements,
+    });
+  } catch (error) {
+    logger.error("billing.woocommerce.paid_entitlement.reconciliation_failed", {
+      leaseGeneration: leaseHandle.generation,
+      configVersion: runtimeConfig.version,
+      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+    });
+  }
+
+  return continueBillingCycle();
+}
+
 function reportBillingReconciliationFailure(error: unknown): void {
   const message = error instanceof Error ? error.message.slice(0, 256) : "unknown failure";
   logger.error("billing.reconciliation.scan_failed", {
@@ -89,11 +113,13 @@ void startReadyWorkerProcess({
       { createBillingReconciliationService },
       { RecoveryCreditRefundCorrectionService },
       { PromotionSelectionExpiryReconciliationService },
+      { wooPaidEntitlementTimeReconciliationService },
     ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
       import("../services/recovery-credit-refund-correction.service.js"),
       import("../services/promotion-selection-expiry-reconciliation.service.js"),
+      import("../services/woocommerce-billing/paid-entitlement-time-reconciliation.service.js"),
     ]);
     const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
@@ -131,65 +157,75 @@ void startReadyWorkerProcess({
         leaseHandle,
         (config) => billingReconciliationService.reconcileOnce(config),
       );
-      logger.info("billing.reconciliation.global_scan_completed", {
-        leaseGeneration: leaseHandle.generation,
-        subscriptionsScanned: reconciliation.subscriptionsScanned,
-        subscriptionsSynced: reconciliation.subscriptionsSynced,
-        subscriptionErrors: reconciliation.subscriptionErrors,
-        purchasesActivated: reconciliation.purchasesActivated,
-        discrepancies: reconciliation.discrepancies.length,
-        usageSelected: reconciliation.published.selected,
-        usageClaimed: reconciliation.published.claimed,
-        usageReported: reconciliation.published.reported,
-        usageRetryable: reconciliation.published.retryable,
-        usageNeedsAttention: reconciliation.published.needsAttention,
-      });
 
-      try {
-        const promotionExpiry =
-          await promotionSelectionExpiryReconciliationService.reconcileOnce(runtimeConfig);
+      await reconcileWooPaidEntitlementsAndContinue(
+        runtimeConfig,
+        leaseHandle,
+        () => wooPaidEntitlementTimeReconciliationService.reconcileOnce(
+          runtimeConfig.billingReconciliationShopBatchSize,
+        ),
+        async () => {
+          logger.info("billing.reconciliation.global_scan_completed", {
+            leaseGeneration: leaseHandle.generation,
+            subscriptionsScanned: reconciliation.subscriptionsScanned,
+            subscriptionsSynced: reconciliation.subscriptionsSynced,
+            subscriptionErrors: reconciliation.subscriptionErrors,
+            purchasesActivated: reconciliation.purchasesActivated,
+            discrepancies: reconciliation.discrepancies.length,
+            usageSelected: reconciliation.published.selected,
+            usageClaimed: reconciliation.published.claimed,
+            usageReported: reconciliation.published.reported,
+            usageRetryable: reconciliation.published.retryable,
+            usageNeedsAttention: reconciliation.published.needsAttention,
+          });
 
-        logger.info("billing.reconciliation.promotion_selection_expiry_completed", {
-          leaseGeneration: leaseHandle.generation,
-          configVersion: runtimeConfig.version,
-          selected: promotionExpiry.selected,
-          released: promotionExpiry.released,
-          raced: promotionExpiry.raced,
-        });
-      } catch (error) {
-        logger.error("billing.reconciliation.promotion_selection_expiry_failed", {
-          leaseGeneration: leaseHandle.generation,
-          configVersion: runtimeConfig.version,
-          errorName:
-            error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-          errorMessage:
-            error instanceof Error
-              ? error.message.slice(0, 256)
-              : "unknown failure",
-        });
-      }
+          try {
+            const promotionExpiry =
+              await promotionSelectionExpiryReconciliationService.reconcileOnce(runtimeConfig);
 
-      const refundCorrection = await recoveryCreditRefundCorrectionService.processDue();
-      logger.info("billing.reconciliation.refund_correction_completed", {
-        leaseGeneration: leaseHandle.generation,
-        selected: refundCorrection.selected,
-        prepared: refundCorrection.prepared,
-        reconciled: refundCorrection.reconciled,
-        completed: refundCorrection.completed,
-        providerActionRequired: refundCorrection.providerActionRequired,
-        needsAttention: refundCorrection.needsAttention,
-      });
+            logger.info("billing.reconciliation.promotion_selection_expiry_completed", {
+              leaseGeneration: leaseHandle.generation,
+              configVersion: runtimeConfig.version,
+              selected: promotionExpiry.selected,
+              released: promotionExpiry.released,
+              raced: promotionExpiry.raced,
+            });
+          } catch (error) {
+            logger.error("billing.reconciliation.promotion_selection_expiry_failed", {
+              leaseGeneration: leaseHandle.generation,
+              configVersion: runtimeConfig.version,
+              errorName:
+                error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+              errorMessage:
+                error instanceof Error
+                  ? error.message.slice(0, 256)
+                  : "unknown failure",
+            });
+          }
 
-      const reconstructed = await subscriptionReconciliation.reconstruct();
-      logger.info("billing.subscription_reconciliation.reconstruction_completed", {
-        leaseGeneration: leaseHandle.generation,
-        enqueued: reconstructed,
-      });
+          const refundCorrection = await recoveryCreditRefundCorrectionService.processDue();
+          logger.info("billing.reconciliation.refund_correction_completed", {
+            leaseGeneration: leaseHandle.generation,
+            selected: refundCorrection.selected,
+            prepared: refundCorrection.prepared,
+            reconciled: refundCorrection.reconciled,
+            completed: refundCorrection.completed,
+            providerActionRequired: refundCorrection.providerActionRequired,
+            needsAttention: refundCorrection.needsAttention,
+          });
 
-      logger.info("billing.reconciliation.cycle_completed", {
-        leaseGeneration: leaseHandle.generation,
-        durationMs: Date.now() - startedAt,
-      });
+          const reconstructed = await subscriptionReconciliation.reconstruct();
+          logger.info("billing.subscription_reconciliation.reconstruction_completed", {
+            leaseGeneration: leaseHandle.generation,
+            enqueued: reconstructed,
+          });
+
+          logger.info("billing.reconciliation.cycle_completed", {
+            leaseGeneration: leaseHandle.generation,
+            durationMs: Date.now() - startedAt,
+          });
+        },
+      );
     };
     const stopScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,

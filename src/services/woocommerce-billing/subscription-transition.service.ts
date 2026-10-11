@@ -15,6 +15,7 @@ import { reduceTerminationEvidence } from "./subscription-termination-reducer.js
 import { activationEvidence, canActivateCurrentFree, latestCreateMatches } from "./subscription-activation-evidence.js";
 import { applyCurrentPlanIntent, confirmWooOperation, findPaidPlan } from "./subscription-plan-intent-projection.js";
 import { operationForReceipt } from "./subscription-receipt-operation-correlation.js";
+import { nextWooEntitlementReconciliationAt } from "./paid-entitlement-window.js";
 import {
   endWooPaidSubscription,
   type CurrentWooSubscription,
@@ -104,6 +105,9 @@ export async function transitionWooSubscription(
         status: financial.evidence.health === "PAUSED"
           ? SubscriptionProjectionStatus.FROZEN
           : SubscriptionProjectionStatus.ACTIVE,
+        nextReconcileAt: financial.evidence.health === "PAUSED" || !current.currentPeriodEnd
+          ? null
+          : nextWooEntitlementReconciliationAt(current.currentPeriodEnd, financial.evidence.coverageEndAt ?? current.providerCoverageEndAt ?? input.now),
         ...(financial.evidence.health === "ACTIVE" && financial.evidence.coverageEndAt
           ? { providerCoverageEndAt: financial.evidence.coverageEndAt }
           : {}),
@@ -122,6 +126,9 @@ export async function transitionWooSubscription(
         status: SubscriptionProjectionStatus.ACTIVE,
         cancelAtPeriodEnd: true,
         providerCoverageEndAt: termination.endAt,
+        nextReconcileAt: current.currentPeriodEnd
+          ? nextWooEntitlementReconciliationAt(current.currentPeriodEnd, termination.endAt)
+          : termination.endAt,
         lastSyncedAt: input.now,
         lastSyncErrorCode: null,
         lastSyncErrorAt: null,

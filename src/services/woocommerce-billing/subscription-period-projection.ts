@@ -130,6 +130,7 @@ export async function endWooPaidSubscription(
       billingPeriodId: null,
       currentPeriodStart: null,
       currentPeriodEnd: null,
+      nextReconcileAt: null,
       cancelAtPeriodEnd: false,
       lastSyncedAt: now,
       lastSyncErrorCode: null,

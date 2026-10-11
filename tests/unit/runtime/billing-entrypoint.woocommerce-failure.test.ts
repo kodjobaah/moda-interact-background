@@ -42,7 +42,10 @@ vi.mock("../../../src/services/woocommerce-billing/charge-receipt-reconciliation
   wooChargeReceiptReconciliationService: { reconcileBatch: mocks.reconcileChargeBatch },
 }));
 
-import { reconcileWooReceiptsAndGlobalBillingScan } from "../../../src/entrypoints/billing.js";
+import {
+  reconcileWooPaidEntitlementsAndContinue,
+  reconcileWooReceiptsAndGlobalBillingScan,
+} from "../../../src/entrypoints/billing.js";
 
 describe("billing entrypoint Woo receipt failure boundary", () => {
   beforeEach(() => {
@@ -158,5 +161,65 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       "billing.woocommerce.charge_receipts.failed",
       "global-scan",
     ]);
+  });
+
+  it("logs a rejected paid-entitlement scan and still runs later billing phases", async () => {
+    const runtimeConfig = { version: 9 } as never;
+    const leaseHandle = { generation: 14 };
+    const failure = new Error("e".repeat(300));
+    failure.name = "Entitlement".repeat(10);
+    const reconcileEntitlements = vi.fn().mockRejectedValueOnce(failure);
+    const laterPhases = vi.fn(async () => {
+      mocks.events.push("promotion-expiry", "refund-correction", "reconstruction", "cycle-completed");
+      return "completed";
+    });
+
+    await expect(reconcileWooPaidEntitlementsAndContinue(
+      runtimeConfig,
+      leaseHandle,
+      reconcileEntitlements,
+      laterPhases,
+    )).resolves.toBe("completed");
+
+    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.paid_entitlement.reconciliation_failed", {
+      leaseGeneration: 14,
+      configVersion: 9,
+      errorName: "Entitlement".repeat(10).slice(0, 64),
+      errorMessage: "e".repeat(256),
+    });
+    expect(mocks.logger.info).not.toHaveBeenCalledWith(
+      "billing.woocommerce.paid_entitlement.reconciliation_completed",
+      expect.anything(),
+    );
+    expect(mocks.events).toEqual([
+      "billing.woocommerce.paid_entitlement.reconciliation_failed",
+      "promotion-expiry",
+      "refund-correction",
+      "reconstruction",
+      "cycle-completed",
+    ]);
+    expect(laterPhases).toHaveBeenCalledOnce();
+  });
+
+  it("reports paid-entitlement success before continuing the billing cycle", async () => {
+    const runtimeConfig = { version: 10 } as never;
+    const leaseHandle = { generation: 15 };
+    const result = { selected: 2, reconciled: 2, failed: 0 };
+    const continueBillingCycle = vi.fn(async () => "completed");
+
+    await expect(reconcileWooPaidEntitlementsAndContinue(
+      runtimeConfig,
+      leaseHandle,
+      async () => result,
+      continueBillingCycle,
+    )).resolves.toBe("completed");
+
+    expect(mocks.logger.info).toHaveBeenCalledWith(
+      "billing.woocommerce.paid_entitlement.reconciliation_completed",
+      { leaseGeneration: 15, ...result },
+    );
+    expect(mocks.logger.error).not.toHaveBeenCalled();
+    expect(mocks.events).toEqual(["billing.woocommerce.paid_entitlement.reconciliation_completed"]);
+    expect(continueBillingCycle).toHaveBeenCalledOnce();
   });
 });
