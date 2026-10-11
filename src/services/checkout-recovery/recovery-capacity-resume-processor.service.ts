@@ -134,6 +134,7 @@ export class RecoveryCapacityResumeProcessorService {
           await this.terminalizeUnrecoverableBlockedRecovery(
             recovery.id,
             outcome.kind === "found" ? "Checkout completed" : "Checkout lookup not-found",
+            current.admissionBlockReason === null && isTargetedSuppressionWakeup(wakeupTrigger, recovery.id),
           );
           return { kind: "terminal", reason: outcome.kind } as const;
         }
@@ -161,6 +162,12 @@ export class RecoveryCapacityResumeProcessorService {
         if (!recipient) {
           if (current.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
             await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
+          } else if (isTargetedSuppressionWakeup(wakeupTrigger, recovery.id)) {
+            await this.terminalizeUnrecoverableBlockedRecovery(
+              recovery.id,
+              "No current recipient during targeted suppression resume",
+              true,
+            );
           }
           return { kind: "suppressed" as const, reason: "no-recipient" };
         }
@@ -183,15 +190,23 @@ export class RecoveryCapacityResumeProcessorService {
   private async terminalizeUnrecoverableBlockedRecovery(
     recoveryId: string,
     reason: string,
+    allowUnblockedSuppressionWakeup = false,
   ): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       const updated = await transaction.checkoutRecovery.updateMany({
         where: {
           id: recoveryId,
           status: "DETECTED",
-          admissionBlockReason: {
-            in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"],
-          },
+          ...(allowUnblockedSuppressionWakeup
+            ? {
+                OR: [
+                  { admissionBlockReason: null },
+                  { admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] } },
+                ],
+              }
+            : {
+                admissionBlockReason: { in: ["RECOVERY_CAPACITY_EXHAUSTED", "WHATSAPP_RECIPIENT_SUPPRESSED"] },
+              }),
         },
         data: {
           status: "CANCELLED",
@@ -226,4 +241,12 @@ function isResumeEligibleBlockReason(
       typeof wakeupTrigger === "string" &&
       typeof recoveryId === "string" &&
       wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`));
+}
+
+function isTargetedSuppressionWakeup(
+  wakeupTrigger: string | undefined,
+  recoveryId: string,
+): boolean {
+  return typeof wakeupTrigger === "string" &&
+    wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`);
 }

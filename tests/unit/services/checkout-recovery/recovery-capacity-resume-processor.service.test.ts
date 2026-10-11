@@ -396,6 +396,81 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     await expect(initialDeferral).resolves.toBe(true);
   });
 
+  it.each([
+    ["no-current-recipient", { kind: "found", checkout: currentCheckout }, null],
+    ["terminal-checkout", { kind: "not-found" }, "15551234567"],
+  ] as const)("prevents a late suppression write after an early %s wake-up", async (_case, lookup, recipient) => {
+    schedule.mockClear().mockResolvedValue("job-id");
+    const until = new Date(Date.now() + 60_000);
+    let releaseBlockWrite!: () => void;
+    let signalBlockWrite!: () => void;
+    const blockWriteGate = new Promise<void>((resolve) => { releaseBlockWrite = resolve; });
+    const blockWriteStarted = new Promise<void>((resolve) => { signalBlockWrite = resolve; });
+    const current = {
+      ...suppressionBlockedRecovery,
+      admissionBlockReason: null,
+    };
+    const updateMany = vi.fn(async ({ where, data }: {
+      where: { id: string; status: string; admissionBlockReason?: { in: Array<string | null> } };
+      data: Record<string, unknown>;
+    }) => {
+      if (where.status !== current.status || where.id !== current.id) return { count: 0 };
+      if (where.admissionBlockReason &&
+        !where.admissionBlockReason.in.includes(current.admissionBlockReason)) return { count: 0 };
+      if (data.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
+        signalBlockWrite();
+        await blockWriteGate;
+      }
+      if (current.status !== "DETECTED") return { count: 0 };
+      Object.assign(current, data);
+      return { count: 1 };
+    });
+    const database = {
+      whatsAppRecipientReachability: {
+        findUnique: vi.fn(async () => ({ suppressUntil: until })),
+      },
+      checkoutRecovery: {
+        findUnique: vi.fn(async () => ({ ...current })),
+        updateMany,
+      },
+      $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) => callback({
+        checkoutRecovery: { updateMany },
+        checkoutRecoveryStatusHistory: { create: vi.fn(async () => ({})) },
+      })),
+    };
+    const admission = new RecoveryRecipientSuppressionAdmissionService(database as never);
+    const originalDeferral = admission.deferDetectedRecovery("recovery-1", "shop-1", until);
+    await blockWriteStarted;
+    const wakeupTrigger = schedule.mock.calls[0]?.[0].trigger;
+    expect(wakeupTrigger).toBeDefined();
+
+    const initiate = vi.fn(async () => undefined);
+    const processor = new RecoveryCapacityResumeProcessorService(
+      database as never,
+      { withCheckoutLock: async (_shopId: string, _token: string, callback: () => Promise<unknown>) => callback() } as never,
+      { evaluate: async () => ({ allowed: true, shopId: "shop-1" }) } as never,
+      { lookup: async () => lookup } as never,
+      { build: async () => ({ shop: "shop.example", checkoutToken: "checkout-1" }) } as never,
+      initiate,
+      {
+        resolve: async () => recipient,
+        resolveForCustomerInShop: async () => null,
+      } as never,
+      admission,
+    );
+
+    const result = await processor.resume("recovery-1", wakeupTrigger);
+    expect(result.kind).toBe(recipient ? "terminal" : "suppressed");
+    expect(initiate).not.toHaveBeenCalled();
+    expect(current.status).toBe("CANCELLED");
+    expect(current.admissionBlockReason).toBeNull();
+
+    releaseBlockWrite();
+    await expect(originalDeferral).resolves.toBe(false);
+    expect(current.status).toBe("CANCELLED");
+    expect(current.admissionBlockReason).toBeNull();
+  });
+
   it("uses the Shop-scoped stored phone when the fresh checkout has no customer phone", async () => {
     const harness = createHarness({
       reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],

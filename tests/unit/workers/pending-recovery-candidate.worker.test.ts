@@ -26,6 +26,11 @@ const hoisted = vi.hoisted(() => ({
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
   findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
   scheduleResume: vi.fn(async () => "resume-job"),
+  redis: {
+    set: vi.fn(async () => "OK"),
+    get: vi.fn(async () => "lock-owner"),
+    del: vi.fn(async () => 1),
+  },
   resolveCustomer: vi.fn(async () => null),
   resolvePolicy: vi.fn(async () => ({
     recoveryDelayMinutes: 30,
@@ -55,7 +60,7 @@ vi.mock("bullmq", () => ({
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => ({})),
 }));
-vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
+vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: hoisted.redis }));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
     shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })) },
@@ -114,6 +119,7 @@ import { RecoveryMaterializationService } from "../../../src/services/checkout-r
 import { RecoveryInitiationService } from "../../../src/services/checkout-recovery/recovery-initiation.service.js";
 import { RecoveryRecipientSuppressionAdmissionService, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED } from "../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 import { findLatestRecovery } from "../../../src/services/checkout-recovery/latest-recovery.js";
+import { CheckoutOrderGuardService } from "../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
 createPendingRecoveryCandidateWorker();
 
@@ -128,6 +134,9 @@ describe("pending recovery candidate worker", () => {
     });
     hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
     hoisted.scheduleResume.mockRejectedValueOnce(new Error("Redis temporarily unavailable"));
+    hoisted.redis.set.mockReset().mockResolvedValue("OK");
+    hoisted.redis.get.mockReset().mockResolvedValue("lock-owner");
+    hoisted.redis.del.mockReset().mockResolvedValue(1);
     hoisted.resolveCustomer.mockReset().mockResolvedValue(null);
     hoisted.resolvePolicy.mockClear();
     hoisted.attemptGetOrCreate.mockClear();
@@ -189,6 +198,7 @@ describe("pending recovery candidate worker", () => {
       lineItems: [],
       internationalContext: null,
     };
+    const checkoutOrderGuard = new CheckoutOrderGuardService();
     const materializer = new RecoveryMaterializationService({
       executionEligibility: { evaluate: vi.fn(async () => ({ allowed: true, shopId: "shop_1" })) },
       abandonedCheckoutLookup: {
@@ -196,7 +206,7 @@ describe("pending recovery candidate worker", () => {
         lookup: vi.fn(async () => ({ kind: "found" as const, checkout: freshCheckout })),
       },
       pendingRecoveryCandidate: {
-        withCheckoutLock: vi.fn(async (_shopId: string, _token: string, callback: () => Promise<unknown>) => callback()),
+        withCheckoutLock: checkoutOrderGuard.withCheckoutLock.bind(checkoutOrderGuard),
         hasOrderProcessed: vi.fn(async () => false),
       },
       findLatestRecovery: (shopId, checkoutToken) => findLatestRecovery(shopId, checkoutToken),
@@ -235,10 +245,19 @@ describe("pending recovery candidate worker", () => {
       attemptsMade: 0,
       failedReason: "",
     };
+    hoisted.redis.get.mockRejectedValueOnce(new Error("Redis lock cleanup unavailable"));
+    hoisted.cleanup.mockRejectedValueOnce(new Error("Redis candidate index cleanup unavailable"));
 
-    await expect(hoisted.processor?.(firstJob)).rejects.toMatchObject({
-      message: RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
-    });
+    let failedReason = "";
+    try {
+      await hoisted.processor?.(firstJob);
+      throw new Error("Expected first candidate attempt to fail");
+    } catch (error) {
+      failedReason = error instanceof Error ? error.message : String(error);
+    }
+    expect(failedReason).toMatch(new RegExp(`^${RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED}:`));
+    expect(failedReason).toContain("checkout lock cleanup failed: Redis lock cleanup unavailable");
+    expect(failedReason).toContain("candidate index cleanup unavailable");
     expect(hoisted.durableRecovery).toMatchObject({
       id: "recovery-1",
       status: "DETECTED",
@@ -249,7 +268,7 @@ describe("pending recovery candidate worker", () => {
     const retryJob = {
       ...firstJob,
       attemptsMade: 1,
-      failedReason: RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
+      failedReason,
     };
     await hoisted.processor?.(retryJob);
 
