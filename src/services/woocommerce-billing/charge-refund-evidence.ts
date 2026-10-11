@@ -7,7 +7,7 @@ export type WooRefundMoneyEvidence = {
 
 export type WooRefundEvidenceResult =
   | { charge: Record<string, unknown>; money: WooRefundMoneyEvidence | null; errorCode?: never }
-  | { charge?: never; money?: never; errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" | "WOO_REFUND_AMOUNT_EVIDENCE_INVALID" };
+  | { charge?: never; money?: never; errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" };
 
 export function parseWooRefundEvidence(
   payload: unknown,
@@ -21,9 +21,7 @@ export function parseWooRefundEvidence(
     return { errorCode: "WOO_REFUND_CHARGE_EVIDENCE_INVALID" };
   }
   const money = readLatestRefundAmount(charge.transactions);
-  return money === INVALID_MONEY
-    ? { errorCode: "WOO_REFUND_AMOUNT_EVIDENCE_INVALID" }
-    : { charge, money };
+  return { charge, money: money === INVALID_MONEY ? null : money };
 }
 
 const INVALID_MONEY = Symbol("invalid-provider-refund-money");

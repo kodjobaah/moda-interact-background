@@ -21,7 +21,7 @@ export class WooRefundHoldPreparationService {
     if (refund.provider !== "WOOCOMMERCE" || refund.status !== RecoveryCreditRefundStatus.REQUESTED) {
       return "waiting";
     }
-    return this.database.$transaction(async (transaction) => {
+    return this.withSerializationRetry(() => this.database.$transaction(async (transaction) => {
       const current = await transaction.recoveryCreditRefund.findUnique({
         where: { id: refund.id },
         select: {
@@ -147,7 +147,21 @@ export class WooRefundHoldPreparationService {
         throw new Error("Woo refund hold preparation compare-and-set failed");
       }
       return "prepared";
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+  }
+
+  private async withSerializationRetry<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError)
+          || error.code !== "P2034" || attempt === 2) {
+          throw error;
+        }
+      }
+    }
+    throw new Error("Woo refund hold transaction retry limit exceeded");
   }
 }
 

@@ -3,7 +3,9 @@ import {
   RecoveryCreditRefundStatus,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import {
   shopifyPartnerBillingApi,
   type ShopifyPartnerBillingProvider,
@@ -31,6 +33,10 @@ import {
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
+const logger = createLogger({
+  serviceName: "moda-billing-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 const LIVE_RECOVERY_CREDIT_REFUND_STATUSES = [
   RecoveryCreditRefundStatus.REQUESTED,
   RecoveryCreditRefundStatus.PROVIDER_ACTION_REQUIRED,
@@ -58,6 +64,7 @@ export class RecoveryCreditRefundCorrectionService {
     partner: ShopifyPartnerBillingProvider = shopifyPartnerBillingApi,
     now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
+    private readonly operationalLogger: StructuredLogger = logger,
   ) {
     const providerState = new RefundProviderStateService(database, partner);
     const completion = new RefundCompletionService(database, now);
@@ -84,6 +91,11 @@ export class RecoveryCreditRefundCorrectionService {
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         take,
         select: refundSelect,
+      }).catch((error: unknown) => {
+        this.operationalLogger.warn("billing.refund_correction.woocommerce_scan_deferred", {
+          errorName: boundedErrorName(error),
+        });
+        return [];
       }),
     ]);
     const refunds = [...shopifyRefunds, ...wooRefunds]
@@ -117,23 +129,22 @@ export class RecoveryCreditRefundCorrectionService {
           outcome = "needs-attention";
         }
       } catch (error) {
-        outcome = isWoo
-          ? "needs-attention"
-          : refund.automaticCorrectionUsageEventId ? "reconciled" : "provider-action-required";
         if (isWoo) {
-          await this.database.recoveryCreditRefund.updateMany({
-            where: { id: refund.id, provider: "WOOCOMMERCE", status: RecoveryCreditRefundStatus.REQUESTED },
-            data: {
-              status: RecoveryCreditRefundStatus.NEEDS_ATTENTION,
-              reason: "WOO_REFUND_HOLD_PREPARATION_FAILED",
-              version: { increment: 1 },
-            },
+          this.operationalLogger.warn("billing.refund_correction.woocommerce_preparation_deferred", {
+            refundId: refund.id,
+            errorName: boundedErrorName(error),
           });
-        } else if (outcome === "provider-action-required") {
-          await this.preparation.markProviderActionRequired(
-            refund,
-            error instanceof Error ? error.message : "provider proof unavailable",
-          );
+          outcome = "reconciled";
+        } else {
+          outcome = refund.automaticCorrectionUsageEventId
+            ? "reconciled"
+            : "provider-action-required";
+          if (outcome === "provider-action-required") {
+            await this.preparation.markProviderActionRequired(
+              refund,
+              error instanceof Error ? error.message : "provider proof unavailable",
+            );
+          }
         }
       }
       result.prepared += outcome === "prepared" ? 1 : 0;
@@ -197,4 +208,8 @@ function boundedPageSize(value: number): number {
   return Number.isInteger(value) && value > 0
     ? Math.min(value, MAX_PAGE_SIZE)
     : DEFAULT_PAGE_SIZE;
+}
+
+function boundedErrorName(error: unknown): string {
+  return error instanceof Error ? error.name.slice(0, 64) : "UnknownError";
 }

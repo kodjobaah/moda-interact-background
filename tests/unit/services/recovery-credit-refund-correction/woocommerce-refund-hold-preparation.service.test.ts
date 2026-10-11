@@ -1,4 +1,5 @@
 import {
+  Prisma,
   RecoveryCreditPurchaseStatus,
   RecoveryCreditRefundStatus,
 } from "@prisma/client";
@@ -90,6 +91,7 @@ function harness(reservedAmount: number, currentAmount: number) {
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(transaction)),
   };
   return {
+    database,
     service: new WooRefundHoldPreparationService(database as never),
     transaction,
     updateRefund,
@@ -99,6 +101,33 @@ function harness(reservedAmount: number, currentAmount: number) {
 }
 
 describe("WooRefundHoldPreparationService", () => {
+  it("retries a serialization conflict and then prepares the hold", async () => {
+    const test = harness(0, 7);
+    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+      code: "P2034",
+      clientVersion: "test",
+    });
+    test.database.$transaction.mockRejectedValueOnce(conflict);
+
+    await expect(test.service.prepare(refund())).resolves.toBe("prepared");
+    expect(test.database.$transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves the request retryable after bounded serialization conflicts", async () => {
+    const test = harness(0, 7);
+    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+      code: "P2034",
+      clientVersion: "test",
+    });
+    test.database.$transaction.mockRejectedValue(conflict);
+
+    await expect(test.service.prepare(refund())).rejects.toBe(conflict);
+    expect(test.database.$transaction).toHaveBeenCalledTimes(3);
+    expect(test.updateRefund).not.toHaveBeenCalled();
+    expect(test.updatePurchase).not.toHaveBeenCalled();
+    expect(test.updateCounter).not.toHaveBeenCalled();
+  });
+
   it("waits while purchased-credit reservations remain", async () => {
     const test = harness(3, 7);
 

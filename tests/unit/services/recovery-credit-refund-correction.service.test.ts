@@ -58,6 +58,7 @@ function refundRow(overrides: Record<string, unknown> = {}) {
 function harness(row = refundRow(), providerResult = provider) {
   const refundUpdate = vi.fn().mockResolvedValue({ count: 1 });
   const usageUpsert = vi.fn().mockResolvedValue({ id: "correction-event-1" });
+  const operationalLogger = { warn: vi.fn() };
   const database = {
     recoveryCreditRefund: {
       findMany: vi.fn().mockImplementation(async (args: { where: { provider: string } }) => (
@@ -76,7 +77,18 @@ function harness(row = refundRow(), providerResult = provider) {
     $transaction: vi.fn().mockImplementation(async (callback: (transaction: unknown) => unknown) => callback(database)),
   };
   const partner = { getSubscriptionReconciliationSnapshot: vi.fn().mockResolvedValue({ activeSubscription: providerResult, latestLifecycleEvent: null }) };
-  return { database, partner, service: new RecoveryCreditRefundCorrectionService(database as never, partner as never) };
+  return {
+    database,
+    partner,
+    operationalLogger,
+    service: new RecoveryCreditRefundCorrectionService(
+      database as never,
+      partner as never,
+      undefined,
+      undefined,
+      operationalLogger as never,
+    ),
+  };
 }
 
 describe("RecoveryCreditRefundCorrectionService", () => {
@@ -95,6 +107,52 @@ describe("RecoveryCreditRefundCorrectionService", () => {
     expect(test.database.recoveryCreditRefund.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { provider: "WOOCOMMERCE", status: "REQUESTED" },
       take: 50,
+    }));
+  });
+
+  it("processes Shopify refunds when the independent Woo scan fails", async () => {
+    const shopifyRefund = refundRow({ provider: "SHOPIFY" });
+    const test = harness(shopifyRefund);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => {
+      if (args.where.provider === "WOOCOMMERCE") throw new Error("Woo scan unavailable");
+      return [shopifyRefund];
+    });
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 1, prepared: 1 });
+    expect(test.operationalLogger.warn).toHaveBeenCalledWith(
+      "billing.refund_correction.woocommerce_scan_deferred",
+      { errorName: "Error" },
+    );
+  });
+
+  it("continues Shopify corrections after a Woo preparation failure without failure-state writes", async () => {
+    const wooRefund = refundRow({
+      id: "woo-refund-1",
+      provider: "WOOCOMMERCE",
+      createdAt: new Date("2026-08-31T00:00:00.000Z"),
+    });
+    const shopifyRefund = refundRow({ provider: "SHOPIFY" });
+    const test = harness(shopifyRefund);
+    test.database.recoveryCreditRefund.findMany.mockImplementation(async (args: { where: { provider: string } }) => (
+      args.where.provider === "WOOCOMMERCE" ? [wooRefund] : [shopifyRefund]
+    ));
+    const conflict = new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+      code: "P2034",
+      clientVersion: "test",
+    });
+    test.database.$transaction
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict);
+
+    await expect(test.service.processDue()).resolves.toMatchObject({ selected: 2, prepared: 1, needsAttention: 0 });
+    expect(test.operationalLogger.warn).toHaveBeenCalledWith(
+      "billing.refund_correction.woocommerce_preparation_deferred",
+      { refundId: "woo-refund-1", errorName: "PrismaClientKnownRequestError" },
+    );
+    expect(test.database.$transaction).toHaveBeenCalledTimes(4);
+    expect(test.database.recoveryCreditRefund.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "NEEDS_ATTENTION" }),
     }));
   });
 

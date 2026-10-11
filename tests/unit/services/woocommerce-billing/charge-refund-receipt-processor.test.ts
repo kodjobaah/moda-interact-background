@@ -75,8 +75,10 @@ describe("processNextWooRefundReceipt", () => {
     );
   });
 
-  it("records invalid provider money without asking correlation or settlement to mutate allowance", async () => {
+  it("settles an exact refund receipt when optional provider money is malformed", async () => {
     const test = harness();
+    const link = { shop: { id: "shop-1" }, operation: { id: "operation-1" }, purchase: { id: "purchase-1" } };
+    mocks.correlate.mockResolvedValueOnce({ link });
     test.receipt.normalizedPayload = {
       charge: {
         id: "charge-1",
@@ -86,8 +88,15 @@ describe("processNextWooRefundReceipt", () => {
     };
 
     await expect(processNextWooRefundReceipt(test.database as never, new Date(), null)).resolves
-      .toMatchObject({ outcome: "retryable", processingError: "WOO_REFUND_AMOUNT_EVIDENCE_INVALID" });
-    expect(mocks.correlate).not.toHaveBeenCalled();
-    expect(mocks.settle).not.toHaveBeenCalled();
+      .toMatchObject({ outcome: "processed" });
+    expect(mocks.correlate).toHaveBeenCalledWith(test.transaction, "charge-1", "operation-1");
+    expect(mocks.settle).toHaveBeenCalledWith(
+      test.transaction,
+      link,
+      test.receipt,
+      "charge-1",
+      null,
+      expect.any(Date),
+    );
   });
 });
