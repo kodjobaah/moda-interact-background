@@ -10,6 +10,7 @@ const hoisted = vi.hoisted(() => ({
     detectedAt: new Date("2026-09-01T00:00:00.000Z"),
     status: "DETECTED",
     admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+    customerId: "customer-1",
     shop: { domain: "shop.example", status: "ACTIVE" },
   },
   lookup: vi.fn(),
@@ -42,11 +43,26 @@ vi.mock("../../../src/lib/db.js", () => ({
       update: hoisted.update,
       updateMany: hoisted.updateMany,
     },
+    whatsAppRecipientReachability: {
+      findUnique: vi.fn(async () => null),
+    },
     $transaction: hoisted.transaction,
   },
 }));
 vi.mock("../../../src/services/customer.service.js", () => ({
-  customerService: {},
+  customerService: { resolveCustomer: vi.fn(async () => ({ id: "customer-1" })) },
+}));
+vi.mock("../../../src/services/customer.phone.service.js", () => ({
+  customerPhoneService: {
+    getCurrentPhone: vi.fn(async () => ({ phone: "+15551234567" })),
+    getCurrentPhoneForShop: vi.fn(async () => ({ phone: "+15551234567" })),
+  },
+}));
+vi.mock("../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js", () => ({
+  recoveryRecipientResolverService: {
+    resolve: vi.fn(async () => "15551234567"),
+    resolveForCustomerInShop: vi.fn(async () => "15551234567"),
+  },
 }));
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: {},
@@ -377,6 +393,8 @@ describe("CheckoutRecoveryService capacity resume", () => {
         checkoutUrl: "https://checkout/current",
         completedAt: null,
       }),
+      1,
+      "15551234567",
     );
   });
 

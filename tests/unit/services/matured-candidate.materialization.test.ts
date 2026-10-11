@@ -20,6 +20,9 @@ const hoisted = vi.hoisted(() => {
         update: vi.fn(),
         updateMany: vi.fn(),
       },
+      whatsAppRecipientReachability: {
+        findUnique: vi.fn(async () => null),
+      },
       recoveryOutreachAttempt: {
         upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
           id: "attempt-1",

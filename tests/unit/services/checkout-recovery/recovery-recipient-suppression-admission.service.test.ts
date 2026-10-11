@@ -47,9 +47,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       .resolves.toEqual({ kind: "allowed" });
   });
 
-  it("durably blocks eligible recoveries and schedules one targeted expiry resume", async () => {
+  it("schedules the expiry wake-up before durably blocking the eligible recovery", async () => {
     const until = new Date("2026-10-12T00:00:00Z");
     const updateMany = vi.fn(async () => ({ count: 1 }));
+    schedule.mockImplementationOnce(async () => "job-1");
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
       checkoutRecovery: { updateMany },
@@ -71,7 +72,25 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
     }, until);
   });
 
-  it("does not schedule a resume when the recovery is no longer DETECTED", async () => {
+  it("does not persist a suppression block when expiry scheduling fails", async () => {
+    schedule.mockClear();
+    const enqueueError = new Error("queue unavailable");
+    schedule.mockRejectedValueOnce(enqueueError);
+    const updateMany = vi.fn(async () => ({ count: 1 }));
+    const service = new RecoveryRecipientSuppressionAdmissionService({
+      whatsAppRecipientReachability: { findUnique: vi.fn() },
+      checkoutRecovery: { updateMany },
+    } as never);
+
+    await expect(service.deferDetectedRecovery(
+      "recovery-1",
+      "shop-1",
+      new Date("2026-10-12T00:00:00Z"),
+    )).rejects.toBe(enqueueError);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("leaves a harmless scheduled wake-up when the recovery is no longer DETECTED", async () => {
     schedule.mockClear();
     const service = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: vi.fn() },
@@ -83,7 +102,7 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       "shop-1",
       new Date("2026-10-12T00:00:00Z"),
     )).resolves.toBe(false);
-    expect(schedule).not.toHaveBeenCalled();
+    expect(schedule).toHaveBeenCalledOnce();
   });
 
   it("gives concurrent duplicate deferrals the same deterministic resume job", async () => {

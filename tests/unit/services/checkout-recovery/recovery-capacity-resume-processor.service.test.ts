@@ -11,6 +11,7 @@ const blockedRecovery = {
   generation: 1,
   status: "DETECTED",
   admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
+  customerId: "customer-1",
   shop: { domain: "shop.example", status: "ACTIVE" },
 };
 const suppressionBlockedRecovery = {
@@ -34,6 +35,8 @@ function createHarness({
   lookup = { kind: "found", checkout: currentCheckout },
   allowed = true,
   updateCount = 1,
+  resolvedRecipient = null,
+  customerRecipient = "15551234567",
 } = {}) {
   const order: string[] = [];
   const readResults = [...reads];
@@ -97,6 +100,13 @@ function createHarness({
     })),
   };
   const initiate = vi.fn(async () => undefined);
+  const recipientResolver = {
+    resolve: vi.fn(async () => resolvedRecipient),
+    resolveForCustomerInShop: vi.fn(async () => customerRecipient),
+  };
+  const suppressionAdmission = {
+    clearDetectedSuppression: vi.fn(async () => undefined),
+  };
   const service = new RecoveryCapacityResumeProcessorService(
     database as never,
     pendingRecoveryCandidateService as never,
@@ -104,6 +114,8 @@ function createHarness({
     abandonedCheckoutLookupService as never,
     snapshotBuilder as never,
     initiate,
+    recipientResolver as never,
+    suppressionAdmission as never,
   );
 
   return {
@@ -114,6 +126,8 @@ function createHarness({
     abandonedCheckoutLookupService,
     snapshotBuilder,
     initiate,
+    recipientResolver,
+    suppressionAdmission,
     service,
   };
 }
@@ -216,7 +230,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     expect(harness.database.$transaction).toHaveBeenCalledOnce();
   });
 
-  it("uses canonical snapshot re-entry and preserves generation-one call arity plus fallback status", async () => {
+  it("uses the Shop-scoped current phone for generation-one re-entry", async () => {
     const harness = createHarness({
       reads: [blockedRecovery, blockedRecovery, null],
     });
@@ -236,7 +250,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       currentCheckout,
     );
     expect(harness.initiate).toHaveBeenCalledOnce();
-    expect(harness.initiate.mock.calls[0]).toHaveLength(1);
+    expect(harness.recipientResolver.resolve).toHaveBeenCalledWith(expect.objectContaining({ checkoutToken: "checkout-1" }));
+    expect(harness.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15551234567");
   });
 
   it("re-evaluates a suppression-blocked recovery from fresh checkout state under its lock", async () => {
@@ -263,6 +279,46 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     ]);
     expect(harness.snapshotBuilder.build).toHaveBeenCalledOnce();
     expect(harness.initiate).toHaveBeenCalledOnce();
+    expect(harness.initiate.mock.calls[0][2]).toBe("15551234567");
+  });
+
+  it("uses a changed current number as an independent recipient key", async () => {
+    const harness = createHarness({
+      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
+      resolvedRecipient: "447700900123",
+    });
+
+    await harness.service.resume("recovery-1");
+
+    expect(harness.recipientResolver.resolveForCustomerInShop).not.toHaveBeenCalled();
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "447700900123");
+  });
+
+  it("clears an expired suppression block and does not initiate when no current phone exists", async () => {
+    const harness = createHarness({
+      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery],
+      customerRecipient: null,
+    });
+
+    await expect(harness.service.resume("recovery-1")).resolves.toEqual({
+      kind: "suppressed",
+      reason: "no-recipient",
+    });
+
+    expect(harness.suppressionAdmission.clearDetectedSuppression).toHaveBeenCalledWith("recovery-1");
+    expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
+  it("uses the Shop-scoped stored phone when the fresh checkout has no customer phone", async () => {
+    const harness = createHarness({
+      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
+      customerRecipient: "15558675309",
+    });
+
+    await harness.service.resume("recovery-1");
+
+    expect(harness.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15558675309");
   });
 
   it("passes later recovery generations to canonical initiation", async () => {
@@ -278,8 +334,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       kind: "initiated",
       status: "MESSAGE_SENT",
     });
-    expect(harness.initiate.mock.calls[0]).toHaveLength(2);
+    expect(harness.initiate.mock.calls[0]).toHaveLength(3);
     expect(harness.initiate.mock.calls[0][1]).toBe(3);
+    expect(harness.initiate.mock.calls[0][2]).toBe("15551234567");
   });
 
   it("reports capacity exhaustion while the durable block remains and makes replay a no-op after it clears", async () => {

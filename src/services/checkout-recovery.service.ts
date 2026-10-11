@@ -96,9 +96,7 @@ export class CheckoutRecoveryService {
       shopExecutionEligibilityService,
       abandonedCheckoutLookupService,
       this.snapshotBuilderService,
-      (seed, generation) => generation === undefined
-        ? this.handleCheckoutCreated(seed)
-        : this.handleCheckoutCreated(seed, generation),
+      (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
     );
     this.recoveryAgentContextService = new RecoveryAgentContextService(
       prisma,

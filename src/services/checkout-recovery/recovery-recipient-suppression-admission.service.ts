@@ -34,15 +34,6 @@ export class RecoveryRecipientSuppressionAdmissionService {
     shopId: string,
     until: Date,
   ): Promise<boolean> {
-    const blocked = await this.database.checkoutRecovery.updateMany({
-      where: { id: recoveryId, status: "DETECTED" },
-      data: {
-        admissionBlockedAt: new Date(),
-        admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
-      },
-    });
-    if (blocked.count !== 1) return false;
-
     await recoveryCapacityResumeService.schedule(
       {
         shopId,
@@ -51,6 +42,14 @@ export class RecoveryRecipientSuppressionAdmissionService {
       },
       until,
     );
+    const blocked = await this.database.checkoutRecovery.updateMany({
+      where: { id: recoveryId, status: "DETECTED" },
+      data: {
+        admissionBlockedAt: new Date(),
+        admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+      },
+    });
+    if (blocked.count !== 1) return false;
     return true;
   }
 

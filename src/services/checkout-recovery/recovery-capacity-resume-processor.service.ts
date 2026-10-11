@@ -5,14 +5,25 @@ import type { abandonedCheckoutLookupService } from "../abandoned-checkout-looku
 import type { pendingRecoveryCandidateService } from "../pending-recovery-candidate.service.js";
 import type { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import type { recoverySnapshotBuilderService } from "./recovery-snapshot-builder.service.js";
+import {
+  recoveryRecipientResolverService,
+  type RecoveryRecipientResolverService,
+} from "./recovery-recipient-resolver.service.js";
+import {
+  recoveryRecipientSuppressionAdmissionService,
+  type RecoveryRecipientSuppressionAdmissionService,
+} from "./recovery-recipient-suppression-admission.service.js";
 
 type CheckoutLockPort = Pick<typeof pendingRecoveryCandidateService, "withCheckoutLock">;
 type ExecutionEligibilityPort = Pick<typeof shopExecutionEligibilityService, "evaluate">;
 type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "lookup">;
 type RecoverySnapshotBuilderPort = Pick<typeof recoverySnapshotBuilderService, "build">;
+type RecoveryRecipientResolverPort = Pick<RecoveryRecipientResolverService, "resolve" | "resolveForCustomerInShop">;
+type SuppressionAdmissionPort = Pick<RecoveryRecipientSuppressionAdmissionService, "clearDetectedSuppression">;
 type RecoveryInitiationPort = (
   seed: RecoveryCheckoutSeed,
   generation?: number,
+  recipient?: string,
 ) => Promise<unknown>;
 
 export class RecoveryCapacityResumeProcessorService {
@@ -23,6 +34,8 @@ export class RecoveryCapacityResumeProcessorService {
     private readonly abandonedCheckoutLookupService: AbandonedCheckoutLookupPort,
     private readonly snapshotBuilder: RecoverySnapshotBuilderPort,
     private readonly initiate: RecoveryInitiationPort,
+    private readonly recipientResolver: RecoveryRecipientResolverPort = recoveryRecipientResolverService,
+    private readonly suppressionAdmission: SuppressionAdmissionPort = recoveryRecipientSuppressionAdmissionService,
   ) {}
 
   async resume(recoveryId: string) {
@@ -36,6 +49,7 @@ export class RecoveryCapacityResumeProcessorService {
         checkoutUrl: true,
         detectedAt: true,
         generation: true,
+        customerId: true,
         status: true,
         admissionBlockReason: true,
         shop: { select: { domain: true, status: true } },
@@ -75,6 +89,7 @@ export class RecoveryCapacityResumeProcessorService {
             checkoutUrl: true,
             detectedAt: true,
             generation: true,
+            customerId: true,
           },
         });
         if (
@@ -135,11 +150,20 @@ export class RecoveryCapacityResumeProcessorService {
           recovery.shop.domain,
           outcome.checkout,
         );
-        if ((current.generation ?? 1) === 1) {
-          await this.initiate(seed);
-        } else {
-          await this.initiate(seed, current.generation);
+        const recipient = await this.recipientResolver.resolve(seed) ??
+          (current.customerId
+            ? await this.recipientResolver.resolveForCustomerInShop(
+                current.customerId,
+                recovery.shopId,
+              )
+            : null);
+        if (!recipient) {
+          if (current.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
+            await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
+          }
+          return { kind: "suppressed" as const, reason: "no-recipient" };
         }
+        await this.initiate(seed, current.generation ?? 1, recipient);
         const after = await this.database.checkoutRecovery.findUnique({
           where: { id: recovery.id },
           select: { status: true, admissionBlockReason: true },

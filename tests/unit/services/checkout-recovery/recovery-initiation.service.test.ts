@@ -201,6 +201,43 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
+  it("keeps active suppression non-billable when expiry enqueue fails", async () => {
+    const enqueueError = new Error("queue unavailable");
+    mocks.suppression.evaluate.mockResolvedValue({
+      kind: "suppressed",
+      until: new Date("2026-10-12T00:00:00Z"),
+    });
+    mocks.suppression.deferDetectedRecovery.mockRejectedValue(enqueueError);
+    const { service, billing } = createInitiation();
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(enqueueError);
+
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("checks a changed current phone against its independent suppression key", async () => {
+    const { service, billing } = createInitiation();
+    mocks.suppression.evaluate.mockResolvedValue({
+      kind: "suppressed",
+      until: new Date("2026-10-12T00:00:00Z"),
+    });
+
+    await service.handleCheckoutCreated(event, 1, "447700900123");
+
+    expect(mocks.suppression.evaluate).toHaveBeenCalledWith("shop-1", "447700900123");
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(
+      recovery.id,
+      "shop-1",
+      expect.any(Date),
+    );
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("releases admission when conversation creation fails before provider send", async () => {
     const error = new Error("conversation unavailable");
     mocks.conversation.getOrCreateRecoveryConversation.mockRejectedValue(error);
