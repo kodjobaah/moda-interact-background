@@ -11,6 +11,7 @@ import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry, type QueueName } from "../observability/queue-performance.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { wooSubscriptionReceiptReconciliationService } from "../services/woocommerce-billing/subscription-receipt-reconciliation.service.js";
+import { wooChargeReceiptReconciliationService } from "../services/woocommerce-billing/charge-receipt-reconciliation.service.js";
 
 const logger = createLogger({
   serviceName: "moda-billing-worker",
@@ -40,6 +41,24 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
     logger.info("billing.woocommerce.subscription_receipts.completed", {
       leaseGeneration: leaseHandle.generation,
       ...wooReceipts,
+    });
+  }
+
+  let wooChargeReceipts: Awaited<ReturnType<typeof wooChargeReceiptReconciliationService.reconcileBatch>> | undefined;
+  try {
+    wooChargeReceipts = await wooChargeReceiptReconciliationService.reconcileBatch();
+  } catch (error) {
+    logger.error("billing.woocommerce.charge_receipts.failed", {
+      leaseGeneration: leaseHandle.generation,
+      configVersion: runtimeConfig.version,
+      outcome: "failed",
+    });
+  }
+
+  if (wooChargeReceipts !== undefined) {
+    logger.info("billing.woocommerce.charge_receipts.completed", {
+      leaseGeneration: leaseHandle.generation,
+      ...wooChargeReceipts,
     });
   }
 
