@@ -122,6 +122,7 @@ function foundCheckout(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  hoisted.findUnique.mockReset().mockResolvedValue(hoisted.recovery);
   hoisted.evaluate.mockResolvedValue({ allowed: true, shopId: "shop-1" });
   hoisted.txUpdateMany.mockResolvedValue({ count: 1 });
   hoisted.historyCreate.mockResolvedValue({ id: "history-1" });
@@ -370,6 +371,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
     hoisted.findUnique
       .mockResolvedValueOnce(hoisted.recovery)
       .mockResolvedValueOnce(currentBlockedRecovery)
+      .mockResolvedValueOnce(currentBlockedRecovery)
       .mockResolvedValueOnce({
         status: "MESSAGE_SENT",
         admissionBlockReason: null,
@@ -403,6 +405,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
     hoisted.findUnique
       .mockResolvedValueOnce(hoisted.recovery)
       .mockResolvedValueOnce(currentBlockedRecovery)
+      .mockResolvedValueOnce(currentBlockedRecovery)
       .mockResolvedValueOnce({
         status: "DETECTED",
         admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED",
@@ -422,6 +425,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
   it("makes a replay after successful re-entry a no-op without duplicate initiation", async () => {
     hoisted.findUnique
       .mockResolvedValueOnce(hoisted.recovery)
+      .mockResolvedValueOnce(currentBlockedRecovery)
       .mockResolvedValueOnce(currentBlockedRecovery)
       .mockResolvedValueOnce({
         status: "MESSAGE_SENT",
@@ -451,7 +455,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
 
     expect(reentry).toHaveBeenCalledTimes(1);
     expect(hoisted.lookup).toHaveBeenCalledTimes(1);
-    expect(hoisted.withCheckoutLock).toHaveBeenCalledTimes(1);
+    expect(hoisted.withCheckoutLock).toHaveBeenCalledTimes(2);
   });
 
   it("preserves the first block timestamp by only marking an unblocked DETECTED recovery", async () => {

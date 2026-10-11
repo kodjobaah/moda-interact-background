@@ -18,7 +18,7 @@ import { recoveryPolicyService } from "../recovery-policy.service.js";
 
 type PendingCandidatePort = Pick<
   typeof pendingRecoveryCandidateService,
-  "scheduleFromCheckoutCreated" | "refreshCandidateActivity" | "scheduleFromCheckoutUpdated"
+  "scheduleFromCheckoutCreated" | "refreshCandidateActivity" | "scheduleFromCheckoutUpdated" | "withCheckoutLock"
 >;
 type ExecutionEligibilityPort = Pick<
   typeof shopExecutionEligibilityService,
@@ -80,15 +80,29 @@ export class CheckoutEventOrchestratorService {
     } as const;
   }
 
-  async recordExternalActivity(recoveryId: string, activityAt: Date) {
-    return this.database.checkoutRecovery.updateMany({
-      where: {
-        id: recoveryId,
-        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-        lastExternalActivityAt: { lt: activityAt },
-      },
-      data: { lastExternalActivityAt: activityAt },
+  async recordExternalActivity(
+    recoveryId: string,
+    activityAt: Date,
+    checkoutIdentity?: { shopId: string; checkoutToken: string },
+  ) {
+    const identity = checkoutIdentity ?? await this.database.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: { shopId: true, checkoutToken: true },
     });
+    if (!identity) return { count: 0 };
+
+    return this.pendingRecoveryCandidateService.withCheckoutLock(
+      identity.shopId,
+      identity.checkoutToken,
+      () => this.database.checkoutRecovery.updateMany({
+        where: {
+          id: recoveryId,
+          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+          lastExternalActivityAt: { lt: activityAt },
+        },
+        data: { lastExternalActivityAt: activityAt },
+      }),
+    );
   }
 
   async handleCheckoutUpdatedContract(
@@ -180,7 +194,10 @@ export class CheckoutEventOrchestratorService {
         : null,
     };
 
-    await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
+    await this.recordExternalActivity(recovery.id, new Date(event.activityAt), {
+      shopId: shop.id,
+      checkoutToken: event.checkoutToken,
+    });
 
     const outcome = await this.abandonedCheckoutLookupService.lookup(lookupInput);
     if (outcome.kind === "provider-error") {

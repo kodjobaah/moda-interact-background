@@ -2,13 +2,30 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecoveryCapacityResumeProcessorService } from "../../../../src/services/checkout-recovery/recovery-capacity-resume-processor.service.js";
 import { RecoveryRecipientSuppressionAdmissionService } from "../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 import { CheckoutEventOrchestratorService } from "../../../../src/services/checkout-recovery/checkout-event-orchestrator.service.js";
+import type { RecoveryCapacityResumeJob } from "../../../../src/domain/recovery-capacity-resume.js";
 
-const schedule = vi.hoisted(() => vi.fn(async () => "job-id"));
+const schedule = vi.hoisted(() => vi.fn(async (_job: RecoveryCapacityResumeJob, _dueAt?: Date) => "job-id"));
 vi.mock("../../../../src/services/recovery-capacity-resume.service.js", () => ({
   recoveryCapacityResumeService: { schedule },
 }));
 
-const blockedRecovery = {
+type RecoveryRecord = {
+  id: string;
+  shopId: string;
+  checkoutToken: string;
+  cartToken: string | null;
+  checkoutUrl: string | null;
+  detectedAt: Date;
+  lastExternalActivityAt: Date;
+  generation: number;
+  status: string;
+  admissionBlockReason: string | null;
+  updatedAt: Date;
+  customerId: string | null;
+  shop: { domain: string; status: string };
+};
+
+const blockedRecovery: RecoveryRecord = {
   id: "recovery-1",
   shopId: "shop-1",
   checkoutToken: "checkout-1",
@@ -28,7 +45,16 @@ const suppressionBlockedRecovery = {
   admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED",
 };
 
-const currentCheckout = {
+const currentCheckout: {
+  createdAt: string;
+  completedAt: string | null;
+  currencyCode: string;
+  totalPrice: string;
+  abandonedCheckoutUrl: string;
+  customer: null;
+  lineItems: never[];
+  internationalContext: null;
+} = {
   createdAt: "2026-09-01T00:00:00.000Z",
   completedAt: null,
   currencyCode: "GBP",
@@ -39,8 +65,26 @@ const currentCheckout = {
   internationalContext: null,
 };
 
+type CheckoutLookup =
+  | { kind: "found"; checkout: typeof currentCheckout }
+  | { kind: "not-found" }
+  | { kind: "provider-error"; message: string }
+  | { kind: "ambiguous" }
+  | { kind: "bounded-limit-exceeded" };
+
+type RecoveryResumeHarnessOptions = {
+  reads?: unknown[];
+  lookup?: CheckoutLookup;
+  allowed?: boolean;
+  updateCount?: number;
+  resolvedRecipient?: string | null;
+  customerRecipient?: string | null;
+  recoveryDelayMinutes?: number;
+  now?: () => Date;
+};
+
 function createHarness({
-  reads = [blockedRecovery, blockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
+  reads = [blockedRecovery, blockedRecovery, blockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
   lookup = { kind: "found", checkout: currentCheckout },
   allowed = true,
   updateCount = 1,
@@ -48,14 +92,14 @@ function createHarness({
   customerRecipient = "15551234567",
   recoveryDelayMinutes = 30,
   now = () => new Date(),
-} = {}) {
+}: RecoveryResumeHarnessOptions = {}) {
   const order: string[] = [];
   const readResults = [...reads];
   const database = {
     checkoutRecovery: {
-      findUnique: vi.fn(async () => {
+      findUnique: vi.fn(async (): Promise<unknown> => {
         order.push("recovery-read");
-        return readResults.shift() ?? null;
+        return (readResults.length > 1 ? readResults.shift() : readResults[0]) ?? null;
       }),
     },
     $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) => {
@@ -110,13 +154,21 @@ function createHarness({
       completedAt: null,
     })),
   };
-  const initiate = vi.fn(async () => undefined);
+  const initiate = vi.fn(async (
+    _seed: unknown,
+    _generation?: number,
+    _recipient?: string,
+    _wakeupTrigger?: string,
+  ) => undefined);
   const recipientResolver = {
     resolve: vi.fn(async () => resolvedRecipient),
     resolveForCustomerInShop: vi.fn(async () => customerRecipient),
   };
   const suppressionAdmission = {
     clearDetectedSuppression: vi.fn(async () => undefined),
+  };
+  const recoveryPolicyResolver = {
+    resolve: vi.fn(async () => ({ recoveryDelayMinutes })),
   };
   const service = new RecoveryCapacityResumeProcessorService(
     database as never,
@@ -128,7 +180,7 @@ function createHarness({
     recipientResolver as never,
     suppressionAdmission as never,
     { schedule } as never,
-    { resolve: vi.fn(async () => ({ recoveryDelayMinutes })) } as never,
+    recoveryPolicyResolver as never,
     now,
   );
 
@@ -143,6 +195,7 @@ function createHarness({
     recipientResolver,
     suppressionAdmission,
     service,
+    recoveryPolicyResolver,
   };
 }
 
@@ -171,7 +224,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
   });
 
-  it("reschedules a stale targeted wake-up until the latest activity matures", async () => {
+  it("schedules a distinct successor when policy extends an active maturity job", async () => {
     schedule.mockClear();
     const latestActivity = new Date("2026-10-11T20:00:00.000Z");
     const recentRecovery = {
@@ -181,6 +234,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     let now = new Date("2026-10-11T20:15:00.000Z");
     const harness = createHarness({
       reads: [
+        recentRecovery,
+        recentRecovery,
+        recentRecovery,
         recentRecovery,
         recentRecovery,
         recentRecovery,
@@ -197,24 +253,150 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       dueAt: new Date(latestActivity.getTime() + 30 * 60_000),
     });
     const maturityJob = schedule.mock.calls[0]?.[0];
-    expect(maturityJob).toEqual({
+    expect(maturityJob).toMatchObject({
       shopId: "shop-1",
       recoveryId: "recovery-1",
-      trigger: `recipient-suppression-recovery-1-maturity-${latestActivity.getTime()}`,
     });
+    expect(maturityJob?.trigger).toMatch(
+      new RegExp(`^recipient-suppression-recovery-1-maturity-${latestActivity.getTime()}-after-`),
+    );
+    expect(maturityJob?.trigger).not.toBe(staleTrigger);
     expect(schedule.mock.calls[0]?.[1]).toEqual(new Date(latestActivity.getTime() + 30 * 60_000));
     expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
     expect(harness.initiate).not.toHaveBeenCalled();
 
     now = new Date(latestActivity.getTime() + 30 * 60_000);
-    await harness.service.resume("recovery-1", maturityJob!.trigger);
+    harness.recoveryPolicyResolver.resolve
+      .mockResolvedValueOnce({ recoveryDelayMinutes: 60 });
+    await expect(harness.service.resume("recovery-1", maturityJob!.trigger)).resolves.toEqual({
+      kind: "deferred-activity",
+      dueAt: new Date(latestActivity.getTime() + 60 * 60_000),
+    });
+    const extendedMaturityJob = schedule.mock.calls[1]?.[0];
+    expect(extendedMaturityJob?.trigger).not.toBe(maturityJob?.trigger);
+    expect(schedule.mock.calls[1]?.[1]).toEqual(new Date(latestActivity.getTime() + 60 * 60_000));
+    expect(harness.initiate).not.toHaveBeenCalled();
+
+    now = new Date(latestActivity.getTime() + 60 * 60_000);
+    await harness.service.resume("recovery-1", extendedMaturityJob!.trigger);
     expect(harness.abandonedCheckoutLookupService.lookup).toHaveBeenCalledOnce();
     expect(harness.initiate).toHaveBeenCalledOnce();
 
-    await expect(harness.service.resume("recovery-1", maturityJob!.trigger)).resolves.toMatchObject({
+    await expect(harness.service.resume("recovery-1", extendedMaturityJob!.trigger)).resolves.toMatchObject({
       kind: "ignored",
     });
     expect(harness.initiate).toHaveBeenCalledOnce();
+  });
+
+  it("defers admission when checkout activity commits during the unlocked Shopify lookup", async () => {
+    schedule.mockClear();
+    const initialActivity = new Date("2026-10-11T20:00:00.000Z");
+    const newerActivity = new Date("2026-10-11T20:30:00.000Z");
+    let now = new Date("2026-10-11T20:30:00.000Z");
+    const current = {
+      ...suppressionBlockedRecovery,
+      lastExternalActivityAt: initialActivity,
+    };
+    let lockTail = Promise.resolve();
+    const withCheckoutLock = vi.fn(async (
+      _shopId: string,
+      _checkoutToken: string,
+      callback: () => Promise<unknown>,
+    ) => {
+      const previous = lockTail;
+      let release!: () => void;
+      lockTail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        return await callback();
+      } finally {
+        release();
+      }
+    });
+    const database = {
+      checkoutRecovery: {
+        findUnique: vi.fn(async ({ select }: { select?: Record<string, unknown> }) =>
+          select?.status && select?.admissionBlockReason && Object.keys(select).length === 2
+            ? { status: current.status, admissionBlockReason: current.admissionBlockReason }
+            : { ...current, shop: blockedRecovery.shop },
+        ),
+        updateMany: vi.fn(async ({ data }: { data: { lastExternalActivityAt: Date } }) => {
+          current.lastExternalActivityAt = data.lastExternalActivityAt;
+          return { count: 1 };
+        }),
+      },
+    };
+    let releaseLookup!: () => void;
+    let signalLookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupStarted = new Promise<void>((resolve) => { signalLookupStarted = resolve; });
+    let lookupCount = 0;
+    const lookup = vi.fn(async () => {
+      lookupCount += 1;
+      if (lookupCount === 1) {
+        signalLookupStarted();
+        await lookupGate;
+      }
+      return { kind: "found" as const, checkout: currentCheckout };
+    });
+    let admissions = 0;
+    const initiate = vi.fn(async () => {
+      admissions += 1;
+      current.status = "MESSAGE_SENT";
+      current.admissionBlockReason = null;
+    });
+    const processor = new RecoveryCapacityResumeProcessorService(
+      database as never,
+      { withCheckoutLock } as never,
+      { evaluate: vi.fn(async () => ({ allowed: true, shopId: "shop-1" })) } as never,
+      { lookup } as never,
+      { build: vi.fn(async () => ({ shop: "shop.example", checkoutToken: "checkout-1" })) } as never,
+      initiate,
+      {
+        resolve: vi.fn(async () => "15551234567"),
+        resolveForCustomerInShop: vi.fn(async () => null),
+      } as never,
+      { clearDetectedSuppression: vi.fn(async () => undefined) } as never,
+      { schedule } as never,
+      { resolve: vi.fn(async () => ({ recoveryDelayMinutes: 30 })) } as never,
+      () => now,
+    );
+    const activityWriter = new CheckoutEventOrchestratorService(
+      database as never,
+      { withCheckoutLock } as never,
+      {} as never,
+      vi.fn() as never,
+      {} as never,
+      {} as never,
+    );
+    const trigger = `recipient-suppression-recovery-1-checkout-update-${initialActivity.getTime()}`;
+
+    const inFlightResume = processor.resume("recovery-1", trigger);
+    await lookupStarted;
+    await activityWriter.recordExternalActivity("recovery-1", newerActivity, {
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+    });
+    expect(current.lastExternalActivityAt).toEqual(newerActivity);
+    releaseLookup();
+
+    await expect(inFlightResume).resolves.toEqual({
+      kind: "deferred-activity",
+      dueAt: new Date(newerActivity.getTime() + 30 * 60_000),
+    });
+    const maturityJob = schedule.mock.calls[0]?.[0];
+    expect(schedule.mock.calls[0]?.[1]).toEqual(new Date(newerActivity.getTime() + 30 * 60_000));
+    expect(admissions).toBe(0);
+    expect(initiate).not.toHaveBeenCalled();
+
+    now = new Date(newerActivity.getTime() + 30 * 60_000);
+    await processor.resume("recovery-1", maturityJob!.trigger);
+    expect(admissions).toBe(1);
+    expect(initiate).toHaveBeenCalledOnce();
+    await expect(processor.resume("recovery-1", maturityJob!.trigger)).resolves.toMatchObject({
+      kind: "ignored",
+    });
+    expect(admissions).toBe(1);
   });
 
   it("re-reads durable block state and rechecks eligibility after acquiring the checkout lock", async () => {
@@ -271,6 +453,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       "recovery-read",
       "eligibility",
       "lookup",
+      "lock",
+      "recovery-read",
+      "eligibility",
       "transaction",
       "terminal-update",
       "history-create",
@@ -292,7 +477,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
 
   it("uses the Shop-scoped current phone for generation-one re-entry", async () => {
     const harness = createHarness({
-      reads: [blockedRecovery, blockedRecovery, null],
+      reads: [blockedRecovery, blockedRecovery, blockedRecovery, null],
     });
 
     await expect(harness.service.resume("recovery-1")).resolves.toEqual({
@@ -320,6 +505,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       reads: [
         suppressionBlockedRecovery,
         suppressionBlockedRecovery,
+        suppressionBlockedRecovery,
         { status: "MESSAGE_SENT", admissionBlockReason: null },
       ],
     });
@@ -335,6 +521,9 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       "recovery-read",
       "eligibility",
       "lookup",
+      "lock",
+      "recovery-read",
+      "eligibility",
       "recovery-read",
     ]);
     expect(harness.snapshotBuilder.build).toHaveBeenCalledOnce();
@@ -344,7 +533,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
 
   it("uses a changed current number as an independent recipient key", async () => {
     const harness = createHarness({
-      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
+      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
       resolvedRecipient: "447700900123",
     });
 
@@ -381,6 +570,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     const recoveryReads = [
       { ...suppressionBlockedRecovery, admissionBlockReason: null },
       { ...suppressionBlockedRecovery, admissionBlockReason: null },
+      { ...suppressionBlockedRecovery, admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED" },
       { status: "DETECTED", admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED" },
     ];
     const database = {
@@ -418,7 +608,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
 
     const initiate = vi.fn(async (
       _seed: unknown,
-      _generation: number,
+      _generation: number | undefined,
       recipient: string,
       wakeupTrigger?: string,
     ) => {
@@ -464,7 +654,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     schedule.mockClear().mockResolvedValue("job-id");
     const until = new Date(Date.now() + 60_000);
     let suppressionUntil: Date | null = until;
-    let currentRecipient = recipient;
+    let currentRecipient: string | null = recipient;
     let attempts = 0;
     let charges = 0;
     let sends = 0;
@@ -540,7 +730,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
 
     const initiate = vi.fn(async (
       _seed: unknown,
-      _generation: number,
+      _generation: number | undefined,
       currentCanonicalRecipient: string,
       wakeup?: string,
     ) => {
@@ -587,7 +777,10 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       const eventTime = "2026-10-11T20:00:00.000Z";
       const checkoutEvents = new CheckoutEventOrchestratorService(
         database as never,
-        { refreshCandidateActivity: vi.fn(async () => ({ outcome: "not-found" })) } as never,
+        {
+          refreshCandidateActivity: vi.fn(async () => ({ outcome: "not-found" })),
+          withCheckoutLock: async (_shopId: string, _checkoutToken: string, callback: () => Promise<unknown>) => callback(),
+        } as never,
         { evaluateResolvedShop: vi.fn(() => ({ allowed: true, shopId: "shop-1" })) } as never,
         vi.fn(async () => ({ ...current })) as never,
         { lookup: vi.fn(async () => ({ kind: "found", checkout: currentCheckout })) } as never,
@@ -635,7 +828,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
 
   it("uses the Shop-scoped stored phone when the fresh checkout has no customer phone", async () => {
     const harness = createHarness({
-      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
+      reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
       customerRecipient: "15558675309",
     });
 
@@ -648,6 +841,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
   it("passes later recovery generations to canonical initiation", async () => {
     const harness = createHarness({
       reads: [
+        { ...blockedRecovery, generation: 3 },
         { ...blockedRecovery, generation: 3 },
         { ...blockedRecovery, generation: 3 },
         { status: "MESSAGE_SENT", admissionBlockReason: null },
@@ -666,6 +860,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
   it("reports capacity exhaustion while the durable block remains and makes replay a no-op after it clears", async () => {
     const harness = createHarness({
       reads: [
+        blockedRecovery,
         blockedRecovery,
         blockedRecovery,
         { status: "DETECTED", admissionBlockReason: "RECOVERY_CAPACITY_EXHAUSTED" },

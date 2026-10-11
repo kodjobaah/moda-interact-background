@@ -1,6 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
-import type { PendingRecoveryCandidate } from "../../domain/pending-recovery-candidate.js";
 import type { abandonedCheckoutLookupService } from "../abandoned-checkout-lookup.service.js";
 import type { pendingRecoveryCandidateService } from "../pending-recovery-candidate.service.js";
 import type { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
@@ -15,6 +14,11 @@ import {
   recoveryRecipientSuppressionAdmissionService,
   type RecoveryRecipientSuppressionAdmissionService,
 } from "./recovery-recipient-suppression-admission.service.js";
+import {
+  deferRecoveryCapacityResumeUntilMature,
+  isTargetedSuppressionWakeup,
+} from "./recovery-capacity-resume-maturity.js";
+import { prepareRecoveryCapacityResumeCheckout } from "./recovery-capacity-resume-checkout-preparation.js";
 
 type CheckoutLockPort = Pick<typeof pendingRecoveryCandidateService, "withCheckoutLock">;
 type ExecutionEligibilityPort = Pick<typeof shopExecutionEligibilityService, "evaluate">;
@@ -82,7 +86,7 @@ export class RecoveryCapacityResumeProcessorService {
       return { kind: "ignored", reason: execution.reason } as const;
     }
 
-    return this.pendingRecoveryCandidateService.withCheckoutLock(
+    const prepared = await this.pendingRecoveryCandidateService.withCheckoutLock(
       recovery.shopId,
       recovery.checkoutToken,
       async () => {
@@ -117,81 +121,102 @@ export class RecoveryCapacityResumeProcessorService {
           return { kind: "ignored", reason: lockedExecution.reason } as const;
         }
 
-        if (isTargetedSuppressionWakeup(wakeupTrigger, recoveryId)) {
-          const policy = await this.recoveryPolicyResolver.resolve(recovery.shopId);
-          const maturityAt = new Date(
-            current.lastExternalActivityAt.getTime() + policy.recoveryDelayMinutes * 60_000,
-          );
-          if (maturityAt > this.clock()) {
-            const trigger = `recipient-suppression-${recovery.id}-maturity-${current.lastExternalActivityAt.getTime()}`;
-            await this.recoveryResumeScheduler.schedule({
-              shopId: recovery.shopId,
-              recoveryId: recovery.id,
-              trigger,
-            }, maturityAt);
-            return { kind: "deferred-activity", dueAt: maturityAt } as const;
-          }
+        const deferred = await deferRecoveryCapacityResumeUntilMature({
+          recoveryId: recovery.id,
+          shopId: recovery.shopId,
+          lastExternalActivityAt: current.lastExternalActivityAt,
+          wakeupTrigger,
+          scheduler: this.recoveryResumeScheduler,
+          policyResolver: this.recoveryPolicyResolver,
+          clock: this.clock,
+        });
+        return deferred ?? { kind: "ready" as const, current };
+      },
+    );
+    if (prepared.kind !== "ready") return prepared;
+
+    const current = prepared.current;
+    const { outcome, terminal, seed, recipient } = await prepareRecoveryCapacityResumeCheckout({
+      recovery: {
+        id: recovery.id,
+        shopId: recovery.shopId,
+        checkoutToken: current.checkoutToken,
+        cartToken: current.cartToken,
+        checkoutUrl: current.checkoutUrl,
+        detectedAt: current.detectedAt,
+        customerId: current.customerId,
+      },
+      shopDomain: recovery.shop.domain,
+      lookup: this.abandonedCheckoutLookupService,
+      snapshotBuilder: this.snapshotBuilder,
+      recipientResolver: this.recipientResolver,
+    });
+
+    return this.pendingRecoveryCandidateService.withCheckoutLock(
+      recovery.shopId,
+      recovery.checkoutToken,
+      async () => {
+        const latest = await this.database.checkoutRecovery.findUnique({
+          where: { id: recovery.id },
+          select: {
+            id: true,
+            status: true,
+            admissionBlockReason: true,
+            checkoutToken: true,
+            cartToken: true,
+            checkoutUrl: true,
+            detectedAt: true,
+            generation: true,
+            customerId: true,
+            lastExternalActivityAt: true,
+          },
+        });
+        if (
+          !latest ||
+          latest.status !== "DETECTED" ||
+          !isResumeEligibleBlockReason(latest.admissionBlockReason, wakeupTrigger, recoveryId)
+        ) {
+          return { kind: "ignored", reason: "already-transitioned" } as const;
+        }
+        const finalExecution = await this.shopExecutionEligibilityService.evaluate(
+          recovery.shopId,
+          undefined,
+          "recovery",
+        );
+        if (!finalExecution.allowed) {
+          return { kind: "ignored", reason: finalExecution.reason } as const;
         }
 
-        const outcome = await this.abandonedCheckoutLookupService.lookup({
+        const deferred = await deferRecoveryCapacityResumeUntilMature({
+          recoveryId: recovery.id,
           shopId: recovery.shopId,
-          shopDomain: recovery.shop.domain,
-          checkoutToken: current.checkoutToken,
-          cartToken: current.cartToken,
-          abandonedCheckoutUrl: current.checkoutUrl,
-          checkoutCreatedAt: current.detectedAt.toISOString(),
+          lastExternalActivityAt: latest.lastExternalActivityAt,
+          wakeupTrigger,
+          scheduler: this.recoveryResumeScheduler,
+          policyResolver: this.recoveryPolicyResolver,
+          clock: this.clock,
         });
-        if (outcome.kind === "provider-error") {
-          throw new Error(
-            `Abandoned checkout provider error while resuming recovery ${recovery.id}: ${outcome.message}`,
-          );
-        }
-        if (
-          outcome.kind === "ambiguous" ||
-          outcome.kind === "bounded-limit-exceeded"
-        ) {
-          throw new Error(
-            `Abandoned checkout lookup ${outcome.kind} while resuming recovery ${recovery.id}`,
-          );
-        }
-        if (outcome.kind === "not-found" || outcome.checkout.completedAt !== null) {
+        if (deferred) return deferred;
+
+        if (terminal) {
           await this.terminalizeUnrecoverableBlockedRecovery(
             recovery.id,
             outcome.kind === "found" ? "Checkout completed" : "Checkout lookup not-found",
-            current.admissionBlockReason === null && isTargetedSuppressionWakeup(wakeupTrigger, recovery.id),
+            latest.admissionBlockReason === null && isTargetedSuppressionWakeup(wakeupTrigger, recovery.id),
           );
           return { kind: "terminal", reason: outcome.kind } as const;
         }
-
-        const candidate: PendingRecoveryCandidate = {
-          shopId: recovery.shopId,
-          shopDomain: recovery.shop.domain,
-          checkoutToken: current.checkoutToken,
-          cartToken: current.cartToken,
-          abandonedCheckoutUrl: current.checkoutUrl,
-          checkoutCreatedAt: current.detectedAt.toISOString(),
-        };
-        const seed = await this.snapshotBuilder.build(
-          candidate,
-          recovery.shop.domain,
-          outcome.checkout,
-        );
-        const recipient = await this.recipientResolver.resolve(seed) ??
-          (current.customerId
-            ? await this.recipientResolver.resolveForCustomerInShop(
-                current.customerId,
-                recovery.shopId,
-              )
-            : null);
-        if (!recipient) {
-          if (current.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
-            await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
-          } else if (isTargetedSuppressionWakeup(wakeupTrigger, recovery.id)) {
+        if (!recipient || !seed) {
+          if (
+            latest.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED" ||
+            isTargetedSuppressionWakeup(wakeupTrigger, recovery.id)
+          ) {
             await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
           }
           return { kind: "suppressed" as const, reason: "no-recipient" };
         }
-        await this.initiate(seed, current.generation ?? 1, recipient, wakeupTrigger);
+
+        await this.initiate(seed, latest.generation ?? 1, recipient, wakeupTrigger);
         const after = await this.database.checkoutRecovery.findUnique({
           where: { id: recovery.id },
           select: { status: true, admissionBlockReason: true },
@@ -261,12 +286,4 @@ function isResumeEligibleBlockReason(
       typeof wakeupTrigger === "string" &&
       typeof recoveryId === "string" &&
       wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`));
-}
-
-function isTargetedSuppressionWakeup(
-  wakeupTrigger: string | undefined,
-  recoveryId: string,
-): boolean {
-  return typeof wakeupTrigger === "string" &&
-    wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`);
 }

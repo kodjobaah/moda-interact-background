@@ -66,6 +66,14 @@ function createHarness({
     }),
   };
   const pendingRecoveryCandidateService = {
+    withCheckoutLock: vi.fn(async (
+      _shopId: string,
+      _checkoutToken: string,
+      callback: () => Promise<unknown>,
+    ) => {
+      order.push("checkout-lock");
+      return callback();
+    }),
     scheduleFromCheckoutCreated: vi.fn(async () => pendingResult),
     refreshCandidateActivity: vi.fn(async () => {
       order.push("pending-refresh");
@@ -305,6 +313,7 @@ describe("CheckoutEventOrchestratorService", () => {
       "eligibility",
       "pending-refresh",
       "recovery-read",
+      "checkout-lock",
       "activity-or-refresh-write",
       "shopify-lookup",
       "transaction",
@@ -375,8 +384,16 @@ describe("CheckoutEventOrchestratorService", () => {
     const harness = createHarness();
     const timestamp = new Date(activityAt);
 
-    await harness.service.recordExternalActivity(activeRecovery.id, timestamp);
+    await harness.service.recordExternalActivity(activeRecovery.id, timestamp, {
+      shopId: shop.id,
+      checkoutToken: event.checkoutToken,
+    });
 
+    expect(harness.pendingRecoveryCandidateService.withCheckoutLock).toHaveBeenCalledWith(
+      shop.id,
+      event.checkoutToken,
+      expect.any(Function),
+    );
     expect(harness.database.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: {
         id: activeRecovery.id,
