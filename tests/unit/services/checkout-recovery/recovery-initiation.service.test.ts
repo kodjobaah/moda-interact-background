@@ -195,7 +195,7 @@ describe("RecoveryInitiationService", () => {
     await service.handleCheckoutCreated(event);
 
     expect(mocks.suppression.evaluate).toHaveBeenCalledWith("shop-1", "15551234567");
-    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(recovery.id, "shop-1", until);
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(recovery.id, "shop-1", until, undefined);
     expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
@@ -232,6 +232,26 @@ describe("RecoveryInitiationService", () => {
       recovery.id,
       "shop-1",
       expect.any(Date),
+      undefined,
+    );
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("passes the targeted wake-up lineage into the next suppression deferral", async () => {
+    const until = new Date("2026-10-12T00:00:00Z");
+    const wakeupTrigger = "recipient-suppression-recovery-1-1791763200000";
+    mocks.suppression.evaluate.mockResolvedValue({ kind: "suppressed", until });
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event, 1, "15551234567", wakeupTrigger);
+
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(
+      recovery.id,
+      "shop-1",
+      until,
+      wakeupTrigger,
     );
     expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();

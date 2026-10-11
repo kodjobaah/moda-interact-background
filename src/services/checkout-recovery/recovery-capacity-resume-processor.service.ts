@@ -24,6 +24,7 @@ type RecoveryInitiationPort = (
   seed: RecoveryCheckoutSeed,
   generation?: number,
   recipient?: string,
+  suppressionWakeupTrigger?: string,
 ) => Promise<unknown>;
 
 export class RecoveryCapacityResumeProcessorService {
@@ -38,7 +39,7 @@ export class RecoveryCapacityResumeProcessorService {
     private readonly suppressionAdmission: SuppressionAdmissionPort = recoveryRecipientSuppressionAdmissionService,
   ) {}
 
-  async resume(recoveryId: string) {
+  async resume(recoveryId: string, wakeupTrigger?: string) {
     const recovery = await this.database.checkoutRecovery.findUnique({
       where: { id: recoveryId },
       select: {
@@ -58,7 +59,7 @@ export class RecoveryCapacityResumeProcessorService {
     if (
       !recovery ||
       recovery.status !== "DETECTED" ||
-      !isResumeEligibleBlockReason(recovery.admissionBlockReason)
+      !isResumeEligibleBlockReason(recovery.admissionBlockReason, wakeupTrigger, recoveryId)
     ) {
       return { kind: "ignored", reason: "not-capacity-blocked" } as const;
     }
@@ -95,7 +96,7 @@ export class RecoveryCapacityResumeProcessorService {
         if (
           !current ||
           current.status !== "DETECTED" ||
-          !isResumeEligibleBlockReason(current.admissionBlockReason)
+          !isResumeEligibleBlockReason(current.admissionBlockReason, wakeupTrigger, recoveryId)
         ) {
           return { kind: "ignored", reason: "already-transitioned" } as const;
         }
@@ -163,7 +164,7 @@ export class RecoveryCapacityResumeProcessorService {
           }
           return { kind: "suppressed" as const, reason: "no-recipient" };
         }
-        await this.initiate(seed, current.generation ?? 1, recipient);
+        await this.initiate(seed, current.generation ?? 1, recipient, wakeupTrigger);
         const after = await this.database.checkoutRecovery.findUnique({
           where: { id: recovery.id },
           select: { status: true, admissionBlockReason: true },
@@ -214,7 +215,15 @@ export class RecoveryCapacityResumeProcessorService {
   }
 }
 
-function isResumeEligibleBlockReason(reason: string | null): boolean {
+function isResumeEligibleBlockReason(
+  reason: string | null,
+  wakeupTrigger?: string,
+  recoveryId?: string,
+): boolean {
   return reason === "RECOVERY_CAPACITY_EXHAUSTED" ||
-    reason === "WHATSAPP_RECIPIENT_SUPPRESSED";
+    reason === "WHATSAPP_RECIPIENT_SUPPRESSED" ||
+    (reason === null &&
+      typeof wakeupTrigger === "string" &&
+      typeof recoveryId === "string" &&
+      wakeupTrigger.startsWith(`recipient-suppression-${recoveryId}-`));
 }

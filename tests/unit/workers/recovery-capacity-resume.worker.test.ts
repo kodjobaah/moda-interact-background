@@ -110,7 +110,10 @@ describe("recovery capacity resume worker", () => {
       data: { shopId: "shop-1", trigger: "recipient-suppression-expiry", recoveryId: "recovery-1" },
     })).resolves.toEqual({ kind: "initiated" });
 
-    expect(hoisted.resume).toHaveBeenCalledExactlyOnceWith("recovery-1");
+    expect(hoisted.resume).toHaveBeenCalledExactlyOnceWith(
+      "recovery-1",
+      "recipient-suppression-expiry",
+    );
     expect(hoisted.findMany).not.toHaveBeenCalled();
   });
 

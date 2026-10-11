@@ -12,6 +12,7 @@ import { pendingRecoveryCandidateService } from "../services/pending-recovery-ca
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
+import { RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED } from "../services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
@@ -34,7 +35,11 @@ export function createPendingRecoveryCandidateWorker() {
             // Materialize the matured candidate into durable recovery state using
             // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
             // payload embedded in the job.
-            await checkoutRecoveryService.materializeMaturedCandidate(job.data);
+            await checkoutRecoveryService.materializeMaturedCandidate(job.data, {
+              retrySuppressionAdmission:
+                job.attemptsMade > 0 &&
+                job.failedReason === RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
+            });
           } finally {
             // The candidate is no longer pending once it has matured: drop the
             // O(1) candidate lookup indexes regardless of the materialization

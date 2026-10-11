@@ -36,7 +36,10 @@ export function createRecoveryCapacityResumeWorker() {
     if (!execution.allowed) return { kind: "ignored", reason: execution.reason };
 
     if (job.data.recoveryId) {
-      return checkoutRecoveryService.resumeCapacityBlockedRecovery(job.data.recoveryId);
+      return checkoutRecoveryService.resumeCapacityBlockedRecovery(
+        job.data.recoveryId,
+        job.data.trigger,
+      );
     }
 
     const batchSize = backgroundRuntimeConfigService.current().recoveryResumeBatchSize;

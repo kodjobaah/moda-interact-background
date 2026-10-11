@@ -10,6 +10,7 @@ import type { RecoveryRecipientResolverService } from "./recovery-recipient-reso
 
 export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string }
+  | { outcome: "recovery-reentered"; checkoutToken: string }
   | { outcome: "deferred-no-recipient"; checkoutToken: string }
   | { outcome: "no-op-existing"; checkoutToken: string; status: string }
   | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
@@ -39,6 +40,7 @@ export class RecoveryMaterializationService {
 
   async materialize(
     candidate: PendingRecoveryCandidate,
+    options: { retrySuppressionAdmission?: boolean } = {},
   ): Promise<MaturedCandidateMaterializationResult> {
     const execution = await this.dependencies.executionEligibility.evaluate(
       candidate.shopId,
@@ -80,13 +82,20 @@ export class RecoveryMaterializationService {
 
         const existing = await this.dependencies.findLatestRecovery(candidate.shopId, candidate.checkoutToken);
         let generation = 1;
+        const reenterSuppressionRetry = options.retrySuppressionAdmission &&
+          existing?.status === "DETECTED";
         if (existing) {
           if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
-            return {
-              outcome: "no-op-existing",
-              checkoutToken: candidate.checkoutToken,
-              status: existing.status,
-            } as const;
+            if (!reenterSuppressionRetry) {
+              return {
+                outcome: "no-op-existing",
+                checkoutToken: candidate.checkoutToken,
+                status: existing.status,
+              } as const;
+            }
+            generation = existing.generation;
+          } else {
+            generation = existing.generation + 1;
           }
           if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
             return {
@@ -95,7 +104,6 @@ export class RecoveryMaterializationService {
               status: existing.status,
             } as const;
           }
-          generation = existing.generation + 1;
         }
 
         const outcome = await this.dependencies.abandonedCheckoutLookup.lookup(
@@ -128,7 +136,10 @@ export class RecoveryMaterializationService {
         }
         await this.dependencies.initiate(seed, generation, recipient);
 
-        return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
+        return {
+          outcome: reenterSuppressionRetry ? "recovery-reentered" : "recovery-created",
+          checkoutToken: seed.checkoutToken,
+        } as const;
       },
     );
   }

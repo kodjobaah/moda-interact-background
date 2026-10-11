@@ -109,7 +109,12 @@ export class RecoveryInitiationService {
     });
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1, resolvedRecipient?: string) {
+  async handleCheckoutCreated(
+    event: RecoveryCheckoutSeed,
+    generation = 1,
+    resolvedRecipient?: string,
+    suppressionWakeupTrigger?: string,
+  ) {
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
       throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
@@ -139,6 +144,7 @@ export class RecoveryInitiationService {
         recovery.id,
         recovery.shopId,
         suppression.until,
+        suppressionWakeupTrigger,
       );
       return recovery;
     }

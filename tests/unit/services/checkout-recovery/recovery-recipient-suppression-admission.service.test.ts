@@ -86,7 +86,10 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
       "recovery-1",
       "shop-1",
       new Date("2026-10-12T00:00:00Z"),
-    )).rejects.toBe(enqueueError);
+    )).rejects.toMatchObject({
+      message: "RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED",
+      cause: enqueueError,
+    });
     expect(updateMany).not.toHaveBeenCalled();
   });
 
@@ -122,6 +125,25 @@ describe("RecoveryRecipientSuppressionAdmissionService", () => {
 
     expect(schedule).toHaveBeenCalledTimes(2);
     expect(schedule.mock.calls[0]).toEqual(schedule.mock.calls[1]);
+  });
+
+  it("derives a distinct deterministic child trigger from an active wake-up", async () => {
+    schedule.mockClear();
+    const until = new Date("2026-10-12T00:00:00Z");
+    const service = new RecoveryRecipientSuppressionAdmissionService({
+      whatsAppRecipientReachability: { findUnique: vi.fn() },
+      checkoutRecovery: { updateMany: vi.fn(async () => ({ count: 1 })) },
+    } as never);
+    const activeTrigger = `recipient-suppression-recovery-1-${until.getTime()}`;
+
+    await Promise.all([
+      service.deferDetectedRecovery("recovery-1", "shop-1", until, activeTrigger),
+      service.deferDetectedRecovery("recovery-1", "shop-1", until, activeTrigger),
+    ]);
+
+    expect(schedule).toHaveBeenCalledTimes(2);
+    expect(schedule.mock.calls[0]).toEqual(schedule.mock.calls[1]);
+    expect(schedule.mock.calls[0]?.[0].trigger).not.toBe(activeTrigger);
   });
 
   it("clears only an expired suppression block from a still-detected recovery", async () => {

@@ -395,6 +395,7 @@ describe("CheckoutRecoveryService capacity resume", () => {
       }),
       1,
       "15551234567",
+      undefined,
     );
   });
 

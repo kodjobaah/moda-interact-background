@@ -1,10 +1,14 @@
 import type { PrismaClient } from "@prisma/client";
+import { createHash } from "node:crypto";
 import prisma from "../../lib/db.js";
 import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
 
 export type RecoveryRecipientSuppression =
   | { kind: "allowed" }
   | { kind: "suppressed"; until: Date };
+
+export const RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED =
+  "RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED";
 
 type SuppressionDatabase = Pick<
   PrismaClient,
@@ -33,15 +37,19 @@ export class RecoveryRecipientSuppressionAdmissionService {
     recoveryId: string,
     shopId: string,
     until: Date,
+    wakeupTrigger?: string,
   ): Promise<boolean> {
-    await recoveryCapacityResumeService.schedule(
-      {
-        shopId,
-        recoveryId,
-        trigger: `recipient-suppression-${recoveryId}-${until.getTime()}`,
-      },
-      until,
-    );
+    try {
+      const trigger = wakeupTrigger
+        ? `recipient-suppression-${recoveryId}-${until.getTime()}-${createHash("sha256").update(wakeupTrigger).digest("hex").slice(0, 12)}`
+        : `recipient-suppression-${recoveryId}-${until.getTime()}`;
+      await recoveryCapacityResumeService.schedule(
+        { shopId, recoveryId, trigger },
+        until,
+      );
+    } catch (error) {
+      throw new Error(RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED, { cause: error });
+    }
     const blocked = await this.database.checkoutRecovery.updateMany({
       where: { id: recoveryId, status: "DETECTED" },
       data: {

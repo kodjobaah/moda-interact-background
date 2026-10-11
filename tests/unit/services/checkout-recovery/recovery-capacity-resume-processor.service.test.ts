@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecoveryCapacityResumeProcessorService } from "../../../../src/services/checkout-recovery/recovery-capacity-resume-processor.service.js";
+import { RecoveryRecipientSuppressionAdmissionService } from "../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
+
+const schedule = vi.hoisted(() => vi.fn(async () => "job-id"));
+vi.mock("../../../../src/services/recovery-capacity-resume.service.js", () => ({
+  recoveryCapacityResumeService: { schedule },
+}));
 
 const blockedRecovery = {
   id: "recovery-1",
@@ -252,7 +258,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     expect(harness.initiate).toHaveBeenCalledOnce();
     expect(harness.recipientResolver.resolve).toHaveBeenCalledWith(expect.objectContaining({ checkoutToken: "checkout-1" }));
     expect(harness.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
-    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15551234567");
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15551234567", undefined);
   });
 
   it("re-evaluates a suppression-blocked recovery from fresh checkout state under its lock", async () => {
@@ -291,7 +297,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     await harness.service.resume("recovery-1");
 
     expect(harness.recipientResolver.resolveForCustomerInShop).not.toHaveBeenCalled();
-    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "447700900123");
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "447700900123", undefined);
   });
 
   it("clears an expired suppression block and does not initiate when no current phone exists", async () => {
@@ -309,6 +315,87 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     expect(harness.initiate).not.toHaveBeenCalled();
   });
 
+  it("requeues an early targeted wake-up while the original suppression block write is pending", async () => {
+    schedule.mockClear();
+    const until = new Date(Date.now() + 60_000);
+    let unblockFirstWrite!: () => void;
+    let firstWriteStarted!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => { unblockFirstWrite = resolve; });
+    const firstWriteStartedGate = new Promise<void>((resolve) => { firstWriteStarted = resolve; });
+    let updateCount = 0;
+    let blockReason: string | null = null;
+    const recoveryReads = [
+      { ...suppressionBlockedRecovery, admissionBlockReason: null },
+      { ...suppressionBlockedRecovery, admissionBlockReason: null },
+      { status: "DETECTED", admissionBlockReason: "WHATSAPP_RECIPIENT_SUPPRESSED" },
+    ];
+    const database = {
+      whatsAppRecipientReachability: {
+        findUnique: vi.fn(async () => ({ suppressUntil: until })),
+      },
+      checkoutRecovery: {
+        updateMany: vi.fn(async () => {
+          updateCount += 1;
+          if (updateCount === 1) {
+            firstWriteStarted();
+            await firstWriteGate;
+          }
+          blockReason = "WHATSAPP_RECIPIENT_SUPPRESSED";
+          return { count: 1 };
+        }),
+        findUnique: vi.fn(async () => {
+          const next = recoveryReads.shift();
+          return next ? { ...next, admissionBlockReason: next.admissionBlockReason ?? blockReason } : null;
+        }),
+      },
+    };
+    const admission = new RecoveryRecipientSuppressionAdmissionService(database as never);
+    const initialDeferral = admission.deferDetectedRecovery("recovery-1", "shop-1", until);
+    await firstWriteStartedGate;
+    const originalWakeup = schedule.mock.calls[0]?.[0];
+    expect(originalWakeup).toBeDefined();
+
+    const initiate = vi.fn(async (
+      _seed: unknown,
+      _generation: number,
+      recipient: string,
+      wakeupTrigger?: string,
+    ) => {
+      expect(recipient).toBe("15551234567");
+      const decision = await admission.evaluate("shop-1", recipient);
+      if (decision.kind === "suppressed") {
+        await admission.deferDetectedRecovery("recovery-1", "shop-1", decision.until, wakeupTrigger);
+      }
+    });
+    const processor = new RecoveryCapacityResumeProcessorService(
+      database as never,
+      { withCheckoutLock: async (_shopId: string, _token: string, callback: () => Promise<unknown>) => callback() } as never,
+      { evaluate: async () => ({ allowed: true, shopId: "shop-1" }) } as never,
+      { lookup: async () => ({ kind: "found", checkout: currentCheckout }) } as never,
+      { build: async () => ({ shop: "shop.example", checkoutToken: "checkout-1" }) } as never,
+      initiate,
+      {
+        resolve: async () => "15551234567",
+        resolveForCustomerInShop: async () => "15551234567",
+      } as never,
+      admission,
+    );
+
+    await expect(processor.resume("recovery-1", originalWakeup!.trigger)).resolves.toMatchObject({
+      kind: "suppressed",
+      reason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+    });
+    const childWakeup = schedule.mock.calls[1]?.[0];
+    expect(childWakeup).toBeDefined();
+    expect(childWakeup!.trigger).not.toBe(originalWakeup!.trigger);
+    expect(childWakeup!.recoveryId).toBe("recovery-1");
+    expect(initiate).toHaveBeenCalledOnce();
+    expect(updateCount).toBe(2);
+
+    unblockFirstWrite();
+    await expect(initialDeferral).resolves.toBe(true);
+  });
+
   it("uses the Shop-scoped stored phone when the fresh checkout has no customer phone", async () => {
     const harness = createHarness({
       reads: [suppressionBlockedRecovery, suppressionBlockedRecovery, { status: "MESSAGE_SENT", admissionBlockReason: null }],
@@ -318,7 +405,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
     await harness.service.resume("recovery-1");
 
     expect(harness.recipientResolver.resolveForCustomerInShop).toHaveBeenCalledWith("customer-1", "shop-1");
-    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15558675309");
+    expect(harness.initiate).toHaveBeenCalledWith(expect.any(Object), 1, "15558675309", undefined);
   });
 
   it("passes later recovery generations to canonical initiation", async () => {
@@ -334,7 +421,7 @@ describe("RecoveryCapacityResumeProcessorService", () => {
       kind: "initiated",
       status: "MESSAGE_SENT",
     });
-    expect(harness.initiate.mock.calls[0]).toHaveLength(3);
+    expect(harness.initiate.mock.calls[0]).toHaveLength(4);
     expect(harness.initiate.mock.calls[0][1]).toBe(3);
     expect(harness.initiate.mock.calls[0][2]).toBe("15551234567");
   });

@@ -96,7 +96,8 @@ export class CheckoutRecoveryService {
       shopExecutionEligibilityService,
       abandonedCheckoutLookupService,
       this.snapshotBuilderService,
-      (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
+      (seed, generation, recipient, wakeupTrigger) =>
+        this.handleCheckoutCreated(seed, generation, recipient, wakeupTrigger),
     );
     this.recoveryAgentContextService = new RecoveryAgentContextService(
       prisma,
@@ -111,8 +112,9 @@ export class CheckoutRecoveryService {
 
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
+    options?: { retrySuppressionAdmission?: boolean },
   ): Promise<MaturedCandidateMaterializationResult> {
-    return this.materializationService.materialize(candidate);
+    return this.materializationService.materialize(candidate, options);
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
@@ -176,8 +178,18 @@ export class CheckoutRecoveryService {
     return this.orderRecoveryCorrelationService.handleOrderCompleted(event);
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1, resolvedRecipient?: string) {
-    return this.initiationService.handleCheckoutCreated(event, generation, resolvedRecipient);
+  async handleCheckoutCreated(
+    event: RecoveryCheckoutSeed,
+    generation = 1,
+    resolvedRecipient?: string,
+    suppressionWakeupTrigger?: string,
+  ) {
+    return this.initiationService.handleCheckoutCreated(
+      event,
+      generation,
+      resolvedRecipient,
+      suppressionWakeupTrigger,
+    );
   }
 
   async processRecoveryOutreachFollowUp(recoveryId: string) {
@@ -188,8 +200,8 @@ export class CheckoutRecoveryService {
     return this.initiationService.markRecoveryCapacityBlocked(recoveryId, blockedAt);
   }
 
-  async resumeCapacityBlockedRecovery(recoveryId: string) {
-    return this.capacityResumeProcessorService.resume(recoveryId);
+  async resumeCapacityBlockedRecovery(recoveryId: string, wakeupTrigger?: string) {
+    return this.capacityResumeProcessorService.resume(recoveryId, wakeupTrigger);
   }
 
   async getAgentContext(input: RecoveryAgentContextInput): Promise<RecoveryAgentContext> {
