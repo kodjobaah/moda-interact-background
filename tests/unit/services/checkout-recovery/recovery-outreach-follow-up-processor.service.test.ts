@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   prisma: {
     checkoutRecovery: { findUnique: vi.fn(), updateMany: vi.fn() },
-    conversationMessage: { findFirst: vi.fn() },
+    conversationMessage: { findFirst: vi.fn(), findUnique: vi.fn() },
     recoveryOutreachAttempt: { findUnique: vi.fn() },
   },
   lock: { withCheckoutLock: vi.fn() },
@@ -62,7 +62,7 @@ const recovery = {
   customerId: "customer-1",
   status: "MESSAGE_SENT",
   shop: { domain: "shop.test", status: "ACTIVE" },
-  outreachAttempts: [{ id: "attempt-1", sequence: 1, status: "WAITING_FOR_RESPONSE", sentAt, followUpDueAt: dueAt }],
+  outreachAttempts: [{ id: "attempt-1", sequence: 1, status: "WAITING_FOR_RESPONSE", sentAt, followUpDueAt: dueAt, outboundMessageId: "message-1" }],
   conversation: { id: "conversation-1", languageTag: "fr-CA", countryCode: "CA" },
   customer: { phone: "+15551234567" },
 };
@@ -95,6 +95,7 @@ beforeEach(() => {
   mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(null);
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
   mocks.prisma.conversationMessage.findFirst.mockResolvedValue(null);
+  mocks.prisma.conversationMessage.findUnique.mockResolvedValue(null);
   mocks.prisma.recoveryOutreachAttempt.findUnique.mockResolvedValue(null);
   mocks.outbound.getProviderAccountId.mockReturnValue("provider-1");
   mocks.outbound.sendTemplate.mockResolvedValue({ kind: "admitted" });
@@ -131,6 +132,51 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     expect(mocks.prisma.conversationMessage.findFirst).not.toHaveBeenCalled();
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+  });
+
+  it("suppresses a due follow-up when its exact initial message failed with 131026", async () => {
+    setRecovery();
+    mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+      status: "FAILED",
+      providerFailureCode: "131026",
+    });
+    const { processor, billing } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "recipient-undeliverable",
+    });
+
+    expect(mocks.prisma.conversationMessage.findUnique).toHaveBeenCalledWith({
+      where: { id: "message-1" },
+      select: { status: true, providerFailureCode: true },
+    });
+    expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreateFollowUp).not.toHaveBeenCalled();
+    expect(mocks.policy.resolve).not.toHaveBeenCalled();
+    expect(mocks.selector.select).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["FAILED", "131047"],
+    ["DELIVERED", "131026"],
+  ])("continues normal follow-up handling for %s message code %s", async (status, providerFailureCode) => {
+    setRecovery();
+    mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+      status,
+      providerFailureCode,
+    });
+    const { processor } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "sent",
+      attemptId: attempt.id,
+    });
+
+    expect(mocks.attempt.markNoResponseIfWaiting).toHaveBeenCalledWith("attempt-1");
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledOnce();
   });
 
   it.each([null, "+19999999999"])("uses the current Shop-scoped phone when legacy Customer.phone is %s", async (legacyPhone) => {
