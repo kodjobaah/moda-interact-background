@@ -213,6 +213,127 @@ export function registerSchedulingCases(context: CandidateFacadeContext) {
     expect(redisZsets.get(shopIndexKey)?.get(result.jobId)).toBeGreaterThan(firstScore!);
   });
 
+  it.each(["active", "waiting"] as const)(
+    "preserves one delayed successor through %s completion cleanup and duplicate updates",
+    async (state) => {
+    const original = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_active_handoff",
+      cartToken: null,
+      abandonedCheckoutUrl: "https://shop.example/recover",
+      checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+      activityAt: "2026-08-28T00:00:00.000Z",
+    });
+    const activeJob = queueInstance.jobs.get(original.jobId)!;
+    activeJob.state = state;
+    const update = {
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_active_handoff",
+      activityAt: "2026-08-28T01:00:00.000Z",
+    };
+
+    const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated(update);
+    const duplicate = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated(update);
+
+    expect(first.outcome).toBe("enqueued");
+    expect(duplicate.outcome).toBe("refreshed");
+    expect(duplicate.jobId).toBe(first.jobId);
+    expect(queueInstance.addCalls).toHaveLength(2);
+
+    queueInstance.jobs.delete(original.jobId);
+    await serviceModule.pendingRecoveryCandidateService.handleCandidateMatured(
+      original.candidate,
+      original.jobId,
+    );
+
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCheckout({
+      shopId: "shop_1",
+      checkoutToken: "checkout_active_handoff",
+    })).toBe(first.jobId);
+    expect(queueInstance.jobs.get(first.jobId)?.state).toBe("delayed");
+    expect(queueInstance.jobs.get(first.jobId)?.data).toMatchObject({
+      checkoutToken: "checkout_active_handoff",
+      abandonedCheckoutUrl: "https://shop.example/recover",
+      checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+    });
+    },
+  );
+
+  it("serializes duplicate updates behind cleanup when removeOnComplete already removed the active job", async () => {
+    const original = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_cleanup_handoff",
+      cartToken: null,
+      abandonedCheckoutUrl: "https://shop.example/recover",
+      checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+      activityAt: "2026-08-28T00:00:00.000Z",
+    });
+    const originalJob = queueInstance.jobs.get(original.jobId)!;
+    originalJob.state = "active";
+    const checkoutIndexKey = domainModule.pendingCandidateCheckoutIndexKey({
+      shopId: "shop_1",
+      checkoutToken: "checkout_cleanup_handoff",
+    });
+    let signalCleanupRead!: () => void;
+    let unblockCleanup!: () => void;
+    const getStoredValue = redisMock.get.getMockImplementation()!;
+    const cleanupReadReached = new Promise<void>((resolve) => { signalCleanupRead = resolve; });
+    const cleanupGate = new Promise<void>((resolve) => { unblockCleanup = resolve; });
+    redisMock.get.mockImplementationOnce(async (key: string) => {
+      if (key === checkoutIndexKey) {
+        signalCleanupRead();
+        await cleanupGate;
+      }
+      return getStoredValue(key);
+    });
+
+    const cleanup = serviceModule.pendingRecoveryCandidateService.handleCandidateMatured(
+      original.candidate,
+      original.jobId,
+    );
+    await cleanupReadReached;
+    queueInstance.jobs.delete(original.jobId);
+    const update = {
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_cleanup_handoff",
+      activityAt: "2026-08-28T01:00:00.000Z",
+    };
+    const firstUpdate = serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated(update);
+    const duplicateUpdate = serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated(update);
+    unblockCleanup();
+    await cleanup;
+    const [first, duplicate] = await Promise.all([firstUpdate, duplicateUpdate]);
+
+    expect(first.outcome).toBe("enqueued");
+    expect(duplicate.outcome).toBe("refreshed");
+    expect(duplicate.jobId).toBe(first.jobId);
+    expect(queueInstance.addCalls).toHaveLength(2);
+    expect(await serviceModule.pendingRecoveryCandidateService.findCandidateJobIdByCheckout({
+      shopId: "shop_1",
+      checkoutToken: "checkout_cleanup_handoff",
+    })).toBe(first.jobId);
+  });
+
+  it("suppresses checkout-update re-entry after the order-completed tombstone", async () => {
+    await redisMock.set(
+      domainModule.checkoutOrderCompletedKey({
+        shopId: "shop_1",
+        checkoutToken: "checkout_ordered",
+      }),
+      "1",
+    );
+
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_ordered",
+      activityAt: "2026-08-28T01:00:00.000Z",
+    });
+
+    expect(result.outcome).toBe("discarded-order-completed");
+    expect(queueInstance.addCalls).toHaveLength(0);
+    expect(redisZsets.size).toBe(0);
+  });
+
   it("removes the old cart alias when checkout scheduling changes cart token", async () => {
     const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
       shopDomain: "shop.myshopify.com",

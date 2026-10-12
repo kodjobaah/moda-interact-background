@@ -192,6 +192,67 @@ describe("shopify-contract-adapter", () => {
     });
   });
 
+  it("maps bounded optional lookup context from v3 checkout.updated", () => {
+    const mapped = mapCheckoutUpdatedContractInput(parseRuntimeShopifyEvent({
+      schemaVersion: 3,
+      receiptId: "r-v3",
+      deliveryId: "d-v3",
+      eventId: "e-v3",
+      source: "shopify",
+      providerTopic: "CHECKOUTS_UPDATE",
+      tenant: { shopId: "shop_1", shopDomain: "shop.myshopify.com" },
+      occurredAt: "2026-08-28T00:02:00.000Z",
+      receivedAt: "2026-08-28T00:02:01.000Z",
+      traceId: "t-v3",
+      orderingKey: "shop_1:checkout_1",
+      eventType: "checkout.updated",
+      payload: {
+        checkoutToken: "checkout_1",
+        cartToken: "cart_1",
+        checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.example/recover?key=abc",
+      },
+    }));
+
+    expect(mapped).toEqual({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_1",
+      cartToken: "cart_1",
+      checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.example/recover?key=abc",
+      activityAt: "2026-08-28T00:02:00.000Z",
+    });
+  });
+
+  it.each([
+    [{ cartToken: "cart_only" }, { cartToken: "cart_only" }],
+    [{ checkoutCreatedAt: "2026-08-28T00:00:00.000Z" }, { checkoutCreatedAt: "2026-08-28T00:00:00.000Z" }],
+    [{ abandonedCheckoutUrl: "https://shop.example/recover?key=only" }, { abandonedCheckoutUrl: "https://shop.example/recover?key=only" }],
+  ])("maps v3 checkout lookup properties independently: %o", (optionalContext, expected) => {
+    const event = parseRuntimeShopifyEvent({
+      schemaVersion: 3,
+      receiptId: "r-v3-partial",
+      deliveryId: "d-v3-partial",
+      eventId: "e-v3-partial",
+      source: "shopify",
+      providerTopic: "CHECKOUTS_UPDATE",
+      tenant: { shopId: "shop_1", shopDomain: "shop.myshopify.com" },
+      occurredAt: "2026-08-28T00:02:00.000Z",
+      receivedAt: "2026-08-28T00:02:01.000Z",
+      traceId: "t-v3-partial",
+      orderingKey: "shop_1:checkout_1",
+      eventType: "checkout.updated",
+      payload: { checkoutToken: "checkout_1", ...optionalContext },
+    });
+
+    expect(mapCheckoutUpdatedContractInput(event)).toEqual({
+      shopDomain: "shop.myshopify.com",
+      checkoutToken: "checkout_1",
+      ...expected,
+      activityAt: "2026-08-28T00:02:00.000Z",
+    });
+  });
+
   it("maps cart.activity with tenant correlation and canonical activity time", () => {
     const mapped = mapCartActivityContractInput(
       parseRuntimeShopifyEvent({

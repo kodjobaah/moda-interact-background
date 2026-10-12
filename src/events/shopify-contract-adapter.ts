@@ -1,6 +1,6 @@
 import {
-  parseShopifyRecoveryEventV2,
-  type ShopifyRecoveryEventV2,
+  parseShopifyRecoveryEvent,
+  type ShopifyRecoveryEvent,
 } from "@modainteract/moda-interact-shared/shopify";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
@@ -17,6 +17,9 @@ export type CheckoutCreatedContractInput = {
 export type CheckoutUpdatedContractInput = {
   shopDomain: string;
   checkoutToken: string;
+  cartToken?: string | null;
+  checkoutCreatedAt?: string | null;
+  abandonedCheckoutUrl?: string | null;
   internationalContext?: InternationalContext;
   activityAt: string;
 };
@@ -38,18 +41,17 @@ export type OrderCompletedContractInput = {
 };
 
 /**
- * Runtime-validate worker job data against the canonical ARCH-001 v2 recovery
- * contract. Invalid cross-service payloads throw before any business handling
- * so malformed events fail visibly rather than being treated as valid.
+ * Runtime-validate queued events against the canonical compatible v2/v3
+ * Shopify contract. Invalid cross-service payloads fail before handling.
  */
 export function parseRuntimeShopifyEvent(
   jobData: unknown,
-): ShopifyRecoveryEventV2 {
-  return parseShopifyRecoveryEventV2(jobData);
+): ShopifyRecoveryEvent {
+  return parseShopifyRecoveryEvent(jobData);
 }
 
 export function mapCheckoutCreatedContractInput(
-  event: ShopifyRecoveryEventV2,
+  event: ShopifyRecoveryEvent,
 ): CheckoutCreatedContractInput {
   if (event.eventType !== "checkout.created") {
       throw new Error(
@@ -71,7 +73,7 @@ export function mapCheckoutCreatedContractInput(
   }
 
 export function mapCheckoutUpdatedContractInput(
-  event: ShopifyRecoveryEventV2,
+  event: ShopifyRecoveryEvent,
 ): CheckoutUpdatedContractInput {
   if (event.eventType !== "checkout.updated") {
       throw new Error(
@@ -82,6 +84,15 @@ export function mapCheckoutUpdatedContractInput(
     return {
     shopDomain: event.tenant.shopDomain,
     checkoutToken: event.payload.checkoutToken,
+    ...( "cartToken" in event.payload && event.payload.cartToken !== undefined
+      ? { cartToken: event.payload.cartToken }
+      : {}),
+    ...( "checkoutCreatedAt" in event.payload && event.payload.checkoutCreatedAt !== undefined
+      ? { checkoutCreatedAt: event.payload.checkoutCreatedAt }
+      : {}),
+    ...( "abandonedCheckoutUrl" in event.payload && event.payload.abandonedCheckoutUrl !== undefined
+      ? { abandonedCheckoutUrl: event.payload.abandonedCheckoutUrl }
+      : {}),
     ...(event.internationalContext
       ? { internationalContext: event.internationalContext }
       : {}),
@@ -90,7 +101,7 @@ export function mapCheckoutUpdatedContractInput(
   }
 
 export function mapCartActivityContractInput(
-  event: ShopifyRecoveryEventV2,
+  event: ShopifyRecoveryEvent,
 ): CartActivityContractInput {
   if (event.eventType !== "cart.activity") {
       throw new Error(
@@ -108,7 +119,7 @@ export function mapCartActivityContractInput(
   }
 
 export function mapOrderCompletedContractInput(
-  event: ShopifyRecoveryEventV2,
+  event: ShopifyRecoveryEvent,
 ): OrderCompletedContractInput {
   if (event.eventType !== "order.completed") {
       throw new Error(

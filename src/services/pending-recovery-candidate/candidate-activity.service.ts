@@ -15,6 +15,9 @@ export type CandidateActivityInput = {
   activityAt: string;
   isEmpty: boolean | null;
   internationalContext?: InternationalContext;
+  checkoutCartToken?: string | null;
+  checkoutCreatedAt?: string | null;
+  abandonedCheckoutUrl?: string | null;
 };
 
 export type CandidateActivityResult =
@@ -47,6 +50,7 @@ type CandidateActivityIndexStore = {
     dueAtMs: number;
     shouldIndexShop: boolean;
   }): Promise<unknown>;
+  removeCartAlias(shopId: string, cartToken: string): Promise<unknown>;
 };
 
 type CandidateActivityDependencies = {
@@ -139,6 +143,9 @@ export class PendingRecoveryCandidateActivityService {
     const delayMinutes = await this.dependencies.resolveDelayMinutes(input.shopId);
     const candidate: PendingRecoveryCandidate = {
       ...matched.candidate,
+      cartToken: input.checkoutCartToken ?? matched.candidate.cartToken,
+      checkoutCreatedAt: input.checkoutCreatedAt ?? matched.candidate.checkoutCreatedAt,
+      abandonedCheckoutUrl: input.abandonedCheckoutUrl ?? matched.candidate.abandonedCheckoutUrl,
       ...optionalCandidateInternationalContext(
         mergeCandidateInternationalContext(
           matched.candidate.internationalContext,
@@ -147,6 +154,12 @@ export class PendingRecoveryCandidateActivityService {
       ),
       lastActivityAt: incomingActivityAt,
     };
+    if (matched.candidate.cartToken && matched.candidate.cartToken !== candidate.cartToken) {
+      await this.dependencies.candidateIndexStore.removeCartAlias(
+        input.shopId,
+        matched.candidate.cartToken,
+      );
+    }
     const dueAtMs = candidateActivityDueAtMs(
       incomingActivityAt,
       delayMinutes,

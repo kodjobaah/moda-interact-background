@@ -37,6 +37,7 @@ function createHarness(input?: { state?: string; jobExists?: boolean }) {
   }));
   const candidateIndexStore = {
     upsert: vi.fn(async () => undefined),
+    removeCartAlias: vi.fn(async () => undefined),
   };
   const service = new PendingRecoveryCandidateActivityService({
     resolveCandidate,
@@ -107,6 +108,35 @@ describe("PendingRecoveryCandidateActivityService", () => {
       delayMinutes: 45,
       dueAtMs: Date.parse("2026-08-28T01:45:00.000Z"),
       shouldIndexShop: true,
+    }));
+  });
+
+  it("enriches lookup context without erasing existing values or regressing activity", async () => {
+    const harness = createHarness();
+
+    const result = await harness.service.refresh({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      checkoutCartToken: "cart-2",
+      activityAt: "2026-08-28T01:00:00.000Z",
+      isEmpty: false,
+      checkoutCreatedAt: null,
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "rescheduled",
+      candidate: {
+        cartToken: "cart-2",
+        checkoutCreatedAt: "2026-08-28T00:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+        lastActivityAt: "2026-08-28T01:00:00.000Z",
+      },
+    });
+    expect(harness.candidateIndexStore.removeCartAlias).toHaveBeenCalledWith("shop-1", "cart-1");
+    expect(harness.candidateIndexStore.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      candidate: expect.objectContaining({ cartToken: "cart-2" }),
+      jobId: "job-1",
     }));
   });
 

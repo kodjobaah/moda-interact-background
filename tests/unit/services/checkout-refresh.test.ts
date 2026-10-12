@@ -214,15 +214,19 @@ describe("CheckoutRecoveryService.handleCheckoutUpdatedContract (ARCH-001-BACKGR
         outcome: "not-found",
       },
     );
+    hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated.mockResolvedValue({
+      outcome: "enqueued",
+      jobId: "candidate-1",
+    });
   });
 
-  it("discards the update and does not call Shopify when no recovery exists", async () => {
+  it("schedules the update without calling Shopify when no recovery exists", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
 
     const result = await service.handleCheckoutUpdatedContract(event);
 
-    expect(result).toEqual({ kind: "discarded", reason: "recovery-not-found" });
-    // No Shopify lookup, no write.
+    expect(result).toEqual({ kind: "pending", outcome: "enqueued", jobId: "candidate-1" });
+    expect(hoisted.pendingCandidateServiceMock.scheduleFromCheckoutUpdated).toHaveBeenCalledOnce();
     expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
     expect(prismaMock.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });

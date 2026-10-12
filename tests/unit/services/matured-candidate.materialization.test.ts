@@ -333,6 +333,45 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
+  it("defers a token-only candidate without Shopify lookup context", async () => {
+    const result = await service.materializeMaturedCandidate({
+      ...candidate,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+    });
+
+    expect(result).toEqual({
+      outcome: "deferred-lookup-unavailable",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("does not initiate a matured job after newer checkout activity indexed a successor", async () => {
+    redisMock.get.mockImplementation(async (key: string) =>
+      key.startsWith("pending-recovery:index:checkout:") ? "successor-job" : null,
+    );
+
+    const result = await service.materializeMaturedCandidate(candidate, "matured-job");
+
+    expect(result).toEqual({
+      outcome: "discarded-superseded",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(prismaMock.recoveryOutreachAttempt.upsert).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
   it("uses current CustomerPhone when the checkout snapshot has no phone", async () => {
     hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValueOnce({ phone: "+44 (0)20 7946 0958" } as never);
     lookupServiceMock.lookup.mockResolvedValueOnce({

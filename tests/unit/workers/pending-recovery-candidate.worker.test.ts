@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { name: string; data: unknown; id: string }) => Promise<unknown>),
   materialize: vi.fn(async () => ({
-    outcome: "discarded-shop-unavailable",
+    outcome: "deferred-lookup-unavailable",
     checkoutToken: "checkout_1",
   })),
   cleanup: vi.fn(async () => undefined),
@@ -61,7 +61,7 @@ describe("pending recovery candidate worker", () => {
 
     await hoisted.processor?.(job);
 
-    expect(hoisted.materialize).toHaveBeenCalledWith(job.data);
+    expect(hoisted.materialize).toHaveBeenCalledWith(job.data, job.id);
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
   });
 });

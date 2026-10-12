@@ -113,8 +113,9 @@ export class CheckoutRecoveryService {
 
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
+    jobId?: string,
   ): Promise<MaturedCandidateMaterializationResult> {
-    return this.materializationService.materialize(candidate);
+    return this.materializationService.materialize(candidate, jobId);
   }
 
   async recordExternalActivity(recoveryId: string, activityAt: Date) {
