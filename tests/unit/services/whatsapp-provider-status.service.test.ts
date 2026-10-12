@@ -30,7 +30,10 @@ const baseEvent = {
   occurredAt: "2026-09-08T15:00:00.000Z",
 };
 
-function harness(status = "SENT") {
+function harness(status = "SENT", attemptStatus: string | null = "WAITING_FOR_RESPONSE") {
+  const linkedAttempt = attemptStatus === null
+    ? null
+    : { id: "attempt-1", status: attemptStatus };
   const message = {
     id: "message-1",
     direction: "OUTBOUND",
@@ -40,6 +43,7 @@ function harness(status = "SENT") {
     readAt: null as Date | null,
     providerFailureCode: null as string | null,
     failedAt: null as Date | null,
+    recoveryOutreachAttempt: linkedAttempt,
     conversation: {
       shopId: null,
       checkoutRecovery: { shopId: "shop-1" },
@@ -67,6 +71,20 @@ function harness(status = "SENT") {
             return { count: 1 };
           },
         ),
+    },
+    recoveryOutreachAttempt: {
+      updateMany: vi.fn().mockImplementation(async ({ where, data }: {
+        where: { id: string; status: string };
+        data: Record<string, unknown>;
+      }) => {
+        if (
+          !linkedAttempt ||
+          where.id !== linkedAttempt.id ||
+          where.status !== linkedAttempt.status
+        ) return { count: 0 };
+        Object.assign(linkedAttempt, data);
+        return { count: 1 };
+      }),
     },
     usageEvent: {
       upsert: vi
@@ -108,6 +126,7 @@ function harness(status = "SENT") {
 
   return {
     message,
+    linkedAttempt,
     usageEvents,
     transaction,
     database,
@@ -162,11 +181,18 @@ describe("WhatsAppProviderStatusService", () => {
   it("updates a sent message to FAILED but allows a later delivered status", async () => {
     const test = harness();
 
-    await test.service.process({ ...baseEvent, status: "FAILED" });
+    await test.service.process({
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: "131026" },
+    });
     expect(test.message.status).toBe("FAILED");
+    expect(test.linkedAttempt?.status).toBe("FAILED");
 
     await test.service.process(baseEvent);
     expect(test.message.status).toBe("DELIVERED");
+    expect(test.linkedAttempt?.status).toBe("FAILED");
     expect(test.usageEvents).toHaveLength(1);
   });
 
@@ -191,6 +217,82 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.failedAt).toEqual(new Date(baseEvent.occurredAt));
     expect(failedAt).toEqual(test.message.failedAt);
   });
+
+  it("fails the exact linked waiting attempt for terminal recipient code 131026", async () => {
+    const test = harness();
+
+    await expect(test.service.process({
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: "131026" },
+    })).resolves.toBe("applied");
+
+    expect(test.message.status).toBe("FAILED");
+    expect(test.message.providerFailureCode).toBe("131026");
+    expect(test.linkedAttempt).toMatchObject({ id: "attempt-1", status: "FAILED" });
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith({
+      where: { id: "attempt-1", status: "WAITING_FOR_RESPONSE" },
+      data: {
+        status: "FAILED",
+        failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE",
+        closedAt: new Date(baseEvent.occurredAt),
+      },
+    });
+  });
+
+  it.each([
+    "NO_RESPONSE",
+    "ENGAGED",
+    "CANCELLED",
+    "CAPACITY_BLOCKED",
+    "FAILED",
+  ])("preserves an already-converged %s attempt for late 131026 evidence", async (attemptStatus) => {
+    const test = harness("SENT", attemptStatus);
+
+    await test.service.process({
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: "131026" },
+    });
+
+    expect(test.linkedAttempt?.status).toBe(attemptStatus);
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+    expect(test.message.providerFailureCode).toBe("131026");
+  });
+
+  it("does not converge a waiting attempt for other provider failure codes", async () => {
+    const test = harness();
+
+    await test.service.process({
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: "131047" },
+    });
+
+    expect(test.linkedAttempt?.status).toBe("WAITING_FOR_RESPONSE");
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["DELIVERED", "READ"] as const)(
+    "does not let positive %s evidence trigger terminal attempt convergence",
+    async (status) => {
+      const test = harness(status);
+
+      await test.service.process({
+        ...baseEvent,
+        schemaVersion: 3 as const,
+        status: "FAILED" as const,
+        failure: { providerCode: "131026" },
+      });
+
+      expect(test.message.status).toBe(status);
+      expect(test.linkedAttempt?.status).toBe("WAITING_FOR_RESPONSE");
+      expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("records v2 failure time without fabricating a provider code", async () => {
     const test = harness("PENDING");
@@ -222,6 +324,7 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.failedAt).toEqual(failedAt);
     expect(test.message.providerFailureCode).toBe("131026");
     expect(test.message.status).toBe("FAILED");
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).toHaveBeenCalledTimes(1);
   });
 
   it.each([

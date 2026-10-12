@@ -14,6 +14,7 @@ import {
   canApplyProviderStatus,
   statusForProviderEvent,
 } from "../domain/whatsapp-provider-status-transition.js";
+import { classifyWhatsAppProviderFailure } from "../domain/whatsapp-recipient-failure.js";
 
 type Database = typeof prisma;
 const MAX_TRANSACTION_RETRIES = 3;
@@ -62,6 +63,7 @@ export class WhatsAppProviderStatusService {
           readAt: true,
           providerFailureCode: true,
           failedAt: true,
+          recoveryOutreachAttempt: { select: { id: true, status: true } },
           conversation: {
             select: {
               shopId: true,
@@ -126,6 +128,33 @@ export class WhatsAppProviderStatusService {
         if (updated.count !== 1) throw new ProviderStatusConcurrencyConflict();
       }
 
+      const updatedFailureCode = lifecycleData.providerFailureCode;
+      const persistedFailureCode = typeof updatedFailureCode === "string"
+        ? updatedFailureCode
+        : message.providerFailureCode;
+      const terminalRecipientFailure =
+        canApplyStatus &&
+        event.status === "FAILED" &&
+        classifyWhatsAppProviderFailure(persistedFailureCode) === "RECIPIENT_UNDELIVERABLE";
+      let attemptConverged = false;
+      if (
+        terminalRecipientFailure &&
+        message.recoveryOutreachAttempt?.status === "WAITING_FOR_RESPONSE"
+      ) {
+        const converged = await transaction.recoveryOutreachAttempt.updateMany({
+          where: {
+            id: message.recoveryOutreachAttempt.id,
+            status: "WAITING_FOR_RESPONSE",
+          },
+          data: {
+            status: "FAILED",
+            failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE",
+            closedAt: occurredAt,
+          },
+        });
+        attemptConverged = converged.count === 1;
+      }
+
       if (becameDelivered) {
         await transaction.usageEvent.upsert({
           where: { idempotencyKey: deliveredUsageKey(message.id) },
@@ -148,11 +177,11 @@ export class WhatsAppProviderStatusService {
         messageId: message.id,
         status: event.status,
         outcome:
-          !lifecycleChanged && !becameDelivered
+          !lifecycleChanged && !becameDelivered && !attemptConverged
             ? "ignored"
             : "applied",
       });
-      return !lifecycleChanged && !becameDelivered
+      return !lifecycleChanged && !becameDelivered && !attemptConverged
         ? "ignored"
         : "applied";
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));

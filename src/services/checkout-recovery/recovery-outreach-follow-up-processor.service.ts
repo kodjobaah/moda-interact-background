@@ -14,6 +14,7 @@ import { conversationMessageService } from "../conversation.message.service.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
 import { recoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 import { recoveryRecipientSuppressionAdmissionService } from "./recovery-recipient-suppression-admission.service.js";
+import { classifyWhatsAppProviderFailure } from "../../domain/whatsapp-recipient-failure.js";
 
 export class RecoveryOutreachFollowUpProcessorService {
   constructor(
@@ -42,6 +43,18 @@ export class RecoveryOutreachFollowUpProcessorService {
         const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
         if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation) {
           return { kind: "suppressed", reason: "not-due" } as const;
+        }
+        if (initial.outboundMessageId) {
+          const initialMessage = await prisma.conversationMessage.findUnique({
+            where: { id: initial.outboundMessageId },
+            select: { status: true, providerFailureCode: true },
+          });
+          if (
+            initialMessage?.status === "FAILED" &&
+            classifyWhatsAppProviderFailure(initialMessage.providerFailureCode) === "RECIPIENT_UNDELIVERABLE"
+          ) {
+            return { kind: "suppressed", reason: "recipient-undeliverable" } as const;
+          }
         }
         if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
           return { kind: "suppressed", reason: "terminal" } as const;
