@@ -209,8 +209,8 @@ export class PendingRecoveryCandidateActivityService {
     existing: PendingRecoveryCandidate,
   ): PendingRecoveryCandidate {
     const cartToken = existing.cartToken ?? input.checkoutCartToken ?? input.cartToken ?? null;
-    const checkoutCreatedAt = input.checkoutCreatedAt ?? existing.checkoutCreatedAt;
-    const abandonedCheckoutUrl = input.abandonedCheckoutUrl ?? existing.abandonedCheckoutUrl;
+    const checkoutCreatedAt = existing.checkoutCreatedAt ?? input.checkoutCreatedAt ?? existing.checkoutCreatedAt;
+    const abandonedCheckoutUrl = existing.abandonedCheckoutUrl ?? input.abandonedCheckoutUrl ?? existing.abandonedCheckoutUrl;
     if (
       cartToken === existing.cartToken
       && checkoutCreatedAt === existing.checkoutCreatedAt

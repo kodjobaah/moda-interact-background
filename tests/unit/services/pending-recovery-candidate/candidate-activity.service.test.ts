@@ -203,6 +203,73 @@ describe("PendingRecoveryCandidateActivityService", () => {
     expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "2026-08-27T23:59:00.000Z",
+    "2026-08-28T00:00:00.000Z",
+  ])("preserves populated lookup hints for stale/equal conflicting activity (%s)", async (activityAt) => {
+    const harness = createHarness();
+    const populatedCandidate = {
+      ...baseCandidate,
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=current",
+    };
+    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: populatedCandidate });
+
+    const result = await harness.service.refresh({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      cartToken: null,
+      checkoutCartToken: "cart-conflicting",
+      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=older",
+      activityAt,
+      isEmpty: false,
+    });
+
+    expect(result).toEqual({ outcome: "stale", jobId: "job-1", candidate: populatedCandidate });
+    expect(harness.job.updateData).not.toHaveBeenCalled();
+    expect(harness.job.changeDelay).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.addCartAlias).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.removeCartAlias).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
+  });
+
+  it("enriches a missing stale hint without replacing other populated hints", async () => {
+    const harness = createHarness();
+    const candidateWithMissingUrl = { ...baseCandidate, abandonedCheckoutUrl: null };
+    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: candidateWithMissingUrl });
+
+    const result = await harness.service.refresh({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      cartToken: null,
+      checkoutCartToken: "cart-conflicting",
+      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+      activityAt: "2026-08-27T23:59:00.000Z",
+      isEmpty: false,
+    });
+
+    expect(result).toEqual({
+      outcome: "stale",
+      jobId: "job-1",
+      candidate: {
+        ...candidateWithMissingUrl,
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+      },
+    });
+    expect(harness.job.updateData).toHaveBeenCalledOnce();
+    expect(harness.job.updateData).toHaveBeenCalledWith(expect.objectContaining({
+      cartToken: "cart-1",
+      checkoutCreatedAt: baseCandidate.checkoutCreatedAt,
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+      lastActivityAt: baseCandidate.lastActivityAt,
+    }));
+    expect(harness.job.changeDelay).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.addCartAlias).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.removeCartAlias).not.toHaveBeenCalled();
+    expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
+  });
+
   it.each(["delayed", "waiting"])(
     "cancels an empty-cart candidate in the supported %s state",
     async (state) => {
