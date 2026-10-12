@@ -11,10 +11,14 @@ import type { pendingRecoveryCandidateService } from "../pending-recovery-candid
 import type { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import type { abandonedCheckoutLookupService } from "../abandoned-checkout-lookup.service.js";
 import type { ShopExecutionDenialReason } from "../shop-execution-eligibility.service.js";
+import {
+  recoveryCapacityResumeService,
+} from "../recovery-capacity-resume.service.js";
+import { recoveryPolicyService } from "../recovery-policy.service.js";
 
 type PendingCandidatePort = Pick<
   typeof pendingRecoveryCandidateService,
-  "scheduleFromCheckoutCreated" | "refreshCandidateActivity" | "scheduleFromCheckoutUpdated"
+  "scheduleFromCheckoutCreated" | "refreshCandidateActivity" | "scheduleFromCheckoutUpdated" | "withCheckoutLock"
 >;
 type ExecutionEligibilityPort = Pick<
   typeof shopExecutionEligibilityService,
@@ -23,6 +27,8 @@ type ExecutionEligibilityPort = Pick<
 type AbandonedCheckoutLookupPort = Pick<typeof abandonedCheckoutLookupService, "lookup">;
 type LatestRecoveryLookup = typeof findLatestRecovery;
 type SnapshotLineItemSerializer = Pick<RecoverySnapshotBuilderService, "serializeLineItems">;
+type RecoveryResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
+type RecoveryPolicyResolver = Pick<typeof recoveryPolicyService, "resolve">;
 
 export type CheckoutRefreshResult =
   | { kind: "pending"; outcome: string; jobId?: string }
@@ -38,6 +44,8 @@ export class CheckoutEventOrchestratorService {
     private readonly findLatestRecovery: LatestRecoveryLookup,
     private readonly abandonedCheckoutLookupService: AbandonedCheckoutLookupPort,
     private readonly snapshotBuilder: SnapshotLineItemSerializer,
+    private readonly recoveryResumeScheduler: RecoveryResumeScheduler = recoveryCapacityResumeService,
+    private readonly recoveryPolicyResolver: RecoveryPolicyResolver = recoveryPolicyService,
   ) {}
 
   async handleCheckoutCreatedContract(event: CheckoutCreatedContractInput) {
@@ -72,15 +80,29 @@ export class CheckoutEventOrchestratorService {
     } as const;
   }
 
-  async recordExternalActivity(recoveryId: string, activityAt: Date) {
-    return this.database.checkoutRecovery.updateMany({
-      where: {
-        id: recoveryId,
-        status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
-        lastExternalActivityAt: { lt: activityAt },
-      },
-      data: { lastExternalActivityAt: activityAt },
+  async recordExternalActivity(
+    recoveryId: string,
+    activityAt: Date,
+    checkoutIdentity?: { shopId: string; checkoutToken: string },
+  ) {
+    const identity = checkoutIdentity ?? await this.database.checkoutRecovery.findUnique({
+      where: { id: recoveryId },
+      select: { shopId: true, checkoutToken: true },
     });
+    if (!identity) return { count: 0 };
+
+    return this.pendingRecoveryCandidateService.withCheckoutLock(
+      identity.shopId,
+      identity.checkoutToken,
+      () => this.database.checkoutRecovery.updateMany({
+        where: {
+          id: recoveryId,
+          status: { in: ["DETECTED", "MESSAGE_SENT", "ENGAGED"] },
+          lastExternalActivityAt: { lt: activityAt },
+        },
+        data: { lastExternalActivityAt: activityAt },
+      }),
+    );
   }
 
   async handleCheckoutUpdatedContract(
@@ -172,7 +194,10 @@ export class CheckoutEventOrchestratorService {
         : null,
     };
 
-    await this.recordExternalActivity(recovery.id, new Date(event.activityAt));
+    await this.recordExternalActivity(recovery.id, new Date(event.activityAt), {
+      shopId: shop.id,
+      checkoutToken: event.checkoutToken,
+    });
 
     const outcome = await this.abandonedCheckoutLookupService.lookup(lookupInput);
     if (outcome.kind === "provider-error") {
@@ -206,6 +231,29 @@ export class CheckoutEventOrchestratorService {
 
     if (refreshed.count === 0) {
       return { kind: "ignored", reason: "already-transitioned" } as const;
+    }
+
+    if (
+      recovery.status === "DETECTED" &&
+      (recovery.admissionBlockReason == null ||
+        recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED")
+    ) {
+      const current = await this.database.checkoutRecovery.findUnique({
+        where: { id: recovery.id },
+        select: { lastExternalActivityAt: true },
+      });
+      if (!current) return { kind: "ignored", reason: "already-transitioned" } as const;
+      const policy = await this.recoveryPolicyResolver.resolve(shop.id);
+      const dueAt = new Date(
+        current.lastExternalActivityAt.getTime() + policy.recoveryDelayMinutes * 60_000,
+      );
+      const trigger = `recipient-suppression-${recovery.id}-checkout-update-${current.lastExternalActivityAt.getTime()}`;
+      const jobId = await this.recoveryResumeScheduler.schedule({
+        shopId: shop.id,
+        recoveryId: recovery.id,
+        trigger,
+      }, dueAt);
+      return { kind: "pending", outcome: "suppression-resume-scheduled", jobId } as const;
     }
 
     return {

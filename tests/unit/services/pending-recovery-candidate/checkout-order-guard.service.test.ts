@@ -75,6 +75,20 @@ describe("CheckoutOrderGuardService", () => {
     expect(redisMock.del).not.toHaveBeenCalled();
   });
 
+  it("preserves the callback failure marker and exposes a Redis cleanup failure", async () => {
+    const service = new CheckoutOrderGuardService();
+    redisMock.get.mockRejectedValueOnce(new Error("Redis GET unavailable"));
+
+    const result = service.withCheckoutLock("shop-1", "checkout-1", async () => {
+      throw new Error("RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED");
+    });
+
+    await expect(result).rejects.toMatchObject({
+      message: expect.stringMatching(/^RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED: checkout lock cleanup failed:/),
+      cause: expect.objectContaining({ name: "AggregateError" }),
+    });
+  });
+
   it("records and reads an order-completed tombstone scoped to one checkout", async () => {
     const service = new CheckoutOrderGuardService();
 

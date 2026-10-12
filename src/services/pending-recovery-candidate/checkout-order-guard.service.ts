@@ -32,12 +32,32 @@ export class CheckoutOrderGuardService {
       );
 
       if (acquired === "OK") {
+        let callbackFailed = false;
+        let callbackError: unknown;
         try {
           return await fn();
+        } catch (error) {
+          callbackFailed = true;
+          callbackError = error;
+          throw error;
         } finally {
-          const value = await connectionRedis.get(lockKey);
-          if (value === owner) {
-            await connectionRedis.del(lockKey);
+          try {
+            const value = await connectionRedis.get(lockKey);
+            if (value === owner) {
+              await connectionRedis.del(lockKey);
+            }
+          } catch (cleanupError) {
+            if (!callbackFailed) throw cleanupError;
+            const primaryMessage = callbackError instanceof Error
+              ? callbackError.message
+              : String(callbackError);
+            const cleanupMessage = cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError);
+            throw new Error(
+              `${primaryMessage}: checkout lock cleanup failed: ${cleanupMessage}`,
+              { cause: new AggregateError([callbackError, cleanupError], "Callback and checkout lock cleanup failed") },
+            );
           }
         }
       }
