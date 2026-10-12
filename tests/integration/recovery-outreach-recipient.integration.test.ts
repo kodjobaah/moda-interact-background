@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import { RecoveryOutreachAttemptService } from "../../src/services/recovery-outreach-attempt.service.js";
+import { RecoveryRecipientSuppressionAdmissionService } from "../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const disposableIntegrationEnabled = process.env.MODA_DISPOSABLE_INTEGRATION === "1";
@@ -100,6 +101,52 @@ describeWithDatabase("recovery outreach recipient PostgreSQL contract", () => {
       ]);
     } finally {
       await database.shop.deleteMany({ where: { id: shopId } });
+      await database.$disconnect();
+    }
+  }, 30_000);
+
+  it("reads active suppression by exact Shop/recipient key and allows expiry and recipient changes", async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const database = new PrismaClient();
+    const suffix = randomUUID();
+    const shopId = `suppression-shop-${suffix}`;
+    const otherShopId = `suppression-other-${suffix}`;
+    const recipient = "15551234567";
+    const until = new Date(Date.now() + 60_000);
+
+    try {
+      const shop = await database.shop.create({
+        data: { id: shopId, domain: `${shopId}.test` },
+      });
+      const otherShop = await database.shop.create({
+        data: { id: otherShopId, domain: `${otherShopId}.test` },
+      });
+      await database.whatsAppRecipientReachability.create({
+        data: {
+          shopId: shop.id,
+          recipient,
+          lastProviderFailureCode: "131026",
+          lastFailureAt: new Date(),
+          suppressUntil: until,
+        },
+      });
+      const service = new RecoveryRecipientSuppressionAdmissionService(database);
+
+      await expect(service.evaluate(shop.id, recipient)).resolves.toEqual({
+        kind: "suppressed",
+        until,
+      });
+      await expect(service.evaluate(otherShop.id, recipient)).resolves.toEqual({
+        kind: "allowed",
+      });
+      await expect(service.evaluate(shop.id, "447700900123")).resolves.toEqual({
+        kind: "allowed",
+      });
+      await expect(service.evaluate(shop.id, recipient, until)).resolves.toEqual({
+        kind: "allowed",
+      });
+    } finally {
+      await database.shop.deleteMany({ where: { id: { in: [shopId, otherShopId] } } });
       await database.$disconnect();
     }
   }, 30_000);

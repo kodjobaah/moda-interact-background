@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  processor: undefined as undefined | ((job: { name: string; data: { shopId: string; trigger: string } }) => Promise<unknown>),
+  processor: undefined as undefined | ((job: { name: string; data: { shopId: string; trigger: string; recoveryId?: string } }) => Promise<unknown>),
   active: true,
   recoveries: [] as Array<{ id: string }>,
   findMany: vi.fn(async () => hoisted.recoveries),
@@ -99,6 +99,22 @@ describe("recovery capacity resume worker", () => {
       take: 25,
       select: { id: true },
     });
+  });
+
+  it("processes an expiry job for one recovery without scanning a shop batch", async () => {
+    hoisted.findMany.mockClear();
+    hoisted.resume.mockReset().mockResolvedValue({ kind: "initiated" });
+
+    await expect(hoisted.processor?.({
+      name: RESUME_CAPACITY_BLOCKED_RECOVERIES_JOB,
+      data: { shopId: "shop-1", trigger: "recipient-suppression-expiry", recoveryId: "recovery-1" },
+    })).resolves.toEqual({ kind: "initiated" });
+
+    expect(hoisted.resume).toHaveBeenCalledExactlyOnceWith(
+      "recovery-1",
+      "recipient-suppression-expiry",
+    );
+    expect(hoisted.findMany).not.toHaveBeenCalled();
   });
 
   it("processes a bounded FIFO batch and schedules a distinct continuation", async () => {

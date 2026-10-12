@@ -15,6 +15,10 @@ import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.ser
 import { findLatestRecovery } from "./latest-recovery.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
 import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
+import {
+  recoveryRecipientSuppressionAdmissionService,
+  type RecoveryRecipientSuppressionAdmissionService,
+} from "./recovery-recipient-suppression-admission.service.js";
 
 type Recovery = NonNullable<Awaited<ReturnType<typeof prisma.checkoutRecovery.findFirst>>>;
 
@@ -24,11 +28,14 @@ interface RecoveryInitiationPorts {
   markRecoveryCapacityBlocked: (recoveryId: string) => Promise<unknown>;
 }
 
+export type RecoveryAdmissionGate = () => Promise<boolean>;
+
 export class RecoveryInitiationService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
     private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(billingService),
     private readonly ports?: RecoveryInitiationPorts,
+    private readonly suppressionAdmission: RecoveryRecipientSuppressionAdmissionService = recoveryRecipientSuppressionAdmissionService,
   ) {}
 
   async upsertRecovery(event: RecoveryCheckoutSeed, generation = 1) {
@@ -104,7 +111,13 @@ export class RecoveryInitiationService {
     });
   }
 
-  async handleCheckoutCreated(event: RecoveryCheckoutSeed, generation = 1, resolvedRecipient?: string) {
+  async handleCheckoutCreated(
+    event: RecoveryCheckoutSeed,
+    generation = 1,
+    resolvedRecipient?: string,
+    suppressionWakeupTrigger?: string,
+    admissionGate?: RecoveryAdmissionGate,
+  ) {
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
       throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
@@ -128,6 +141,22 @@ export class RecoveryInitiationService {
     const policy = await recoveryPolicyService.resolve(recovery.shopId);
     const recipient = canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
     if (!recipient) throw new Error("Recovery outreach recipient is unavailable");
+    const suppression = await this.suppressionAdmission.evaluate(recovery.shopId, recipient);
+    if (suppression.kind === "suppressed") {
+      await this.suppressionAdmission.deferDetectedRecovery(
+        recovery.id,
+        recovery.shopId,
+        suppression.until,
+        suppressionWakeupTrigger,
+      );
+      return recovery;
+    }
+    if (recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED") {
+      await this.suppressionAdmission.clearDetectedSuppression(recovery.id);
+    }
+
+    if (admissionGate && !(await admissionGate())) return recovery;
+
     const attempt = await recoveryOutreachAttemptService.getOrCreate({
       recoveryId: recovery.id,
       sequence: 1,

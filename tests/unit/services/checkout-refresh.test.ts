@@ -19,6 +19,9 @@ const hoisted = vi.hoisted(() => {
         upsert: vi.fn(),
         update: vi.fn(),
       },
+      whatsAppRecipientReachability: {
+        findUnique: vi.fn(async () => null),
+      },
       recoveryOutreachAttempt: {
         upsert: vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
           id: "attempt-1",
@@ -85,6 +88,7 @@ const hoisted = vi.hoisted(() => {
     pendingCandidateServiceMock: {
       refreshCandidateActivity: vi.fn(),
       scheduleFromCheckoutUpdated: vi.fn(),
+      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) => callback()),
     },
     recoveryBillingServiceMock: {
       admit: vi.fn(async () => ({

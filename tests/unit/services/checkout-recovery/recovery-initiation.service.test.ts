@@ -26,6 +26,11 @@ const mocks = vi.hoisted(() => ({
     markWaitingAfterConfirmedSend: vi.fn(),
   },
   followUp: { schedule: vi.fn() },
+  suppression: {
+    evaluate: vi.fn(),
+    deferDetectedRecovery: vi.fn(),
+    clearDetectedSuppression: vi.fn(),
+  },
 }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
@@ -52,6 +57,9 @@ vi.mock("../../../../src/services/recovery-outreach-attempt.service.js", () => (
 }));
 vi.mock("../../../../src/services/recovery-outreach-follow-up.service.js", () => ({
   recoveryOutreachFollowUpService: mocks.followUp,
+}));
+vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js", () => ({
+  recoveryRecipientSuppressionAdmissionService: mocks.suppression,
 }));
 
 import type { RecoveryBillingService } from "../../../../src/services/recovery-billing.service.js";
@@ -99,7 +107,12 @@ function createInitiation(overrides: {
     resolveRecipient: vi.fn(() => "+15551234567"),
     markRecoveryCapacityBlocked: vi.fn(async () => undefined),
   };
-  return { service: new RecoveryInitiationService(billing, finalizer, ports), billing, finalizer, ports };
+  return {
+    service: new RecoveryInitiationService(billing, finalizer, ports),
+    billing,
+    finalizer,
+    ports,
+  };
 }
 
 beforeEach(() => {
@@ -124,6 +137,9 @@ beforeEach(() => {
   mocks.attempt.getOrCreate.mockResolvedValue(attempt);
   mocks.attempt.markStatus.mockResolvedValue(undefined);
   mocks.attempt.markWaitingAfterConfirmedSend.mockResolvedValue({ count: 1 });
+  mocks.suppression.evaluate.mockResolvedValue({ kind: "allowed" });
+  mocks.suppression.deferDetectedRecovery.mockResolvedValue(true);
+  mocks.suppression.clearDetectedSuppression.mockResolvedValue(undefined);
 });
 
 describe("findLatestRecovery", () => {
@@ -158,6 +174,18 @@ describe("RecoveryInitiationService", () => {
     }
   });
 
+  it("skips attempt, billable, and provider admission when the resume gate rejects", async () => {
+    const { service, billing } = createInitiation();
+    const admissionGate = vi.fn(async () => false);
+
+    await service.handleCheckoutCreated(event, 1, undefined, undefined, admissionGate);
+
+    expect(admissionGate).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("durably blocks capacity-exhausted admissions without a failure code", async () => {
     const { service, billing, ports } = createInitiation({
       billing: { admit: vi.fn(async () => ({ kind: "blocked" as const, reason: "capacity-exhausted" })) },
@@ -169,6 +197,77 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "CAPACITY_BLOCKED");
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
     expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
+  });
+
+  it("defers an actively suppressed recipient before attempt, billing, or provider admission", async () => {
+    const until = new Date("2026-10-12T00:00:00Z");
+    mocks.suppression.evaluate.mockResolvedValue({ kind: "suppressed", until });
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(mocks.suppression.evaluate).toHaveBeenCalledWith("shop-1", "15551234567");
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(recovery.id, "shop-1", until, undefined);
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("keeps active suppression non-billable when expiry enqueue fails", async () => {
+    const enqueueError = new Error("queue unavailable");
+    mocks.suppression.evaluate.mockResolvedValue({
+      kind: "suppressed",
+      until: new Date("2026-10-12T00:00:00Z"),
+    });
+    mocks.suppression.deferDetectedRecovery.mockRejectedValue(enqueueError);
+    const { service, billing } = createInitiation();
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(enqueueError);
+
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("checks a changed current phone against its independent suppression key", async () => {
+    const { service, billing } = createInitiation();
+    mocks.suppression.evaluate.mockResolvedValue({
+      kind: "suppressed",
+      until: new Date("2026-10-12T00:00:00Z"),
+    });
+
+    await service.handleCheckoutCreated(event, 1, "447700900123");
+
+    expect(mocks.suppression.evaluate).toHaveBeenCalledWith("shop-1", "447700900123");
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(
+      recovery.id,
+      "shop-1",
+      expect.any(Date),
+      undefined,
+    );
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("passes the targeted wake-up lineage into the next suppression deferral", async () => {
+    const until = new Date("2026-10-12T00:00:00Z");
+    const wakeupTrigger = "recipient-suppression-recovery-1-1791763200000";
+    mocks.suppression.evaluate.mockResolvedValue({ kind: "suppressed", until });
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event, 1, "15551234567", wakeupTrigger);
+
+    expect(mocks.suppression.deferDetectedRecovery).toHaveBeenCalledWith(
+      recovery.id,
+      "shop-1",
+      until,
+      wakeupTrigger,
+    );
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
   it("releases admission when conversation creation fails before provider send", async () => {

@@ -1,6 +1,7 @@
 import prisma from "../../lib/db.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
+import { recoveryOutreachFollowUpService } from "../recovery-outreach-follow-up.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import {
   recoveryBillingService,
@@ -12,6 +13,7 @@ import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.s
 import { conversationMessageService } from "../conversation.message.service.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
 import { recoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
+import { recoveryRecipientSuppressionAdmissionService } from "./recovery-recipient-suppression-admission.service.js";
 
 export class RecoveryOutreachFollowUpProcessorService {
   constructor(
@@ -61,6 +63,20 @@ export class RecoveryOutreachFollowUpProcessorService {
           ? await recoveryRecipientResolverService.resolveForCustomerInShop(recovery.customerId, recovery.shopId)
           : null;
         if (!recipient) return { kind: "suppressed", reason: "no-recipient" } as const;
+        const suppression = await recoveryRecipientSuppressionAdmissionService.evaluate(
+          recovery.shopId,
+          recipient,
+        );
+        if (suppression.kind === "suppressed") {
+          await recoveryOutreachFollowUpService.schedule(
+            { checkoutRecoveryId: recoveryId, sequence: 2 },
+            suppression.until,
+          );
+          return {
+            kind: "suppressed",
+            reason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+          } as const;
+        }
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
           const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient });

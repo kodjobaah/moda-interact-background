@@ -107,4 +107,13 @@ export class PendingRecoveryCandidateIndexStore {
       pendingCandidateCartIndexKey({ shopId, cartToken }),
     );
   }
+
+  async addCartAlias(shopId: string, cartToken: string, jobId: string, delayMinutes: number) {
+    await connectionRedis.set(
+      pendingCandidateCartIndexKey({ shopId, cartToken }),
+      jobId,
+      "PX",
+      pendingCandidateIndexTtlMs(delayMinutes),
+    );
+  }
 }

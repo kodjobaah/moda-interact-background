@@ -8,6 +8,8 @@ export type RecoveryOutreachFollowUpJob = {
 
 export function createRecoveryOutreachFollowUpJobId(
   input: RecoveryOutreachFollowUpJob,
+  dueAt?: Date,
 ): string {
-  return `recovery-outreach-follow-up:${input.checkoutRecoveryId}:${input.sequence}`;
+  const baseId = `recovery-outreach-follow-up:${input.checkoutRecoveryId}:${input.sequence}`;
+  return dueAt ? `${baseId}--${dueAt.getTime()}` : baseId;
 }

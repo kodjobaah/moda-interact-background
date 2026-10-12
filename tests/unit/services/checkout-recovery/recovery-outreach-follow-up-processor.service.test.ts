@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   message: { buildRecoveryTemplateDescriptor: vi.fn() },
   recipientResolver: { resolveForCustomerInShop: vi.fn() },
   followUp: { schedule: vi.fn() },
+  suppression: { evaluate: vi.fn() },
 }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
@@ -44,6 +45,9 @@ vi.mock("../../../../src/services/recovery-policy.service.js", () => ({ recovery
 vi.mock("../../../../src/services/conversation.message.service.js", () => ({ conversationMessageService: mocks.message }));
 vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js", () => ({ recoveryRecipientResolverService: mocks.recipientResolver }));
 vi.mock("../../../../src/services/recovery-outreach-follow-up.service.js", () => ({ recoveryOutreachFollowUpService: mocks.followUp }));
+vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js", () => ({
+  recoveryRecipientSuppressionAdmissionService: mocks.suppression,
+}));
 
 import type { RecoveryBillingService } from "../../../../src/services/recovery-billing.service.js";
 import { RecoveryOutreachFinalizationService } from "../../../../src/services/checkout-recovery/recovery-outreach-finalization.service.js";
@@ -106,6 +110,7 @@ beforeEach(() => {
   mocks.policy.resolve.mockResolvedValue({});
   mocks.recipientResolver.resolveForCustomerInShop.mockResolvedValue("15551234567");
   mocks.message.buildRecoveryTemplateDescriptor.mockReturnValue("follow-up-template");
+  mocks.suppression.evaluate.mockResolvedValue({ kind: "allowed" });
 });
 
 describe("RecoveryOutreachFollowUpProcessorService", () => {
@@ -146,6 +151,27 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "no-recipient" });
 
+    expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreateFollowUp).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("reschedules an actively suppressed follow-up without claiming, billing, or sending", async () => {
+    setRecovery();
+    const until = new Date("2026-10-12T00:00:00Z");
+    mocks.suppression.evaluate.mockResolvedValue({ kind: "suppressed", until });
+    const { processor, billing } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed",
+      reason: "WHATSAPP_RECIPIENT_SUPPRESSED",
+    });
+
+    expect(mocks.followUp.schedule).toHaveBeenCalledWith(
+      { checkoutRecoveryId: recovery.id, sequence: 2 },
+      until,
+    );
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
     expect(mocks.attempt.getOrCreateFollowUp).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();

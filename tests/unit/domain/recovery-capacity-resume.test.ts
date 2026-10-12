@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createRecoveryCapacityResumeContinuation,
   createRecoveryCapacityResumeJobId,
+  createRecoveryCapacityResumeMaturitySuccessor,
 } from "../../../src/domain/recovery-capacity-resume.js";
 
 describe("recovery capacity resume job identity", () => {
@@ -42,6 +43,29 @@ describe("recovery capacity resume job identity", () => {
     });
     expect(createRecoveryCapacityResumeJobId(first)).not.toBe(
       createRecoveryCapacityResumeJobId(second),
+    );
+  });
+
+  it("creates a distinct deterministic maturity successor for each active trigger", () => {
+    const input = {
+      shopId: "shop-1",
+      recoveryId: "recovery-1",
+      lastExternalActivityAt: new Date("2026-10-11T20:00:00.000Z"),
+      currentTrigger: "recipient-suppression-recovery-1-maturity-1",
+    };
+
+    const first = createRecoveryCapacityResumeMaturitySuccessor(input);
+    const retry = createRecoveryCapacityResumeMaturitySuccessor(input);
+    const successor = createRecoveryCapacityResumeMaturitySuccessor({
+      ...input,
+      currentTrigger: first.trigger,
+    });
+
+    expect(retry).toEqual(first);
+    expect(first.trigger).not.toBe(input.currentTrigger);
+    expect(successor.trigger).not.toBe(first.trigger);
+    expect(createRecoveryCapacityResumeJobId(successor)).not.toBe(
+      createRecoveryCapacityResumeJobId(first),
     );
   });
 });

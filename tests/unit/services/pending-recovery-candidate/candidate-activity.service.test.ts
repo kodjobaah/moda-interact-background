@@ -38,6 +38,7 @@ function createHarness(input?: { state?: string; jobExists?: boolean }) {
   const candidateIndexStore = {
     upsert: vi.fn(async () => undefined),
     removeCartAlias: vi.fn(async () => undefined),
+    addCartAlias: vi.fn(async () => undefined),
   };
   const service = new PendingRecoveryCandidateActivityService({
     resolveCandidate,
@@ -154,6 +155,52 @@ describe("PendingRecoveryCandidateActivityService", () => {
     expect(harness.getQueue).not.toHaveBeenCalled();
     expect(harness.cancelCandidate).not.toHaveBeenCalled();
     expect(harness.resolveDelayMinutes).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "2026-08-27T23:59:00.000Z",
+    "2026-08-28T00:00:00.000Z",
+  ])("enriches missing lookup hints for stale/equal activity without rescheduling", async (activityAt) => {
+    const harness = createHarness();
+    const tokenOnlyCandidate = {
+      ...baseCandidate,
+      cartToken: null,
+      checkoutCreatedAt: null,
+      abandonedCheckoutUrl: null,
+    };
+    harness.resolveCandidate.mockResolvedValue({ jobId: "job-1", candidate: tokenOnlyCandidate });
+
+    const result = await harness.service.refresh({
+      shopId: "shop-1",
+      checkoutToken: "checkout-1",
+      cartToken: null,
+      checkoutCartToken: "cart-2",
+      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+      activityAt,
+      isEmpty: false,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "stale",
+      jobId: "job-1",
+      candidate: {
+        cartToken: "cart-2",
+        checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+        abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+        lastActivityAt: baseCandidate.lastActivityAt,
+      },
+    });
+    expect(harness.job.updateData).toHaveBeenCalledWith(expect.objectContaining({
+      checkoutCreatedAt: "2026-08-27T22:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=added",
+    }));
+    expect(harness.job.changeDelay).not.toHaveBeenCalled();
+    expect(harness.resolveDelayMinutes).toHaveBeenCalledOnce();
+    expect(harness.candidateIndexStore.addCartAlias).toHaveBeenCalledWith(
+      "shop-1", "cart-2", "job-1", 45,
+    );
+    expect(harness.candidateIndexStore.upsert).not.toHaveBeenCalled();
   });
 
   it.each(["delayed", "waiting"])(

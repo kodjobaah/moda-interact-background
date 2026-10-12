@@ -51,6 +51,7 @@ type CandidateActivityIndexStore = {
     shouldIndexShop: boolean;
   }): Promise<unknown>;
   removeCartAlias(shopId: string, cartToken: string): Promise<unknown>;
+  addCartAlias(shopId: string, cartToken: string, jobId: string, delayMinutes: number): Promise<unknown>;
 };
 
 type CandidateActivityDependencies = {
@@ -111,15 +112,40 @@ export class PendingRecoveryCandidateActivityService {
     );
     const existingActivityAt = matched.candidate.lastActivityAt
       ?? matched.candidate.checkoutCreatedAt;
-    if (
+    const isStale = Boolean(
       existingActivityAt
       && Date.parse(incomingActivityAt) <= Date.parse(existingActivityAt)
-    ) {
-      return {
-        outcome: "stale",
-        jobId: matched.jobId,
-        candidate: matched.candidate,
-      };
+    );
+    if (isStale) {
+      const candidate = this.enrichMissingLookupContext(input, matched.candidate);
+      if (candidate === matched.candidate) {
+        return {
+          outcome: "stale",
+          jobId: matched.jobId,
+          candidate: matched.candidate,
+        };
+      }
+
+      const job = await this.dependencies.getQueue().getJob(matched.jobId);
+      if (!job || await job.getState() !== "delayed") {
+        return {
+          outcome: "stale",
+          jobId: matched.jobId,
+          candidate: matched.candidate,
+        };
+      }
+
+      await job.updateData(candidate);
+      if (!matched.candidate.cartToken && candidate.cartToken) {
+        const delayMinutes = await this.dependencies.resolveDelayMinutes(input.shopId);
+        await this.dependencies.candidateIndexStore.addCartAlias(
+          input.shopId,
+          candidate.cartToken,
+          matched.jobId,
+          delayMinutes,
+        );
+      }
+      return { outcome: "stale", jobId: matched.jobId, candidate };
     }
 
     const job = await this.dependencies.getQueue().getJob(matched.jobId);
@@ -176,5 +202,28 @@ export class PendingRecoveryCandidateActivityService {
     });
 
     return { outcome: "rescheduled", jobId: matched.jobId, candidate };
+  }
+
+  private enrichMissingLookupContext(
+    input: CandidateActivityInput,
+    existing: PendingRecoveryCandidate,
+  ): PendingRecoveryCandidate {
+    const cartToken = existing.cartToken ?? input.checkoutCartToken ?? input.cartToken ?? null;
+    const checkoutCreatedAt = input.checkoutCreatedAt ?? existing.checkoutCreatedAt;
+    const abandonedCheckoutUrl = input.abandonedCheckoutUrl ?? existing.abandonedCheckoutUrl;
+    if (
+      cartToken === existing.cartToken
+      && checkoutCreatedAt === existing.checkoutCreatedAt
+      && abandonedCheckoutUrl === existing.abandonedCheckoutUrl
+    ) {
+      return existing;
+    }
+
+    return {
+      ...existing,
+      cartToken,
+      checkoutCreatedAt,
+      abandonedCheckoutUrl,
+    };
   }
 }
