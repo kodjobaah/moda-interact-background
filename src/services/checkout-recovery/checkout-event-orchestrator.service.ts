@@ -140,11 +140,18 @@ export class CheckoutEventOrchestratorService {
       cartToken: null,
       activityAt: event.activityAt,
       isEmpty: null,
+      ...(event.cartToken !== undefined ? { checkoutCartToken: event.cartToken } : {}),
+      ...(event.checkoutCreatedAt !== undefined
+        ? { checkoutCreatedAt: event.checkoutCreatedAt }
+        : {}),
+      ...(event.abandonedCheckoutUrl !== undefined
+        ? { abandonedCheckoutUrl: event.abandonedCheckoutUrl }
+        : {}),
       ...(event.internationalContext
         ? { internationalContext: event.internationalContext }
         : {}),
     });
-    if (pending.outcome !== "not-found") {
+    if (pending.outcome !== "not-found" && pending.outcome !== "not-reschedulable") {
       return {
         kind: "pending",
         outcome: pending.outcome,
@@ -154,7 +161,29 @@ export class CheckoutEventOrchestratorService {
 
     const recovery = await this.findLatestRecovery(shop.id, event.checkoutToken);
     if (!recovery) {
-      return { kind: "discarded", reason: "recovery-not-found" } as const;
+      const scheduled = await this.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated({
+        shopDomain: event.shopDomain,
+        checkoutToken: event.checkoutToken,
+        ...(event.cartToken !== undefined ? { cartToken: event.cartToken } : {}),
+        ...(event.checkoutCreatedAt !== undefined
+          ? { checkoutCreatedAt: event.checkoutCreatedAt }
+          : {}),
+        ...(event.abandonedCheckoutUrl !== undefined
+          ? { abandonedCheckoutUrl: event.abandonedCheckoutUrl }
+          : {}),
+        activityAt: event.activityAt,
+        ...(event.internationalContext
+          ? { internationalContext: event.internationalContext }
+          : {}),
+      });
+      if (scheduled.outcome === "discarded-order-completed") {
+        return { kind: "ignored", reason: "order-completed" } as const;
+      }
+      return {
+        kind: "pending",
+        outcome: scheduled.outcome,
+        ...( "jobId" in scheduled ? { jobId: scheduled.jobId } : {}),
+      } as const;
     }
 
     if (["COMPLETED", "CANCELLED"].includes(recovery.status)) {

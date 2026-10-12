@@ -1,4 +1,14 @@
-import type { PendingRecoveryCandidate } from "../../domain/pending-recovery-candidate.js";
+import {
+  EVALUATE_PENDING_RECOVERY_JOB,
+  type PendingRecoveryCandidate,
+} from "../../domain/pending-recovery-candidate.js";
+import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
+import {
+  candidateActivityDueAtMs,
+  maxCandidateActivityAt,
+  mergeCandidateInternationalContext,
+  optionalCandidateInternationalContext,
+} from "./candidate-activity.js";
 
 type ResolvedCandidate = {
   jobId: string;
@@ -8,16 +18,31 @@ type ResolvedCandidate = {
 type CandidateLifecycleJob = {
   data: PendingRecoveryCandidate;
   getState(): Promise<string>;
+  updateData(candidate: PendingRecoveryCandidate): Promise<unknown>;
+  changeDelay(delayMs: number): Promise<unknown>;
   remove(): Promise<unknown>;
 };
 
 type CandidateLifecycleQueue = {
   getJob(jobId: string): Promise<CandidateLifecycleJob | null | undefined>;
+  add(
+    jobName: string,
+    candidate: PendingRecoveryCandidate,
+    options: { jobId: string; delay: number },
+  ): Promise<unknown>;
 };
 
 type CandidateLifecycleIndexStore = {
   findByCheckout(input: { shopId: string; checkoutToken: string }): Promise<string | null>;
   findByCart(input: { shopId: string; cartToken: string }): Promise<string | null>;
+  removeCartAlias(shopId: string, cartToken: string): Promise<unknown>;
+  upsert(input: {
+    candidate: PendingRecoveryCandidate;
+    jobId: string;
+    delayMinutes: number;
+    dueAtMs: number;
+    shouldIndexShop: boolean;
+  }): Promise<unknown>;
   remove(
     candidate: Pick<PendingRecoveryCandidate, "shopId" | "checkoutToken" | "cartToken">,
     jobId?: string,
@@ -72,6 +97,110 @@ export class PendingRecoveryCandidateLifecycleService {
     if (!job) return null;
 
     return { jobId, candidate: job.data };
+  }
+
+  async scheduleFromCheckoutUpdated(
+    candidate: PendingRecoveryCandidate,
+    delayMinutes: number,
+  ) {
+    const queue = this.dependencies.getQueue();
+    const indexed = await this.resolve({
+      shopId: candidate.shopId,
+      checkoutToken: candidate.checkoutToken,
+      cartToken: null,
+    });
+    const baseJobId = `${candidate.shopId}--${createPendingRecoveryCandidateJobId(
+      candidate.shopId,
+      candidate.checkoutToken,
+    )}`;
+    const fallbackJob = indexed ? null : await queue.getJob(baseJobId);
+    const current = indexed ?? (fallbackJob
+      ? { jobId: baseJobId, candidate: fallbackJob.data }
+      : null);
+    const currentJob = current ? await queue.getJob(current.jobId) : null;
+    const currentState = currentJob ? await currentJob.getState() : null;
+    const successorJobId = `${baseJobId}--update-${Date.parse(candidate.lastActivityAt ?? "")}`;
+
+    if (
+      current
+      && currentJob
+      && currentState === "delayed"
+    ) {
+      const refreshed = this.mergeUpdate(candidate, current.candidate);
+      if (current.candidate.cartToken && current.candidate.cartToken !== refreshed.cartToken) {
+        await this.dependencies.candidateIndexStore.removeCartAlias(
+          candidate.shopId,
+          current.candidate.cartToken,
+        );
+      }
+      await currentJob.updateData(refreshed);
+      if (currentState === "delayed") {
+        const dueAtMs = candidateActivityDueAtMs(refreshed.lastActivityAt, delayMinutes);
+        await currentJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
+      }
+      await this.dependencies.candidateIndexStore.upsert({
+        candidate: refreshed,
+        jobId: current.jobId,
+        delayMinutes,
+        dueAtMs: currentState === "delayed"
+          ? candidateActivityDueAtMs(refreshed.lastActivityAt, delayMinutes)
+          : Date.now(),
+        shouldIndexShop: true,
+      });
+      return {
+        outcome: "refreshed" as const,
+        jobId: current.jobId,
+        delayMinutes,
+        candidate: refreshed,
+      };
+    }
+
+    let jobId = current ? successorJobId : baseJobId;
+    let targetJob = await queue.getJob(jobId);
+    if (targetJob) {
+      const targetState = await targetJob.getState();
+      if (targetState !== "delayed" && targetState !== "waiting") {
+        jobId = `${successorJobId}-retry`;
+        targetJob = await queue.getJob(jobId);
+      }
+    }
+
+    const updatedCandidate = this.mergeUpdate(
+      candidate,
+      targetJob?.data ?? current?.candidate,
+    );
+    const previousCartToken = targetJob?.data.cartToken ?? current?.candidate.cartToken;
+    if (previousCartToken && previousCartToken !== updatedCandidate.cartToken) {
+      await this.dependencies.candidateIndexStore.removeCartAlias(
+        candidate.shopId,
+        previousCartToken,
+      );
+    }
+    const dueAtMs = candidateActivityDueAtMs(updatedCandidate.lastActivityAt, delayMinutes);
+    if (targetJob) {
+      await targetJob.updateData(updatedCandidate);
+      if (await targetJob.getState() === "delayed") {
+        await targetJob.changeDelay(Math.max(0, dueAtMs - Date.now()));
+      }
+    } else {
+      await queue.add(EVALUATE_PENDING_RECOVERY_JOB, updatedCandidate, {
+        jobId,
+        delay: Math.max(0, dueAtMs - Date.now()),
+      });
+    }
+    await this.dependencies.candidateIndexStore.upsert({
+      candidate: updatedCandidate,
+      jobId,
+      delayMinutes,
+      dueAtMs,
+      shouldIndexShop: true,
+    });
+    return {
+      outcome: targetJob ? "refreshed" as const : "enqueued" as const,
+      jobId,
+      delayMinutes,
+      candidate: updatedCandidate,
+    };
   }
 
   async cancel(input: ResolvedCandidate): Promise<{ removed: true }> {
@@ -153,5 +282,32 @@ export class PendingRecoveryCandidateLifecycleService {
       && matched.candidate.shopId === input.shopId
       && matched.candidate.cartToken === input.cartToken,
     );
+  }
+
+  private mergeUpdate(
+    incoming: PendingRecoveryCandidate,
+    existing?: PendingRecoveryCandidate,
+  ): PendingRecoveryCandidate {
+    return {
+      ...existing,
+      ...incoming,
+      cartToken: incoming.cartToken ?? existing?.cartToken ?? null,
+      abandonedCheckoutUrl: incoming.abandonedCheckoutUrl
+        ?? existing?.abandonedCheckoutUrl
+        ?? null,
+      checkoutCreatedAt: incoming.checkoutCreatedAt
+        ?? existing?.checkoutCreatedAt
+        ?? null,
+      ...optionalCandidateInternationalContext(
+        mergeCandidateInternationalContext(
+          existing?.internationalContext,
+          incoming.internationalContext,
+        ),
+      ),
+      lastActivityAt: maxCandidateActivityAt(
+        existing?.lastActivityAt ?? existing?.checkoutCreatedAt,
+        incoming.lastActivityAt,
+      ),
+    };
   }
 }

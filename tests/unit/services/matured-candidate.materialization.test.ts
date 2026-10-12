@@ -180,6 +180,7 @@ vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
 }));
 
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
+import { PendingRecoveryCandidateActivityService } from "../../../src/services/pending-recovery-candidate/candidate-activity.service.js";
 
 const service = new CheckoutRecoveryService();
 
@@ -332,6 +333,104 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
     expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("defers a token-only candidate without Shopify lookup context", async () => {
+    const result = await service.materializeMaturedCandidate({
+      ...candidate,
+      abandonedCheckoutUrl: null,
+      checkoutCreatedAt: null,
+    });
+
+    expect(result).toEqual({
+      outcome: "deferred-lookup-unavailable",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.update).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("materializes a token-only candidate after stale activity fills its lookup hints", async () => {
+    const tokenOnlyCandidate = {
+      ...candidate,
+      cartToken: null,
+      checkoutCreatedAt: null,
+      abandonedCheckoutUrl: null,
+      lastActivityAt: "2026-08-28T12:00:00.000Z",
+    };
+    const job = {
+      getState: vi.fn(async () => "delayed"),
+      updateData: vi.fn(async () => undefined),
+      changeDelay: vi.fn(async () => undefined),
+    };
+    let candidateData = tokenOnlyCandidate;
+    const activityService = new PendingRecoveryCandidateActivityService({
+      resolveCandidate: vi.fn(async () => ({ jobId: "candidate-job-1", candidate: candidateData })),
+      withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) => callback()),
+      cancelCandidate: vi.fn(async () => undefined),
+      resolveDelayMinutes: vi.fn(async () => 30),
+      getQueue: vi.fn(() => ({ getJob: vi.fn(async () => job) })),
+      candidateIndexStore: {
+        upsert: vi.fn(async () => undefined),
+        removeCartAlias: vi.fn(async () => undefined),
+        addCartAlias: vi.fn(async () => undefined),
+      },
+      now: () => Date.parse("2026-08-28T13:00:00.000Z"),
+    });
+    const enrichment = await activityService.refresh({
+      shopId: candidate.shopId,
+      checkoutToken: candidate.checkoutToken,
+      cartToken: null,
+      checkoutCartToken: "cart_1",
+      checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
+      activityAt: "2026-08-28T11:59:00.000Z",
+      isEmpty: false,
+    });
+    if (enrichment.outcome !== "stale") throw new Error("Expected stale activity enrichment");
+    candidateData = enrichment.candidate;
+
+    expect(job.updateData).toHaveBeenCalledWith(expect.objectContaining({
+      cartToken: "cart_1",
+      checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
+      lastActivityAt: "2026-08-28T12:00:00.000Z",
+    }));
+    expect(job.changeDelay).not.toHaveBeenCalled();
+
+    const result = await service.materializeMaturedCandidate(candidateData);
+
+    expect(result.outcome).toBe("recovery-created");
+    expect(lookupServiceMock.lookup).toHaveBeenCalledWith(expect.objectContaining({
+      checkoutToken: candidate.checkoutToken,
+      cartToken: "cart_1",
+      checkoutCreatedAt: "2026-08-28T11:00:00.000Z",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
+    }));
+  });
+
+  it("does not initiate a matured job after newer checkout activity indexed a successor", async () => {
+    redisMock.get.mockImplementation(async (key: string) =>
+      key.startsWith("pending-recovery:index:checkout:") ? "successor-job" : null,
+    );
+
+    const result = await service.materializeMaturedCandidate(candidate, { jobId: "matured-job" });
+
+    expect(result).toEqual({
+      outcome: "discarded-superseded",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(lookupServiceMock.lookup).not.toHaveBeenCalled();
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(prismaMock.recoveryOutreachAttempt.upsert).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
     expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });

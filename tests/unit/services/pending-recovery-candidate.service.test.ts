@@ -77,7 +77,8 @@ let queueOptions: Record<string, unknown> | null = null;
 const redisStore = new Map<string, string>();
 const redisZsets = new Map<string, Map<string, number>>();
 const redisMock = {
-  set: vi.fn(async (key: string, value: string) => {
+  set: vi.fn(async (key: string, value: string, ...options: Array<string | number>) => {
+    if (options.includes("NX") && redisStore.has(key)) return null;
     redisStore.set(key, value);
     return "OK";
   }),

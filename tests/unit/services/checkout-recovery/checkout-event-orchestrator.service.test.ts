@@ -142,7 +142,7 @@ describe("CheckoutEventOrchestratorService", () => {
 
     await expect(harness.service.handleCheckoutCreatedContract({
       ...event,
-      cartToken: "cart-1",
+      checkoutCartToken: "cart-1",
       checkoutCreatedAt: "2026-10-03T07:00:00.000Z",
       abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=event",
     })).resolves.toEqual({
@@ -208,15 +208,60 @@ describe("CheckoutEventOrchestratorService", () => {
     expect(harness.order).toEqual(["shop-read", "eligibility", "pending-refresh"]);
   });
 
-  it("discards a checkout update with no durable recovery before Shopify lookup", async () => {
+  it("passes independently supplied lookup context into pending candidate refresh", async () => {
+    const update = {
+      ...event,
+      cartToken: "cart-1",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=update",
+    };
+    const harness = createHarness({ pendingResult: { outcome: "rescheduled", jobId: "candidate-1" } });
+
+    await harness.service.handleCheckoutUpdatedContract(update);
+
+    expect(harness.pendingRecoveryCandidateService.refreshCandidateActivity).toHaveBeenCalledWith({
+      shopId: shop.id,
+      checkoutToken: event.checkoutToken,
+      cartToken: null,
+      activityAt,
+      isEmpty: null,
+      checkoutCartToken: "cart-1",
+      abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=update",
+    });
+  });
+
+  it("schedules a checkout update with no candidate or durable recovery", async () => {
     const harness = createHarness({ recovery: null });
 
     await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
-      kind: "discarded",
-      reason: "recovery-not-found",
+      kind: "pending",
+      outcome: "enqueued",
+      jobId: "restart-1",
+    });
+    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated).toHaveBeenCalledWith({
+      shopDomain: event.shopDomain,
+      checkoutToken: event.checkoutToken,
+      cartToken: undefined,
+      checkoutCreatedAt: undefined,
+      abandonedCheckoutUrl: undefined,
+      activityAt,
     });
     expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
     expect(harness.database.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("re-enters no-recovery scheduling when an active candidate cannot be rescheduled", async () => {
+    const harness = createHarness({
+      pendingResult: { outcome: "not-reschedulable", state: "active", jobId: "candidate-1" },
+      recovery: null,
+    });
+
+    await expect(harness.service.handleCheckoutUpdatedContract(event)).resolves.toEqual({
+      kind: "pending",
+      outcome: "enqueued",
+      jobId: "restart-1",
+    });
+    expect(harness.pendingRecoveryCandidateService.scheduleFromCheckoutUpdated).toHaveBeenCalledOnce();
+    expect(harness.abandonedCheckoutLookupService.lookup).not.toHaveBeenCalled();
   });
 
   it.each(["COMPLETED", "CANCELLED"])("never reopens terminal recovery %s", async (status) => {

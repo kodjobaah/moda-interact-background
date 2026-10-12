@@ -248,13 +248,47 @@ export class PendingRecoveryCandidateService {
   async scheduleFromCheckoutUpdated(input: {
     shopDomain: string;
     checkoutToken: string;
-    cartToken: string | null;
-    checkoutCreatedAt: string | null;
-    abandonedCheckoutUrl: string | null;
+    cartToken?: string | null;
+    checkoutCreatedAt?: string | null;
+    abandonedCheckoutUrl?: string | null;
     activityAt: string;
     internationalContext?: InternationalContext;
   }) {
-    return this.scheduleFromCheckoutCreated(input);
+    const shopDomain = input.shopDomain.trim().toLowerCase();
+    const shop = await shopExecutionEligibilityService.resolveShopByDomain(shopDomain);
+    if (!shop) throw new Error(`Shop not found for domain: ${shopDomain}`);
+    if (shop.status !== "ACTIVE") {
+      return { outcome: "discarded-shop-unavailable", shopDomain } as const;
+    }
+    const execution = shopExecutionEligibilityService.evaluateResolvedShop(shop, "recovery");
+    if (!execution.allowed) {
+      if (execution.reason === "SUBSCRIPTION_FROZEN") {
+        return { outcome: "discarded-subscription-frozen", shopDomain } as const;
+      }
+      return { outcome: "discarded-shop-unavailable", shopDomain, reason: execution.reason } as const;
+    }
+
+    return this.checkoutOrderGuard.withCheckoutLock(shop.id, input.checkoutToken, async () => {
+      if (await this.checkoutOrderGuard.hasOrderProcessed(shop.id, input.checkoutToken)) {
+        return { outcome: "discarded-order-completed", shopDomain } as const;
+      }
+
+      const policy = await recoveryPolicyService.resolve(shop.id);
+      const delayMinutes = policy.recoveryDelayMinutes;
+      const candidate: PendingRecoveryCandidate = {
+        shopId: shop.id,
+        shopDomain,
+        checkoutToken: input.checkoutToken,
+        cartToken: input.cartToken ?? null,
+        abandonedCheckoutUrl: input.abandonedCheckoutUrl ?? null,
+        checkoutCreatedAt: input.checkoutCreatedAt ?? null,
+        ...(input.internationalContext
+          ? { internationalContext: input.internationalContext }
+          : {}),
+        lastActivityAt: canonicalCandidateActivityAt(input.activityAt),
+      };
+      return this.candidateLifecycleService.scheduleFromCheckoutUpdated(candidate, delayMinutes);
+    });
   }
 
   async findCandidateJobIdByCheckout(input: {
@@ -354,7 +388,19 @@ export class PendingRecoveryCandidateService {
     candidate: PendingRecoveryCandidate,
     jobId?: string,
   ) {
-    await this.candidateIndexStore.remove(candidate, jobId);
+    await this.checkoutOrderGuard.withCheckoutLock(
+      candidate.shopId,
+      candidate.checkoutToken,
+      async () => {
+        const currentJobId = await this.candidateIndexStore.findByCheckout({
+          shopId: candidate.shopId,
+          checkoutToken: candidate.checkoutToken,
+        });
+        if (!jobId || currentJobId === jobId) {
+          await this.candidateIndexStore.remove(candidate, jobId);
+        }
+      },
+    );
     return candidate;
   }
 

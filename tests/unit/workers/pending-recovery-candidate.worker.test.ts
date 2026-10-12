@@ -178,6 +178,7 @@ describe("pending recovery candidate worker", () => {
     await hoisted.processor?.(job);
 
     expect(hoisted.materialize).toHaveBeenCalledWith(job.data, {
+      jobId: job.id,
       retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
@@ -228,6 +229,7 @@ describe("pending recovery candidate worker", () => {
       pendingRecoveryCandidate: {
         withCheckoutLock: checkoutOrderGuard.withCheckoutLock.bind(checkoutOrderGuard),
         hasOrderProcessed: vi.fn(async () => false),
+        findCandidateJobIdByCheckout: vi.fn(async () => "candidate-job-1"),
       },
       findLatestRecovery: (shopId, checkoutToken) => findLatestRecovery(shopId, checkoutToken),
       snapshotBuilder: {
@@ -293,6 +295,7 @@ describe("pending recovery candidate worker", () => {
     await hoisted.processor?.(retryJob);
 
     expect(hoisted.materialize).toHaveBeenLastCalledWith(candidate, {
+      jobId: firstJob.id,
       retrySuppressionAdmission: true,
     });
     expect(hoisted.createRecovery).toHaveBeenCalledTimes(2);
@@ -348,6 +351,7 @@ describe("pending recovery candidate worker", () => {
     await hoisted.processor?.(versionReadRetryJob);
 
     expect(hoisted.materialize).toHaveBeenLastCalledWith(candidate, {
+      jobId: firstJob.id,
       retrySuppressionAdmission: true,
     });
     expect(hoisted.createRecovery).toHaveBeenCalledTimes(2);

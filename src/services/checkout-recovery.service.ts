@@ -112,7 +112,7 @@ export class CheckoutRecoveryService {
 
   async materializeMaturedCandidate(
     candidate: PendingRecoveryCandidate,
-    options?: { retrySuppressionAdmission?: boolean },
+    options?: { jobId?: string; retrySuppressionAdmission?: boolean },
   ): Promise<MaturedCandidateMaterializationResult> {
     return this.materializationService.materialize(candidate, options);
   }

@@ -1,5 +1,6 @@
 import { Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import {
   EVALUATE_PENDING_RECOVERY_JOB,
@@ -12,6 +13,7 @@ import { pendingRecoveryCandidateService } from "../services/pending-recovery-ca
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import {
   RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
   RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
@@ -26,6 +28,10 @@ const workerMetricDefinition = {
   queueName: PENDING_RECOVERY_CANDIDATE_QUEUE,
   jobNames: [EVALUATE_PENDING_RECOVERY_JOB],
 } as const;
+const logger = createLogger({
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 export function createPendingRecoveryCandidateWorker() {
   const worker = new Worker<PendingRecoveryCandidate>(
@@ -40,11 +46,18 @@ export function createPendingRecoveryCandidateWorker() {
             // Materialize the matured candidate into durable recovery state using
             // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
             // payload embedded in the job.
-            await checkoutRecoveryService.materializeMaturedCandidate(job.data, {
+            const result = await checkoutRecoveryService.materializeMaturedCandidate(job.data, {
+              ...(typeof job.id === "string" ? { jobId: job.id } : {}),
               retrySuppressionAdmission:
                 job.attemptsMade > 0 &&
                 isSuppressionResumeEnqueueFailure(job.failedReason),
             });
+            if (result.outcome === "deferred-lookup-unavailable") {
+              logger.warn("recovery.pending_candidate.lookup_unavailable", {
+                jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
+                outcome: result.outcome,
+              });
+            }
           } catch (error) {
             materializationFailed = true;
             materializationError = error;

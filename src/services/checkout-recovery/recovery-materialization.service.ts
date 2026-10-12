@@ -14,11 +14,13 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "deferred-no-recipient"; checkoutToken: string }
   | { outcome: "no-op-existing"; checkoutToken: string; status: string }
   | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
+  | { outcome: "discarded-superseded"; checkoutToken: string }
   | { outcome: "discarded-not-found"; checkoutToken: string }
   | { outcome: "discarded-not-recoverable"; checkoutToken: string }
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
   | { outcome: "discarded-order-completed"; checkoutToken: string }
+  | { outcome: "deferred-lookup-unavailable"; checkoutToken: string }
   | {
       outcome: "discarded-shop-unavailable";
       checkoutToken: string;
@@ -28,7 +30,8 @@ export type MaturedCandidateMaterializationResult =
 type RecoveryMaterializationDependencies = {
   executionEligibility: Pick<ShopExecutionEligibilityService, "evaluate">;
   abandonedCheckoutLookup: Pick<AbandonedCheckoutLookupService, "resolveShopDomain" | "lookup">;
-  pendingRecoveryCandidate: Pick<PendingRecoveryCandidateService, "withCheckoutLock" | "hasOrderProcessed">;
+  pendingRecoveryCandidate: Pick<PendingRecoveryCandidateService,
+    "withCheckoutLock" | "hasOrderProcessed" | "findCandidateJobIdByCheckout">;
   findLatestRecovery: typeof findLatestRecovery;
   snapshotBuilder: Pick<RecoverySnapshotBuilderService, "build">;
   recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
@@ -40,7 +43,7 @@ export class RecoveryMaterializationService {
 
   async materialize(
     candidate: PendingRecoveryCandidate,
-    options: { retrySuppressionAdmission?: boolean } = {},
+    options: { jobId?: string; retrySuppressionAdmission?: boolean } = {},
   ): Promise<MaturedCandidateMaterializationResult> {
     const execution = await this.dependencies.executionEligibility.evaluate(
       candidate.shopId,
@@ -80,6 +83,16 @@ export class RecoveryMaterializationService {
           } as const;
         }
 
+        const indexedJobId = options.jobId
+          ? await this.dependencies.pendingRecoveryCandidate.findCandidateJobIdByCheckout({
+            shopId: candidate.shopId,
+            checkoutToken: candidate.checkoutToken,
+          })
+          : null;
+        if (indexedJobId && indexedJobId !== options.jobId) {
+          return { outcome: "discarded-superseded", checkoutToken: candidate.checkoutToken } as const;
+        }
+
         const existing = await this.dependencies.findLatestRecovery(candidate.shopId, candidate.checkoutToken);
         let generation = 1;
         const reenterSuppressionRetry = options.retrySuppressionAdmission &&
@@ -104,6 +117,13 @@ export class RecoveryMaterializationService {
               status: existing.status,
             } as const;
           }
+        }
+
+        if (!candidate.abandonedCheckoutUrl || !candidate.checkoutCreatedAt) {
+          return {
+            outcome: "deferred-lookup-unavailable",
+            checkoutToken: candidate.checkoutToken,
+          } as const;
         }
 
         const outcome = await this.dependencies.abandonedCheckoutLookup.lookup(
