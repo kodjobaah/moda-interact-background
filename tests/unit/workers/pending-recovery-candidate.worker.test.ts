@@ -33,6 +33,7 @@ const hoisted = vi.hoisted(() => ({
   }),
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
   findRecovery: vi.fn(async () => hoisted.durableRecovery),
+  suppressUntil: new Date(),
   findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
   scheduleResume: vi.fn(async () => "resume-job"),
   redis: {
@@ -144,8 +145,9 @@ describe("pending recovery candidate worker", () => {
     hoisted.updateRecoveryMany.mockClear();
     hoisted.findLatestRecovery.mockClear();
     hoisted.findRecovery.mockReset().mockImplementation(async () => hoisted.durableRecovery);
+    hoisted.suppressUntil = new Date(Date.now() + 60 * 60_000);
     hoisted.findSuppression.mockReset().mockResolvedValue({
-      suppressUntil: new Date("2026-10-12T00:00:00Z"),
+      suppressUntil: hoisted.suppressUntil,
     });
     hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
     hoisted.scheduleResume.mockRejectedValueOnce(new Error("Redis temporarily unavailable"));
@@ -355,7 +357,7 @@ describe("pending recovery candidate worker", () => {
     expect(hoisted.scheduleResume).toHaveBeenCalledOnce();
     expect(hoisted.scheduleResume).toHaveBeenCalledWith(
       expect.objectContaining({ recoveryId: "recovery-1" }),
-      new Date("2026-10-12T00:00:00Z"),
+      hoisted.suppressUntil,
     );
     expect(hoisted.durableRecovery).toMatchObject({
       id: "recovery-1",
