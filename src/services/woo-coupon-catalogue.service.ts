@@ -77,16 +77,30 @@ export class WooCouponCatalogueService {
         }
         const now = this.clock();
         await this.upsertObserved(tx, shopId, claim.generation, observed, now);
-        // Missing rows are preserved for foreign keys/history. Never alter isAvailable:
-        // on WooCommerce this flag means merchant-selected, not provider-available.
-        await tx.shopifyDiscount.updateMany({
-          where: { shopId, lastSeenSyncGeneration: { not: claim.generation } },
-          data: { providerStatus: "REMOVED", fixedSelectable: false },
-        });
-        await tx.shopifyDiscount.updateMany({
-          where: { shopId, lastSeenSyncGeneration: { not: claim.generation }, unavailableAt: null },
-          data: { unavailableAt: now },
-        });
+        // Confirm removal only after TWO consecutive verified complete scans
+        // have missed the coupon. Both timestamps are written with the same
+        // clock value on a successful observed generation; failed scans do not
+        // advance lastSuccessfulSyncAt, even though they increment generation.
+        // Therefore generation arithmetic alone would wrongly count failures.
+        // On the first absence, retain status, FK/history and merchant selection.
+        const previousSuccess = catalogue.lastSuccessfulSyncAt;
+        if (previousSuccess !== null) {
+          const confirmedMissing = {
+            shopId,
+            lastSeenSyncGeneration: { not: claim.generation },
+            lastSyncedAt: { lt: previousSuccess },
+          };
+          await tx.shopifyDiscount.updateMany({
+            where: confirmedMissing,
+            data: { providerStatus: "REMOVED", fixedSelectable: false },
+          });
+          await tx.shopifyDiscount.updateMany({
+            where: { ...confirmedMissing, unavailableAt: null },
+            data: { unavailableAt: now },
+          });
+        }
+        // isAvailable is deliberately never written during reconciliation:
+        // on WooCommerce it records the merchant's saved checkbox selection.
         await tx.shopifyDiscountCatalogue.update({
           where: { shopId },
           data: {

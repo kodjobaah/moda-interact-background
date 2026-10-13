@@ -80,9 +80,29 @@ describeWithDatabase("ARCH-036 Woo coupon PostgreSQL reconciliation", () => {
         .reconcile(a, next)).toBe("current");
       const stillSelected = await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } });
       expect(stillSelected.isAvailable).toBe(true);
-      expect(stillSelected.providerStatus).toBe("REMOVED");
-      expect(stillSelected.fixedSelectable).toBe(false);
-      expect(stillSelected.unavailableAt).not.toBeNull();
+      expect(stillSelected.providerStatus).toBe("ACTIVE");
+      expect(stillSelected.fixedSelectable).toBe(true);
+      expect(stillSelected.unavailableAt).toBeNull();
+      const failed = new Date("2026-10-13T14:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: failed } });
+      await expect(new WooCouponCatalogueService(db,
+        async () => { throw new WooCouponReadError("incomplete_pages"); }, () => failed)
+        .reconcile(a, failed)).rejects.toThrow("incomplete_pages");
+      const confirmed = new Date("2026-10-13T15:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: confirmed } });
+      expect(await new WooCouponCatalogueService(db, async () => [coupon(101, "UPDATED")], () => confirmed)
+        .reconcile(a, confirmed)).toBe("current");
+      const removed = await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } });
+      expect(removed.isAvailable).toBe(true);
+      expect(removed.providerStatus).toBe("REMOVED");
+      expect(removed.fixedSelectable).toBe(false);
+      expect(removed.unavailableAt).toEqual(confirmed);
+      const reappeared = new Date("2026-10-13T16:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: reappeared } });
+      expect(await new WooCouponCatalogueService(db, async () => [coupon(100, "RETURNED"), coupon(101, "UPDATED")], () => reappeared)
+        .reconcile(a, reappeared)).toBe("current");
+      expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } }))
+        .toMatchObject({ isAvailable: true, providerStatus: "ACTIVE", singleRedeemCode: "RETURNED", unavailableAt: null });
       expect(await db.shopifyDiscount.count({ where: { shopId: b } })).toBe(1);
     } finally {
       await db.shop.deleteMany({ where: { id: { in: shops } } });

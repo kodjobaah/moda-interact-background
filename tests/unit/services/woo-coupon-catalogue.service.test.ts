@@ -70,12 +70,14 @@ function fixture(records: Discount[] = []) {
           else Object.assign(candidate.discounts[index]!, update);
         }),
         updateMany: vi.fn().mockImplementation(async ({ where, data }: {
-          where: { shopId: string; lastSeenSyncGeneration: { not: number }; unavailableAt?: null };
+          where: { shopId: string; lastSeenSyncGeneration: { not: number };
+            lastSyncedAt?: { lt: Date }; unavailableAt?: null };
           data: Partial<Discount>;
         }) => {
           calls.updates.push({ where, data });
           for (const row of candidate.discounts) {
             if (row.shopId === where.shopId && row.lastSeenSyncGeneration !== where.lastSeenSyncGeneration.not &&
+                (where.lastSyncedAt === undefined || row.lastSyncedAt < where.lastSyncedAt.lt) &&
                 (where.unavailableAt === undefined || row.unavailableAt === null)) Object.assign(row, data);
           }
         }),
@@ -128,22 +130,59 @@ describe("ARCH-036 Woo catalogue generation reconciliation", () => {
       .toMatchObject({ isAvailable: true, singleRedeemCode: "NEWCODE", lastSeenSyncGeneration: 1 });
     expect(f.calls.upserts[0]?.update).not.toHaveProperty("isAvailable");
 
-    // Another verified full scan: coupon 12 has disappeared; keep FK and selection.
+    // First complete scan without coupon 12 retains status, FK and selection.
     const next = new Date("2026-10-13T13:00:00Z");
     f.state.catalogue.syncRequestedAt = next;
-    const removing = new WooCouponCatalogueService(f.database,
-      async () => [fresh(13, "EXPIRING")], () => next);
-    expect(await removing.reconcile("woo-a", next)).toBe("current");
+    expect(await new WooCouponCatalogueService(f.database,
+      async () => [fresh(13, "EXPIRING")], () => next).reconcile("woo-a", next)).toBe("current");
     expect(f.state.discounts.find((row) => row.shopifyDiscountNodeId === "woo:coupon:12"))
-      .toMatchObject({ isAvailable: true, providerStatus: "REMOVED", fixedSelectable: false, unavailableAt: next });
+      .toMatchObject({ isAvailable: true, providerStatus: "ACTIVE", fixedSelectable: true, unavailableAt: null });
+
+    // Second CONSECUTIVE verified complete absence confirms removal.
+    const confirmed = new Date("2026-10-13T14:00:00Z");
+    f.state.catalogue.syncRequestedAt = confirmed;
+    expect(await new WooCouponCatalogueService(f.database,
+      async () => [fresh(13, "EXPIRING")], () => confirmed).reconcile("woo-a", confirmed)).toBe("current");
+    expect(f.state.discounts.find((row) => row.shopifyDiscountNodeId === "woo:coupon:12"))
+      .toMatchObject({ isAvailable: true, providerStatus: "REMOVED", fixedSelectable: false, unavailableAt: confirmed });
     expect(f.calls.updates.every((call) => !Object.hasOwn(call.data, "isAvailable"))).toBe(true);
   });
 
-  it("valid empty catalogue tombstones prior rows without deleting or clearing selections", async () => {
-    const f = fixture([oldSelection()]);
-    expect(await new WooCouponCatalogueService(f.database, async () => [], () => REQUESTED)
-      .reconcile("woo-a", REQUESTED)).toBe("current");
-    expect(f.state.discounts[0]).toMatchObject({ isAvailable: true, providerStatus: "REMOVED", fixedSelectable: false });
+  it("empty catalogue requires two complete misses; intervening failed attempts do not count", async () => {
+    const f = fixture();
+    const scan = async (time: Date, coupons: Record<string, unknown>[]) => {
+      f.state.catalogue.syncRequestedAt = time;
+      return new WooCouponCatalogueService(f.database, async () => coupons, () => time)
+        .reconcile("woo-a", time);
+    };
+    expect(await scan(REQUESTED, [fresh(12, "SAVE10")])).toBe("current");
+    f.state.discounts[0]!.isAvailable = true;
+    const firstMiss = new Date("2026-10-13T13:00:00Z");
+    expect(await scan(firstMiss, [])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "ACTIVE", fixedSelectable: true, unavailableAt: null,
+    });
+    const failure = new Date("2026-10-13T14:00:00Z");
+    f.state.catalogue.syncRequestedAt = failure;
+    await expect(new WooCouponCatalogueService(f.database,
+      async () => { throw new WooCouponReadError("incomplete_pages"); }, () => failure)
+      .reconcile("woo-a", failure)).rejects.toThrow("incomplete_pages");
+    expect(f.state.discounts[0]?.providerStatus).toBe("ACTIVE");
+    const secondMiss = new Date("2026-10-13T15:00:00Z");
+    expect(await scan(secondMiss, [])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "REMOVED", fixedSelectable: false, unavailableAt: secondMiss,
+    });
+    // Reappearing under the same Woo ID restores provider availability but not selection.
+    const reappeared = new Date("2026-10-13T16:00:00Z");
+    expect(await scan(reappeared, [fresh(12, "SAVE15")])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "ACTIVE", fixedSelectable: true,
+      singleRedeemCode: "SAVE15", unavailableAt: null,
+    });
+    const missedAgain = new Date("2026-10-13T17:00:00Z");
+    expect(await scan(missedAgain, [])).toBe("current");
+    expect(f.state.discounts[0]?.providerStatus).toBe("ACTIVE");
   });
 
   it("incomplete/invalid scan records ERROR and leaves prior rows and successful generation intact", async () => {

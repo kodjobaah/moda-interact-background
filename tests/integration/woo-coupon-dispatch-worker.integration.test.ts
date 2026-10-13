@@ -99,4 +99,112 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
       await db.$disconnect();
     }
   }, 60_000);
+
+  it("allows only one global owner, fences a stale owner and recovers an expired lease", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const name = "WOO_COUPON_SYNC_DISPATCH" as const;
+    const first = new BackgroundRuntimeLeaseService(db, `woo-lease-a-${randomUUID()}`);
+    const second = new BackgroundRuntimeLeaseService(db, `woo-lease-b-${randomUUID()}`);
+    const { connectionRedis } = await import("../../src/lib/redis.js");
+    const queue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const shopId = `arch036-overlap-${randomUUID()}`;
+    try {
+      // Two replicas competing for the same lease must have one winner.
+      const [a, b] = await Promise.all([first.tryAcquire(name), second.tryAcquire(name)]);
+      expect([a, b].filter((value) => value !== null)).toHaveLength(1);
+      const original = a ?? b;
+      expect(original).not.toBeNull();
+      const winner = a ? first : second;
+      const successorService = a ? second : first;
+      expect(await successorService.tryAcquire(name)).toBeNull();
+      expect(await winner.heartbeat(original!)).toBe(true);
+
+      // Simulate a crashed/stalled instance: expired ownership is taken over,
+      // and the old generation can neither heartbeat nor release its successor.
+      await db.backgroundRuntimeLease.update({
+        where: { name }, data: { leaseUntil: new Date(Date.now() - 1000) },
+      });
+      const successor = await successorService.tryAcquire(name);
+      expect(successor).not.toBeNull();
+      expect(successor!.generation).toBe(original!.generation + 1);
+      expect(await winner.heartbeat(original!)).toBe(false);
+      expect(await winner.release(original!)).toBe(false);
+      expect(await successorService.heartbeat(successor!)).toBe(true);
+
+      // Even if the expired owner is still executing its callback, both
+      // dispatch attempts share the same atomic per-shop reservation.
+      const canonicalSiteUrl = `https://${randomUUID()}.example.test`;
+      await db.shop.create({ data: { id: shopId, domain: canonicalSiteUrl, platform: "WOOCOMMERCE", status: "ACTIVE" } });
+      await db.wooCommerceInstallation.create({
+        data: { shopId, canonicalSiteUrl, credentialDigest: randomBytes(32) },
+      });
+      const staleDispatcher = new WooCouponDispatcherService(db, queue);
+      const currentDispatcher = new WooCouponDispatcherService(db, queue);
+      const [staleRun, currentRun] = await Promise.all([
+        staleDispatcher.dispatch(1), currentDispatcher.dispatch(1),
+      ]);
+      expect(staleRun.jobsPublished + currentRun.jobsPublished).toBe(1);
+      const queued = await queue.getJob(createWooCouponJobId(shopId));
+      expect(queued?.data.shopId).toBe(shopId);
+      await queued?.remove();
+
+      expect(await successorService.release(successor!)).toBe(true);
+      expect(await winner.tryAcquire(name)).toBeNull(); // 60-second completion cadence
+
+      // A callback failure is also released with lastFinishedAt populated.
+      await db.backgroundRuntimeLease.update({
+        where: { name }, data: { leaseUntil: new Date(Date.now() - 1000), lastFinishedAt: null },
+      });
+      await expect(winner.runWithLease(name, async () => {
+        throw new Error("dispatcher unavailable");
+      })).rejects.toThrow("dispatcher unavailable");
+      const released = await db.backgroundRuntimeLease.findUniqueOrThrow({ where: { name } });
+      expect(released.lastFinishedAt).not.toBeNull();
+      expect(released.leaseUntil.getTime()).toBeLessThanOrEqual(Date.now());
+    } finally {
+      await queue.close();
+      await db.shop.deleteMany({ where: { id: shopId } });
+      await db.backgroundRuntimeLease.deleteMany({ where: { name } });
+      await db.$disconnect();
+    }
+  }, 40_000);
+
+  it("recovers a PostgreSQL dispatch reservation after Redis publication failure and cooldown", async () => {
+    const [{ connectionRedis }] = await Promise.all([import("../../src/lib/redis.js")]);
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const queue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const shopId = `arch036-retry-${randomUUID()}`;
+    const canonicalSiteUrl = `https://${randomUUID()}.example.test`;
+    try {
+      await db.shop.create({ data: { id: shopId, domain: canonicalSiteUrl, platform: "WOOCOMMERCE", status: "ACTIVE" } });
+      await db.wooCommerceInstallation.create({
+        data: { shopId, canonicalSiteUrl, credentialDigest: randomBytes(32) },
+      });
+      const failedPublisher = new WooCouponDispatcherService(db, {
+        addBulk: async () => { throw new Error("redis publication unavailable"); },
+      } as unknown as Queue);
+      await expect(failedPublisher.dispatch(1)).rejects.toThrow("redis publication unavailable");
+      const catalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(catalogue.status).toBe("SYNC_REQUIRED");
+      expect(catalogue.syncRequestedAt).not.toBeNull();
+      expect(await queue.getJob(createWooCouponJobId(shopId))).toBeFalsy();
+      const healthyDispatcher = new WooCouponDispatcherService(db, queue);
+      expect((await healthyDispatcher.dispatch(1)).jobsPublished).toBe(0); // cooldown prevents a spin
+
+      // The publisher crashed after the DB reservation: after the bounded
+      // cooldown the next tick must enqueue a valid shop job without a grant.
+      await db.shopifyDiscountCatalogue.update({
+        where: { shopId }, data: { syncRequestedAt: new Date(Date.now() - 6 * 60_000) },
+      });
+      expect((await healthyDispatcher.dispatch(1)).jobsPublished).toBe(1);
+      const job = await queue.getJob(createWooCouponJobId(shopId));
+      expect(job?.data.shopId).toBe(shopId);
+      expect(job?.data).not.toHaveProperty("credentials");
+      await job?.remove();
+    } finally {
+      await queue.close();
+      await db.shop.deleteMany({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  }, 40_000);
 });
