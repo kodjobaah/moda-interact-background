@@ -56,6 +56,14 @@ describe("BackgroundRuntimeLeaseService", () => {
     }
   });
 
+  it("uses one 60-second global Woo coupon dispatcher lease cadence", async () => {
+    const leaseName = "WOO_COUPON_SYNC_DISPATCH" as any;
+    const db = sqlDatabase([{ name: leaseName, generation: 1 }]);
+    await new BackgroundRuntimeLeaseService(db, "woo-dispatch-owner").tryAcquire(leaseName);
+    const sql = String((db.$queryRaw.mock.calls[0]?.[0] as any)?.sql ?? "");
+    expect(sql).toContain(`WHEN 'WOO_COUPON_SYNC_DISPATCH'::"BackgroundRuntimeLeaseName" THEN 60`);
+  });
+
   it("preserves existing lease cadence mappings and adds fixed Merchant Knowledge cadences", async () => {
     const leaseName = "MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION" as any;
     const db = sqlDatabase([{ name: leaseName, generation: 1 }]);

@@ -8,6 +8,8 @@
     "test:unit": "vitest run tests/unit",
     "test:shopify": "vitest run tests/integration/shopify.service.integration.test.ts",
     "test:integration": "node scripts/test-integration.mjs",
+    "test:arch036-woo-coupon-catalogue:postgres": "node scripts/test-integration.mjs tests/integration/woo-coupon-catalogue-reconciliation.integration.test.ts",
+    "test:arch036-woo-coupon-dispatch:postgres": "node scripts/test-integration.mjs tests/integration/woo-coupon-dispatch-worker.integration.test.ts",
     "inspect:shop-discounts": "node scripts/inspect-shop-discounts.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "npm run prisma:generate && tsc",
