@@ -1,6 +1,6 @@
 import { createServer, type RequestListener } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WooCouponPageTransport } from "../../../src/providers/woo-coupon-transport.js";
 import { signLocalWooCouponPath } from "../../../src/providers/woo-coupon-local-oauth.js";
 
@@ -91,4 +91,13 @@ describe("ARCH-036 Woo coupon HTTP read", () => {
       .toBe("JmXx1SgJYvpJ+im+8dTVFcQKg35Ym8rmDv780SI7BYU=");
     expect(path).not.toContain(credential.consumerSecret);
   });
+});
+
+it("respects the validated per-transport page cap before making DNS requests", async () => {
+  const { loadWooCouponSyncConfig } = await import("../../../src/services/woo-coupon-sync-config.js");
+  const dns = vi.fn(localDns);
+  const transport = new WooCouponPageTransport(dns, loadWooCouponSyncConfig({ WOO_COUPON_SYNC_MAX_PAGES: "2" }));
+  await expect(transport.readPage({ canonicalSiteUrl: "https://woo.example", mode: "public" }, credential, 3, 100))
+    .rejects.toThrow("invalid_page");
+  expect(dns).not.toHaveBeenCalled();
 });

@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
 import prisma from "../lib/db.js";
 
@@ -12,12 +15,10 @@ import prisma from "../lib/db.js";
 export const WOO_COUPON_SYNC_QUEUE_NAME = "woo-coupon-sync";
 export const WOO_COUPON_SYNC_JOB_NAME = "sync-woo-coupons";
 
-const MAX_BATCH_SIZE = 500;
-const INITIAL_BATCH_SIZE = 500;
-const REQUEST_COOLDOWN_MINUTES = 5;
-const REFRESH_INTERVAL_MINUTES = 30;
-const UNAVAILABLE_RECHECK_MINUTES = 30;
-const STALE_SCAN_MINUTES = 15;
+const logger = createLogger({
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 type DispatchDatabase = Pick<PrismaClient, "shop" | "shopifyDiscountCatalogue" | "$queryRaw">;
 type DispatchQueue = Pick<Queue, "addBulk">;
@@ -28,6 +29,7 @@ export interface WooCouponDispatchResult {
   shopsReserved: number;
   jobsPublished: number;
 }
+type DueBacklog = { backlog: number; oldestDueSeconds: number | null };
 
 /** Stable, bounded BullMQ identity. Never place a site URL or credentials in a job ID. */
 export function createWooCouponJobId(shopId: string): string {
@@ -44,11 +46,13 @@ export class WooCouponDispatcherService {
   constructor(
     private readonly database: DispatchDatabase = prisma,
     private readonly queue?: DispatchQueue,
+    private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
+    private readonly reporting: Pick<StructuredLogger, "info" | "warn"> = logger,
   ) {}
 
-  async dispatch(batchSize = INITIAL_BATCH_SIZE): Promise<WooCouponDispatchResult> {
-    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
-      throw new RangeError(`Woo coupon dispatch batchSize must be between 1 and ${MAX_BATCH_SIZE}`);
+  async dispatch(batchSize = this.settings.dispatchBatchSize): Promise<WooCouponDispatchResult> {
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > this.settings.dispatchBatchSize) {
+      throw new RangeError(`Woo coupon dispatch batchSize must be between 1 and ${this.settings.dispatchBatchSize}`);
     }
     if (!this.queue) throw new Error("Woo coupon sync queue has not been configured");
 
@@ -86,15 +90,15 @@ export class WooCouponDispatcherService {
           AND i."status" = 'ACTIVE'
           AND i."revokedAt" IS NULL
           AND (c."lastSuccessfulSyncAt" IS NULL
-            OR c."lastSuccessfulSyncAt" <= NOW() - (${REFRESH_INTERVAL_MINUTES} * INTERVAL '1 minute'))
+            OR c."lastSuccessfulSyncAt" <= NOW() - (${this.settings.refreshIntervalMinutes} * INTERVAL '1 minute'))
           AND (c."syncRequestedAt" IS NULL
-            OR c."syncRequestedAt" <= NOW() - (${REQUEST_COOLDOWN_MINUTES} * INTERVAL '1 minute'))
+            OR c."syncRequestedAt" <= NOW() - (${this.settings.dispatchCooldownMinutes} * INTERVAL '1 minute'))
           AND (c."status" <> 'UNAVAILABLE'
             OR c."lastErrorAt" IS NULL
-            OR c."lastErrorAt" <= NOW() - (${UNAVAILABLE_RECHECK_MINUTES} * INTERVAL '1 minute'))
+            OR c."lastErrorAt" <= NOW() - (${this.settings.unavailableRecheckMinutes} * INTERVAL '1 minute'))
           AND (c."status" <> 'SYNCING'
             OR c."syncStartedAt" IS NULL
-            OR c."syncStartedAt" <= NOW() - (${STALE_SCAN_MINUTES} * INTERVAL '1 minute'))
+            OR c."syncStartedAt" <= NOW() - (${this.settings.staleScanMinutes} * INTERVAL '1 minute'))
         ORDER BY c."lastSuccessfulSyncAt" ASC NULLS FIRST,
           c."syncRequestedAt" ASC NULLS FIRST, c."shopId" ASC
         LIMIT ${batchSize}
@@ -107,8 +111,10 @@ export class WooCouponDispatcherService {
       RETURNING c."shopId", c."syncRequestedAt" AS "requestedAt"
     `);
 
-    if (reserved.length > 0) {
-      await this.queue.addBulk(reserved.map(({ shopId, requestedAt }) => ({
+    let jobsPublished = 0;
+    try {
+      if (reserved.length > 0) {
+        await this.queue.addBulk(reserved.map(({ shopId, requestedAt }) => ({
         name: WOO_COUPON_SYNC_JOB_NAME,
         data: { shopId, requestedAt: requestedAt.toISOString() },
         opts: {
@@ -119,12 +125,50 @@ export class WooCouponDispatcherService {
           removeOnFail: true,
         },
       })));
+        jobsPublished = reserved.length;
+      }
+    } finally {
+      // Operational reporting must never become a database/queue correctness dependency.
+      await this.reportCycle(created.count, missing.length, reserved.length, jobsPublished);
     }
 
-    return {
-      cataloguesCreated: created.count,
-      shopsReserved: reserved.length,
-      jobsPublished: reserved.length,
-    };
+    return { cataloguesCreated: created.count, shopsReserved: reserved.length, jobsPublished };
+  }
+
+  private async reportCycle(created: number, discovered: number, reserved: number, published: number): Promise<void> {
+    let backlog: number | null = null;
+    let oldestDueSeconds: number | null = null;
+    try {
+      const rows = await this.database.$queryRaw<DueBacklog[]>(Prisma.sql`
+        SELECT COUNT(*)::integer AS "backlog",
+          EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(c."lastSuccessfulSyncAt", c."createdAt"))))::double precision AS "oldestDueSeconds"
+        FROM "shopify"."ShopifyDiscountCatalogue" c
+        JOIN "commerce"."Shop" s ON s."id" = c."shopId"
+        JOIN "woocommerce"."WooCommerceInstallation" i ON i."shopId" = c."shopId"
+        WHERE s."platform" = 'WOOCOMMERCE' AND s."status" = 'ACTIVE'
+          AND i."status" = 'ACTIVE' AND i."revokedAt" IS NULL
+          AND (c."lastSuccessfulSyncAt" IS NULL OR
+            c."lastSuccessfulSyncAt" <= NOW() - (${this.settings.refreshIntervalMinutes} * INTERVAL '1 minute'))
+          AND (c."syncRequestedAt" IS NULL OR
+            c."syncRequestedAt" <= NOW() - (${this.settings.dispatchCooldownMinutes} * INTERVAL '1 minute'))
+          AND (c."status" <> 'UNAVAILABLE' OR c."lastErrorAt" IS NULL OR
+            c."lastErrorAt" <= NOW() - (${this.settings.unavailableRecheckMinutes} * INTERVAL '1 minute'))
+          AND (c."status" <> 'SYNCING' OR c."syncStartedAt" IS NULL OR
+            c."syncStartedAt" <= NOW() - (${this.settings.staleScanMinutes} * INTERVAL '1 minute'))
+      `);
+      const value = rows[0];
+      if (value && Number.isSafeInteger(value.backlog) && value.backlog >= 0) {
+        backlog = value.backlog;
+        oldestDueSeconds = value.oldestDueSeconds === null ? null :
+          Number.isFinite(value.oldestDueSeconds) ? Math.max(0, Math.round(value.oldestDueSeconds)) : null;
+      }
+    } catch { /* Telemetry queries must not interrupt dispatch. */ }
+    try {
+      this.reporting.info("woo.coupon_sync.dispatch_cycle", {
+        cataloguesCreated: created, discovered, scanned: reserved + (backlog ?? 0),
+        due: reserved + (backlog ?? 0), reserved, published,
+        skipped: backlog, backlog, oldestDueSeconds,
+      });
+    } catch { /* Logging failures are isolated from the business workflow. */ }
   }
 }

@@ -29,3 +29,19 @@ describe("ARCH-036 full Woo coupon scan", () => {
     await expect(readAllWooCouponPages(fetchPage)).rejects.toThrow();
   });
 });
+
+describe("ARCH-036 configured page and scan limits", () => {
+  it("rejects catalogues needing more than the validated page limit", async () => {
+    const first = page(Array.from({ length: 100 }, (_, n) => n + 1), 101, 2);
+    await expect(readAllWooCouponPages(async () => first, 1, 120000))
+      .rejects.toThrow("invalid_page");
+  });
+
+  it("fails a scan after its elapsed-time limit rather than committing partial pages", async () => {
+    const read = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return page([], 0, 0);
+    });
+    await expect(readAllWooCouponPages(read, 2, 1)).rejects.toThrow("provider_unavailable");
+  });
+});

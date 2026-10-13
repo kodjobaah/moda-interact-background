@@ -4,8 +4,8 @@ import prisma from "../lib/db.js";
 import { normalizeWooCoupons, type NormalizedWooCoupon } from "../providers/woo-coupon-normalization.js";
 import { WooCouponReadError } from "../providers/woo-coupon-transport.js";
 import { WooCouponReaderService } from "./woo-coupon-reader.service.js";
+import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
-const STALE_SCAN_MS = 15 * 60_000;
 const ERROR_CODE_LENGTH = 128;
 // A complete bounded scan may contain up to 5,000 coupons. Prisma's default
 // five-second interactive transaction timeout is too short for the atomic write.
@@ -25,6 +25,7 @@ export class WooCouponCatalogueService {
     private readonly read: (shopId: string) => Promise<Record<string, unknown>[]> =
       (shopId) => new WooCouponReaderService().fetchAll(shopId),
     private readonly clock: () => Date = () => new Date(),
+    private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
   ) {}
 
   async reconcile(shopId: string, requestedAt: Date): Promise<ScanResult> {
@@ -39,7 +40,7 @@ export class WooCouponCatalogueService {
       if (catalogue.lastSuccessfulSyncAt && catalogue.lastSuccessfulSyncAt >= requestedAt) return null;
       const now = this.clock();
       if (catalogue.status === "SYNCING" && catalogue.syncStartedAt &&
-          now.getTime() - catalogue.syncStartedAt.getTime() < STALE_SCAN_MS) {
+          now.getTime() - catalogue.syncStartedAt.getTime() < this.settings.staleScanMinutes * 60_000) {
         return "already-running" as const;
       }
       const token = randomUUID();

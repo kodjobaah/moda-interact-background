@@ -1,4 +1,5 @@
 import { WooCouponReadError } from "./woo-coupon-transport.js";
+import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 
 export interface WooCouponPage {
   coupons: unknown;
@@ -7,24 +8,31 @@ export interface WooCouponPage {
 }
 
 const PAGE_SIZE = 100;
-const MAX_PAGES = 50;
-const MAX_COUPONS = PAGE_SIZE * MAX_PAGES;
+
 
 /** Fail the entire scan on partial, duplicate, reordered or inconsistent provider pages. */
 export async function readAllWooCouponPages(
   readPage: (page: number, perPage: number) => Promise<WooCouponPage>,
+  maxPages = loadWooCouponSyncConfig().maxPages,
+  maxScanDurationMs = loadWooCouponSyncConfig().maxScanDurationMs,
 ): Promise<Record<string, unknown>[]> {
+  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 200) throw new WooCouponReadError("too_many_pages");
+  if (!Number.isSafeInteger(maxScanDurationMs) || maxScanDurationMs < 1) throw new WooCouponReadError("provider_unavailable");
+  const startedAt = Date.now();
+  const maxCoupons = PAGE_SIZE * maxPages;
   const result: Record<string, unknown>[] = [];
   const seen = new Set<number>();
   let expectedTotal: number | undefined;
   let expectedPages: number | undefined;
   let previousId = 0;
 
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= maxPages; page++) {
+    if (Date.now() - startedAt >= maxScanDurationMs) throw new WooCouponReadError("provider_unavailable");
     const response = await readPage(page, PAGE_SIZE);
-    if (!Number.isSafeInteger(response.total) || response.total < 0 || response.total > MAX_COUPONS ||
+    if (Date.now() - startedAt >= maxScanDurationMs) throw new WooCouponReadError("provider_unavailable");
+    if (!Number.isSafeInteger(response.total) || response.total < 0 || response.total > maxCoupons ||
         !Number.isSafeInteger(response.totalPages) || response.totalPages < 0 ||
-        response.totalPages > MAX_PAGES || !Array.isArray(response.coupons)) {
+        response.totalPages > maxPages || !Array.isArray(response.coupons)) {
       throw new WooCouponReadError("invalid_page");
     }
     const pages = Math.max(1, response.totalPages);

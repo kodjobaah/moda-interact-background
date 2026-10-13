@@ -10,6 +10,7 @@ import { isPublicIpAddress, normalizeIpAddress } from "../services/merchant-know
 import type { WooConnectionMode, WooCouponCredential } from "../services/woo-coupon-grant.service.js";
 import { signLocalWooCouponPath } from "./woo-coupon-local-oauth.js";
 import type { WooCouponPage } from "./woo-coupon-pages.js";
+import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 
 export class WooCouponReadError extends Error {
   constructor(readonly code:
@@ -26,8 +27,6 @@ export interface WooCouponSite {
   mode: WooConnectionMode;
 }
 
-const REQUEST_TIMEOUT_MS = 8000;
-const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_DNS_ANSWERS = 32;
 const LOCAL_V4 = ["127.", "10.", "192.168.", "169.254."];
 
@@ -77,10 +76,12 @@ export type WooCouponDnsResolver = (hostname: string) => Promise<readonly Lookup
 /** SSRF protected, DNS-pinned GET-only transport; never accepts arbitrary caller URLs. */
 export class WooCouponPageTransport {
   constructor(private readonly resolve: WooCouponDnsResolver =
-    (host) => dnsLookup(host, { all: true, verbatim: true })) {}
+    (host) => dnsLookup(host, { all: true, verbatim: true }),
+    private readonly limits: WooCouponSyncConfig = loadWooCouponSyncConfig(),
+  ) {}
 
   async readPage(site: WooCouponSite, credentials: WooCouponCredential, page: number, perPage: number): Promise<WooCouponPage> {
-    if (!Number.isInteger(page) || page < 1 || page > 50 || perPage !== 100) {
+    if (!Number.isInteger(page) || page < 1 || page > this.limits.maxPages || perPage !== 100) {
       throw new WooCouponReadError("invalid_page");
     }
     const { url, hostname, basePath } = canonicalSite(site);
@@ -109,7 +110,7 @@ export class WooCouponPageTransport {
     const path = url.protocol === "http:"
       ? signLocalWooCouponPath(url.origin, rawPath, credentials)
       : rawPath;
-    return await requestPage(url, hostname, selected, approved, path, credentials);
+    return await requestPage(url, hostname, selected, approved, path, credentials, this.limits);
   }
 }
 
@@ -121,7 +122,7 @@ function numericHeader(headers: IncomingHttpHeaders, name: string): number {
 
 function requestPage(
   url: URL, hostname: string, address: ApprovedAddress, approved: ReadonlySet<string>, path: string,
-  credentials: WooCouponCredential,
+  credentials: WooCouponCredential, limits: WooCouponSyncConfig,
 ): Promise<WooCouponPage> {
   return new Promise((resolve, reject) => {
     const req = (url.protocol === "https:" ? httpsRequest : httpRequest)({
@@ -157,7 +158,7 @@ function requestPage(
       const length = lengthRaw === undefined ? 0 : Number(lengthRaw);
       if (typeof contentType !== "string" || contentType.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
           encoding !== undefined && encoding !== "identity" || !Number.isInteger(length) ||
-          length < 0 || length > MAX_BODY_BYTES) {
+          length < 0 || length > limits.maxResponseBytes) {
         response.destroy(); reject(new WooCouponReadError("invalid_page")); return;
       }
       let total: number, totalPages: number;
@@ -172,7 +173,7 @@ function requestPage(
       response.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += bytes.length;
-        if (size > MAX_BODY_BYTES) response.destroy(new WooCouponReadError("invalid_page"));
+        if (size > limits.maxResponseBytes) response.destroy(new WooCouponReadError("invalid_page"));
         else buffers.push(bytes);
       });
       response.once("error", () => reject(new WooCouponReadError("invalid_page")));
@@ -183,7 +184,7 @@ function requestPage(
         } catch { reject(new WooCouponReadError("invalid_page")); }
       });
     });
-    const timeout = setTimeout(() => req.destroy(new WooCouponReadError("provider_unavailable")), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => req.destroy(new WooCouponReadError("provider_unavailable")), limits.requestTimeoutMs);
     req.once("close", () => clearTimeout(timeout));
     req.once("error", (error: unknown) => reject(error instanceof WooCouponReadError
       ? error : new WooCouponReadError("provider_unavailable")));

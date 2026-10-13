@@ -155,3 +155,39 @@ describeWithDatabase("ARCH-036 Woo coupon PostgreSQL reconciliation", () => {
     }
   }, 40_000);
 });
+
+describeWithDatabase("ARCH-036 persisted stale per-shop generation fence", () => {
+  it("lets an expired shop claim be replaced but forbids the old reader from committing", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const shopId = await fixture(db);
+    let entered!: () => void;
+    let release!: (items: Record<string, unknown>[]) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const delayed = new Promise<Record<string, unknown>[]>((resolve) => { release = resolve; });
+    try {
+      const old = new WooCouponCatalogueService(db, async () => { entered(); return delayed; }, () => NOW);
+      const oldRun = old.reconcile(shopId, NOW);
+      await started;
+      const firstClaim = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(firstClaim.status).toBe("SYNCING");
+      const next = new Date(NOW.getTime() + 16 * 60_000);
+      await db.shopifyDiscountCatalogue.update({ where: { shopId }, data: { syncRequestedAt: next } });
+      const successor = new WooCouponCatalogueService(db, async () => [coupon(2, "SUCCESSOR")], () => next);
+      expect(await successor.reconcile(shopId, next)).toBe("current");
+      const newer = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(newer.syncGeneration).toBe(firstClaim.syncGeneration + 1);
+      expect(newer.status).toBe("CURRENT");
+      release([coupon(1, "STALE")]);
+      expect(await oldRun).toBe("superseded");
+      expect(await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } }))
+        .toMatchObject({ syncGeneration: newer.syncGeneration, status: "CURRENT", activeSyncToken: null });
+      const coupons = await db.shopifyDiscount.findMany({ where: { shopId } });
+      expect(coupons).toHaveLength(1);
+      expect(coupons[0]?.singleRedeemCode).toBe("SUCCESSOR");
+    } finally {
+      release?.([]);
+      await db.shop.delete({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  }, 60_000);
+});

@@ -1,4 +1,7 @@
 import { Queue } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 import prisma from "../lib/db.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
@@ -10,6 +13,10 @@ import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { checkoutRecoveryExpiryService } from "../services/checkout-recovery-expiry.service.js";
 import { WooCouponDispatcherService, WOO_COUPON_SYNC_QUEUE_NAME } from "../services/woo-coupon-dispatcher.service.js";
+
+const wooDispatchLogger = createLogger({
+  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+});
 
 void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
@@ -42,7 +49,8 @@ void startReadyWorkerProcess({
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
     const wooCouponSyncWorker = createWooCouponSyncWorker();
     const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
-    const wooCouponDispatcher = new WooCouponDispatcherService(prisma, wooCouponSyncQueue);
+    const wooCouponSyncSettings = loadWooCouponSyncConfig();
+    const wooCouponDispatcher = new WooCouponDispatcherService(prisma, wooCouponSyncQueue, wooCouponSyncSettings);
     const stopQueueConcurrencyController =
       await startQueueConcurrencyController({
         config: backgroundRuntimeConfigService,
@@ -87,11 +95,11 @@ void startReadyWorkerProcess({
       intervalMs: 60_000,
       runImmediately: true,
       run: async () => {
-        await wooCouponDispatcher.dispatch();
+        await wooCouponDispatcher.dispatch(wooCouponSyncSettings.dispatchBatchSize);
       },
       onError: () => {
         // Do not log arbitrary provider or database error messages.
-        console.error("Woo coupon dispatcher failed");
+        try { wooDispatchLogger.error("woo.coupon_sync.dispatch_failed", { reason: "dispatch_error" }); } catch { /* telemetry isolation */ }
       },
     });
 

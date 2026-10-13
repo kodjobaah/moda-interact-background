@@ -10,10 +10,10 @@ describe("ARCH-036 recovery entrypoint Woo coupon wiring", () => {
   it("starts the worker before enabling globally leased shop discovery and dispatch", () => {
     expect(entry).toContain("createWooCouponSyncWorker()");
     expect(entry).toContain("new Queue(WOO_COUPON_SYNC_QUEUE_NAME");
-    expect(entry).toContain("new WooCouponDispatcherService(prisma, wooCouponSyncQueue)");
+    expect(entry).toContain("new WooCouponDispatcherService(prisma, wooCouponSyncQueue, wooCouponSyncSettings)");
     expect(entry).toContain('leaseName: "WOO_COUPON_SYNC_DISPATCH"');
     expect(entry).toContain("intervalMs: 60_000");
-    expect(entry).toContain("await wooCouponDispatcher.dispatch()");
+    expect(entry).toContain("await wooCouponDispatcher.dispatch(wooCouponSyncSettings.dispatchBatchSize)");
     expect(entry.indexOf("createWooCouponSyncWorker()")).toBeLessThan(entry.indexOf('leaseName: "WOO_COUPON_SYNC_DISPATCH"'));
     expect(entry).not.toContain("upsertJobScheduler");
     expect(entry).not.toContain("setInterval");

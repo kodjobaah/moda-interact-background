@@ -160,7 +160,9 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
       })).rejects.toThrow("dispatcher unavailable");
       const released = await db.backgroundRuntimeLease.findUniqueOrThrow({ where: { name } });
       expect(released.lastFinishedAt).not.toBeNull();
-      expect(released.leaseUntil.getTime()).toBeLessThanOrEqual(Date.now());
+      // Both timestamps are assigned by PostgreSQL in the same release UPDATE.
+      // Comparing to the Node clock would introduce cross-clock skew/flakiness.
+      expect(released.leaseUntil.getTime()).toBeLessThanOrEqual(released.lastFinishedAt!.getTime());
     } finally {
       await queue.close();
       await db.shop.deleteMany({ where: { id: shopId } });
@@ -207,4 +209,48 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
       await db.$disconnect();
     }
   }, 40_000);
+});
+
+// The small deterministic fixture proves budget and fairness. It is NOT a 10,000-shop load test.
+databaseTests("ARCH-036 bounded dispatcher backlog fairness", () => {
+  it("bootstraps and eventually dispatches shops beyond the first batch", async () => {
+    const { connectionRedis } = await import("../../src/lib/redis.js");
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const queue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const shopIds = Array.from({ length: 5 }, () => `arch036-fair-${randomUUID()}`);
+    try {
+      for (const shopId of shopIds) {
+        const canonicalSiteUrl = `https://${randomUUID()}.example.test`;
+        await db.shop.create({ data: { id: shopId, domain: canonicalSiteUrl, platform: "WOOCOMMERCE", status: "ACTIVE" } });
+        await db.wooCommerceInstallation.create({ data: { shopId, canonicalSiteUrl, credentialDigest: randomBytes(32) } });
+      }
+      const dispatcher = new WooCouponDispatcherService(db, queue);
+      const dispatched: number[] = [];
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        const outcome = await dispatcher.dispatch(2);
+        expect(outcome.cataloguesCreated).toBeLessThanOrEqual(2);
+        expect(outcome.shopsReserved).toBeLessThanOrEqual(2);
+        dispatched.push(outcome.jobsPublished);
+      }
+      expect(dispatched).toEqual([2, 2, 1]);
+      expect(await db.shopifyDiscountCatalogue.count({ where: { shopId: { in: shopIds } } })).toBe(5);
+      for (const shopId of shopIds) {
+        const catalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+        expect(catalogue.status).toBe("SYNC_REQUIRED");
+        expect(catalogue.syncRequestedAt).not.toBeNull();
+        const queued = await queue.getJob(createWooCouponJobId(shopId));
+        expect(queued?.data.shopId).toBe(shopId);
+        await queued?.remove();
+      }
+      expect((await dispatcher.dispatch(2)).jobsPublished).toBe(0);
+    } finally {
+      for (const shopId of shopIds) {
+        const queued = await queue.getJob(createWooCouponJobId(shopId));
+        await queued?.remove();
+      }
+      await queue.close();
+      await db.shop.deleteMany({ where: { id: { in: shopIds } } });
+      await db.$disconnect();
+    }
+  }, 60_000);
 });

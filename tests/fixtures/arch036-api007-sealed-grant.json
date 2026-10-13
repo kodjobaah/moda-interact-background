@@ -1,0 +1,14 @@
+{
+  "provenance": "moda-interact-api/src/woocommerce/rest-read/envelope.ts sealWooReadCredentials (API-007)",
+  "context": {
+    "shopId": "woo-shop",
+    "installationId": "install-a",
+    "authorizationAttemptId": "attempt-a",
+    "credentialVersionSnapshot": 3
+  },
+  "keyId": "api007-fixture-key-20261013",
+  "rotationVersion": 1,
+  "ciphertext": "o7jF8cpXHc0U8oyBZ8Ltt74j/w==",
+  "nonce": "03i2/+RgYkHgT2/E",
+  "authTag": "qzHxIxSeJmydprzzO+aRAA=="
+}

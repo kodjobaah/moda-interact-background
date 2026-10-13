@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createCipheriv, randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
@@ -72,5 +73,100 @@ describe("ARCH-036 API-sealed read grant parity", () => {
     expect(() => loadWooCouponReadKeyring({ MODA_WOO_REST_READ_KEYRING: "{}" })).toThrow("grant_configuration");
     expect(loadWooCouponReadKeyring({ MODA_WOO_REST_READ_KEYRING: JSON.stringify({ [keyId]: key.toString("base64url") }) }).get(keyId)).toEqual(key);
     expect(() => loadWooCouponConnectionMode({ MODA_WOOCOMMERCE_CONNECTION_MODE: "local-development", NODE_ENV: "production" })).toThrow("grant_configuration");
+  });
+});
+
+// Immutable cross-repository fixture: generated using API-007's
+// moda-interact-api/src/woocommerce/rest-read/envelope.ts sealWooReadCredentials.
+// This is intentionally NOT created using Background's own sealing helper.
+const apiFixture = JSON.parse(
+  readFileSync(new URL("../../fixtures/arch036-api007-sealed-grant.json", import.meta.url), "utf8"),
+) as {
+  context: { shopId: string; installationId: string; authorizationAttemptId: string; credentialVersionSnapshot: number };
+  keyId: string;
+  rotationVersion: number;
+  ciphertext: string;
+  nonce: string;
+  authTag: string;
+};
+
+function producerFixture(overrides: {
+  installation?: Record<string, unknown>;
+  grant?: Record<string, unknown>;
+  keys?: ReadonlyMap<string, Buffer>;
+} = {}) {
+  const original = {
+    id: apiFixture.context.installationId,
+    shopId: apiFixture.context.shopId,
+    status: "ACTIVE", revokedAt: null,
+    canonicalSiteUrl: "https://woo.example", credentialVersion: apiFixture.context.credentialVersionSnapshot,
+    shop: { status: "ACTIVE", platform: "WOOCOMMERCE", shopifyShopId: null, domain: "https://woo.example" },
+    restReadGrant: {
+      id: "fixture-grant", installationId: apiFixture.context.installationId,
+      shopId: apiFixture.context.shopId,
+      status: "ACTIVE", revokedAt: null, invalidatedAt: null, authorizedScope: "read",
+      authorizationAttemptId: apiFixture.context.authorizationAttemptId,
+      credentialVersionSnapshot: apiFixture.context.credentialVersionSnapshot,
+      rotationVersion: apiFixture.rotationVersion, encryptionKeyId: apiFixture.keyId,
+      credentialCiphertext: Buffer.from(apiFixture.ciphertext, "base64"),
+      credentialNonce: Buffer.from(apiFixture.nonce, "base64"),
+      credentialAuthTag: Buffer.from(apiFixture.authTag, "base64"),
+    },
+  };
+  const installation = { ...original, ...overrides.installation,
+    restReadGrant: { ...original.restReadGrant, ...overrides.grant } };
+  const findUnique = vi.fn().mockResolvedValue(installation);
+  const db = { wooCommerceInstallation: { findUnique } } as unknown as PrismaClient;
+  return { findUnique, installation, service: new WooCouponGrantService(db,
+    overrides.keys ?? new Map([[apiFixture.keyId, Buffer.alloc(32, 17)]]), "public") };
+}
+
+describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
+  it("opens the immutable API-produced fixture and rechecks the installation", async () => {
+    const h = producerFixture();
+    const provider = vi.fn().mockResolvedValue("ok");
+    expect(await h.service.withAuthorizedRead(apiFixture.context.shopId, provider)).toBe("ok");
+    expect(provider).toHaveBeenCalledWith(
+      { canonicalSiteUrl: "https://woo.example", mode: "public" },
+      { consumerKey: "ck_123", consumerSecret: "cs_456" },
+    );
+    expect(h.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["missing key ID", { grant: { encryptionKeyId: "other-key" } }],
+    ["incorrect key bytes", { keys: new Map([[apiFixture.keyId, Buffer.alloc(32, 44)]]) }],
+    ["installation AAD", { installation: { id: "wrong-installation" }, grant: { installationId: "wrong-installation" } }],
+    ["attempt AAD", { grant: { authorizationAttemptId: "wrong-attempt" } }],
+    ["credential-version AAD", { installation: { credentialVersion: 4 }, grant: { credentialVersionSnapshot: 4 } }],
+    ["wrong tenant", { installation: { shopId: "other-shop" } }],
+    ["write scope", { grant: { authorizedScope: "read_write" } }],
+    ["revoked grant", { grant: { status: "REVOKED" } }],
+  ])("rejects %s without calling provider", async (_name, overrides) => {
+    const h = producerFixture(overrides);
+    const provider = vi.fn();
+    await expect(h.service.withAuthorizedRead(apiFixture.context.shopId, provider)).rejects.toThrow();
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it("rejects altered shop-bound AAD even when row identity is otherwise consistent", async () => {
+    const newShopId = "woo-other-shop";
+    const h = producerFixture({
+      installation: { shopId: newShopId },
+      grant: { shopId: newShopId },
+    });
+    const provider = vi.fn();
+    await expect(h.service.withAuthorizedRead(newShopId, provider)).rejects.toThrow("grant_unavailable");
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it("rejects grant rotation that occurs during the provider read", async () => {
+    const h = producerFixture();
+    h.findUnique.mockResolvedValueOnce(h.installation).mockResolvedValueOnce({
+      ...h.installation,
+      restReadGrant: { ...(h.installation.restReadGrant as object), rotationVersion: 2 },
+    });
+    await expect(h.service.withAuthorizedRead(apiFixture.context.shopId, async () => []))
+      .rejects.toThrow("grant_changed");
   });
 });

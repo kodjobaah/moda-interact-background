@@ -96,7 +96,56 @@ describe("ARCH-036 Woo coupon leased dispatcher", () => {
   it("fails visibly if Redis publication fails; timestamp reservation permits retry after cooldown", async () => {
     const h = harness({ failure: true, reserved: [{ shopId: "one", requestedAt: new Date() }] });
     await expect(h.service.dispatch()).rejects.toThrow("redis down");
-    expect(h.queryRaw).toHaveBeenCalledOnce();
+    // Dispatch reservation and best-effort reporting each issue a SQL query,
+    // including when Redis fails. Reporting must not swallow that failure.
+    expect(h.queryRaw).toHaveBeenCalledTimes(2);
+    expect(String(h.queryRaw.mock.calls[0]?.[0]?.strings ?? "")).toContain("FOR UPDATE OF c SKIP LOCKED");
+    expect(String(h.queryRaw.mock.calls[1]?.[0]?.strings ?? "")).toContain('"oldestDueSeconds"');
     expect(h.addBulk).toHaveBeenCalledOnce();
+  });
+});
+
+describe("ARCH-036 bounded dispatcher reporting", () => {
+  it("reports bounded due/backlog data without exposing shop identities", async () => {
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const database = {
+      shop: { findMany: vi.fn().mockResolvedValue([{ id: "one" }]) },
+      shopifyDiscountCatalogue: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{ shopId: "one", requestedAt: new Date("2026-10-13T12:00:00Z") }])
+        .mockResolvedValueOnce([{ backlog: 3, oldestDueSeconds: 93.2 }]),
+    } as unknown as PrismaClient;
+    const queue = { addBulk: vi.fn().mockResolvedValue([]) } as unknown as Queue;
+    const { loadWooCouponSyncConfig } = await import("../../../src/services/woo-coupon-sync-config.js");
+    const settings = loadWooCouponSyncConfig({ WOO_COUPON_SYNC_DISPATCH_BATCH_SIZE: "2" });
+    const reporting = {
+      info: (event: string, fields: Record<string, unknown>) => { events.push({ event, fields }); },
+      warn: vi.fn(),
+    };
+    const service = new WooCouponDispatcherService(database, queue, settings, reporting as never);
+    expect(await service.dispatch()).toEqual({ cataloguesCreated: 1, shopsReserved: 1, jobsPublished: 1 });
+    expect(events).toEqual([{
+      event: "woo.coupon_sync.dispatch_cycle",
+      fields: {
+        cataloguesCreated: 1, discovered: 1, scanned: 4, due: 4,
+        reserved: 1, published: 1, skipped: 3, backlog: 3, oldestDueSeconds: 93,
+      },
+    }]);
+    expect(JSON.stringify(events)).not.toContain("woo.example");
+  });
+
+  it("does not let telemetry SQL or logging failure affect published jobs", async () => {
+    const { loadWooCouponSyncConfig } = await import("../../../src/services/woo-coupon-sync-config.js");
+    const database = {
+      shop: { findMany: vi.fn().mockResolvedValue([]) },
+      shopifyDiscountCatalogue: { createMany: vi.fn() },
+      $queryRaw: vi.fn().mockResolvedValueOnce([{ shopId: "one", requestedAt: new Date() }])
+        .mockRejectedValueOnce(new Error("monitoring failed")),
+    } as unknown as PrismaClient;
+    const addBulk = vi.fn().mockResolvedValue([]);
+    const service = new WooCouponDispatcherService(database, { addBulk } as unknown as Queue,
+      loadWooCouponSyncConfig({}), { info: () => { throw new Error("logger down"); }, warn: vi.fn() } as never);
+    expect(await service.dispatch()).toMatchObject({ shopsReserved: 1, jobsPublished: 1 });
+    expect(addBulk).toHaveBeenCalledOnce();
   });
 });
