@@ -3,7 +3,7 @@ import "dotenv/config";
 import { randomBytes, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { Queue, Worker } from "bullmq";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { BackgroundRuntimeLeaseService } from "../../src/runtime/background-runtime-lease.js";
 import { WooCouponCatalogueService } from "../../src/services/woo-coupon-catalogue.service.js";
@@ -13,6 +13,15 @@ import {
 
 const url = process.env.TEST_DATABASE_URL;
 const databaseTests = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
+
+/** Inspect the job for the current DB reservation, never a shop-global BullMQ ID. */
+async function getReservedShopJob(db: PrismaClient, queue: Queue, shopId: string) {
+  const row = await db.shopifyDiscountCatalogue.findUniqueOrThrow({
+    where: { shopId }, select: { syncRequestedAt: true },
+  });
+  if (!row.syncRequestedAt) return null;
+  return queue.getJob(createWooCouponJobId(shopId, row.syncRequestedAt.toISOString()));
+}
 
 /** Exercise the real PostgreSQL lease + dispatcher + BullMQ + fenced write path. */
 databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", () => {
@@ -64,13 +73,15 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
       const finished = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("Woo coupon job did not finish")), 15_000);
         worker!.on("completed", (job, result) => {
-          if (job.id !== createWooCouponJobId(shopId)) return;
+          if (job.data.shopId !== shopId ||
+              job.id !== createWooCouponJobId(shopId, job.data.requestedAt)) return;
           clearTimeout(timeout);
           if (result === "current") resolve();
           else reject(new Error(`Unexpected Woo sync result: ${String(result)}`));
         });
         worker!.on("failed", (job, error) => {
-          if (job?.id === createWooCouponJobId(shopId)) {
+          if (job?.data.shopId === shopId &&
+              job.id === createWooCouponJobId(shopId, job.data.requestedAt)) {
             clearTimeout(timeout); reject(error);
           }
         });
@@ -144,7 +155,7 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
         staleDispatcher.dispatch(1), currentDispatcher.dispatch(1),
       ]);
       expect(staleRun.jobsPublished + currentRun.jobsPublished).toBe(1);
-      const queued = await queue.getJob(createWooCouponJobId(shopId));
+      const queued = await getReservedShopJob(db, queue, shopId);
       expect(queued?.data.shopId).toBe(shopId);
       await queued?.remove();
 
@@ -189,7 +200,7 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
       const catalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
       expect(catalogue.status).toBe("SYNC_REQUIRED");
       expect(catalogue.syncRequestedAt).not.toBeNull();
-      expect(await queue.getJob(createWooCouponJobId(shopId))).toBeFalsy();
+      expect(await getReservedShopJob(db, queue, shopId)).toBeFalsy();
       const healthyDispatcher = new WooCouponDispatcherService(db, queue);
       expect((await healthyDispatcher.dispatch(1)).jobsPublished).toBe(0); // cooldown prevents a spin
 
@@ -199,11 +210,64 @@ databaseTests("ARCH-036 Woo coupon leased dispatch to BullMQ and PostgreSQL", ()
         where: { shopId }, data: { syncRequestedAt: new Date(Date.now() - 6 * 60_000) },
       });
       expect((await healthyDispatcher.dispatch(1)).jobsPublished).toBe(1);
-      const job = await queue.getJob(createWooCouponJobId(shopId));
+      const job = await getReservedShopJob(db, queue, shopId);
       expect(job?.data.shopId).toBe(shopId);
       expect(job?.data).not.toHaveProperty("credentials");
       await job?.remove();
     } finally {
+      await queue.close();
+      await db.shop.deleteMany({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  }, 40_000);
+
+  it("publishes a newer reservation while the previous job is still queued", async () => {
+    const { connectionRedis } = await import("../../src/lib/redis.js");
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const queue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const shopId = `arch036-lag-${randomUUID()}`;
+    const canonicalSiteUrl = `https://${randomUUID()}.example.test`;
+    let firstJobId: string | undefined;
+    let secondJobId: string | undefined;
+    try {
+      await db.shop.create({ data: { id: shopId, domain: canonicalSiteUrl,
+        platform: "WOOCOMMERCE", status: "ACTIVE" } });
+      await db.wooCommerceInstallation.create({ data: { shopId, canonicalSiteUrl,
+        credentialDigest: randomBytes(32) } });
+      const dispatcher = new WooCouponDispatcherService(db, queue);
+      expect((await dispatcher.dispatch(1)).jobsPublished).toBe(1);
+      const firstReservation = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      firstJobId = createWooCouponJobId(shopId, firstReservation.syncRequestedAt!.toISOString());
+      const oldJob = await queue.getJob(firstJobId);
+      expect(oldJob).toBeTruthy();
+      expect(await oldJob!.getState()).toBe("waiting");
+
+      // Simulate a delayed queue and a later eligible DB reservation. Keep the
+      // original BullMQ job waiting rather than removing or processing it.
+      await db.shopifyDiscountCatalogue.update({ where: { shopId },
+        data: { syncRequestedAt: new Date(Date.now() - 6 * 60_000) } });
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      expect((await dispatcher.dispatch(1)).jobsPublished).toBe(1);
+      const secondReservation = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      secondJobId = createWooCouponJobId(shopId, secondReservation.syncRequestedAt!.toISOString());
+      expect(secondJobId).not.toBe(firstJobId);
+      expect(await queue.getJob(firstJobId)).toBeTruthy();
+      const newJob = await queue.getJob(secondJobId);
+      expect(newJob).toBeTruthy();
+      expect(newJob!.data).toEqual({ shopId, requestedAt: secondReservation.syncRequestedAt!.toISOString() });
+
+      const read = vi.fn().mockResolvedValue([]);
+      const catalogue = new WooCouponCatalogueService(db, read);
+      // The stale payload is declined BEFORE any provider read or claim update.
+      expect(await catalogue.reconcile(shopId, firstReservation.syncRequestedAt!)).toBe("unavailable");
+      expect(read).not.toHaveBeenCalled();
+      const afterStale = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(afterStale.syncRequestedAt).toEqual(secondReservation.syncRequestedAt);
+      expect(afterStale.status).toBe("SYNC_REQUIRED");
+      expect(await queue.getJob(secondJobId)).toBeTruthy();
+    } finally {
+      if (firstJobId) await (await queue.getJob(firstJobId))?.remove();
+      if (secondJobId) await (await queue.getJob(secondJobId))?.remove();
       await queue.close();
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();
@@ -238,14 +302,14 @@ databaseTests("ARCH-036 bounded dispatcher backlog fairness", () => {
         const catalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
         expect(catalogue.status).toBe("SYNC_REQUIRED");
         expect(catalogue.syncRequestedAt).not.toBeNull();
-        const queued = await queue.getJob(createWooCouponJobId(shopId));
+        const queued = await getReservedShopJob(db, queue, shopId);
         expect(queued?.data.shopId).toBe(shopId);
         await queued?.remove();
       }
       expect((await dispatcher.dispatch(2)).jobsPublished).toBe(0);
     } finally {
       for (const shopId of shopIds) {
-        const queued = await queue.getJob(createWooCouponJobId(shopId));
+        const queued = await getReservedShopJob(db, queue, shopId);
         await queued?.remove();
       }
       await queue.close();

@@ -31,9 +31,15 @@ export interface WooCouponDispatchResult {
 }
 type DueBacklog = { backlog: number; oldestDueSeconds: number | null };
 
-/** Stable, bounded BullMQ identity. Never place a site URL or credentials in a job ID. */
-export function createWooCouponJobId(shopId: string): string {
-  return `woo-coupon-${createHash("sha256").update(shopId, "utf8").digest("hex")}`;
+/**
+ * Deterministic identity for ONE PostgreSQL dispatch reservation. A later
+ * reservation for the same shop must have a different BullMQ ID even if an
+ * older job is still waiting; retries of the same reservation keep the ID.
+ * Only internal shop identity and the canonical reservation timestamp are hashed.
+ */
+export function createWooCouponJobId(shopId: string, requestedAt: string): string {
+  return `woo-coupon-${createHash("sha256")
+    .update(JSON.stringify([shopId, requestedAt]), "utf8").digest("hex")}`;
 }
 
 /**
@@ -118,7 +124,7 @@ export class WooCouponDispatcherService {
         name: WOO_COUPON_SYNC_JOB_NAME,
         data: { shopId, requestedAt: requestedAt.toISOString() },
         opts: {
-          jobId: createWooCouponJobId(shopId),
+          jobId: createWooCouponJobId(shopId, requestedAt.toISOString()),
           attempts: 3,
           backoff: { type: "exponential" as const, delay: 30_000 },
           removeOnComplete: true,

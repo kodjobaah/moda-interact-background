@@ -34,12 +34,13 @@ export function parseWooCouponSyncJob(job: Pick<Job, "name" | "id" | "data">): {
   if (Object.keys(data).length !== 2 ||
       typeof data.shopId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(data.shopId) ||
       typeof data.requestedAt !== "string" || data.requestedAt.length > 35 ||
-      typeof job.id !== "string" || job.id !== createWooCouponJobId(data.shopId)) {
+      typeof job.id !== "string") {
     throw new Error("Invalid Woo coupon synchronisation job");
   }
   const requestedAt = new Date(data.requestedAt);
   if (!Number.isFinite(requestedAt.getTime()) ||
-      requestedAt.toISOString() !== data.requestedAt) {
+      requestedAt.toISOString() !== data.requestedAt ||
+      job.id !== createWooCouponJobId(data.shopId, data.requestedAt)) {
     throw new Error("Invalid Woo coupon synchronisation job");
   }
   return { shopId: data.shopId, requestedAt };

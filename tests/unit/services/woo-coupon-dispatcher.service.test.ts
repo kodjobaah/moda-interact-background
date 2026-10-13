@@ -65,11 +65,21 @@ describe("ARCH-036 Woo coupon leased dispatcher", () => {
     expect(jobs).toHaveLength(2);
     expect(jobs[0]?.data).toEqual({ shopId: "one", requestedAt: requestedAt.toISOString() });
     expect(jobs[0]?.name).toBe(WOO_COUPON_SYNC_JOB_NAME);
-    expect(jobs[0]?.opts?.jobId).toBe(createWooCouponJobId("one"));
+    expect(jobs[0]?.opts?.jobId).toBe(createWooCouponJobId("one", requestedAt.toISOString()));
     expect(jobs[0]?.opts?.removeOnComplete).toBe(true);
     expect(jobs[1]?.opts?.jobId).not.toBe(jobs[0]?.opts?.jobId);
     expect(jobs[0]?.data).not.toHaveProperty("credentials");
     expect(jobs[0]?.data).not.toHaveProperty("siteUrl");
+  });
+
+  it("uses a distinct job ID for each reservation but an identical ID on reservation replay", () => {
+    const first = "2026-10-13T12:00:00.000Z";
+    const second = "2026-10-13T12:06:00.000Z";
+    const original = createWooCouponJobId("one", first);
+    expect(createWooCouponJobId("one", first)).toBe(original);
+    expect(createWooCouponJobId("one", second)).not.toBe(original);
+    expect(createWooCouponJobId("two", first)).not.toBe(original);
+    expect(original).toMatch(/^woo-coupon-[a-f0-9]{64}$/);
   });
 
   it("reserves due shops using SQL row locking, cooldown and provider isolation", async () => {

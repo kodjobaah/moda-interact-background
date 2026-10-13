@@ -41,7 +41,7 @@ import {
 
 const requestedAt = "2026-10-13T12:00:00.000Z";
 const job = (shopId = "woo-shop-one") => ({
-  id: createWooCouponJobId(shopId), name: WOO_COUPON_SYNC_JOB_NAME,
+  id: createWooCouponJobId(shopId, requestedAt), name: WOO_COUPON_SYNC_JOB_NAME,
   data: { shopId, requestedAt }, attemptsMade: 0,
 });
 
@@ -70,6 +70,8 @@ describe("ARCH-036 Woo coupon BullMQ consumer", () => {
     const cases = [
       { ...job(), name: "other-job" },
       { ...job(), id: "wrong-id" },
+      // A valid identity from an older reservation must not validate a newer payload.
+      { ...job(), data: { shopId: "woo-shop-one", requestedAt: "2026-10-13T12:06:00.000Z" } },
       { ...job(), data: { shopId: "woo-shop-one", requestedAt, credential: "secret" } },
       { ...job(), data: { shopId: "woo-shop-one", requestedAt: "yesterday" } },
       { ...job(), data: { shopId: "woo-shop-one", requestedAt: "2026-10-13T12:00:00Z" } },
