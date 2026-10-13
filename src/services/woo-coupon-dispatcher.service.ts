@@ -169,11 +169,14 @@ export class WooCouponDispatcherService {
           Number.isFinite(value.oldestDueSeconds) ? Math.max(0, Math.round(value.oldestDueSeconds)) : null;
       }
     } catch { /* Telemetry queries must not interrupt dispatch. */ }
+    // The reservation count and the backlog query come from different database
+    // snapshots. Their sum is an estimate, never a count of rows actually scanned.
+    // If backlog reporting fails, do not invent an estimate from reserved alone.
+    const dueEstimate = backlog === null ? null : reserved + backlog;
     try {
       this.reporting.info("woo.coupon_sync.dispatch_cycle", {
-        cataloguesCreated: created, discovered, scanned: reserved + (backlog ?? 0),
-        due: reserved + (backlog ?? 0), reserved, published,
-        skipped: backlog, backlog, oldestDueSeconds,
+        cataloguesCreated: created, discovered, reserved, published,
+        dueEstimate, backlog, oldestDueSeconds,
       });
     } catch { /* Logging failures are isolated from the business workflow. */ }
   }

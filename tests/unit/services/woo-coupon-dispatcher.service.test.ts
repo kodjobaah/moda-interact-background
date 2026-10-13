@@ -137,11 +137,38 @@ describe("ARCH-036 bounded dispatcher reporting", () => {
     expect(events).toEqual([{
       event: "woo.coupon_sync.dispatch_cycle",
       fields: {
-        cataloguesCreated: 1, discovered: 1, scanned: 4, due: 4,
-        reserved: 1, published: 1, skipped: 3, backlog: 3, oldestDueSeconds: 93,
+        cataloguesCreated: 1, discovered: 1, reserved: 1, published: 1,
+        dueEstimate: 4, backlog: 3, oldestDueSeconds: 93,
       },
     }]);
     expect(JSON.stringify(events)).not.toContain("woo.example");
+    // The two queries are separate snapshots. Neither an observed scan count nor
+    // a skipped count is available, even when the backlog query succeeds.
+    expect(events[0]?.fields).not.toHaveProperty("scanned");
+    expect(events[0]?.fields).not.toHaveProperty("due");
+    expect(events[0]?.fields).not.toHaveProperty("skipped");
+  });
+
+  it("reports no due estimate when the independent backlog query fails", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const database = {
+      shop: { findMany: vi.fn().mockResolvedValue([]) },
+      shopifyDiscountCatalogue: { createMany: vi.fn() },
+      $queryRaw: vi.fn().mockResolvedValueOnce([{ shopId: "one", requestedAt: new Date() }])
+        .mockRejectedValueOnce(new Error("reporting unavailable")),
+    } as unknown as PrismaClient;
+    const addBulk = vi.fn().mockResolvedValue([]);
+    const { loadWooCouponSyncConfig } = await import("../../../src/services/woo-coupon-sync-config.js");
+    const service = new WooCouponDispatcherService(database, { addBulk } as unknown as Queue,
+      loadWooCouponSyncConfig({}),
+      { info: (_event: string, fields: Record<string, unknown>) => { events.push(fields); }, warn: vi.fn() } as never);
+    expect(await service.dispatch()).toMatchObject({ shopsReserved: 1, jobsPublished: 1 });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      reserved: 1, published: 1, dueEstimate: null, backlog: null, oldestDueSeconds: null,
+    });
+    expect(events[0]).not.toHaveProperty("scanned");
+    expect(events[0]).not.toHaveProperty("skipped");
   });
 
   it("does not let telemetry SQL or logging failure affect published jobs", async () => {
