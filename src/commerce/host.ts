@@ -37,6 +37,7 @@ import {
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
 import { resolveCommerceEnvironment } from "./model-environment.js";
+import { assertLiveBudgetFitsLease, resolveLiveBudget, LiveBudgetPolicyError, type ResolvedLiveBudget } from "./live-budget.js";
 import {
   extractTrustedEvidence,
   recordEvidenceRefreshOutcome,
@@ -56,6 +57,8 @@ export type HostDependencies = {
   config?: McpConfiguration;
   signal?: AbortSignal;
   extractEvidence?: EvidenceExtractor;
+  /** Host test fixture only. Production resolves from the trusted Shop on each invocation. */
+  resolvedBudgetForTest?: ResolvedLiveBudget;
 };
 export async function executeCommerceHost(
   context: RecoveryAgentContext,
@@ -65,6 +68,9 @@ export async function executeCommerceHost(
     return await execute(context, deps);
   } catch (error) {
     const failure = error instanceof CommerceHostError ? error
+      : error instanceof LiveBudgetPolicyError
+        ? new CommerceHostError("UNAVAILABLE", false,
+          hostDiagnostic("host.lifecycle", "HOST_LIVE_POLICY_REJECTED"), error)
       : deps.signal?.aborted
         ? new CommerceHostError("CANCELLED", false,
           hostDiagnostic("host.lifecycle", "HOST_CANCELLED"), error)
@@ -95,11 +101,6 @@ async function execute(
   context: RecoveryAgentContext,
   deps: HostDependencies,
 ): Promise<CommerceAgentResult> {
-  const started = Date.now();
-  const signal = AbortSignal.any([
-    AbortSignal.timeout(90_000),
-    ...(deps.signal ? [deps.signal] : []),
-  ]);
   const current = await prisma.conversation.findUnique({
     where: { id: context.conversation.conversationId },
     include: {
@@ -134,6 +135,42 @@ async function execute(
   if (Date.now() - current.processingStartedAt.getTime() >= 120_000)
     throw new CommerceHostError("STALE_TURN", false,
       hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"));
+  // Resolve LIVE policy once for this invocation, after trusted Shop and
+  // processing-version checks. A later invocation may use updated policy;
+  // no Redis key or persistent policy snapshot is created.
+  let budget: ResolvedLiveBudget;
+  try {
+    if (deps.resolvedBudgetForTest) {
+      budget = deps.resolvedBudgetForTest;
+      if (budget.environment !== resolveCommerceEnvironment())
+        throw new LiveBudgetPolicyError("TEST_BUDGET_ENVIRONMENT_MISMATCH");
+      if (budget.shopId !== recovery.shopId || budget.conversationId !== current.id ||
+        budget.recoveryId !== recovery.id || budget.inboundVersion !== current.inboundVersion)
+        throw new LiveBudgetPolicyError("TEST_BUDGET_IDENTITY_MISMATCH");
+    } else {
+      budget = await resolveLiveBudget({
+        db: prisma, environment: resolveCommerceEnvironment(),
+        shopId: recovery.shopId, conversationId: current.id,
+        recoveryId: recovery.id, inboundVersion: current.inboundVersion,
+      });
+    }
+    assertLiveBudgetFitsLease(budget, current.processingStartedAt);
+  } catch (error) {
+    if (error instanceof LiveBudgetPolicyError) {
+      try {
+        (deps.logger ?? createLogger({ serviceName: "moda-messaging-worker", environment: resolveCommerceEnvironment() }))
+          .error("commerce.turn.budget_rejected", {
+            reasonCode: error.reasonCode, shopId: recovery.shopId,
+            conversationId: current.id, inboundVersion: current.inboundVersion,
+          });
+      } catch { /* logging must not change the failure */ }
+    }
+    throw error;
+  }
+  const signal = AbortSignal.any([
+    AbortSignal.timeout(budget.deadlineMs),
+    ...(deps.signal ? [deps.signal] : []),
+  ]);
   const turn = CommerceTurnIdentitySchema.parse({
     contractVersion: "commerce.v1",
     shopId: recovery.shopId,
@@ -145,6 +182,14 @@ async function execute(
     serviceName: "moda-messaging-worker",
     environment: resolveCommerceEnvironment(),
   });
+  try { logger.info("commerce.turn.budget_resolved", {
+    shopId: budget.shopId, conversationId: budget.conversationId,
+    inboundVersion: budget.inboundVersion, environment: budget.environment,
+    deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens,
+    deadlineSource: budget.deadlineSource, outputTokenSource: budget.outputTokenSource,
+    merchantPricingPlanId: budget.merchantPricingPlanId,
+    policyEditVersions: budget.policyEditVersions, resolvedAt: budget.resolvedAt,
+  }); } catch { /* best-effort telemetry */ }
   const config = deps.config ?? mcpConfiguration();
   let grant: Awaited<ReturnType<typeof readGrant>>;
   try { grant = await readGrant(turn); }
@@ -301,7 +346,7 @@ async function execute(
       // Legacy explicit-source rows remain readable, without imposing preference
       // precedence on recovery. Supply their retained tag as context instead.
       language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
-      budgets: { deadlineMs: Math.max(1, 90_000 - (Date.now() - started)) },
+      budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens },
       dependencies: {
         model: {
           invoke: async (request, modelSignal) => {

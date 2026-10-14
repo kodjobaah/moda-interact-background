@@ -27,6 +27,7 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { Prisma } from "@prisma/client";
 const db = vi.hoisted(() => ({
   conversation: { findUnique: vi.fn() },
+  $transaction: vi.fn(),
   commerceConversationGrant: { findUnique: vi.fn(), create: vi.fn() },
   commerceRelease: { findUnique: vi.fn() },
 }));
@@ -267,6 +268,14 @@ const run = (
 ) =>
   executeCommerceHost(c, {
     model: { invoke },
+    resolvedBudgetForTest: {
+      shopId: "shop-fixture", conversationId: "conversation-fixture", recoveryId: "recovery-fixture",
+      inboundVersion: c.conversation.version, environment: "DEVELOPMENT", deadlineMs: 60_000, outputTokens: 800,
+      deadlineSource: "PLATFORM", outputTokenSource: "PLATFORM",
+      merchantPricingPlanId: null, shopifyPlanHandle: null,
+      policyEditVersions: { platform: 1, pricePlan: null, merchant: null },
+      resolvedAt: "2026-10-13T00:00:00.000Z",
+    },
     config: config(),
     ...(signal ? { signal } : {}),
     ...(logger ? {
@@ -279,6 +288,57 @@ const run = (
       },
     } : {}),
   });
+describe("ARCH-038 LIVE host budget wiring", () => {
+  it("passes the pinned output-token limit to each model invocation", async () => {
+    const invoke = vi.fn(async (request: ModelRequest) => {
+      expect(request.maxOutputTokens).toBe(800);
+      return final();
+    });
+    await run(invoke);
+    expect(invoke).toHaveBeenCalled();
+  });
+
+  it("resolves the current LIVE policy from PostgreSQL on every host invocation", async () => {
+    let tokens = 1100;
+    db.$transaction.mockImplementation(async (callback) => callback({
+      subscription: { findUnique: async () => null },
+      merchantPricingPlan: { findUnique: async () => { throw Error("inactive plan must not be read"); } },
+      commerceModelPolicy: { findMany: async () => [{
+        id: "platform-policy", scope: "PLATFORM", shopId: null, merchantPricingPlanId: null,
+        budgetSchemaVersion: 1, budget: { deadlineMs: 60_000, outputTokens: tokens }, editVersion: 1,
+      }] },
+    }));
+    const sentTokens: number[] = [];
+    const invoke = vi.fn(async (request: ModelRequest) => {
+      sentTokens.push(request.maxOutputTokens);
+      return final();
+    });
+    // No test budget injected: this exercises the real host policy-resolution path.
+    await executeCommerceHost(context, { model: { invoke }, config: config() });
+    tokens = 1500;
+    await executeCommerceHost(context, { model: { invoke }, config: config() });
+    expect(sentTokens).toEqual([1100, 1500]);
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects another Shop's injected budget before contacting the model", async () => {
+    const invoke = vi.fn(async () => final());
+    await expect(executeCommerceHost(context, {
+      model: { invoke }, config: config(),
+      resolvedBudgetForTest: {
+        shopId: "other-shop", conversationId: "conversation-fixture",
+        recoveryId: "recovery-fixture", inboundVersion: 1,
+        environment: "DEVELOPMENT", deadlineMs: 60_000, outputTokens: 800,
+        deadlineSource: "PLATFORM", outputTokenSource: "PLATFORM",
+        merchantPricingPlanId: null, shopifyPlanHandle: null,
+        policyEditVersions: { platform: 1, pricePlan: null, merchant: null },
+        resolvedAt: "2026-10-13T00:00:00.000Z",
+      },
+    })).rejects.toMatchObject({code:"UNAVAILABLE",retryable:false});
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
 describe("C5/C6/C16 real SDK host interoperability; scripted model", () => {
   it("passes a safe child logger to Shared while preserving the messaging service identity", async () => {
     const records: Array<Record<string, unknown>> = [];
@@ -1049,11 +1109,11 @@ it("does not create a grant for an expired processing lease", async () => {
   expect(db.commerceConversationGrant.create).not.toHaveBeenCalled();
   expect(observations).toHaveLength(0);
 });
-it("enforces the 90-second turn deadline including discovery (accelerated timer fixture)", async () => {
+it("enforces the configured LIVE deadline including discovery (accelerated timer fixture)", async () => {
   const original = AbortSignal.timeout.bind(AbortSignal);
   const timeout = vi
     .spyOn(AbortSignal, "timeout")
-    .mockImplementation((ms) => original(ms === 90000 ? 300 : ms));
+    .mockImplementation((ms) => original(ms === 60000 ? 300 : ms));
   try {
     await expect(
       run(
@@ -1065,7 +1125,7 @@ it("enforces the 90-second turn deadline including discovery (accelerated timer 
           ),
       ),
     ).rejects.toMatchObject({ code: "DEADLINE" });
-    expect(timeout).toHaveBeenCalledWith(90000);
+    expect(timeout).toHaveBeenCalledWith(60000);
     expect(timeout).toHaveBeenCalledWith(10000);
   } finally {
     timeout.mockRestore();
