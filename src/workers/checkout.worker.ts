@@ -1,7 +1,4 @@
-import {
-  Job,
-  Worker,
-} from "bullmq";
+import { Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import { connectionRedis } from "../lib/redis.js";

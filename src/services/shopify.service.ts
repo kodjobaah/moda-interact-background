@@ -1,6 +1,23 @@
 import type { SearchProductsInput, ShopifyProduct } from "../integration/shopify/types.js";
 import { getShopifyAccessToken } from "./shopify-session.service.js";
 
+type ShopifyProductNode = {
+  id: string;
+  title: string;
+  handle: string;
+  description: string;
+  totalInventory: number;
+  priceRangeV2: {
+    minVariantPrice: { amount: string; currencyCode: string };
+    maxVariantPrice: { amount: string; currencyCode: string };
+  };
+};
+
+type ShopifyProductSearchResponse = {
+  data: { products: { nodes: ShopifyProductNode[] } };
+  errors?: unknown;
+};
+
 export async function searchProducts({
   shop,
   query,
@@ -69,7 +86,7 @@ export async function searchProducts({
     );
   }
 
-  const result = await response.json();
+  const result = (await response.json()) as ShopifyProductSearchResponse;
   console.log("Shopify GraphQL result:", JSON.stringify(result));
 
   if (result.errors) {
@@ -79,7 +96,7 @@ export async function searchProducts({
   }
 
   return result.data.products.nodes.map(
-    (product: any) => ({
+    (product) => ({
       id: product.id,
       title: product.title,
       handle: product.handle,

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SamePlanBillingPeriodRolloverService } from "../../../../src/services/same-plan-billing-period-rollover.service.js";
-import { now, pendingEffectiveAt, harness, pendingRow, freeProvider, paidPlan, payload, cycleRow, cyclePlan } from "./facade-test-fixtures.js";
+import { now, pendingEffectiveAt, harness, pendingRow, freeProvider, payload, cycleRow, cyclePlan } from "./facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
   it("reconstructs only active pending rows and preserves overdue work as immediate jobs", async () => {

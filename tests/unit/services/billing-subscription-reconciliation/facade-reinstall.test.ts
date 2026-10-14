@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SamePlanBillingPeriodRolloverService } from "../../../../src/services/same-plan-billing-period-rollover.service.js";
-import { now, pendingEffectiveAt, harness, pendingRow, freeProvider, paidProvider, paidPlan, payload } from "./facade-test-fixtures.js";
+import { now, harness, pendingRow, freeProvider, paidProvider, paidPlan, payload } from "./facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
   it("reconciles only an uninstalled shop with a matching reinstall marker and schedule", async () => {

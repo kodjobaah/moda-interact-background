@@ -190,7 +190,6 @@ export class InitialActivationReconciliationService {
     const periodStart = provider.currentPeriodStart as Date;
     const periodEnd = provider.currentPeriodEnd as Date;
     const nextReconcileAt = new Date(Math.max(now.getTime(), periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS));
-    const expectedGrant = allowance as number;
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
       await lockShop(transaction, shopId);
       await lockShopSettings(transaction, shopId);

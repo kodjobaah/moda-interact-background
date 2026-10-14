@@ -13,11 +13,18 @@ describe("readCommerceCredentialKeyring", () => {
     expect(keyring.active).toEqual(Buffer.alloc(32, 7));
   });
 
+  it("accepts API-007 safe key IDs up to 128 characters", () => {
+    const keyId = "k".repeat(128);
+    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [keyId]: secret }));
+    expect(readCommerceCredentialKeyring()[keyId]).toEqual(Buffer.alloc(32, 7));
+  });
+
   it.each([
     ["malformed JSON", "{"],
     ["an array", "[]"],
     ["a scalar", "\"value\""],
     ["a blank key id", JSON.stringify({ "  ": secret })],
+    ["an overlong key id", JSON.stringify({ ["k".repeat(129)]: secret })],
     ["invalid base64", JSON.stringify({ active: "not base64!" })],
     ["a short key", JSON.stringify({ active: Buffer.alloc(16).toString("base64") })],
     ["an empty keyring", "{}"],

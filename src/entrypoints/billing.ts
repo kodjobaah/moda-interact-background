@@ -48,7 +48,7 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
   let wooChargeReceipts: Awaited<ReturnType<typeof wooChargeReceiptReconciliationService.reconcileBatch>> | undefined;
   try {
     wooChargeReceipts = await wooChargeReceiptReconciliationService.reconcileBatch();
-  } catch (error) {
+  } catch {
     logger.error("billing.woocommerce.charge_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,

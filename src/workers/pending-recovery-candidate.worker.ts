@@ -39,7 +39,7 @@ export function createPendingRecoveryCandidateWorker() {
   async (job) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
       switch (job.name) {
-        case EVALUATE_PENDING_RECOVERY_JOB:
+        case EVALUATE_PENDING_RECOVERY_JOB: {
           let materializationFailed = false;
           let materializationError: unknown;
           try {
@@ -62,6 +62,9 @@ export function createPendingRecoveryCandidateWorker() {
             materializationFailed = true;
             materializationError = error;
           }
+
+          let cleanupFailed = false;
+          let cleanupError: unknown;
           try {
             // The candidate is no longer pending once it has matured: drop the
             // O(1) candidate lookup indexes regardless of the materialization
@@ -70,8 +73,12 @@ export function createPendingRecoveryCandidateWorker() {
               job.data,
               job.id,
             );
-          } catch (cleanupError) {
-            if (!materializationFailed) throw cleanupError;
+          } catch (error) {
+            cleanupFailed = true;
+            cleanupError = error;
+          }
+
+          if (materializationFailed && cleanupFailed) {
             const primaryMessage = materializationError instanceof Error
               ? materializationError.message
               : String(materializationError);
@@ -83,8 +90,10 @@ export function createPendingRecoveryCandidateWorker() {
               { cause: new AggregateError([materializationError, cleanupError], "Materialization and candidate cleanup failed") },
             );
           }
+          if (cleanupFailed) throw cleanupError;
           if (materializationFailed) throw materializationError;
           return;
+        }
         default:
           throw new Error(`Unknown pending candidate job: ${job.name}`);
       }

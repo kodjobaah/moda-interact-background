@@ -71,13 +71,20 @@ function optionalMoney(value: unknown): string | null {
   return amount(value);
 }
 
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f);
+  });
+}
+
 /** Do not persist email_restrictions, used_by, meta_data or other customer PII. */
 export function normalizeWooCoupon(coupon: Record<string, unknown>, now: Date): NormalizedWooCoupon {
   const id = coupon.id;
   const code = coupon.code;
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 ||
       typeof code !== "string" || !code.trim() || code.length > MAX_CODE_LENGTH ||
-      /[\u0000-\u001f\u007f]/.test(code) || !Number.isFinite(now.getTime())) invalid();
+      containsControlCharacter(code) || !Number.isFinite(now.getTime())) invalid();
 
   const discountType = coupon.discount_type;
   if (typeof discountType !== "string" || discountType.length > 64) invalid();

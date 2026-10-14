@@ -25,7 +25,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
       "src/services/checkout-recovery.service.ts",
     ]) {
       const source = readFileSync(resolve(process.cwd(), relativePath), "utf8");
-      expect(source).not.toMatch(/from ["'][.\/]+whatsapp\.service\.js["']/);
+      expect(source).not.toMatch(/from ["'][./]+whatsapp\.service\.js["']/);
       expect(source).not.toMatch(/whatsAppService\.sendWhatsApp(?:Text|Template)/);
     }
   });

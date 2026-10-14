@@ -422,6 +422,6 @@ try {
 } finally {
   if (client) await client.$disconnect().catch(() => {});
   delete process.env.COMMERCE_CONNECTION_KEYS_JSON;
-  try { docker(["rm", "--force", container]); } catch {}
-  try { docker(["network", "rm", network]); } catch {}
+  try { docker(["rm", "--force", container]); } catch { /* best-effort cleanup */ }
+  try { docker(["network", "rm", network]); } catch { /* best-effort cleanup */ }
 }

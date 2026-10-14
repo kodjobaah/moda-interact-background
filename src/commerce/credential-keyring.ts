@@ -12,7 +12,7 @@ export function readCommerceCredentialKeyring(): Readonly<Record<string, Uint8Ar
     for (const [keyId, encoded] of Object.entries(parsed)) {
       if (
         !keyId.trim() ||
-        keyId.length > 64 ||
+        keyId.length > 128 ||
         typeof encoded !== "string" ||
         !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
       )

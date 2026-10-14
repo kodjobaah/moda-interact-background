@@ -23,7 +23,7 @@ The provider HTTP client pins DNS and rejects redirects, uses Basic credentials 
 
 ## Credential wiring
 
-Background must receive the same secret `MODA_WOO_REST_READ_KEYRING` JSON mapping of key IDs to 32-byte base64url keys that API-007 uses to seal grants; do not create a separate keyring or store it in source control. Key IDs may be up to 128 safe characters. The keyring and `MODA_WOOCOMMERCE_CONNECTION_MODE` are validated at the Background worker boundary. Only the existing API authorisation service can create/rotate the sealed grant. The worker validates installation, tenant, `authorizedScope=read`, authorization attempt, credential version and rotation before/after reads.
+Background reads Woo grant decryption keys from the shared `COMMERCE_CONNECTION_KEYS_JSON` JSON object mapping safe key IDs (1-128 characters) to canonical standard-base64 encodings of 32-byte AES keys. API-007 still seals grants using its `MODA_WOO_REST_READ_KEYRING` base64url format. For every Woo grant key ID, configure the identical 32-byte key material and ID in both settings, encoded according to each variable's format; retain old keys in both keyrings while grants reference them. Do not store key material in source control. The shared keyring and `MODA_WOOCOMMERCE_CONNECTION_MODE` are validated at the Background worker boundary. Only the existing API authorisation service can create/rotate the sealed grant. The worker validates installation, tenant, `authorizedScope=read`, authorization attempt, credential version and rotation before/after reads.
 
 ## Observability and failure recovery
 

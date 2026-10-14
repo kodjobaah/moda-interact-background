@@ -195,7 +195,6 @@ describe("BillingSubscriptionReconciliationService", () => {
   it("successfully retries a failed pre-close flush and clears its failure metadata", async () => {
     const periodStart = new Date("2026-09-01T00:00:00.000Z");
     const periodEnd = new Date("2026-10-01T00:00:00.000Z");
-    const preCloseAt = new Date("2026-09-30T23:55:00.000Z");
     const retryNow = new Date("2026-09-30T23:57:00.000Z");
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: retryNow } });
     const test = harness({

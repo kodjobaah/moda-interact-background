@@ -10,15 +10,11 @@ import type {
   OrderCompletedContractInput,
 } from "../events/shopify-contract-adapter.js";
 import { conversationService } from "./conversation.service.js";
-import { outboundWhatsAppAdmissionService } from "./outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from "./whatsapp-template-selector.service.js";
 import {
   recoveryBillingService,
   type RecoveryBillingService,
 } from "./recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.service.js";
-import { recoveryPolicyService } from "./recovery-policy.service.js";
-import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";

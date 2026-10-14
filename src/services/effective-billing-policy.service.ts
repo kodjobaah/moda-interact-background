@@ -216,7 +216,7 @@ export class EffectiveBillingPolicyResolver {
         : null;
 
     if (plan.kind === BillingPlanKind.PAID_METERED) {
-      validatePaidBillingPeriod(shopId, subscription, billingPeriodCounter, now);
+      validatePaidBillingPeriod(shopId, subscription, billingPeriodCounter);
     }
 
     const activeOverride =
@@ -446,7 +446,6 @@ function validatePaidBillingPeriod(
     reservedQuantity: number;
     forfeitedQuantity: number;
   } | null,
-  now: Date,
 ): void {
   const period = subscription.billingPeriod;
   if (
@@ -488,13 +487,6 @@ function getBillingPeriodPhase(
     return "DRAINING";
   }
   return "ACTIVE";
-}
-
-function validatePositiveInteger(shopId: string, label: string, value: number): number {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw invalidConfiguration(shopId, `${label} must be a finite positive integer`);
-  }
-  return value;
 }
 
 function validateNonNegativeInteger(shopId: string, label: string, value: number): number {

@@ -3,7 +3,7 @@ import "dotenv/config";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { Prisma, PrismaClient } from "@prisma/client";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { WooChargeReceiptReconciliationService } from "../../src/services/woocommerce-billing/charge-receipt-reconciliation.service.js";
 

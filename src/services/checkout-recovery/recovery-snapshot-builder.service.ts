@@ -2,7 +2,6 @@ import prisma from "../../lib/db.js";
 import type { NormalizedAbandonedCheckout } from "../../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../../domain/pending-recovery-candidate.js";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
-import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 import {
   resolveRecoveryInternationalContext,
   serializeRecoveryLineItems,

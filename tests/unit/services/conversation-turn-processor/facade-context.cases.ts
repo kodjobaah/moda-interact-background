@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
 export function registerContextCases(context: ConversationTurnFacadeContext) {
-  const { harness, state, first } = context;
+  const { harness, state } = context;
 
   it("settles three fragments into one agent turn and one response", async () => {
     const test = harness();

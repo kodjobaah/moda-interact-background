@@ -3,8 +3,6 @@ import {
   RecoveryCreditPurchaseStatus,
   RecoveryCreditRefundStatus,
 } from "@prisma/client";
-import type { Prisma as PrismaTypes } from "@prisma/client";
-
 import { createRefundCompletionSupportMessage } from "../recovery-credit-refund-correction/refund-completion-support-message.js";
 import type { WooRefundMoneyEvidence } from "./charge-refund-evidence.js";
 import type { ChargeReceiptLink } from "./charge-receipt-correlation.js";
