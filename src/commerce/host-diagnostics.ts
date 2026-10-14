@@ -67,6 +67,7 @@ const explanations = {
   HOST_TOOL_LIST_DUPLICATE: { message: "The MCP tool list includes duplicate tool names.", action: "Remove duplicate tool names in the Commerce MCP catalogue." },
   HOST_RUNNER_FAILURE: { message: "The shared Commerce runner rejected the turn; the attached runner reason identifies its validation stage.", action: "Inspect the correlated commerce.turn.failed event and runner diagnostic." },
   HOST_CANCELLED: { message: "The Commerce host operation was cancelled by its caller.", action: "Inspect the caller cancellation and shutdown lifecycle." },
+  HOST_LIVE_POLICY_REJECTED: { message: "The LIVE Commerce budget is unavailable, invalid or incompatible with the processing lease.", action: "Check the resolved policy, subscription mapping and worker processing lease." },
   HOST_DEADLINE_EXCEEDED: { message: "The Commerce host reached its execution deadline.", action: "Inspect the elapsed operation and MCP service latency." },
   HOST_UNEXPECTED_FAILURE: { message: "An unexpected Commerce host operation failed.", action: "Inspect adjacent application and database logs for this conversation." },
 } as const satisfies Record<string, Explanation>;

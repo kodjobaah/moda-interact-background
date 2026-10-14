@@ -30,7 +30,9 @@
     "prisma:generate": "prisma generate --schema database/prisma/schema.prisma",
     "test:arch029-store-category-translation-runtime": "node scripts/validate-arch029-store-category-translation-runtime.mjs",
     "test:arch029-store-category-translation-publication": "node scripts/validate-arch029-store-category-translation-publication.mjs",
-    "test:arch031-merchant-pricing-translation-runtime": "vitest run tests/unit/domain/merchant-pricing-translation.test.ts tests/unit/services/merchant-pricing-translation tests/unit/services/merchant-pricing-translation-batch-submit.service.test.ts tests/unit/services/merchant-pricing-translation-batch-results.service.test.ts tests/unit/services/merchant-pricing-translation-runtime-wiring.test.ts tests/unit/services/merchant-pricing-translation-reconciliation.service.test.ts tests/unit/services/merchant-pricing-translation-batch-poll.service.test.ts"
+    "test:arch031-merchant-pricing-translation-runtime": "vitest run tests/unit/domain/merchant-pricing-translation.test.ts tests/unit/services/merchant-pricing-translation tests/unit/services/merchant-pricing-translation-batch-submit.service.test.ts tests/unit/services/merchant-pricing-translation-batch-results.service.test.ts tests/unit/services/merchant-pricing-translation-runtime-wiring.test.ts tests/unit/services/merchant-pricing-translation-reconciliation.service.test.ts tests/unit/services/merchant-pricing-translation-batch-poll.service.test.ts",
+    "test:arch038-live-budgets": "node --experimental-strip-types --test scripts/test-arch038-live-budget-contract.mjs",
+    "test:arch038-live-budgets:postgres": "tsx scripts/test-arch038-live-budget-postgres.ts"
   },
   "keywords": [],
   "author": "",
@@ -38,7 +40,7 @@
   "dependencies": {
     "@ai-sdk/openai": "^4.0.46",
     "@aws-sdk/client-s3": "^3.1143.0",
-    "@modainteract/moda-interact-shared": "1.5.0",
+    "@modainteract/moda-interact-shared": "2.3.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",
@@ -55,6 +57,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@copilotkit/aimock": "1.45.1",
     "@opentelemetry/context-async-hooks": "^2.11.0",
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
