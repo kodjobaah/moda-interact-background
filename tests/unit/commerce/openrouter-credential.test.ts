@@ -1,4 +1,5 @@
 import { createCipheriv } from "node:crypto";
+import { parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 import type { PrismaClient } from "@prisma/client";
 import { createCommerceOpenRouterCredentialAad } from "@modainteract/moda-interact-shared/commerce/model";
 import { describe, expect, it, vi } from "vitest";
@@ -6,7 +7,8 @@ import { createOpenRouterCredentialResolver } from "../../../src/commerce/openro
 import { OpenRouterCredentialResolutionFailure } from "../../../src/commerce/openrouter-credential-failure.js";
 
 const key = Buffer.alloc(32, 11);
-const keyring = { active: key };
+const keyring = parseCredentialKeyring(JSON.stringify({ active: key.toString("base64") }));
+const missingKeyring = parseCredentialKeyring(JSON.stringify({ rotated: key.toString("base64") }));
 
 function seal(credential: string) {
   const nonce = Buffer.alloc(12, 5);
@@ -59,8 +61,7 @@ describe("OpenRouter credential decryption", () => {
 
   it.each([
     ["missing row", null, keyring, "CREDENTIAL_NOT_CONFIGURED"],
-    ["missing key id", seal("credential-A"), {}, "CREDENTIAL_KEY_MISSING"],
-    ["short key", seal("credential-A"), { active: Buffer.alloc(16) }, "CREDENTIAL_KEY_INVALID"],
+    ["missing key id", seal("credential-A"), missingKeyring, "CREDENTIAL_KEY_MISSING"],
     ["short nonce", { ...seal("credential-A"), nonce: Buffer.alloc(11) }, keyring, "CREDENTIAL_ENVELOPE_INVALID"],
     ["short tag", { ...seal("credential-A"), authTag: Buffer.alloc(15) }, keyring, "CREDENTIAL_ENVELOPE_INVALID"],
     ["empty ciphertext", { ...seal("credential-A"), ciphertext: Buffer.alloc(0) }, keyring, "CREDENTIAL_ENVELOPE_INVALID"],

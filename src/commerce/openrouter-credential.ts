@@ -4,10 +4,13 @@ import {
   type CommerceEnvironment,
 } from "@modainteract/moda-interact-shared/commerce/model";
 import {
-  decryptEncryptedCredential,
-  isValidEncryptedCredentialEnvelope,
-  isValidEncryptedCredentialKey,
-} from "../security/aes-gcm-credential.js";
+  decryptCredential,
+  type CredentialKeyring,
+} from "@modainteract/moda-interact-shared/security/credentials/node";
+import {
+  hasValidPersistedCredentialMetadata,
+  isValidProviderCredentialText,
+} from "./provider-credential-validation.js";
 import { OpenRouterCredentialResolutionFailure } from "./openrouter-credential-failure.js";
 
 export type OpenRouterCredentialResolver = {
@@ -19,7 +22,7 @@ export type OpenRouterCredentialResolver = {
 
 export function createOpenRouterCredentialResolver(input: {
   db: PrismaClient;
-  keyring: Readonly<Record<string, Uint8Array>>;
+  keyring: CredentialKeyring;
 }): OpenRouterCredentialResolver {
   return {
     async resolve({ environment, signal }): Promise<string> {
@@ -40,24 +43,27 @@ export function createOpenRouterCredentialResolver(input: {
         throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_NOT_CONFIGURED");
       if (row.environment !== environment)
         throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVIRONMENT_MISMATCH");
-      if (!isValidEncryptedCredentialEnvelope(row))
+      if (!hasValidPersistedCredentialMetadata(row))
         throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_ENVELOPE_INVALID");
-      if (!Object.hasOwn(input.keyring, row.keyId))
+      if (!input.keyring.hasKey(row.keyId))
         throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_KEY_MISSING");
-      const key = input.keyring[row.keyId];
-      if (!isValidEncryptedCredentialKey(key))
-        throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_KEY_INVALID");
 
       let credential: string;
       try {
-        credential = decryptEncryptedCredential({
-          envelope: row,
-          key,
+        credential = decryptCredential({
+          keyring: input.keyring,
+          envelope: {
+            keyId: row.keyId,
+            nonce: row.nonce,
+            ciphertext: row.ciphertext,
+            authTag: row.authTag,
+          },
           aad: createCommerceOpenRouterCredentialAad({
             environment,
             keyId: row.keyId,
           }),
         });
+        if (!isValidProviderCredentialText(credential)) throw new Error("Invalid provider credential");
       } catch (error) {
         assertCurrent();
         throw new OpenRouterCredentialResolutionFailure("CREDENTIAL_DECRYPTION_FAILED", error);

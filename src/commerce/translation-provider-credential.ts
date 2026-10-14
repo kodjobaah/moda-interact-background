@@ -3,7 +3,14 @@ import {
   createCommerceTranslationProviderCredentialAad,
   type CommerceEnvironment,
 } from "@modainteract/moda-interact-shared/commerce/model";
-import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
+import {
+  decryptCredential,
+  type CredentialKeyring,
+} from "@modainteract/moda-interact-shared/security/credentials/node";
+import {
+  hasValidPersistedCredentialMetadata,
+  isValidProviderCredentialText,
+} from "./provider-credential-validation.js";
 
 const UNAVAILABLE = "Translation provider credential is unavailable";
 
@@ -17,7 +24,7 @@ export type TranslationProviderCredentialResolver = {
 
 export function createTranslationProviderCredentialResolver(input: {
   db: PrismaClient;
-  keyring: Readonly<Record<string, Uint8Array>>;
+  keyring: CredentialKeyring;
 }): TranslationProviderCredentialResolver {
   return {
     async resolve({ environment, provider, signal }): Promise<string> {
@@ -39,21 +46,26 @@ export function createTranslationProviderCredentialResolver(input: {
           signal?.aborted ||
           !row ||
           row.environment !== environment ||
-          row.provider !== normalizedProvider
+          row.provider !== normalizedProvider ||
+          !hasValidPersistedCredentialMetadata(row)
         ) {
           throw new Error(UNAVAILABLE);
         }
-
-        const credential = decryptEncryptedCredential({
-          envelope: row,
-          key: input.keyring[row.keyId],
+        const credential = decryptCredential({
+          keyring: input.keyring,
+          envelope: {
+            keyId: row.keyId,
+            nonce: row.nonce,
+            ciphertext: row.ciphertext,
+            authTag: row.authTag,
+          },
           aad: createCommerceTranslationProviderCredentialAad({
             environment,
             provider: normalizedProvider,
             keyId: row.keyId,
           }),
         });
-        if (signal?.aborted) throw new Error(UNAVAILABLE);
+        if (!isValidProviderCredentialText(credential) || signal?.aborted) throw new Error(UNAVAILABLE);
         return credential;
       } catch {
         throw new Error(UNAVAILABLE);

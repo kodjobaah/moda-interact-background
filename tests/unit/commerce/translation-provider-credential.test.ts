@@ -1,4 +1,5 @@
 import { createCipheriv } from "node:crypto";
+import { parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 import type { PrismaClient } from "@prisma/client";
 import { createCommerceTranslationProviderCredentialAad } from "@modainteract/moda-interact-shared/commerce/model";
 import { describe, expect, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTranslationProviderCredentialResolver } from "../../../src/commerce/translation-provider-credential.js";
 
 const key = Buffer.alloc(32, 17);
-const keyring = { active: key };
+const keyring = parseCredentialKeyring(JSON.stringify({ active: key.toString("base64") }));
 
 function seal(credential: string) {
   const nonce = Buffer.alloc(12, 7);
