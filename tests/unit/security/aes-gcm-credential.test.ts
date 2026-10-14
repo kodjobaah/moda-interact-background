@@ -35,12 +35,13 @@ describe("AES-256-GCM encrypted credential boundary", () => {
     expect(isValidEncryptedCredentialEnvelope(envelope)).toBe(true);
     expect(isValidEncryptedCredentialKey(key)).toBe(true);
     expect(decrypt(envelope)).toBe("valid-é-credential");
+    expect(isValidEncryptedCredentialEnvelope({ ...envelope, keyId: "k".repeat(128) })).toBe(true);
   });
 
   it.each([
     ["missing envelope", null],
     ["blank key id", { ...seal(Buffer.from("secret")), keyId: "  " }],
-    ["long key id", { ...seal(Buffer.from("secret")), keyId: "k".repeat(65) }],
+    ["long key id", { ...seal(Buffer.from("secret")), keyId: "k".repeat(129) }],
     ["zero edit version", { ...seal(Buffer.from("secret")), editVersion: 0 }],
     ["fractional edit version", { ...seal(Buffer.from("secret")), editVersion: 1.5 }],
     ["unsafe edit version", { ...seal(Buffer.from("secret")), editVersion: Number.MAX_SAFE_INTEGER + 1 }],

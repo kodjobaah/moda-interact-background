@@ -1,3 +1,8 @@
+import { Queue } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
+import prisma from "../lib/db.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -7,6 +12,11 @@ import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lea
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { checkoutRecoveryExpiryService } from "../services/checkout-recovery-expiry.service.js";
+import { WooCouponDispatcherService, WOO_COUPON_SYNC_QUEUE_NAME } from "../services/woo-coupon-dispatcher.service.js";
+
+const wooDispatchLogger = createLogger({
+  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+});
 
 void startReadyWorkerProcess({
   serviceName: "moda-recovery-worker",
@@ -18,6 +28,7 @@ void startReadyWorkerProcess({
       { createRecoveryCapacityResumeWorker },
       { createRecoveryOutreachFollowUpWorker },
       { createShopifyDiscountSyncWorker },
+      { createWooCouponSyncWorker },
       { recoveryCapacityResumeService },
       { recoveryOutreachFollowUpService },
     ] = await Promise.all([
@@ -26,6 +37,7 @@ void startReadyWorkerProcess({
       import("../workers/recovery-capacity-resume.worker.js"),
       import("../workers/recovery-outreach-follow-up.worker.js"),
       import("../workers/shopify-discount-sync.worker.js"),
+      import("../workers/woo-coupon-sync.worker.js"),
       import("../services/recovery-capacity-resume.service.js"),
       import("../services/recovery-outreach-follow-up.service.js"),
     ]);
@@ -35,6 +47,10 @@ void startReadyWorkerProcess({
     const recoveryOutreachFollowUpWorker =
       createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
+    const wooCouponSyncWorker = createWooCouponSyncWorker();
+    const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
+    const wooCouponSyncSettings = loadWooCouponSyncConfig();
+    const wooCouponDispatcher = new WooCouponDispatcherService(prisma, wooCouponSyncQueue, wooCouponSyncSettings);
     const stopQueueConcurrencyController =
       await startQueueConcurrencyController({
         config: backgroundRuntimeConfigService,
@@ -70,6 +86,23 @@ void startReadyWorkerProcess({
       },
     });
 
+    // All replicas attempt this tick, but only the PostgreSQL lease holder
+    // discovers and dispatches due shops. Never run provider I/O under this lease.
+    const stopWooCouponDispatcher = await startDynamicLeasedScheduler({
+      config: backgroundRuntimeConfigService,
+      lease: backgroundRuntimeLeaseService,
+      leaseName: "WOO_COUPON_SYNC_DISPATCH",
+      intervalMs: 60_000,
+      runImmediately: true,
+      run: async () => {
+        await wooCouponDispatcher.dispatch(wooCouponSyncSettings.dispatchBatchSize);
+      },
+      onError: () => {
+        // Do not log arbitrary provider or database error messages.
+        try { wooDispatchLogger.error("woo.coupon_sync.dispatch_failed", { reason: "dispatch_error" }); } catch { /* telemetry isolation */ }
+      },
+    });
+
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
       queueNames: [
@@ -77,6 +110,7 @@ void startReadyWorkerProcess({
         "recovery-capacity-resume",
         "recovery-outreach-follow-up",
         "shopify-discount-sync",
+        WOO_COUPON_SYNC_QUEUE_NAME,
       ],
     });
 
@@ -86,18 +120,31 @@ void startReadyWorkerProcess({
         recoveryCapacityResumeWorker,
         recoveryOutreachFollowUpWorker,
         shopifyDiscountSyncWorker,
+        wooCouponSyncWorker,
       ],
-      closeResources: [
-        ...closeWorkerResources,
-        stopQueueConcurrencyController,
-        closeWorkerObservability,
-        stopRepairScheduler,
-        stopExpiryScheduler,
-        () => backgroundRuntimeConfigService.close(),
-        closeQueuePerformanceTelemetry,
-        () => recoveryCapacityResumeService.close(),
-        () => recoveryOutreachFollowUpService.close(),
-      ],
+      // startWorkerProcess closes workers first. Then stop producers before
+      // closing their queue, and only then disconnect shared Redis/Postgres.
+      closeResources: [async () => {
+        const stopFunctions = [
+          stopQueueConcurrencyController,
+          stopRepairScheduler,
+          stopExpiryScheduler,
+          stopWooCouponDispatcher,
+          closeWorkerObservability,
+          () => backgroundRuntimeConfigService.close(),
+          () => recoveryCapacityResumeService.close(),
+          () => recoveryOutreachFollowUpService.close(),
+          closeQueuePerformanceTelemetry,
+        ];
+        const stopResults = await Promise.allSettled(stopFunctions.map((stop) => stop()));
+        const queueResults = await Promise.allSettled([wooCouponSyncQueue.close()]);
+        const connectionResults = await Promise.allSettled(closeWorkerResources.map((close) => close()));
+        const results: PromiseSettledResult<unknown>[] = [
+          ...stopResults, ...queueResults, ...connectionResults,
+        ];
+        const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+        if (failures.length > 0) throw new AggregateError(failures, "Recovery resources failed to close");
+      }],
     };
   },
 }).catch(reportReadinessFailure);

@@ -27,6 +27,7 @@ export class BackgroundRuntimeLeaseService {
           WHEN 'MERCHANT_KNOWLEDGE_PENDING_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 60
           WHEN 'MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP'::"BackgroundRuntimeLeaseName" THEN 3600
           WHEN 'MERCHANT_KNOWLEDGE_ENTITLEMENT_RECONCILIATION'::"BackgroundRuntimeLeaseName" THEN 300
+          WHEN 'WOO_COUPON_SYNC_DISPATCH'::"BackgroundRuntimeLeaseName" THEN 60
         END AS "cadenceSeconds"
         FROM "public"."BackgroundRuntimeConfig"
         WHERE "id" = 'default'

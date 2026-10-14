@@ -4,8 +4,8 @@ import prisma from "../lib/db.js";
 import { normalizeWooCoupons, type NormalizedWooCoupon } from "../providers/woo-coupon-normalization.js";
 import { WooCouponReadError } from "../providers/woo-coupon-transport.js";
 import { WooCouponReaderService } from "./woo-coupon-reader.service.js";
+import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
-const STALE_SCAN_MS = 15 * 60_000;
 const ERROR_CODE_LENGTH = 128;
 // A complete bounded scan may contain up to 5,000 coupons. Prisma's default
 // five-second interactive transaction timeout is too short for the atomic write.
@@ -25,6 +25,7 @@ export class WooCouponCatalogueService {
     private readonly read: (shopId: string) => Promise<Record<string, unknown>[]> =
       (shopId) => new WooCouponReaderService().fetchAll(shopId),
     private readonly clock: () => Date = () => new Date(),
+    private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
   ) {}
 
   async reconcile(shopId: string, requestedAt: Date): Promise<ScanResult> {
@@ -39,7 +40,7 @@ export class WooCouponCatalogueService {
       if (catalogue.lastSuccessfulSyncAt && catalogue.lastSuccessfulSyncAt >= requestedAt) return null;
       const now = this.clock();
       if (catalogue.status === "SYNCING" && catalogue.syncStartedAt &&
-          now.getTime() - catalogue.syncStartedAt.getTime() < STALE_SCAN_MS) {
+          now.getTime() - catalogue.syncStartedAt.getTime() < this.settings.staleScanMinutes * 60_000) {
         return "already-running" as const;
       }
       const token = randomUUID();
@@ -77,16 +78,30 @@ export class WooCouponCatalogueService {
         }
         const now = this.clock();
         await this.upsertObserved(tx, shopId, claim.generation, observed, now);
-        // Missing rows are preserved for foreign keys/history. Never alter isAvailable:
-        // on WooCommerce this flag means merchant-selected, not provider-available.
-        await tx.shopifyDiscount.updateMany({
-          where: { shopId, lastSeenSyncGeneration: { not: claim.generation } },
-          data: { providerStatus: "REMOVED", fixedSelectable: false },
-        });
-        await tx.shopifyDiscount.updateMany({
-          where: { shopId, lastSeenSyncGeneration: { not: claim.generation }, unavailableAt: null },
-          data: { unavailableAt: now },
-        });
+        // Confirm removal only after TWO consecutive verified complete scans
+        // have missed the coupon. Both timestamps are written with the same
+        // clock value on a successful observed generation; failed scans do not
+        // advance lastSuccessfulSyncAt, even though they increment generation.
+        // Therefore generation arithmetic alone would wrongly count failures.
+        // On the first absence, retain status, FK/history and merchant selection.
+        const previousSuccess = catalogue.lastSuccessfulSyncAt;
+        if (previousSuccess !== null) {
+          const confirmedMissing = {
+            shopId,
+            lastSeenSyncGeneration: { not: claim.generation },
+            lastSyncedAt: { lt: previousSuccess },
+          };
+          await tx.shopifyDiscount.updateMany({
+            where: confirmedMissing,
+            data: { providerStatus: "REMOVED", fixedSelectable: false },
+          });
+          await tx.shopifyDiscount.updateMany({
+            where: { ...confirmedMissing, unavailableAt: null },
+            data: { unavailableAt: now },
+          });
+        }
+        // isAvailable is deliberately never written during reconciliation:
+        // on WooCommerce it records the merchant's saved checkbox selection.
         await tx.shopifyDiscountCatalogue.update({
           where: { shopId },
           data: {

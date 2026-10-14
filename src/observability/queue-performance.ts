@@ -15,6 +15,7 @@ export type QueueName =
   | "recovery-capacity-resume"
   | "recovery-outreach-follow-up"
   | "shopify-discount-sync"
+  | "woo-coupon-sync"
   | "whatsapp-events"
   | "merchant-communications"
   | "billing-subscription-reconcile"

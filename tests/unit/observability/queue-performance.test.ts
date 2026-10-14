@@ -167,6 +167,26 @@ describe("queue performance telemetry", () => {
     expect(bullMQMocks.events[1]?.close).toHaveBeenCalledOnce();
   });
 
+  it("observes Woo coupon synchronisation queue and closes its resources", async () => {
+    const close = startQueuePerformanceTelemetry({
+      connection: {} as never,
+      queueNames: ["woo-coupon-sync"],
+      sampleIntervalMs: 60_000,
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bullMQMocks.queues).toHaveLength(1);
+    expect(bullMQMocks.events).toHaveLength(1);
+    expect((bullMQMocks.queues[0] as { name: string }).name).toBe("woo-coupon-sync");
+    expect(bullMQMocks.queues[0]?.getJobCounts).toHaveBeenCalledWith(
+      "waiting", "active", "delayed", "failed",
+    );
+
+    await close();
+    expect(bullMQMocks.queues[0]?.close).toHaveBeenCalledOnce();
+    expect(bullMQMocks.events[0]?.close).toHaveBeenCalledOnce();
+  });
+
   it("does not throw when telemetry resource setup fails", async () => {
     bullMQMocks.controls.throwOnQueueEventsConstructorCall = 1;
 

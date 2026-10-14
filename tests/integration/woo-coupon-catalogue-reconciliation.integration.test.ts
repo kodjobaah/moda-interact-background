@@ -80,9 +80,29 @@ describeWithDatabase("ARCH-036 Woo coupon PostgreSQL reconciliation", () => {
         .reconcile(a, next)).toBe("current");
       const stillSelected = await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } });
       expect(stillSelected.isAvailable).toBe(true);
-      expect(stillSelected.providerStatus).toBe("REMOVED");
-      expect(stillSelected.fixedSelectable).toBe(false);
-      expect(stillSelected.unavailableAt).not.toBeNull();
+      expect(stillSelected.providerStatus).toBe("ACTIVE");
+      expect(stillSelected.fixedSelectable).toBe(true);
+      expect(stillSelected.unavailableAt).toBeNull();
+      const failed = new Date("2026-10-13T14:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: failed } });
+      await expect(new WooCouponCatalogueService(db,
+        async () => { throw new WooCouponReadError("incomplete_pages"); }, () => failed)
+        .reconcile(a, failed)).rejects.toThrow("incomplete_pages");
+      const confirmed = new Date("2026-10-13T15:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: confirmed } });
+      expect(await new WooCouponCatalogueService(db, async () => [coupon(101, "UPDATED")], () => confirmed)
+        .reconcile(a, confirmed)).toBe("current");
+      const removed = await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } });
+      expect(removed.isAvailable).toBe(true);
+      expect(removed.providerStatus).toBe("REMOVED");
+      expect(removed.fixedSelectable).toBe(false);
+      expect(removed.unavailableAt).toEqual(confirmed);
+      const reappeared = new Date("2026-10-13T16:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: a }, data: { syncRequestedAt: reappeared } });
+      expect(await new WooCouponCatalogueService(db, async () => [coupon(100, "RETURNED"), coupon(101, "UPDATED")], () => reappeared)
+        .reconcile(a, reappeared)).toBe("current");
+      expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: discount.id } }))
+        .toMatchObject({ isAvailable: true, providerStatus: "ACTIVE", singleRedeemCode: "RETURNED", unavailableAt: null });
       expect(await db.shopifyDiscount.count({ where: { shopId: b } })).toBe(1);
     } finally {
       await db.shop.deleteMany({ where: { id: { in: shops } } });
@@ -134,4 +154,40 @@ describeWithDatabase("ARCH-036 Woo coupon PostgreSQL reconciliation", () => {
       await db.$disconnect();
     }
   }, 40_000);
+});
+
+describeWithDatabase("ARCH-036 persisted stale per-shop generation fence", () => {
+  it("lets an expired shop claim be replaced but forbids the old reader from committing", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const shopId = await fixture(db);
+    let entered!: () => void;
+    let release!: (items: Record<string, unknown>[]) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const delayed = new Promise<Record<string, unknown>[]>((resolve) => { release = resolve; });
+    try {
+      const old = new WooCouponCatalogueService(db, async () => { entered(); return delayed; }, () => NOW);
+      const oldRun = old.reconcile(shopId, NOW);
+      await started;
+      const firstClaim = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(firstClaim.status).toBe("SYNCING");
+      const next = new Date(NOW.getTime() + 16 * 60_000);
+      await db.shopifyDiscountCatalogue.update({ where: { shopId }, data: { syncRequestedAt: next } });
+      const successor = new WooCouponCatalogueService(db, async () => [coupon(2, "SUCCESSOR")], () => next);
+      expect(await successor.reconcile(shopId, next)).toBe("current");
+      const newer = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
+      expect(newer.syncGeneration).toBe(firstClaim.syncGeneration + 1);
+      expect(newer.status).toBe("CURRENT");
+      release([coupon(1, "STALE")]);
+      expect(await oldRun).toBe("superseded");
+      expect(await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } }))
+        .toMatchObject({ syncGeneration: newer.syncGeneration, status: "CURRENT", activeSyncToken: null });
+      const coupons = await db.shopifyDiscount.findMany({ where: { shopId } });
+      expect(coupons).toHaveLength(1);
+      expect(coupons[0]?.singleRedeemCode).toBe("SUCCESSOR");
+    } finally {
+      release?.([]);
+      await db.shop.delete({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  }, 60_000);
 });

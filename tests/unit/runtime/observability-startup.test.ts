@@ -23,7 +23,8 @@ const workerProfiles = [
     script: "start:recovery-worker",
     profile: "recovery",
     entrypoint: "recovery",
-    resourceCleanup: "...closeWorkerResources",
+    // Recovery now closes task-specific queues before the shared connections.
+    resourceCleanup: "closeWorkerResources.map((close) => close())",
   },
   {
     serviceName: "moda-messaging-worker",

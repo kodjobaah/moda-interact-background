@@ -19,7 +19,7 @@ export function isValidEncryptedCredentialEnvelope(
   return (
     typeof value.keyId === "string"
     && Boolean(value.keyId.trim())
-    && value.keyId.length <= 64
+    && value.keyId.length <= 128
     && Number.isSafeInteger(value.editVersion)
     && (value.editVersion as number) >= 1
     && value.ciphertext instanceof Uint8Array
