@@ -23,7 +23,15 @@ function runVitest(environment, tests) {
       [vitestBinary, "run", ...tests],
       {
         cwd: repositoryRoot,
-        env: { ...process.env, ...environment, MODA_DISPOSABLE_INTEGRATION: "1" },
+        // The database and Redis are disposable; policy selection must be equally
+        // deterministic. Never inherit a developer/deployment environment into
+        // these integration tests (TEST is the fixture policy namespace).
+        env: {
+          ...process.env,
+          ...environment,
+          DEPLOYMENT_ENVIRONMENT_NAME: "test",
+          MODA_DISPOSABLE_INTEGRATION: "1",
+        },
         stdio: "inherit",
       },
     );
