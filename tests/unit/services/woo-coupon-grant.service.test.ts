@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   WooCouponGrantService, loadWooCouponConnectionMode,
 } from "../../../src/services/woo-coupon-grant.service.js";
+import { readWooCouponLegacyKeyring } from "../../../src/services/woo-coupon-legacy-keyring.js";
 
 const keyId = "k".repeat(70); // API-007 accepts key IDs up to 128 characters.
 const key = Buffer.alloc(32, 17);
@@ -77,13 +78,18 @@ describe("ARCH-036 API-sealed read grant parity", () => {
     expect(() => new WooCouponGrantService(
       { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
     )).toThrow("grant_configuration");
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [keyId]: key.toString("base64") }));
+    const canonicalId = "woo-grant-key";
+    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [canonicalId]: key.toString("base64") }));
+    expect(readWooCouponLegacyKeyring()[canonicalId]).toEqual(key);
     const service = new WooCouponGrantService(
       { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
       undefined,
       "public",
     );
     expect(service).toBeInstanceOf(WooCouponGrantService);
+    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", undefined);
+    vi.stubEnv("MODA_WOO_REST_READ_KEYRING", JSON.stringify({ [canonicalId]: key.toString("base64") }));
+    expect(() => readWooCouponLegacyKeyring()).toThrow();
     expect(() => loadWooCouponConnectionMode({ MODA_WOOCOMMERCE_CONNECTION_MODE: "local-development", NODE_ENV: "production" })).toThrow("grant_configuration");
   });
 });

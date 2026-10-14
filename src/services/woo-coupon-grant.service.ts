@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { readWooCouponLegacyKeyring } from "./woo-coupon-legacy-keyring.js";
 import prisma from "../lib/db.js";
 import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
 import { WooCouponReadError, type WooCouponSite } from "../providers/woo-coupon-transport.js";
@@ -15,7 +15,7 @@ export type WooCouponGrantDatabase = Pick<PrismaClient, "wooCommerceInstallation
 
 function loadWooCouponGrantKeyring(): Readonly<Record<string, Uint8Array>> {
   try {
-    return readCommerceCredentialKeyring();
+    return readWooCouponLegacyKeyring();
   } catch {
     throw new WooCouponReadError("grant_configuration");
   }

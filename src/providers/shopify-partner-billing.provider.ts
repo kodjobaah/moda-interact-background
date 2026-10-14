@@ -411,7 +411,7 @@ function parseLifecycleEvent(value: unknown, appId: string, shopId: string): Par
   return {
     id: event.id,
     eventType,
-    state,
+    state: state as PartnerSubscriptionLifecycleEvent["state"],
     occurredAt,
     cancelEffectiveOn: nullableString(event.cancelEffectiveOn, "cancelEffectiveOn"),
     planHandle: nullableString(event.plan?.handle, "planHandle"),
