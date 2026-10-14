@@ -10,7 +10,6 @@ import {
   MERCHANT_COMMUNICATIONS_QUEUE_NAME,
   TranslationDispatchJobSchema,
   type TranslationBatchSubmitJob,
-  type TranslationDispatchJob,
 } from "../domain/translation-batch.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -77,7 +76,7 @@ export class TranslationBatchAssemblyService {
   async assembleFromDispatch(
     input: unknown,
   ): Promise<TranslationBatchAssemblyResult> {
-    const dispatch = TranslationDispatchJobSchema.parse(input);
+    TranslationDispatchJobSchema.parse(input);
     const result = await this.database.$transaction(async (transaction) => {
       const candidates = await transaction.$queryRaw<TranslationCandidate[]>(Prisma.sql`
         SELECT

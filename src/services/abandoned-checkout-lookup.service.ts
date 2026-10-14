@@ -35,6 +35,50 @@ import {
 const GRAPHQL_ENDPOINT = (shopDomain: string, version: string) =>
   `https://${shopDomain}/admin/api/${version}/graphql.json`;
 
+type ShopifyMoney = {
+  amount?: string | null;
+  currencyCode?: string | null;
+};
+
+type ShopifyAbandonedCheckoutLineItem = {
+  product?: { id?: string | null } | null;
+  variant?: { id?: string | null } | null;
+  sku?: string | null;
+  title?: string | null;
+  variantTitle?: string | null;
+  quantity?: number | null;
+  originalUnitPriceSet?: { presentmentMoney?: ShopifyMoney | null } | null;
+};
+
+type ShopifyAbandonedCheckoutNode = {
+  id?: string | null;
+  abandonedCheckoutUrl?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  totalPriceSet?: { presentmentMoney?: ShopifyMoney | null } | null;
+  customer?: {
+    id?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    locale?: string | null;
+  } | null;
+  billingAddress?: {
+    countryCodeV2?: string | null;
+    timeZone?: string | null;
+  } | null;
+  lineItems?: { nodes?: ShopifyAbandonedCheckoutLineItem[] | null } | null;
+};
+
+type AbandonedCheckoutGraphqlResponse = {
+  data?: {
+    abandonedCheckoutsCount?: { count?: number | null } | null;
+    abandonedCheckouts?: { nodes?: ShopifyAbandonedCheckoutNode[] | null } | null;
+  } | null;
+  errors?: unknown;
+};
+
 export class AbandonedCheckoutLookupService {
   async resolveShopDomain(shopId: string): Promise<string> {
     const shop = await prisma.shop.findUnique({
@@ -254,10 +298,10 @@ export class AbandonedCheckoutLookupService {
       return null;
     }
 
-    return nodes.map((node: any) => this.normalize(node));
+    return nodes.map((node) => this.normalize(node));
   }
 
-  private normalize(node: any): NormalizedAbandonedCheckout {
+  private normalize(node: ShopifyAbandonedCheckoutNode): NormalizedAbandonedCheckout {
     const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
     return {
       shopifyAbandonedCheckoutId: node?.id ?? null,
@@ -277,7 +321,7 @@ export class AbandonedCheckoutLookupService {
           }
         : null,
       lineItems: Array.isArray(node?.lineItems?.nodes)
-        ? node.lineItems.nodes.map((li: any) => ({
+        ? node.lineItems.nodes.map((li) => ({
             productId: li?.product?.id ?? null,
             variantId: li?.variant?.id ?? null,
             title: li?.title ?? null,
@@ -294,7 +338,7 @@ export class AbandonedCheckoutLookupService {
     shopDomain: string,
     accessToken: string,
     body: { query: string; variables: Record<string, unknown> },
-  ): Promise<any | null> {
+  ): Promise<AbandonedCheckoutGraphqlResponse | null> {
     let response: Response;
     try {
       response = await fetch(
@@ -313,6 +357,7 @@ export class AbandonedCheckoutLookupService {
         `Shopify abandoned-checkout transport error: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        { cause: error },
       );
     }
 
@@ -322,14 +367,15 @@ export class AbandonedCheckoutLookupService {
       );
     }
 
-    let parsed: any;
+    let parsed: AbandonedCheckoutGraphqlResponse;
     try {
-      parsed = await response.json();
+      parsed = (await response.json()) as AbandonedCheckoutGraphqlResponse;
     } catch (error) {
       throw new Error(
         `Shopify abandoned-checkout GraphQL returned invalid JSON: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        { cause: error },
       );
     }
 
@@ -344,7 +390,7 @@ export class AbandonedCheckoutLookupService {
 }
 
 export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService();
-function normalizeInternationalContext(node: any): InternationalContext {
+function normalizeInternationalContext(node: ShopifyAbandonedCheckoutNode): InternationalContext {
   const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
   const billingAddress = node?.billingAddress;
 

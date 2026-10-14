@@ -34,32 +34,41 @@ export class CheckoutOrderGuardService {
       if (acquired === "OK") {
         let callbackFailed = false;
         let callbackError: unknown;
+        let result!: T;
         try {
-          return await fn();
+          result = await fn();
         } catch (error) {
           callbackFailed = true;
           callbackError = error;
-          throw error;
-        } finally {
-          try {
-            const value = await connectionRedis.get(lockKey);
-            if (value === owner) {
-              await connectionRedis.del(lockKey);
-            }
-          } catch (cleanupError) {
-            if (!callbackFailed) throw cleanupError;
-            const primaryMessage = callbackError instanceof Error
-              ? callbackError.message
-              : String(callbackError);
-            const cleanupMessage = cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError);
-            throw new Error(
-              `${primaryMessage}: checkout lock cleanup failed: ${cleanupMessage}`,
-              { cause: new AggregateError([callbackError, cleanupError], "Callback and checkout lock cleanup failed") },
-            );
-          }
         }
+
+        let cleanupFailed = false;
+        let cleanupError: unknown;
+        try {
+          const value = await connectionRedis.get(lockKey);
+          if (value === owner) {
+            await connectionRedis.del(lockKey);
+          }
+        } catch (error) {
+          cleanupFailed = true;
+          cleanupError = error;
+        }
+
+        if (callbackFailed && cleanupFailed) {
+          const primaryMessage = callbackError instanceof Error
+            ? callbackError.message
+            : String(callbackError);
+          const cleanupMessage = cleanupError instanceof Error
+            ? cleanupError.message
+            : String(cleanupError);
+          throw new Error(
+            `${primaryMessage}: checkout lock cleanup failed: ${cleanupMessage}`,
+            { cause: new AggregateError([callbackError, cleanupError], "Callback and checkout lock cleanup failed") },
+          );
+        }
+        if (callbackFailed) throw callbackError;
+        if (cleanupFailed) throw cleanupError;
+        return result;
       }
 
       await sleep(CHECKOUT_LOCK_RETRY_DELAY_MS);

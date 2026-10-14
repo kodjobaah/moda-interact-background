@@ -16,8 +16,6 @@ export type CurrentWooSubscription = Prisma.SubscriptionGetPayload<{
 }>;
 export type WooPaidPlan = Pick<BillingPlan, "id" | "name" | "kind" | "shopifyPlanHandle" | "includedRecoveryConversationAllowance">;
 
-const WOO_MODA_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
-
 export async function switchWooSubscriptionPlan(
   transaction: Transaction,
   current: CurrentWooSubscription,

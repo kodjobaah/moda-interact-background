@@ -1,9 +1,6 @@
 import { Prisma } from "@prisma/client";
-import type { PrismaClient } from "@prisma/client";
-
 import { lockShop, lockSubscription } from "../billing-subscription-reconciliation/locking.js";
 
-type ChargeDatabase = Pick<PrismaClient, "$transaction">;
 type Transaction = Prisma.TransactionClient;
 
 export type ChargeReceiptLink = {

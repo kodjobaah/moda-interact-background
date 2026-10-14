@@ -33,7 +33,7 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
 }));
 
 import {
-  createWooCouponSyncWorker, parseWooCouponSyncJob, wooCouponWorkerConcurrency,
+  createWooCouponSyncWorker, wooCouponWorkerConcurrency,
 } from "../../../src/workers/woo-coupon-sync.worker.js";
 import {
   WOO_COUPON_SYNC_JOB_NAME, WOO_COUPON_SYNC_QUEUE_NAME, createWooCouponJobId,

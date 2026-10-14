@@ -255,7 +255,7 @@ describe("RecoveryCreditRefundCorrectionService", () => {
   it.each([
     ["PROVIDER_ACTION_REQUIRED", "an earlier provider-action refund"],
     ["NEEDS_ATTENTION", "an earlier needs-attention refund"],
-  ])("defers behind %s on the same meter", async (status) => {
+  ])("defers behind %s on the same meter", async (_status) => {
     const test = harness(refundRow());
     test.database.recoveryCreditRefund.findFirst.mockResolvedValue({ id: "older-refund" });
 

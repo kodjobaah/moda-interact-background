@@ -3,8 +3,6 @@ import {
   ShopifyReportState,
   UsageMetric,
 } from "@prisma/client";
-import { createLogger } from "@modainteract/moda-interact-shared/logging";
-import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
@@ -19,11 +17,6 @@ const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 const IN_FLIGHT_RECOVERY_MS = 15 * 60_000;
 const MAX_RESPONSE_SUMMARY_LENGTH = 2000;
-const logger = createLogger({
-  serviceName: "moda-shopify-event-worker",
-  environment: resolveDeploymentEnvironmentName(),
-});
-
 type UsageEventRecord = {
   id: string;
   shopId: string;

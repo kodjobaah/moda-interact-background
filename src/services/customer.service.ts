@@ -186,7 +186,7 @@ const customer = await prisma.customer.upsert({
 });
 
   if (phone) {
-    let currentPhone = {
+    const currentPhone = {
       customerId: customer.id,
       phone,
     }
@@ -196,9 +196,6 @@ const customer = await prisma.customer.upsert({
   return customer;
 }
 
-}
-function normalizePhone(phone: string): string {
-  return phone.trim();
 }
 export const customerService =
   new CustomerService();

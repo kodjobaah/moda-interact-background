@@ -24,7 +24,6 @@ import {
 } from "./effective-billing-policy.service.js";
 import type {
   BillingPolicyClient,
-  EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
 import type { ReservationCounter } from "./purchased-recovery-reservation.service.js";
 

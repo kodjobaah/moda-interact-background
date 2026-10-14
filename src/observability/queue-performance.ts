@@ -41,13 +41,6 @@ type QueueJobMetadata = Pick<Job, "id" | "processedOn">;
 const MAX_TRACKED_ELIGIBILITY_ENTRIES = 10_000;
 const ELIGIBILITY_RETENTION_MS = 2 * 60 * 60 * 1_000;
 
-const EMPTY_SNAPSHOT: QueueSnapshot = {
-  active: 0,
-  delayed: 0,
-  failed: 0,
-  oldestWaitingAgeMs: null,
-  waiting: 0,
-};
 const snapshots = new Map<QueueName, QueueSnapshot>();
 const eligibleAtByQueue = new Map<QueueName, Map<string, number>>();
 const instruments = createInstruments();

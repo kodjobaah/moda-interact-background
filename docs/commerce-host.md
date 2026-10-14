@@ -4,11 +4,11 @@ The WhatsApp worker calls the Shared runner after existing turn, abuse and outbo
 
 ## Configuration
 
-Configure these only on the messaging worker:
+Configure the MCP and deployment settings on the messaging worker. The shared credential keyring is also attached to the recovery worker for WooCommerce API-007 grant decryption.
 
 - `COMMERCE_MCP_URL`: fixed private Commerce URL ending in `/api/mcp`. No credentials, query or fragment. HTTP is supported for the private service network; redirects are rejected.
 - `DEPLOYMENT_ENVIRONMENT_NAME`: existing shared environment identity; match Commerce.
-- `COMMERCE_CONNECTION_KEYS_JSON`: existing credential-decryption keyring used for the environment's encrypted OpenRouter credential.
+- `COMMERCE_CONNECTION_KEYS_JSON`: shared 32-byte AES keyring used to decrypt the environment's encrypted OpenRouter credential and WooCommerce API-007 read grants. Woo key IDs and key bytes must also be configured in API-007's `MODA_WOO_REST_READ_KEYRING`, encoded there as base64url and here as standard base64.
 - The single Moda WhatsApp sender configuration remains required. The legacy conversational Groq model selector is not used by the CommerceAgent; `GROQ_API_KEY` may remain required independently for Groq speech transcription.
 
 ## Production model resolution

@@ -7,7 +7,7 @@ import { backgroundRuntimeConfigService } from "../runtime/background-runtime-co
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startDynamicLeasedScheduler } from "../runtime/dynamic-leased-scheduler.js";
 import { createMerchantKnowledgeWorker } from "../workers/merchant-knowledge.worker.js";
-import { merchantKnowledgeQueue, closeMerchantKnowledgeResources } from "./merchant-knowledge-resources.js";
+import { closeMerchantKnowledgeResources } from "./merchant-knowledge-resources.js";
 import { MerchantKnowledgeUploadedAssetAcquirerService } from "../services/merchant-knowledge-uploaded-asset-acquirer.js";
 import { MerchantKnowledgeWebPageAcquirer } from "../services/merchant-knowledge-web-page-acquirer.js";
 import { MerchantKnowledgeUploadCleanupService } from "../services/merchant-knowledge-upload-cleanup.service.js";

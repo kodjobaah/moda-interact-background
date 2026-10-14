@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SamePlanBillingPeriodRolloverService } from "../../../../src/services/same-plan-billing-period-rollover.service.js";
-import { now, pendingEffectiveAt, harness, pendingRow, paidProvider, paidPlan, payload, reinstallPaidRow, configureReinstallPaidPeriod, expectNoModelMutations } from "./facade-test-fixtures.js";
+import { now, harness, pendingRow, paidProvider, paidPlan, payload, reinstallPaidRow, configureReinstallPaidPeriod, expectNoModelMutations } from "./facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
   const exactPaidPeriod = {

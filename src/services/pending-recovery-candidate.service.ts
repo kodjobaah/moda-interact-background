@@ -41,12 +41,6 @@ const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-shopify-event-worker",
 });
 
-type CandidateEnqueueOutcome =
-  | "enqueued"
-  | "refreshed"
-  | "discarded-shop-unavailable"
-  | "discarded-subscription-frozen";
-
 export type { CandidateActivityInput, CandidateActivityResult };
 
 let pendingCandidateQueue: Queue<PendingRecoveryCandidate, void, string> | null =

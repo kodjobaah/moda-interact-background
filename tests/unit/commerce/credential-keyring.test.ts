@@ -20,6 +20,12 @@ describe("readCommerceCredentialKeyring (Shared parser)", () => {
     expect(readCommerceCredentialKeyring().hasKey(id)).toBe(true);
   });
 
+  it("accepts API-007 safe key IDs up to 128 characters", () => {
+    const keyId = "k".repeat(128);
+    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [keyId]: secret }));
+    expect(readCommerceCredentialKeyring()[keyId]).toEqual(Buffer.alloc(32, 7));
+  });
+
   it.each([
     ["missing configuration", undefined],
     ["malformed JSON", "{"],

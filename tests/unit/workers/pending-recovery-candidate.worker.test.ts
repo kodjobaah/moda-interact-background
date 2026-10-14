@@ -270,7 +270,7 @@ describe("pending recovery candidate worker", () => {
     hoisted.redis.get.mockRejectedValueOnce(new Error("Redis lock cleanup unavailable"));
     hoisted.cleanup.mockRejectedValueOnce(new Error("Redis candidate index cleanup unavailable"));
 
-    let failedReason = "";
+    let failedReason: string;
     try {
       await hoisted.processor?.(firstJob);
       throw new Error("Expected first candidate attempt to fail");
