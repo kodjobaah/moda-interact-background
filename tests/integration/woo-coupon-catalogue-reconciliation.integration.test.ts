@@ -191,3 +191,92 @@ describeWithDatabase("ARCH-036 persisted stale per-shop generation fence", () =>
     }
   }, 60_000);
 });
+
+describeWithDatabase("ARCH-036 BACKGROUND-005 merchant-controlled Woo catalogues", () => {
+  it("commits mixed provider coupons and >255-code as CURRENT, preserves selection across code loss and recovery", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const shop = await fixture(db);
+    const extendedCode = `CUSTOM${"Q".repeat(350)}`;
+    const mixed = [
+      ...[1, 2, 3, 4, 5].map((id) => coupon(id, `CODE${id}`)),
+      { ...coupon(6, extendedCode), discount_type: "plugin-defined-coupon", amount: "0",
+        date_expires_gmt: "invalid date", product_ids: ["unexpected"], usage_limit: "many" },
+      { ...coupon(7, "HAS-NO-CODE"), code: null },
+    ];
+    const sync = async (time: Date, rows: Record<string, unknown>[]) => {
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: shop }, data: { syncRequestedAt: time } });
+      return new WooCouponCatalogueService(db, async () => rows, () => time).reconcile(shop, time);
+    };
+    try {
+      expect(await sync(NOW, mixed)).toBe("current");
+      expect(await db.shopifyDiscount.count({ where: { shopId: shop } })).toBe(7);
+      const six = await db.shopifyDiscount.findUniqueOrThrow({ where: {
+        shopId_shopifyDiscountNodeId: { shopId: shop, shopifyDiscountNodeId: "woo:coupon:6" },
+      } });
+      expect(six).toMatchObject({
+        singleRedeemCode: extendedCode, fixedSelectable: true, providerStatus: "ACTIVE",
+        isAvailable: false,
+      });
+      expect(six.providerSnapshot).toMatchObject({ discountType: "plugin-defined-coupon", amount: "0" });
+      const seven = await db.shopifyDiscount.findUniqueOrThrow({ where: {
+        shopId_shopifyDiscountNodeId: { shopId: shop, shopifyDiscountNodeId: "woo:coupon:7" },
+      } });
+      expect(seven).toMatchObject({ singleRedeemCode: null, fixedSelectable: false,
+        providerStatus: "UNDELIVERABLE", isAvailable: false });
+      await db.shopifyDiscount.update({ where: { id: six.id }, data: { isAvailable: true } });
+      const again = new Date("2026-10-13T13:00:00Z");
+      expect(await sync(again, [
+        ...mixed.slice(0, 5), { ...coupon(6, "UNSAFE\\nHEADER"), code: "UNSAFE\nHEADER" }, mixed[6]!,
+      ])).toBe("current");
+      expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: six.id } })).toMatchObject({
+        isAvailable: true, providerStatus: "UNDELIVERABLE", fixedSelectable: false,
+        singleRedeemCode: null, unavailableAt: null,
+      });
+      const twice = new Date("2026-10-13T14:00:00Z");
+      expect(await sync(twice, [
+        ...mixed.slice(0, 5), { ...coupon(6, ""), code: null }, mixed[6]!,
+      ])).toBe("current");
+      expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: six.id } })).toMatchObject({
+        isAvailable: true, providerStatus: "UNDELIVERABLE", unavailableAt: null,
+      });
+      const recovered = new Date("2026-10-13T15:00:00Z");
+      expect(await sync(recovered, mixed)).toBe("current");
+      expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: six.id } })).toMatchObject({
+        singleRedeemCode: extendedCode, isAvailable: true, providerStatus: "ACTIVE",
+        unavailableAt: null,
+      });
+      const catalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId: shop } });
+      expect(catalogue.status).toBe("CURRENT");
+    } finally {
+      await db.shop.delete({ where: { id: shop } });
+      await db.$disconnect();
+    }
+  }, 60_000);
+
+  it("fails ambiguous IDs atomically and recovers ERROR on a later complete scan", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const shop = await fixture(db);
+    try {
+      expect(await new WooCouponCatalogueService(db, async () => [coupon(1, "GOOD")], () => NOW)
+        .reconcile(shop, NOW)).toBe("current");
+      const existing = await db.shopifyDiscount.findMany({ where: { shopId: shop } });
+      const failure = new Date("2026-10-13T13:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: shop }, data: { syncRequestedAt: failure } });
+      await expect(new WooCouponCatalogueService(db, async () => [coupon(1, "GOOD"), coupon(1, "OTHER")], () => failure)
+        .reconcile(shop, failure)).rejects.toThrow("provider_identity_invalid");
+      expect(await db.shopifyDiscount.findMany({ where: { shopId: shop } })).toEqual(existing);
+      expect(await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId: shop } }))
+        .toMatchObject({ status: "ERROR", lastErrorCode: "provider_identity_invalid" });
+      const retry = new Date("2026-10-13T14:00:00Z");
+      await db.shopifyDiscountCatalogue.update({ where: { shopId: shop }, data: { syncRequestedAt: retry } });
+      expect(await new WooCouponCatalogueService(db, async () => [
+        { ...coupon(1, "GOOD"), date_expires_gmt: "bad date" },
+      ], () => retry).reconcile(shop, retry)).toBe("current");
+      expect(await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId: shop } }))
+        .toMatchObject({ status: "CURRENT", lastErrorCode: null });
+    } finally {
+      await db.shop.delete({ where: { id: shop } });
+      await db.$disconnect();
+    }
+  }, 60_000);
+});

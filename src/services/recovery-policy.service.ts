@@ -1,6 +1,7 @@
 import { RecoveryOfferMode } from "@prisma/client";
 import { parseEffectiveRecoveryPolicy } from "@modainteract/moda-interact-shared/recovery-policy";
 import prisma from "../lib/db.js";
+import { deliverableWooCode } from "../providers/woo-coupon-normalization.js";
 
 export type RecoveryPolicySnapshot = ReturnType<typeof parseEffectiveRecoveryPolicy> & {
   offerSnapshot: Record<string, unknown> | null;
@@ -48,12 +49,26 @@ export class RecoveryPolicyService {
 
     const configuredOfferMode = source.recoveryOfferMode as RecoveryOfferMode;
     const discount = source.fixedShopifyDiscount;
-    const fixedUsable = configuredOfferMode === "FIXED" && discount !== null &&
+    // Resolve the trusted Shop platform, never infer it from coupon metadata.
+    // Shopify's established eligibility checks must remain unchanged.
+    const shop = configuredOfferMode === "FIXED" && discount !== null
+      ? await this.database.shop.findUnique({ where: { id: shopId }, select: { platform: true } })
+      : null;
+    const wooSelectedCode = shop?.platform === "WOOCOMMERCE" && discount !== null &&
+      discount.shopId === shopId &&
+      discount.shopifyDiscountNodeId.startsWith("woo:coupon:") &&
+      discount.method === "CODE" && discount.isAvailable &&
+      discount.providerStatus !== "REMOVED" && discount.unavailableAt === null &&
+      discount.catalogue.lastSuccessfulSyncAt !== null &&
+      deliverableWooCode(discount.singleRedeemCode);
+    const shopifyFixedUsable = shop?.platform === "SHOPIFY" && discount !== null &&
       discount.fixedSelectable && discount.isAvailable &&
-        discount.providerStatus === "ACTIVE" &&
+      discount.providerStatus === "ACTIVE" &&
       discount.catalogue.status === "CURRENT" &&
       (discount.startsAt === null || discount.startsAt <= now) &&
       (discount.endsAt === null || discount.endsAt > now);
+    const fixedUsable = configuredOfferMode === "FIXED" &&
+      (wooSelectedCode || shopifyFixedUsable);
     const policy = parseEffectiveRecoveryPolicy({
       recoveryDelayMinutes: source.recoveryDelayMinutes,
       recoveryOfferMode: configuredOfferMode,

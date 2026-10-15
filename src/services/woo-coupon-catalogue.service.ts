@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
-import { normalizeWooCoupons, type NormalizedWooCoupon } from "../providers/woo-coupon-normalization.js";
+import { normalizeWooCouponBatch, type NormalizedWooCoupon } from "../providers/woo-coupon-normalization.js";
 import { WooCouponReadError } from "../providers/woo-coupon-transport.js";
 import { WooCouponReaderService } from "./woo-coupon-reader.service.js";
 import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
 const ERROR_CODE_LENGTH = 128;
+const logger = createLogger({
+  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+});
 // A complete bounded scan may contain up to 5,000 coupons. Prisma's default
 // five-second interactive transaction timeout is too short for the atomic write.
 const WRITE_TRANSACTION_TIMEOUT_MS = 120_000;
@@ -26,6 +31,7 @@ export class WooCouponCatalogueService {
       (shopId) => new WooCouponReaderService().fetchAll(shopId),
     private readonly clock: () => Date = () => new Date(),
     private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
+    private readonly reporting: Pick<StructuredLogger, "warn"> = logger,
   ) {}
 
   async reconcile(shopId: string, requestedAt: Date): Promise<ScanResult> {
@@ -59,9 +65,11 @@ export class WooCouponCatalogueService {
 
     try {
       // Reader requires a current grant before and after the entire paginated read.
-      // Any incomplete page or invalid coupon prevents all catalogue writes.
-      const observed = normalizeWooCoupons(await this.read(shopId), this.clock());
-      return await this.database.$transaction(async (tx) => {
+      // Failed pages or unreliable provider identities prevent all writes;
+      // individual optional-field anomalies must not fail a trustworthy scan.
+      const batch = normalizeWooCouponBatch(await this.read(shopId), this.clock());
+      const observed = batch.observed;
+      const outcome = await this.database.$transaction(async (tx) => {
         const catalogue = await this.lock(tx, shopId);
         if (!catalogue || catalogue.activeSyncToken !== claim.token ||
             catalogue.syncGeneration !== claim.generation || catalogue.status !== "SYNCING") {
@@ -111,6 +119,19 @@ export class WooCouponCatalogueService {
         });
         return "current" as const;
       }, { timeout: WRITE_TRANSACTION_TIMEOUT_MS });
+      if (outcome === "current" && batch.issueCount > 0) {
+        // Codes, Woo response bodies, provider metadata and customer PII never enter logs.
+        try {
+          this.reporting.warn("woo.coupon_sync.item_issues", {
+            shopId, generation: claim.generation, observedCount: observed.length,
+            issueCount: batch.issueCount, codeUnavailableCount: batch.codeUnavailableCount,
+            issues: batch.issues,
+          });
+        } catch {
+          // Operational diagnostics must never invalidate an already committed catalogue.
+        }
+      }
+      return outcome;
     } catch (error) {
       // A stale worker must not change a new owner's error/current state.
       await this.database.$transaction(async (tx) => {

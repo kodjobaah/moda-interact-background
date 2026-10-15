@@ -16,7 +16,7 @@ export class WooCouponReadError extends Error {
   constructor(readonly code:
     "grant_configuration" | "shop_unavailable" | "grant_missing" | "grant_unavailable" | "grant_changed" |
     "unsafe_target" | "provider_unavailable" | "unauthorized" | "invalid_page" | "unstable_pages" |
-    "incomplete_pages" | "too_many_pages" | "invalid_coupon") {
+    "incomplete_pages" | "too_many_pages" | "invalid_coupon" | "provider_identity_invalid") {
     super(code);
     this.name = "WooCouponReadError";
   }

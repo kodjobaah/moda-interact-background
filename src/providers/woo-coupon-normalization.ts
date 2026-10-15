@@ -1,6 +1,8 @@
 /**
- * Maps a completed Woo REST scan into the existing, provider-neutral discount columns.
- * This module neither accesses the database nor modifies merchant selection state.
+ * WooCommerce owns coupon eligibility and redemption. Only verify provider
+ * identity and whether a code is safe to transmit; optional attributes are
+ * descriptive and cannot invalidate an otherwise complete catalogue scan.
+ * Never copy provider customer data, metadata or entire response bodies.
  */
 import { WooCouponReadError } from "./woo-coupon-transport.js";
 
@@ -8,136 +10,184 @@ export interface NormalizedWooCoupon {
   shopifyDiscountNodeId: string;
   providerType: string;
   method: "CODE";
-  providerStatus: "ACTIVE" | "EXPIRED" | "EXHAUSTED" | "UNSUPPORTED";
+  providerStatus: "ACTIVE" | "UNDELIVERABLE";
   title: string;
   summary: string;
   startsAt: null;
   endsAt: Date | null;
-  codeCount: 1;
-  singleRedeemCode: string;
+  codeCount: 0 | 1;
+  singleRedeemCode: string | null;
   fixedSelectable: boolean;
   providerSnapshot: Record<string, unknown>;
 }
 
-const MAX_CODE_LENGTH = 255;
-const MAX_LIST_ENTRIES = 1000;
-const TYPES = new Set(["percent", "fixed_cart", "fixed_product"]);
-
-function invalid(): never { throw new WooCouponReadError("invalid_coupon"); }
-
-function optionalCount(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  if (!Number.isSafeInteger(value) || typeof value !== "number" || value < 0) invalid();
-  return value;
+export type WooCouponIssueReason = "code_not_deliverable" | "optional_field_ignored";
+export interface WooCouponIssue {
+  couponId: number;
+  field: string;
+  reason: WooCouponIssueReason;
 }
 
-function ids(value: unknown): number[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > MAX_LIST_ENTRIES ||
-      value.some((id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) invalid();
-  return value;
+const MAX_RESTRICTION_IDS = 1000;
+const MAX_ATTRIBUTE_LENGTH = 1024;
+const MAX_REPORTED_ISSUES = 20;
+
+function identityInvalid(): never {
+  throw new WooCouponReadError("provider_identity_invalid");
 }
 
-function bool(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value !== "boolean") invalid();
-  return value;
-}
-
-function amount(value: unknown): string {
-  if (typeof value !== "string" && typeof value !== "number") invalid();
-  const text = String(value);
-  if (!/^(?:0|[1-9]\d{0,9})(?:\.\d{1,6})?$/.test(text) || !Number.isFinite(Number(text))) invalid();
-  return text;
-}
-
-/** Prefer the explicitly UTC Woo field; do not guess the store timezone from date_expires. */
-function expiry(coupon: Record<string, unknown>): { date: Date | null; uncertain: boolean } {
-  const raw = coupon.date_expires_gmt;
-  if (raw === null || raw === undefined || raw === "") {
-    return { date: null, uncertain: typeof coupon.date_expires === "string" && coupon.date_expires.length > 0 };
-  }
-  if (typeof raw !== "string" ||
-      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)?$/.test(raw)) invalid();
-  // date_expires_gmt without an offset is documented as GMT/UTC, not local time.
-  const value = /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? raw : `${raw}Z`;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) invalid();
-  return { date: parsed, uncertain: false };
-}
-
-function optionalMoney(value: unknown): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  return amount(value);
+function providerId(coupon: Record<string, unknown>): number {
+  const id = coupon.id;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) identityInvalid();
+  return id;
 }
 
 function containsControlCharacter(value: string): boolean {
   return [...value].some((character) => {
-    const codePoint = character.codePointAt(0);
-    return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f);
+    const point = character.codePointAt(0);
+    return point !== undefined && (point <= 0x1f || point === 0x7f);
   });
 }
 
-/** Do not persist email_restrictions, used_by, meta_data or other customer PII. */
-export function normalizeWooCoupon(coupon: Record<string, unknown>, now: Date): NormalizedWooCoupon {
-  const id = coupon.id;
-  const code = coupon.code;
-  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 ||
-      typeof code !== "string" || !code.trim() || code.length > MAX_CODE_LENGTH ||
-      containsControlCharacter(code) || !Number.isFinite(now.getTime())) invalid();
+/** Codes are deliberately not truncated or constrained to 255 characters. */
+export function deliverableWooCode(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !containsControlCharacter(value);
+}
 
-  const discountType = coupon.discount_type;
-  if (typeof discountType !== "string" || discountType.length > 64) invalid();
-  const value = amount(coupon.amount);
-  const freeShipping = bool(coupon.free_shipping);
-  const { date: endsAt, uncertain } = expiry(coupon);
-  const usageLimit = optionalCount(coupon.usage_limit);
-  const usageCount = optionalCount(coupon.usage_count) ?? 0;
-  const usageLimitPerUser = optionalCount(coupon.usage_limit_per_user);
-  const maximumUsageItems = optionalCount(coupon.limit_usage_to_x_items);
-  const minimumAmount = optionalMoney(coupon.minimum_amount);
-  const maximumAmount = optionalMoney(coupon.maximum_amount);
-  const productIds = ids(coupon.product_ids);
-  const excludedProductIds = ids(coupon.excluded_product_ids);
-  const productCategories = ids(coupon.product_categories);
-  const excludedProductCategories = ids(coupon.excluded_product_categories);
-  const individualUse = bool(coupon.individual_use);
-  const excludeSaleItems = bool(coupon.exclude_sale_items);
-  const expired = endsAt !== null && endsAt.getTime() <= now.getTime();
-  const exhausted = usageLimit !== null && usageLimit > 0 && usageCount >= usageLimit;
-  const supported = TYPES.has(discountType) && (Number(value) > 0 || freeShipping) &&
-    !(discountType === "percent" && Number(value) > 100) && !uncertain;
-  const providerStatus = expired ? "EXPIRED" : exhausted ? "EXHAUSTED" : supported ? "ACTIVE" : "UNSUPPORTED";
+function optionalString(value: unknown): string | null {
+  if (typeof value === "string" && value.length <= MAX_ATTRIBUTE_LENGTH &&
+      !containsControlCharacter(value)) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function optionalCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function optionalIds(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length > MAX_RESTRICTION_IDS ||
+      value.some((id) => typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)) return null;
+  return value;
+}
+
+function optionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/** Never infer Woo's store timezone from the local-time date_expires field. */
+function utcExpiry(value: unknown): Date | null {
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)?$/.test(value)) return null;
+  const utc = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`;
+  const date = new Date(utc);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function normalise(
+  coupon: Record<string, unknown>, now: Date, report: (field: string, reason: WooCouponIssueReason) => void,
+): NormalizedWooCoupon {
+  const id = providerId(coupon);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid Woo coupon scan time");
+
+  const code = deliverableWooCode(coupon.code) ? coupon.code : null;
+  if (code === null) report("code", "code_not_deliverable");
+  const optional = <T>(field: string, convert: (raw: unknown) => T | null): T | null => {
+    const raw = coupon[field];
+    if (raw === null || raw === undefined || raw === "") return null;
+    const result = convert(raw);
+    if (result === null) report(field, "optional_field_ignored");
+    return result;
+  };
+  const discountType = optional("discount_type", optionalString);
+  const value = optional("amount", optionalString);
+  const freeShipping = optional("free_shipping", optionalBoolean);
+  const endsAt = optional("date_expires_gmt", utcExpiry);
+  const usageLimit = optional("usage_limit", optionalCount);
+  const usageCount = optional("usage_count", optionalCount);
+  const usageLimitPerUser = optional("usage_limit_per_user", optionalCount);
+  const maximumUsageItems = optional("limit_usage_to_x_items", optionalCount);
+  const minimumAmount = optional("minimum_amount", optionalString);
+  const maximumAmount = optional("maximum_amount", optionalString);
+  const productIds = optional("product_ids", optionalIds);
+  const excludedProductIds = optional("excluded_product_ids", optionalIds);
+  const productCategories = optional("product_categories", optionalIds);
+  const excludedProductCategories = optional("excluded_product_categories", optionalIds);
+  const individualUse = optional("individual_use", optionalBoolean);
+  const excludeSaleItems = optional("exclude_sale_items", optionalBoolean);
+
+  // Fixed internal marker fits VARCHAR(128). Retain the real provider-defined
+  // discount type in the bounded, explicit snapshot instead of an allowlist.
   const snapshot: Record<string, unknown> = {
-    provider: "WOOCOMMERCE", couponId: id, code,
+    provider: "WOOCOMMERCE", couponId: id,
     discountType, amount: value, freeShipping,
     usageLimit, usageCount, usageLimitPerUser, maximumUsageItems,
     productIds, excludedProductIds, productCategories, excludedProductCategories,
     individualUse, excludeSaleItems, minimumAmount, maximumAmount,
     dateExpiresGmt: endsAt?.toISOString() ?? null,
-    expiryUnverified: uncertain,
+    expiryUnverified: endsAt === null && (coupon.date_expires_gmt != null || coupon.date_expires != null),
+    codeDeliverable: code !== null,
   };
+  if (code !== null) snapshot.code = code;
+
   return {
     shopifyDiscountNodeId: `woo:coupon:${id}`,
-    providerType: `WooCoupon:${discountType}`,
+    providerType: "WooCoupon:code",
     method: "CODE",
-    providerStatus,
-    title: code,
-    summary: `${discountType}: ${value}${freeShipping ? "; free shipping" : ""}`,
+    providerStatus: code === null ? "UNDELIVERABLE" : "ACTIVE",
+    title: code ?? `WooCommerce coupon #${id}`,
+    summary: code === null ? "Coupon code unavailable" :
+      `${discountType ?? "WooCommerce coupon"}: ${value ?? "amount unspecified"}${freeShipping ? "; free shipping" : ""}`.slice(0, 256),
     startsAt: null,
     endsAt,
-    codeCount: 1,
+    codeCount: code === null ? 0 : 1,
     singleRedeemCode: code,
-    fixedSelectable: providerStatus === "ACTIVE",
+    fixedSelectable: code !== null,
     providerSnapshot: snapshot,
   };
+}
+
+export function normalizeWooCoupon(coupon: Record<string, unknown>, now: Date): NormalizedWooCoupon {
+  return normalise(coupon, now, () => {});
+}
+
+export interface WooCouponNormalizationBatch {
+  observed: NormalizedWooCoupon[];
+  issueCount: number;
+  codeUnavailableCount: number;
+  issues: WooCouponIssue[];
+}
+
+export function normalizeWooCouponBatch(
+  coupons: readonly Record<string, unknown>[], now: Date,
+): WooCouponNormalizationBatch {
+  if (!Number.isFinite(now.getTime())) throw new RangeError("Invalid Woo coupon scan time");
+  const seen = new Set<number>();
+  // Validate ALL provider identities before accepting any per-item projections.
+  // Duplicates/ambiguous IDs make absence accounting untrustworthy.
+  for (const coupon of coupons) {
+    if (!coupon || typeof coupon !== "object" || Array.isArray(coupon)) identityInvalid();
+    const id = providerId(coupon);
+    if (seen.has(id)) identityInvalid();
+    seen.add(id);
+  }
+  const result: WooCouponNormalizationBatch = {
+    observed: [], issueCount: 0, codeUnavailableCount: 0, issues: [],
+  };
+  for (const coupon of coupons) {
+    const id = providerId(coupon);
+    const item = normalise(coupon, now, (field, reason) => {
+      result.issueCount++;
+      if (result.issues.length < MAX_REPORTED_ISSUES) result.issues.push({ couponId: id, field, reason });
+    });
+    result.observed.push(item);
+    if (item.singleRedeemCode === null) result.codeUnavailableCount++;
+  }
+  return result;
 }
 
 export function normalizeWooCoupons(
   coupons: readonly Record<string, unknown>[], now: Date,
 ): NormalizedWooCoupon[] {
-  const result = coupons.map((coupon) => normalizeWooCoupon(coupon, now));
-  const keys = new Set(result.map((coupon) => coupon.shopifyDiscountNodeId));
-  if (keys.size !== result.length) invalid();
-  return result;
+  return normalizeWooCouponBatch(coupons, now).observed;
 }

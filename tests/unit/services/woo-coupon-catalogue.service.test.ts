@@ -15,7 +15,7 @@ type Discount = {
   shopId: string; shopifyDiscountNodeId: string; isAvailable: boolean;
   providerStatus: string; fixedSelectable: boolean; unavailableAt: Date | null;
   lastSeenSyncGeneration: number; lastSyncedAt: Date;
-  singleRedeemCode: string; providerSnapshot: Record<string, unknown>;
+  singleRedeemCode: string | null; providerSnapshot: Record<string, unknown>;
 };
 type Catalogue = {
   shopId: string; status: string; syncGeneration: number; activeSyncToken: string | null;
@@ -245,5 +245,80 @@ describe("ARCH-036 Woo catalogue generation reconciliation", () => {
     expect(await new WooCouponCatalogueService(f.database, read, () => REQUESTED)
       .reconcile("woo-a", REQUESTED)).toBe("unavailable");
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it("commits CURRENT with five ordinary coupons and one malformed optional coupon", async () => {
+    const f = fixture();
+    const reporter = { warn: vi.fn() };
+    const read = async () => [
+      ...[1, 2, 3, 4, 5].map((id) => fresh(id, `SAVE${id}`)),
+      { ...fresh(6, "UNFAMILIAR"), discount_type: "plugin-defined", amount: "0",
+        usage_limit: "unknown", date_expires_gmt: "invalid-date", product_ids: ["oops"] },
+    ];
+    const service = new WooCouponCatalogueService(f.database, read, () => REQUESTED, undefined, reporter);
+    expect(await service.reconcile("woo-a", REQUESTED)).toBe("current");
+    expect(f.state.catalogue.status).toBe("CURRENT");
+    expect(f.state.discounts).toHaveLength(6);
+    expect(f.state.discounts.find((r) => r.shopifyDiscountNodeId === "woo:coupon:6"))
+      .toMatchObject({ singleRedeemCode: "UNFAMILIAR", fixedSelectable: true,
+        providerStatus: "ACTIVE", isAvailable: false });
+    expect(reporter.warn).toHaveBeenCalledWith("woo.coupon_sync.item_issues", expect.objectContaining({
+      shopId: "woo-a", observedCount: 6, issueCount: 3,
+    }));
+    const logs = JSON.stringify(reporter.warn.mock.calls);
+    expect(logs).not.toContain("UNFAMILIAR");
+  });
+
+  it("keeps a selected coupon observed when its code disappears and restores deliverability later", async () => {
+    const f = fixture([oldSelection()]);
+    const scan = async (time: Date, entries: Record<string, unknown>[]) => {
+      f.state.catalogue.syncRequestedAt = time;
+      return new WooCouponCatalogueService(f.database, async () => entries, () => time)
+        .reconcile("woo-a", time);
+    };
+    expect(await scan(REQUESTED, [fresh(12, "OLD")])).toBe("current");
+    const missingCode = new Date("2026-10-13T13:00:00Z");
+    expect(await scan(missingCode, [{ ...fresh(12, "OLD"), code: "BAD\nHEADER" }])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "UNDELIVERABLE", fixedSelectable: false,
+      singleRedeemCode: null, lastSeenSyncGeneration: 2, unavailableAt: null,
+    });
+    expect(await scan(new Date("2026-10-13T14:00:00Z"), [
+      { ...fresh(12, "OLD"), code: null },
+    ])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "UNDELIVERABLE", unavailableAt: null,
+    });
+    const recovered = new Date("2026-10-13T15:00:00Z");
+    const longCode = "CODE" + "x".repeat(350);
+    expect(await scan(recovered, [fresh(12, longCode)])).toBe("current");
+    expect(f.state.discounts[0]).toMatchObject({
+      isAvailable: true, providerStatus: "ACTIVE", fixedSelectable: true,
+      singleRedeemCode: longCode, unavailableAt: null,
+    });
+    expect(f.calls.upserts.every((call) => !Object.hasOwn(call.update as object, "isAvailable"))).toBe(true);
+  });
+
+  it("does not report a stale generation as CURRENT or emit false diagnostics", async () => {
+    const f = fixture();
+    const reporter = { warn: vi.fn() };
+    const service = new WooCouponCatalogueService(f.database,
+      async () => { f.takeover(); return [{ ...fresh(1, "CODE"), usage_count: "bad" }]; },
+      () => REQUESTED, undefined, reporter);
+    expect(await service.reconcile("woo-a", REQUESTED)).toBe("superseded");
+    expect(f.state.discounts).toHaveLength(0);
+    expect(reporter.warn).not.toHaveBeenCalled();
+  });
+
+  it("treats provider ID corruption as an atomic whole-scan failure", async () => {
+    const f = fixture([oldSelection()]);
+    const reporter = { warn: vi.fn() };
+    await expect(new WooCouponCatalogueService(f.database,
+      async () => [fresh(12, "CODE"), { ...fresh(15, "OTHER"), id: 12 }],
+      () => REQUESTED, undefined, reporter)
+      .reconcile("woo-a", REQUESTED)).rejects.toThrow("provider_identity_invalid");
+    expect(f.state.catalogue).toMatchObject({ status: "ERROR", lastErrorCode: "provider_identity_invalid" });
+    expect(f.state.discounts).toEqual([oldSelection()]);
+    expect(reporter.warn).not.toHaveBeenCalled();
   });
 });
