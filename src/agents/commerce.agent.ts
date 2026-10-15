@@ -3,7 +3,7 @@ import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/co
 import { observeAgentInvocation } from "@modainteract/moda-interact-shared/observability/genai";
 import prisma from "../lib/db.js";
 import { executeCommerceHost } from "../commerce/host.js";
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import {
   createOpenRouterCredentialResolver,

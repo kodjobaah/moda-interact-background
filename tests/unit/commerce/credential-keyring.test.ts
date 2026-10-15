@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readCommerceCredentialKeyring } from "../../../src/commerce/credential-keyring.js";
+import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../../../src/commerce/credential-keyring.js";
 
 const secret = Buffer.alloc(32, 7).toString("base64");
 

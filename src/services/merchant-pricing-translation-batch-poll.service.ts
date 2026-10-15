@@ -19,7 +19,7 @@ import {
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import {
   createTranslationProviderCredentialResolver,
   type TranslationProviderCredentialResolver,

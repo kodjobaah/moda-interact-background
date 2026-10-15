@@ -16,7 +16,7 @@ const productionResolution = vi.hoisted(() => ({
 
 vi.mock("../../../src/commerce/host.js", () => ({ executeCommerceHost: host }));
 vi.mock("../../../src/commerce/credential-keyring.js", () => ({
-  readCommerceCredentialKeyring: productionResolution.readKeyring,
+  readCanonicalCredentialKeyring: productionResolution.readKeyring,
 }));
 vi.mock("../../../src/commerce/openrouter-credential.js", () => ({
   createOpenRouterCredentialResolver: productionResolution.resolveCredential,

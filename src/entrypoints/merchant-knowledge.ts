@@ -13,7 +13,7 @@ import { MerchantKnowledgeWebPageAcquirer } from "../services/merchant-knowledge
 import { MerchantKnowledgeUploadCleanupService } from "../services/merchant-knowledge-upload-cleanup.service.js";
 import { createMerchantKnowledgeR2Client } from "../services/merchant-knowledge-r2-client.js";
 import { loadMerchantKnowledgeR2Config } from "../services/merchant-knowledge-r2-config.js";
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import { createMerchantKnowledgeEmbeddingResolver } from "../services/merchant-knowledge-embedding-runtime.js";
 import { MerchantKnowledgeProcessingService } from "../services/merchant-knowledge-processing.service.js";
