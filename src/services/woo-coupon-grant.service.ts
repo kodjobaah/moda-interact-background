@@ -1,8 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import prisma from "../lib/db.js";
-import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
+import {
+  createWooRestReadGrantAad,
+  decryptCredential,
+  parseCredentialKeyring,
+  type CredentialKeyring,
+} from "@modainteract/moda-interact-shared/security/credentials/node";
 import { WooCouponReadError, type WooCouponSite } from "../providers/woo-coupon-transport.js";
 
 export interface WooCouponCredential {
@@ -13,9 +17,12 @@ export interface WooCouponCredential {
 export type WooConnectionMode = "public" | "local-development";
 export type WooCouponGrantDatabase = Pick<PrismaClient, "wooCommerceInstallation">;
 
-function loadWooCouponGrantKeyring(): Readonly<Record<string, Uint8Array>> {
+/** Reader-only configuration: one canonical keyring, no active-key or HMAC dependency. */
+export function loadWooCouponReadKeyring(
+  environment: Readonly<{ COMMERCE_CONNECTION_KEYS_JSON?: string }> = process.env,
+): CredentialKeyring {
   try {
-    return readCommerceCredentialKeyring();
+    return parseCredentialKeyring(environment.COMMERCE_CONNECTION_KEYS_JSON);
   } catch {
     throw new WooCouponReadError("grant_configuration");
   }
@@ -46,7 +53,7 @@ const installationSelection = {
 export class WooCouponGrantService {
   constructor(
     private readonly database: WooCouponGrantDatabase = prisma,
-    private readonly keys: Readonly<Record<string, Uint8Array>> = loadWooCouponGrantKeyring(),
+    private readonly keyring: CredentialKeyring = loadWooCouponReadKeyring(),
     private readonly mode: WooConnectionMode = loadWooCouponConnectionMode(),
   ) {}
 
@@ -68,19 +75,25 @@ export class WooCouponGrantService {
     const site = { canonicalSiteUrl: before.canonicalSiteUrl, mode: this.mode } as const;
     let credential: WooCouponCredential;
     try {
-      const value = decryptEncryptedCredential({
+      // Rotation is durable grant state (not a Shared envelope field). Keep its
+      // existing validity check and post-I/O fence even though Shared owns AEAD.
+      if (!Number.isSafeInteger(grant.rotationVersion) || grant.rotationVersion < 1) {
+        throw new Error("invalid rotation");
+      }
+      const value = decryptCredential({
+        keyring: this.keyring,
         envelope: {
           keyId: grant.encryptionKeyId,
-          editVersion: grant.rotationVersion,
           ciphertext: grant.credentialCiphertext,
           nonce: grant.credentialNonce,
           authTag: grant.credentialAuthTag,
         },
-        key: this.keys[grant.encryptionKeyId],
-        aad: JSON.stringify([
-          "moda-woo-rest-read-v1", shopId, before.id,
-          grant.authorizationAttemptId, grant.credentialVersionSnapshot,
-        ]),
+        aad: createWooRestReadGrantAad({
+          shopId,
+          installationId: before.id,
+          authorizationAttemptId: grant.authorizationAttemptId,
+          credentialVersionSnapshot: grant.credentialVersionSnapshot,
+        }),
       });
       const parsed: unknown = JSON.parse(value);
       if (!Array.isArray(parsed) || parsed.length !== 2 ||
