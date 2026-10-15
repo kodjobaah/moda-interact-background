@@ -48,7 +48,7 @@ describe("ARCH-036 BACKGROUND-005 Woo selected coupon policy", () => {
     { label: "confirmed REMOVED", changes: { providerStatus: "REMOVED" } },
     { label: "removed timestamp", changes: { unavailableAt: new Date("2026-10-14T12:00:00Z") } },
     { label: "missing redeem code", changes: { singleRedeemCode: null } },
-    { label: "unsafe redeem code", changes: { singleRedeemCode: "a\\nb" } },
+    { label: "unsafe redeem code", changes: { singleRedeemCode: "a\nb" } },
     { label: "never successfully observed", changes: { catalogue: { status: "ERROR", lastSuccessfulSyncAt: null } } },
     { label: "different shop", changes: { shopId: "someone-else" } },
     { label: "non-Woo provider ID", changes: { shopifyDiscountNodeId: "gid://shopify/Discount/123" } },
