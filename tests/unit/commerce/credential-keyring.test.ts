@@ -27,6 +27,7 @@ describe("readCommerceCredentialKeyring (Shared parser)", () => {
     ["a scalar", '"value"'],
     ["a blank key id", JSON.stringify({ "  ": secret })],
     ["an overlong key id", JSON.stringify({ ["k".repeat(65)]: secret })],
+    ["the former 128-character key ID", JSON.stringify({ ["k".repeat(128)]: secret })],
     ["invalid base64", JSON.stringify({ active: "not base64!" })],
     ["a short key", JSON.stringify({ active: Buffer.alloc(16).toString("base64") })],
     ["an empty keyring", "{}"],

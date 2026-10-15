@@ -1,6 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
 
-import { readWooCouponLegacyKeyring } from "./woo-coupon-legacy-keyring.js";
 import prisma from "../lib/db.js";
 import { decryptEncryptedCredential } from "../security/aes-gcm-credential.js";
 import { WooCouponReadError, type WooCouponSite } from "../providers/woo-coupon-transport.js";
@@ -13,12 +12,28 @@ export interface WooCouponCredential {
 export type WooConnectionMode = "public" | "local-development";
 export type WooCouponGrantDatabase = Pick<PrismaClient, "wooCommerceInstallation">;
 
-function loadWooCouponGrantKeyring(): Readonly<Record<string, Uint8Array>> {
-  try {
-    return readWooCouponLegacyKeyring();
-  } catch {
+/** The same keyring format and key identifiers used by API-007. No generated fallback keys. */
+export function loadWooCouponReadKeyring(environment: NodeJS.ProcessEnv = process.env): ReadonlyMap<string, Buffer> {
+  const raw = environment.MODA_WOO_REST_READ_KEYRING;
+  if (!raw) throw new WooCouponReadError("grant_configuration");
+  let source: unknown;
+  try { source = JSON.parse(raw); } catch { throw new WooCouponReadError("grant_configuration"); }
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new WooCouponReadError("grant_configuration");
   }
+  const entries = Object.entries(source);
+  if (entries.length < 1 || entries.length > 16) throw new WooCouponReadError("grant_configuration");
+  const keys = new Map<string, Buffer>();
+  for (const [id, encoded] of entries) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || typeof encoded !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(encoded)) throw new WooCouponReadError("grant_configuration");
+    const key = Buffer.from(encoded, "base64url");
+    if (key.length !== 32 || key.toString("base64url") !== encoded) {
+      throw new WooCouponReadError("grant_configuration");
+    }
+    keys.set(id, key);
+  }
+  return keys;
 }
 
 export function loadWooCouponConnectionMode(environment: NodeJS.ProcessEnv = process.env): WooConnectionMode {
@@ -46,7 +61,7 @@ const installationSelection = {
 export class WooCouponGrantService {
   constructor(
     private readonly database: WooCouponGrantDatabase = prisma,
-    private readonly keys: Readonly<Record<string, Uint8Array>> = loadWooCouponGrantKeyring(),
+    private readonly keys: ReadonlyMap<string, Buffer> = loadWooCouponReadKeyring(),
     private readonly mode: WooConnectionMode = loadWooCouponConnectionMode(),
   ) {}
 
@@ -76,7 +91,7 @@ export class WooCouponGrantService {
           nonce: grant.credentialNonce,
           authTag: grant.credentialAuthTag,
         },
-        key: this.keys[grant.encryptionKeyId],
+        key: this.keys.get(grant.encryptionKeyId),
         aad: JSON.stringify([
           "moda-woo-rest-read-v1", shopId, before.id,
           grant.authorizationAttemptId, grant.credentialVersionSnapshot,

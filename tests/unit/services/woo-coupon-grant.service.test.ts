@@ -1,20 +1,16 @@
 import { readFileSync } from "node:fs";
 import { createCipheriv, randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  WooCouponGrantService, loadWooCouponConnectionMode,
+  WooCouponGrantService, loadWooCouponReadKeyring, loadWooCouponConnectionMode,
 } from "../../../src/services/woo-coupon-grant.service.js";
-import { readWooCouponLegacyKeyring } from "../../../src/services/woo-coupon-legacy-keyring.js";
 
 const keyId = "k".repeat(70); // API-007 accepts key IDs up to 128 characters.
 const key = Buffer.alloc(32, 17);
 const shopId = "woo-shop";
 const installationId = "install-a";
 const attemptId = "attempt-a";
-const keyring = { [keyId]: key };
-
-afterEach(() => vi.unstubAllEnvs());
 
 function sealed() {
   const nonce = randomBytes(12);
@@ -37,7 +33,7 @@ function harness(overrides: Record<string, unknown> = {}) {
   };
   const findUnique = vi.fn().mockResolvedValue({ ...installation, ...overrides });
   const database = { wooCommerceInstallation: { findUnique } } as unknown as PrismaClient;
-  return { findUnique, service: new WooCouponGrantService(database, keyring, "public") };
+  return { findUnique, service: new WooCouponGrantService(database, new Map([[keyId, key]]), "public") };
 }
 
 describe("ARCH-036 API-sealed read grant parity", () => {
@@ -73,23 +69,9 @@ describe("ARCH-036 API-sealed read grant parity", () => {
     await expect(revoked.service.withAuthorizedRead(shopId, async () => [])).rejects.toThrow("grant_changed");
   });
 
-  it("uses the shared Commerce keyring and forbids local mode in production", () => {
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", "{}");
-    expect(() => new WooCouponGrantService(
-      { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
-    )).toThrow("grant_configuration");
-    const canonicalId = "woo-grant-key";
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [canonicalId]: key.toString("base64") }));
-    expect(readWooCouponLegacyKeyring()[canonicalId]).toEqual(key);
-    const service = new WooCouponGrantService(
-      { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
-      undefined,
-      "public",
-    );
-    expect(service).toBeInstanceOf(WooCouponGrantService);
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", undefined);
-    vi.stubEnv("MODA_WOO_REST_READ_KEYRING", JSON.stringify({ [canonicalId]: key.toString("base64") }));
-    expect(() => readWooCouponLegacyKeyring()).toThrow();
+  it("rejects partial/invalid keyring and forbids local mode in production", () => {
+    expect(() => loadWooCouponReadKeyring({ MODA_WOO_REST_READ_KEYRING: "{}" })).toThrow("grant_configuration");
+    expect(loadWooCouponReadKeyring({ MODA_WOO_REST_READ_KEYRING: JSON.stringify({ [keyId]: key.toString("base64url") }) }).get(keyId)).toEqual(key);
     expect(() => loadWooCouponConnectionMode({ MODA_WOOCOMMERCE_CONNECTION_MODE: "local-development", NODE_ENV: "production" })).toThrow("grant_configuration");
   });
 });
@@ -111,7 +93,7 @@ const apiFixture = JSON.parse(
 function producerFixture(overrides: {
   installation?: Record<string, unknown>;
   grant?: Record<string, unknown>;
-  keys?: Readonly<Record<string, Uint8Array>>;
+  keys?: ReadonlyMap<string, Buffer>;
 } = {}) {
   const original = {
     id: apiFixture.context.installationId,
@@ -136,7 +118,7 @@ function producerFixture(overrides: {
   const findUnique = vi.fn().mockResolvedValue(installation);
   const db = { wooCommerceInstallation: { findUnique } } as unknown as PrismaClient;
   return { findUnique, installation, service: new WooCouponGrantService(db,
-    overrides.keys ?? { [apiFixture.keyId]: Buffer.alloc(32, 17) }, "public") };
+    overrides.keys ?? new Map([[apiFixture.keyId, Buffer.alloc(32, 17)]]), "public") };
 }
 
 describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
@@ -153,7 +135,7 @@ describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
 
   it.each([
     ["missing key ID", { grant: { encryptionKeyId: "other-key" } }],
-    ["incorrect key bytes", { keys: { [apiFixture.keyId]: Buffer.alloc(32, 44) } }],
+    ["incorrect key bytes", { keys: new Map([[apiFixture.keyId, Buffer.alloc(32, 44)]]) }],
     ["installation AAD", { installation: { id: "wrong-installation" }, grant: { installationId: "wrong-installation" } }],
     ["attempt AAD", { grant: { authorizationAttemptId: "wrong-attempt" } }],
     ["credential-version AAD", { installation: { credentialVersion: 4 }, grant: { credentialVersionSnapshot: 4 } }],

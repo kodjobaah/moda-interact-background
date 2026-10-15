@@ -411,7 +411,7 @@ function parseLifecycleEvent(value: unknown, appId: string, shopId: string): Par
   return {
     id: event.id,
     eventType,
-    state: state as PartnerSubscriptionLifecycleEvent["state"],
+    state,
     occurredAt,
     cancelEffectiveOn: nullableString(event.cancelEffectiveOn, "cancelEffectiveOn"),
     planHandle: nullableString(event.plan?.handle, "planHandle"),
@@ -449,7 +449,7 @@ function nullableString(value: unknown, fieldName: string): string | null {
   return value;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null;
 }
 
