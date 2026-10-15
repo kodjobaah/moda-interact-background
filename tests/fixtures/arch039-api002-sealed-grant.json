@@ -1,0 +1,17 @@
+{
+  "provenance": "moda-interact-api/src/woocommerce/rest-read/envelope.ts#sealWooReadCredentials (ARCH-039-API-002)",
+  "producerSourceSha256": "a7ea116d050dc0d797c595024ec338e34e1fbe66d6055c6283ca47148107ea60",
+  "sharedVersion": "2.4.1",
+  "context": {
+    "shopId": "woo-shop",
+    "installationId": "install-a",
+    "authorizationAttemptId": "attempt-a",
+    "credentialVersionSnapshot": 3
+  },
+  "keyId": "woo-key-v1",
+  "rotationVersion": 1,
+  "testKeyBase64": "ERERERERERERERERERERERERERERERERERERERERERE=",
+  "ciphertext": "jdRCoDtKTx/J+Ig5qZYdJtD6qQ==",
+  "nonce": "2aqNFjZ2QxZfhFOe",
+  "authTag": "22yYIOXisQeuJB2gSBwOJw=="
+}
