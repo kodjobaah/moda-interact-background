@@ -2,6 +2,11 @@ import { createCipheriv } from "node:crypto";
 
 import { CommerceEmbeddingPurpose } from "@prisma/client";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import { parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
+
+const ring = (entries: Record<string, Uint8Array>) => parseCredentialKeyring(
+  JSON.stringify(Object.fromEntries(Object.entries(entries).map(([id, key]) => [id, Buffer.from(key).toString("base64")]))),
+);
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -68,7 +73,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const resolver = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique } } as never,
       environment: "TEST",
-      keyring: { active: key },
+      keyring: ring({ active: key }),
     });
 
     const service = await resolver.resolve();
@@ -99,7 +104,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const resolver = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique } } as never,
       environment: "TEST",
-      keyring: { active: first.key },
+      keyring: ring({ active: first.key }),
     });
 
     await expect(resolver.resolve()).resolves.toMatchObject({
@@ -115,7 +120,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const missing = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(null) } } as never,
       environment: "TEST",
-      keyring: { active: Buffer.alloc(32, 1) },
+      keyring: ring({ active: Buffer.alloc(32, 1) }),
     });
     await expect(missing.resolve()).rejects.toMatchObject({
       code: "EMBEDDING_CONFIGURATION_UNAVAILABLE",
@@ -125,7 +130,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const wrongKey = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
       environment: "TEST",
-      keyring: { active: Buffer.alloc(32, 3) },
+      keyring: ring({ active: Buffer.alloc(32, 3) }),
     });
     await expect(wrongKey.resolve()).rejects.toBeInstanceOf(
       MerchantKnowledgeEmbeddingConfigurationError,
@@ -142,7 +147,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const resolver = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
       environment: "TEST",
-      keyring: { active: key },
+      keyring: ring({ active: key }),
     });
     await expect(resolver.resolve()).rejects.toMatchObject({
       code: "INVALID_EMBEDDING_CONFIGURATION",
@@ -154,7 +159,7 @@ describe("Merchant Knowledge database-backed embedding configuration", () => {
     const resolver = createMerchantKnowledgeEmbeddingResolver({
       db: { commerceEmbeddingConfiguration: { findUnique: vi.fn().mockResolvedValue(row) } } as never,
       environment: "TEST",
-      keyring: { rotated: key },
+      keyring: ring({ rotated: key }),
     });
     await expect(resolver.resolve()).rejects.toMatchObject({
       code: "EMBEDDING_CONFIGURATION_UNAVAILABLE",

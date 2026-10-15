@@ -20,7 +20,7 @@ import {
   createOpenAITranslationProvider,
   type TranslationProvider,
 } from "../providers/translation.provider.js";
-import { readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
+import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import {
   createTranslationProviderCredentialResolver,
   type TranslationProviderCredentialResolver,
