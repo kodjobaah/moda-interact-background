@@ -8,7 +8,7 @@ Configure the MCP and deployment settings on the messaging worker. The shared cr
 
 - `COMMERCE_MCP_URL`: fixed private Commerce URL ending in `/api/mcp`. No credentials, query or fragment. HTTP is supported for the private service network; redirects are rejected.
 - `DEPLOYMENT_ENVIRONMENT_NAME`: existing shared environment identity; match Commerce.
-- `COMMERCE_CONNECTION_KEYS_JSON`: shared 32-byte AES keyring used to decrypt the environment's encrypted OpenRouter credential and WooCommerce API-007 read grants. Woo key IDs and key bytes must also be configured in API-007's `MODA_WOO_REST_READ_KEYRING`, encoded there as base64url and here as standard base64.
+- `COMMERCE_CONNECTION_KEYS_JSON`: shared 32-byte AES keyring used to decrypt the environment's encrypted OpenRouter credential and WooCommerce API-007 read grants. API and Background share this one canonical keyring (standard padded Base64); no Woo-specific keyring or base64url configuration is permitted.
 - The single Moda WhatsApp sender configuration remains required. The legacy conversational Groq model selector is not used by the CommerceAgent; `GROQ_API_KEY` may remain required independently for Groq speech transcription.
 
 ## Production model resolution

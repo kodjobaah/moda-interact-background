@@ -400,6 +400,9 @@ function parseLifecycleEvent(value: unknown, appId: string, shopId: string): Par
     throw new ShopifyPartnerBillingError("Shopify Partner API returned an invalid lifecycle event timestamp", "malformed-lifecycle-event", true);
   }
   const state = event.state;
+  if (!isLifecycleState(state)) {
+    throw new ShopifyPartnerBillingError("Shopify Partner API returned an invalid subscription lifecycle state", "malformed-lifecycle-event", true);
+  }
   const eventType = lifecycleEventType(state, event.eventType);
   if (!eventType) {
     throw new ShopifyPartnerBillingError("Shopify Partner API returned an invalid subscription lifecycle state", "malformed-lifecycle-event", true);
@@ -435,6 +438,13 @@ function lifecycleEventType(
   const expected = stateToEventType[state];
   if (!expected || rawEventType !== expected) return null;
   return expected;
+}
+
+function isLifecycleState(
+  state: unknown,
+): state is PartnerSubscriptionLifecycleEvent["state"] {
+  return typeof state === "string"
+    && ["CREATED", "UPDATED", "CANCELLATION_SCHEDULED", "CANCELED", "FROZEN", "UNFROZEN"].includes(state);
 }
 
 function nullableString(value: unknown, fieldName: string): string | null {

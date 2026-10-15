@@ -1,26 +1,45 @@
 import { readFileSync } from "node:fs";
 import { createCipheriv, randomBytes } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  WooCouponGrantService, loadWooCouponConnectionMode,
+  createWooRestReadGrantAad,
+  encryptCredential,
+  parseCredentialKeyring,
+  type CredentialKeyring,
+} from "@modainteract/moda-interact-shared/security/credentials/node";
+import type { PrismaClient } from "@prisma/client";
+import { describe, expect, it, vi } from "vitest";
+import {
+  WooCouponGrantService, loadWooCouponReadKeyring, loadWooCouponConnectionMode,
 } from "../../../src/services/woo-coupon-grant.service.js";
 
-const keyId = "k".repeat(70); // API-007 accepts key IDs up to 128 characters.
+const keyId = "woo-key-v1";
+const secondKeyId = "woo-key-v2";
 const key = Buffer.alloc(32, 17);
+const secondKey = Buffer.alloc(32, 29);
+const canonicalKeyring = parseCredentialKeyring(JSON.stringify({
+  [keyId]: key.toString("base64"),
+  [secondKeyId]: secondKey.toString("base64"),
+}));
 const shopId = "woo-shop";
 const installationId = "install-a";
 const attemptId = "attempt-a";
-const keyring = { [keyId]: key };
 
-afterEach(() => vi.unstubAllEnvs());
-
-function sealed() {
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(Buffer.from(JSON.stringify(["moda-woo-rest-read-v1", shopId, installationId, attemptId, 3])));
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(["ck_123", "cs_456"])), cipher.final()]);
-  return { credentialCiphertext: ciphertext, credentialNonce: nonce, credentialAuthTag: cipher.getAuthTag() };
+/** Same Shared call and persisted fields as API-002 sealWooReadCredentials. */
+function sealed(activeKeyId = keyId, text = JSON.stringify(["ck_123", "cs_456"])) {
+  const envelope = encryptCredential({
+    keyring: canonicalKeyring,
+    activeKeyId,
+    plaintext: text,
+    aad: createWooRestReadGrantAad({
+      shopId, installationId, authorizationAttemptId: attemptId, credentialVersionSnapshot: 3,
+    }),
+  });
+  return {
+    encryptionKeyId: envelope.keyId,
+    credentialCiphertext: Buffer.from(envelope.ciphertext),
+    credentialNonce: Buffer.from(envelope.nonce),
+    credentialAuthTag: Buffer.from(envelope.authTag),
+  };
 }
 
 function harness(overrides: Record<string, unknown> = {}) {
@@ -36,11 +55,11 @@ function harness(overrides: Record<string, unknown> = {}) {
   };
   const findUnique = vi.fn().mockResolvedValue({ ...installation, ...overrides });
   const database = { wooCommerceInstallation: { findUnique } } as unknown as PrismaClient;
-  return { findUnique, service: new WooCouponGrantService(database, keyring, "public") };
+  return { findUnique, service: new WooCouponGrantService(database, canonicalKeyring, "public") };
 }
 
-describe("ARCH-036 API-sealed read grant parity", () => {
-  it("opens the exact API-007 AAD and rechecks the grant after I/O", async () => {
+describe("ARCH-039 Shared Woo grant reader parity", () => {
+  it("opens the exact API-002 Shared AAD and rechecks the grant after I/O", async () => {
     const h = harness();
     const read = vi.fn().mockResolvedValue([{ id: 10 }]);
     expect(await h.service.withAuthorizedRead(shopId, read)).toEqual([{ id: 10 }]);
@@ -49,6 +68,76 @@ describe("ARCH-036 API-sealed read grant parity", () => {
       { consumerKey: "ck_123", consumerSecret: "cs_456" },
     );
     expect(h.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it("decrypts with a retained non-active key without an active writer selector", async () => {
+    const h = harness();
+    const installation = await h.findUnique();
+    h.findUnique.mockResolvedValue({
+      ...installation,
+      restReadGrant: {
+        ...installation.restReadGrant,
+        ...sealed(secondKeyId),
+      },
+    });
+    const read = vi.fn().mockResolvedValue("rotated");
+    expect(await h.service.withAuthorizedRead(shopId, read)).toBe("rotated");
+    expect(read).toHaveBeenCalledWith(
+      { canonicalSiteUrl: "https://woo.example", mode: "public" },
+      { consumerKey: "ck_123", consumerSecret: "cs_456" },
+    );
+  });
+
+  it("rejects modified tags, incorrect key IDs and malformed decrypted JSON", async () => {
+    for (const grant of [
+      { credentialAuthTag: Buffer.alloc(16, 0) },
+      { encryptionKeyId: "missing-key" },
+      { ...sealed(keyId, JSON.stringify(["ck_123"])) },
+      { ...sealed(keyId, JSON.stringify(["ck_123", "cs\n456"])) },
+    ]) {
+      const h = harness();
+      const installation = await h.findUnique();
+      h.findUnique.mockResolvedValue({ ...installation, restReadGrant: { ...installation.restReadGrant, ...grant } });
+      const read = vi.fn();
+      await expect(h.service.withAuthorizedRead(shopId, read)).rejects.toThrow("grant_unavailable");
+      expect(read).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects invalid durable rotation versions before calling the provider", async () => {
+    for (const rotationVersion of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const h = harness();
+      const installation = await h.findUnique();
+      h.findUnique.mockResolvedValue({
+        ...installation,
+        restReadGrant: { ...installation.restReadGrant, rotationVersion },
+      });
+      const read = vi.fn();
+      await expect(h.service.withAuthorizedRead(shopId, read)).rejects.toThrow("grant_unavailable");
+      expect(read).not.toHaveBeenCalled();
+    }
+  });
+
+  it("accepts an independently sealed API-format envelope using canonical Shared AAD", async () => {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(Buffer.from(createWooRestReadGrantAad({
+      shopId, installationId, authorizationAttemptId: attemptId, credentialVersionSnapshot: 3,
+    })));
+    const ciphertext = Buffer.concat([cipher.update(JSON.stringify(["ck_123", "cs_456"])), cipher.final()]);
+    const h = harness();
+    const installation = await h.findUnique();
+    h.findUnique.mockResolvedValue({
+      ...installation,
+      restReadGrant: {
+        ...installation.restReadGrant,
+        credentialNonce: nonce,
+        credentialCiphertext: ciphertext,
+        credentialAuthTag: cipher.getAuthTag(),
+      },
+    });
+    expect(await h.service.withAuthorizedRead(shopId, async (_site, credential) => credential.consumerKey))
+      .toBe("ck_123");
   });
 
   it("skips absent permission and never invokes the provider", async () => {
@@ -72,57 +161,69 @@ describe("ARCH-036 API-sealed read grant parity", () => {
     await expect(revoked.service.withAuthorizedRead(shopId, async () => [])).rejects.toThrow("grant_changed");
   });
 
-  it("uses the shared Commerce keyring and forbids local mode in production", () => {
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", "{}");
-    expect(() => new WooCouponGrantService(
-      { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
-    )).toThrow("grant_configuration");
-    vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [keyId]: key.toString("base64") }));
-    const service = new WooCouponGrantService(
-      { wooCommerceInstallation: { findUnique: vi.fn() } } as unknown as PrismaClient,
-      undefined,
-      "public",
-    );
-    expect(service).toBeInstanceOf(WooCouponGrantService);
+  it("rejects partial/invalid keyring and forbids local mode in production", () => {
+    expect(() => loadWooCouponReadKeyring({})).toThrow("grant_configuration");
+    expect(() => loadWooCouponReadKeyring({ COMMERCE_CONNECTION_KEYS_JSON: "{}" })).toThrow("grant_configuration");
+    const parsed = loadWooCouponReadKeyring({
+      COMMERCE_CONNECTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64") }),
+    });
+    expect(parsed.hasKey(keyId)).toBe(true);
+    expect(parsed.keyIds).toEqual([keyId]);
+    expect(() => loadWooCouponReadKeyring({
+      // Legacy-only configuration is forbidden (no alias or fallback).
+      MODA_WOO_REST_READ_KEYRING: JSON.stringify({ [keyId]: key.toString("base64url") }),
+    } as NodeJS.ProcessEnv)).toThrow("grant_configuration");
+    expect(() => loadWooCouponReadKeyring({
+      COMMERCE_CONNECTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64url") }),
+    })).toThrow("grant_configuration");
     expect(() => loadWooCouponConnectionMode({ MODA_WOOCOMMERCE_CONNECTION_MODE: "local-development", NODE_ENV: "production" })).toThrow("grant_configuration");
   });
 });
 
-// Immutable cross-repository fixture: generated using API-007's
-// moda-interact-api/src/woocommerce/rest-read/envelope.ts sealWooReadCredentials.
-// This is intentionally NOT created using Background's own sealing helper.
-const apiFixture = JSON.parse(
-  readFileSync(new URL("../../fixtures/arch036-api007-sealed-grant.json", import.meta.url), "utf8"),
-) as {
+// Immutable independent producer fixture from the earlier API-007 AES-GCM grant.
+// It exercises the same persisted AES-GCM wire shape; API-002 Shared-generated
+// grants are covered by the separate ARCH-039 API-002 fixture tests below.
+type ApiGrantFixture = {
   context: { shopId: string; installationId: string; authorizationAttemptId: string; credentialVersionSnapshot: number };
   keyId: string;
   rotationVersion: number;
   ciphertext: string;
   nonce: string;
   authTag: string;
+  testKeyBase64?: string;
 };
+
+const apiFixture = JSON.parse(
+  readFileSync(new URL("../../fixtures/arch036-api007-sealed-grant.json", import.meta.url), "utf8"),
+) as ApiGrantFixture;
+
+// Fixed output of API-002's actual sealWooReadCredentials function, not a
+// locally reconstructed ciphertext. The JSON records its producer source hash.
+const api002Fixture = JSON.parse(
+  readFileSync(new URL("../../fixtures/arch039-api002-sealed-grant.json", import.meta.url), "utf8"),
+) as ApiGrantFixture;
 
 function producerFixture(overrides: {
   installation?: Record<string, unknown>;
   grant?: Record<string, unknown>;
-  keys?: Readonly<Record<string, Uint8Array>>;
-} = {}) {
+  keyring?: CredentialKeyring;
+} = {}, fixture: ApiGrantFixture = apiFixture) {
   const original = {
-    id: apiFixture.context.installationId,
-    shopId: apiFixture.context.shopId,
+    id: fixture.context.installationId,
+    shopId: fixture.context.shopId,
     status: "ACTIVE", revokedAt: null,
-    canonicalSiteUrl: "https://woo.example", credentialVersion: apiFixture.context.credentialVersionSnapshot,
+    canonicalSiteUrl: "https://woo.example", credentialVersion: fixture.context.credentialVersionSnapshot,
     shop: { status: "ACTIVE", platform: "WOOCOMMERCE", shopifyShopId: null, domain: "https://woo.example" },
     restReadGrant: {
-      id: "fixture-grant", installationId: apiFixture.context.installationId,
-      shopId: apiFixture.context.shopId,
+      id: "fixture-grant", installationId: fixture.context.installationId,
+      shopId: fixture.context.shopId,
       status: "ACTIVE", revokedAt: null, invalidatedAt: null, authorizedScope: "read",
-      authorizationAttemptId: apiFixture.context.authorizationAttemptId,
-      credentialVersionSnapshot: apiFixture.context.credentialVersionSnapshot,
-      rotationVersion: apiFixture.rotationVersion, encryptionKeyId: apiFixture.keyId,
-      credentialCiphertext: Buffer.from(apiFixture.ciphertext, "base64"),
-      credentialNonce: Buffer.from(apiFixture.nonce, "base64"),
-      credentialAuthTag: Buffer.from(apiFixture.authTag, "base64"),
+      authorizationAttemptId: fixture.context.authorizationAttemptId,
+      credentialVersionSnapshot: fixture.context.credentialVersionSnapshot,
+      rotationVersion: fixture.rotationVersion, encryptionKeyId: fixture.keyId,
+      credentialCiphertext: Buffer.from(fixture.ciphertext, "base64"),
+      credentialNonce: Buffer.from(fixture.nonce, "base64"),
+      credentialAuthTag: Buffer.from(fixture.authTag, "base64"),
     },
   };
   const installation = { ...original, ...overrides.installation,
@@ -130,7 +231,9 @@ function producerFixture(overrides: {
   const findUnique = vi.fn().mockResolvedValue(installation);
   const db = { wooCommerceInstallation: { findUnique } } as unknown as PrismaClient;
   return { findUnique, installation, service: new WooCouponGrantService(db,
-    overrides.keys ?? { [apiFixture.keyId]: Buffer.alloc(32, 17) }, "public") };
+    overrides.keyring ?? parseCredentialKeyring(JSON.stringify({
+      [fixture.keyId]: fixture.testKeyBase64 ?? key.toString("base64"),
+    })), "public") };
 }
 
 describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
@@ -147,7 +250,9 @@ describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
 
   it.each([
     ["missing key ID", { grant: { encryptionKeyId: "other-key" } }],
-    ["incorrect key bytes", { keys: { [apiFixture.keyId]: Buffer.alloc(32, 44) } }],
+    ["incorrect key bytes", { keyring: parseCredentialKeyring(JSON.stringify({
+      [apiFixture.keyId]: Buffer.alloc(32, 44).toString("base64"),
+    })) }],
     ["installation AAD", { installation: { id: "wrong-installation" }, grant: { installationId: "wrong-installation" } }],
     ["attempt AAD", { grant: { authorizationAttemptId: "wrong-attempt" } }],
     ["credential-version AAD", { installation: { credentialVersion: 4 }, grant: { credentialVersionSnapshot: 4 } }],
@@ -179,6 +284,62 @@ describe("ARCH-036 API-007 producer-sealed credential fixture", () => {
       restReadGrant: { ...(h.installation.restReadGrant as object), rotationVersion: 2 },
     });
     await expect(h.service.withAuthorizedRead(apiFixture.context.shopId, async () => []))
+      .rejects.toThrow("grant_changed");
+  });
+});
+
+
+describe("ARCH-039 API-002 sealWooReadCredentials immutable producer fixture", () => {
+  it("opens the actual API-002 sealed grant and enforces the post-read fence", async () => {
+    const h = producerFixture({}, api002Fixture);
+    const read = vi.fn().mockResolvedValue("api002-ok");
+    expect(await h.service.withAuthorizedRead(api002Fixture.context.shopId, read)).toBe("api002-ok");
+    expect(read).toHaveBeenCalledWith(
+      { canonicalSiteUrl: "https://woo.example", mode: "public" },
+      { consumerKey: "ck_123", consumerSecret: "cs_456" },
+    );
+    expect(h.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["tenant", { installation: { shopId: "other-shop" } }],
+    ["installation AAD", { installation: { id: "other-install" }, grant: { installationId: "other-install" } }],
+    ["authorization attempt AAD", { grant: { authorizationAttemptId: "other-attempt" } }],
+    ["version AAD", { installation: { credentialVersion: 4 }, grant: { credentialVersionSnapshot: 4 } }],
+    ["revocation", { grant: { status: "REVOKED" } }],
+    ["read scope", { grant: { authorizedScope: "read_write" } }],
+    ["unknown key", { grant: { encryptionKeyId: "unknown" } }],
+  ])("rejects the API-002 fixture with altered %s", async (_label, overrides) => {
+    const h = producerFixture(overrides, api002Fixture);
+    const read = vi.fn();
+    await expect(h.service.withAuthorizedRead(api002Fixture.context.shopId, read)).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("rejects tampered API-002 ciphertext and authentication tag", async () => {
+    for (const column of ["credentialCiphertext", "credentialAuthTag"] as const) {
+      const h = producerFixture({}, api002Fixture);
+      const original = h.installation.restReadGrant[column];
+      const tampered = Buffer.from(original);
+      tampered[0] ^= 1;
+      h.findUnique.mockResolvedValue({
+        ...h.installation,
+        restReadGrant: { ...h.installation.restReadGrant, [column]: tampered },
+      });
+      const read = vi.fn();
+      await expect(h.service.withAuthorizedRead(api002Fixture.context.shopId, read))
+        .rejects.toThrow("grant_unavailable");
+      expect(read).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fences a rotated API-002 grant after provider I/O", async () => {
+    const h = producerFixture({}, api002Fixture);
+    h.findUnique.mockResolvedValueOnce(h.installation).mockResolvedValueOnce({
+      ...h.installation,
+      restReadGrant: { ...h.installation.restReadGrant, rotationVersion: 2 },
+    });
+    await expect(h.service.withAuthorizedRead(api002Fixture.context.shopId, async () => []))
       .rejects.toThrow("grant_changed");
   });
 });
