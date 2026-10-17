@@ -21,7 +21,9 @@ Background `database/` submodule must be updated to the accepted
 - `RecoveryFollowUpPolicyService.checkServiceWindow`,
   `validateHumanFollowUp`, `claimSequenceTwo` accept a canonical recovery; one
   `(recoveryId, sequence=2)` row and `recovery-outreach:<attemptId>` credit key
-  are shared by human and automatic follow-up. BG002 must inject the existing
+  are shared by human and automatic follow-up. A merchant claim must supply
+  `expectedRevision` and must atomically match a HUMAN-owned conversation;
+  a stale/AI-owned command never consumes the slot. BG002 must inject the existing
   checkout lock and template choice; `RecoveryFollowUpBillingService` delegates
   admit/revalidate/commit/failure/release to `RecoveryBillingService`. Do not call a new billing ledger.
 - `HumanSendPolicyService.checkRestriction`, `validateContent`,

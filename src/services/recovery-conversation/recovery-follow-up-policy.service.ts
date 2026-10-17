@@ -4,8 +4,14 @@ import { first, rows, changed, recoveryDatabase, readRecoveryContext, lockRecove
 
 export const CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
 export type FollowUpClaim = { kind: "claimed"; attemptId: string; billingSource: string }
-  | { kind: "suppressed"; reason: "not-recovery-linked" | "terminal-recovery" | "human-controlled" | "customer-window-open" | "customer-engaged" | "no-initial-outreach" | "already-claimed" | "recipient-mismatch" | "invalid-claim" };
+  | { kind: "suppressed"; reason: "not-recovery-linked" | "terminal-recovery" | "human-controlled" | "customer-window-open" | "customer-engaged" | "no-initial-outreach" | "already-claimed" | "recipient-mismatch" | "invalid-claim" | "human-inactive-or-stale" };
 export type FollowUpInitiation = "scheduled_no_response" | "merchant_post_window";
+export type FollowUpClaimInput = {
+  recoveryId: string; initiationKey: string; recipient: string; now: Date;
+} & (
+  | { initiator: "merchant_post_window"; expectedRevision: number }
+  | { initiator: "scheduled_no_response"; expectedRevision?: never }
+);
 
 export function customerWindow(lastVerifiedInbound: Date | null, now: Date) {
   const closesAt = lastVerifiedInbound ? new Date(lastVerifiedInbound.getTime() + CUSTOMER_WINDOW_MS) : null;
@@ -34,12 +40,10 @@ export class RecoveryFollowUpPolicyService {
 
   /** Sequence 2 is the *only* recovery follow-up claim. Lock Shop and Conversation,
    * then claim the existing pending attempt or create once from initial snapshot.
+   * Merchant claims require an expected HUMAN control revision under the same locks.
    * External checkout lock and RecoveryBillingService admission remain BG002's ports.
    */
-  async claimSequenceTwo(input: {
-    recoveryId: string; initiator: FollowUpInitiation; initiationKey: string;
-    recipient: string; now: Date;
-  }): Promise<FollowUpClaim> {
+  async claimSequenceTwo(input: FollowUpClaimInput): Promise<FollowUpClaim> {
     if (!input.initiationKey.trim() || input.initiationKey.length > 255 || !input.recipient.trim())
       return { kind: "suppressed", reason: "invalid-claim" };
     return this.database.$transaction(async (tx) => {
@@ -51,6 +55,13 @@ export class RecoveryFollowUpPolicyService {
       if (!context || context.recoveryId !== input.recoveryId)
         return { kind: "suppressed", reason: "not-recovery-linked" } as const;
       if (terminalRecovery(context.recoveryStatus)) return { kind: "suppressed", reason: "terminal-recovery" } as const;
+      // The claim consumes the one shared follow-up slot. Check HUMAN ownership
+      // under the same Shop -> Conversation locks as the attempt mutation so a
+      // stale merchant command cannot burn the slot while AI owns the chat.
+      if (input.initiator === "merchant_post_window" &&
+          (context.mode !== "HUMAN" || input.expectedRevision === undefined ||
+           !Number.isSafeInteger(input.expectedRevision) || context.revision !== input.expectedRevision))
+        return { kind: "suppressed", reason: "human-inactive-or-stale" } as const;
       if (input.initiator === "scheduled_no_response" && context.mode === "HUMAN")
         return { kind: "suppressed", reason: "human-controlled" } as const;
       if (input.initiator === "merchant_post_window" && customerWindow(context.lastInboundAt, input.now).open)

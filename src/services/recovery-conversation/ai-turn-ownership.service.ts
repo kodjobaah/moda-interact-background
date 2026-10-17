@@ -44,6 +44,7 @@ export function projectRecoveryHistory(input: ReadonlyArray<{
 }>, maxMessages = 24, maxCharacters = 8000): AttributedHistory[] {
   const limit = Math.max(0, Math.min(100, Math.floor(maxMessages)));
   const characters = Math.max(0, Math.min(20000, Math.floor(maxCharacters)));
+  if (limit === 0) return [];
   return input.slice(-limit).map((message) => ({
     role: message.senderType === "CUSTOMER" || message.senderType === "HUMAN" ? "user" : "assistant",
     content: message.senderType === "HUMAN"

@@ -50,6 +50,25 @@ async function fixture(db: PrismaClient, label: string) {
   return { shopId,recoveryId,conversationId, addCommand, async cleanup(){ await db.shop.delete({ where: {id:shopId} }); } };
 }
 
+/** Seed a sent initial outreach; waiting state requires a real sent message. */
+async function initialOutreach(db: PrismaClient, conversationId: string, recoveryId: string) {
+  const initialId = randomUUID();
+  const initialMessageId = randomUUID();
+  const initialSentAt = new Date(Date.now() - 48 * 60 * 60_000);
+  await db.conversationMessage.create({ data: {
+    id: initialMessageId, conversationId,
+    direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT",
+    content: "Initial recovery outreach", createdAt: initialSentAt, sentAt: initialSentAt,
+  } });
+  await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
+    ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
+     "configuredOfferMode","outboundMessageId","sentAt","updatedAt")
+    VALUES ($1,$2,'15551234567',1,'INITIAL','WAITING_FOR_RESPONSE','NONE',$3,$4,statement_timestamp())`,
+  initialId, recoveryId, initialMessageId, initialSentAt);
+  await db.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation" SET "lastInboundAt"=$2 WHERE "id"=$1`,
+    conversationId, initialSentAt);
+}
+
 suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
   it("provider admission commits before later takeover, then UNKNOWN is reconciliation-only", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
@@ -147,26 +166,10 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
     const db=new PrismaClient({datasourceUrl:url!});
     const f=await fixture(db,"followup");
     try {
-      const initialId=randomUUID();
-      const initialMessageId=randomUUID();
-      const initialSentAt=new Date(Date.now()-48*60*60_000);
-      // WAITING_FOR_RESPONSE requires real sent-message evidence (ARCH-016).
-      // A timestamp alone violates ck_arch016_outreach_waiting_message.
-      await db.conversationMessage.create({data:{
-        id:initialMessageId,conversationId:f.conversationId,
-        direction:"OUTBOUND",senderType:"AUTOMATION",status:"SENT",
-        content:"Initial recovery outreach",createdAt:initialSentAt,sentAt:initialSentAt,
-      }});
-      await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
-       ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
-       "configuredOfferMode","outboundMessageId","sentAt","updatedAt")
-       VALUES ($1,$2,'15551234567',1,'INITIAL','WAITING_FOR_RESPONSE','NONE', $3,$4,statement_timestamp())`,
-       initialId,f.recoveryId,initialMessageId,initialSentAt);
-      await db.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation" SET "lastInboundAt"=$2 WHERE "id"=$1`,
-        f.conversationId,new Date(Date.now()-48*60*60_000));
+      await initialOutreach(db, f.conversationId, f.recoveryId);
       const service=new RecoveryFollowUpPolicyService(db);
       const results=await Promise.all([
-        service.claimSequenceTwo({recoveryId:f.recoveryId,initiator:"merchant_post_window",initiationKey:`human-${randomUUID()}`,recipient:"15551234567",now:new Date()}),
+        service.claimSequenceTwo({recoveryId:f.recoveryId,initiator:"merchant_post_window",initiationKey:`human-${randomUUID()}`,recipient:"15551234567",now:new Date(),expectedRevision:1}),
         service.claimSequenceTwo({recoveryId:f.recoveryId,initiator:"scheduled_no_response",initiationKey:`auto-${randomUUID()}`,recipient:"15551234567",now:new Date()}),
       ]);
       expect(results.filter(result=>result.kind==="claimed")).toHaveLength(1);
@@ -177,6 +180,185 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
       if (win?.kind==="claimed") expect(win.billingSource).toBe(`recovery-outreach:${rows[0]?.id}`);
     } finally {await f.cleanup();await db.$disconnect();}
   },60_000);
+  it("a stale HUMAN claim cannot consume sequence two across a takeover lock", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, "claim-fence");
+    let unblock = () => {};
+    try {
+      await initialOutreach(db, f.conversationId, f.recoveryId);
+      let takeoverReady!: () => void;
+      let releaseTakeover!: () => void;
+      const ready = new Promise<void>((resolve) => { takeoverReady = resolve; });
+      const release = new Promise<void>((resolve) => { releaseTakeover = resolve; });
+      unblock = releaseTakeover;
+      const takeover = db.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE`, f.shopId);
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`, f.conversationId);
+        await tx.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation"
+          SET "controlMode"='AI',"controlRevision"=2,"controlChangedAt"=statement_timestamp()
+          WHERE "id"=$1`, f.conversationId);
+        await tx.$executeRawUnsafe(`INSERT INTO "whatsapp"."ConversationControlEvent"
+          ("id","conversationId","fromMode","toMode","fromRevision","toRevision")
+          VALUES ($1,$2,'HUMAN','AI',1,2)`, randomUUID(), f.conversationId);
+        takeoverReady();
+        await release;
+      }, { timeout: 20_000 });
+      await ready;
+      const service = new RecoveryFollowUpPolicyService(db);
+      let finished = false;
+      const pending = service.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window", initiationKey: randomUUID(),
+        recipient: "15551234567", now: new Date(), expectedRevision: 1,
+      }).then((result) => { finished = true; return result; });
+      await pause(100);
+      expect(finished).toBe(false); // shop/conversation lock serializes the claim
+      releaseTakeover();
+      await takeover;
+      expect(await pending).toEqual({ kind: "suppressed", reason: "human-inactive-or-stale" });
+      const unused = await db.$queryRawUnsafe<Array<{ id: string }>>(`SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
+        WHERE "checkoutRecoveryId"=$1 AND "sequence"=2`, f.recoveryId);
+      expect(unused).toHaveLength(0);
+      await db.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE`, f.shopId);
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`, f.conversationId);
+        await tx.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation"
+          SET "controlMode"='HUMAN',"controlRevision"=3,"controlChangedAt"=statement_timestamp()
+          WHERE "id"=$1`, f.conversationId);
+        await tx.$executeRawUnsafe(`INSERT INTO "whatsapp"."ConversationControlEvent"
+          ("id","conversationId","fromMode","toMode","fromRevision","toRevision")
+          VALUES ($1,$2,'AI','HUMAN',2,3)`, randomUUID(), f.conversationId);
+      });
+      const oldRevision = await service.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window", initiationKey: randomUUID(),
+        recipient: "15551234567", now: new Date(), expectedRevision: 1,
+      });
+      expect(oldRevision).toEqual({ kind: "suppressed", reason: "human-inactive-or-stale" });
+      const valid = await service.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window", initiationKey: randomUUID(),
+        recipient: "15551234567", now: new Date(), expectedRevision: 3,
+      });
+      expect(valid.kind).toBe("claimed");
+      expect((await service.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window", initiationKey: randomUUID(),
+        recipient: "15551234567", now: new Date(), expectedRevision: 3,
+      })).kind).toBe("suppressed");
+    } finally { unblock(); await f.cleanup(); await db.$disconnect(); }
+  }, 60_000);
+
+  it("only one worker can claim the same command under concurrent SKIP LOCKED calls", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const other = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, "same-command");
+    let unblock = () => {};
+    try {
+      const commandId = await f.addCommand();
+      let locked!: () => void;
+      let unlock!: () => void;
+      const ready = new Promise<void>((resolve) => { locked = resolve; });
+      const release = new Promise<void>((resolve) => { unlock = resolve; });
+      unblock = unlock;
+      const blocker = db.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "whatsapp"."MerchantConversationSendCommand"
+          WHERE "id"=$1 FOR UPDATE`, commandId);
+        locked();
+        await release;
+      }, { timeout: 20_000 });
+      await ready;
+      const first = new MerchantSendCommandService(db);
+      const second = new MerchantSendCommandService(other);
+      const now = new Date();
+      const skipped = await Promise.all([
+        first.claimDueHumanCommands({ limit: 1, now }),
+        second.claimDueHumanCommands({ limit: 1, now }),
+      ]);
+      expect(skipped.flat()).toEqual([]); // neither waits on the row lock
+      unlock(); await blocker;
+      const concurrent = await Promise.all([
+        first.claimDueHumanCommands({ limit: 1, now }),
+        second.claimDueHumanCommands({ limit: 1, now }),
+      ]);
+      expect(concurrent.flat()).toHaveLength(1);
+      expect(concurrent.flat()[0]?.id).toBe(commandId);
+      const persisted = await db.$queryRawUnsafe<Array<{ state: string; dispatchAttemptCount: number }>>(`
+        SELECT "state"::text,"dispatchAttemptCount" FROM "whatsapp"."MerchantConversationSendCommand"
+        WHERE "id"=$1`, commandId);
+      expect(persisted).toEqual([{ state: "CLAIMED", dispatchAttemptCount: 1 }]);
+      expect(await second.claimDueHumanCommands({ limit: 1, now })).toEqual([]);
+    } finally { unblock(); await f.cleanup(); await other.$disconnect(); await db.$disconnect(); }
+  }, 60_000);
+
+  it("verified definitive provider rejection settles one message and never permits retry", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, "definitive-failure");
+    try {
+      const commandId = await f.addCommand();
+      const commandService = new MerchantSendCommandService(db);
+      const claim = (await commandService.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const permit = await new OutboundSendFenceService(db, async () => null).admitFinalSend({
+        senderType: "HUMAN", conversationId: f.conversationId, recoveryId: f.recoveryId,
+        shopId: f.shopId, commandId, leaseToken: claim.leaseToken,
+        expectedControlRevision: 1, recipient: "15551234567", now: new Date(),
+      });
+      expect(permit.kind).toBe("admitted");
+      if (permit.kind !== "admitted") throw new Error("provider admission was not granted");
+      const reconciliation = new HumanSendReconciliationService(db);
+      expect(await reconciliation.recordDefinitiveFailure({
+        commandId, leaseToken: claim.leaseToken, reason: "meta_rejected", definitiveProviderEvidence: false,
+      })).toEqual({ kind: "ignored", reason: "unverified-provider-outcome" });
+      expect(await reconciliation.recordDefinitiveFailure({
+        commandId, leaseToken: claim.leaseToken, reason: "meta_rejected", definitiveProviderEvidence: true,
+      })).toEqual({ kind: "definitive-failure", messageId: permit.messageId, reason: "meta_rejected" });
+      const persisted = await db.$queryRawUnsafe<Array<{
+        commandState: string; messageStatus: string; failureCode: string; messageId: string;
+      }>>(`SELECT c."state"::text AS "commandState",m."status"::text AS "messageStatus",
+        m."providerFailureCode" AS "failureCode",m."id" AS "messageId"
+        FROM "whatsapp"."MerchantConversationSendCommand" c
+        JOIN "whatsapp"."ConversationMessage" m ON m."id"=c."outboundMessageId"
+        WHERE c."id"=$1`, commandId);
+      expect(persisted).toEqual([{
+        commandState: "FAILED", messageStatus: "FAILED", failureCode: "meta_rejected", messageId: permit.messageId,
+      }]);
+      expect((await reconciliation.recordDefinitiveFailure({
+        commandId, reason: "meta_rejected", definitiveProviderEvidence: true,
+      })).kind).toBe("ignored");
+      expect((await reconciliation.recordProviderAccepted({
+        commandId, providerMessageId: "wa:late", providerVerified: true,
+      })).kind).toBe("ignored");
+      expect(await commandService.claimDueHumanCommands({ limit: 5, now: new Date(Date.now() + 3600_000) }))
+        .toEqual([]);
+      expect(await db.conversationMessage.count({ where: { id: permit.messageId } })).toBe(1);
+    } finally { await f.cleanup(); await db.$disconnect(); }
+  }, 60_000);
+
+  it("UNKNOWN with verified definitive failure resolves to FAILED without a second send", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, "unknown-failure");
+    try {
+      const commandId = await f.addCommand();
+      const claim = (await new MerchantSendCommandService(db).claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const permit = await new OutboundSendFenceService(db, async () => null).admitFinalSend({
+        senderType: "HUMAN", conversationId: f.conversationId, recoveryId: f.recoveryId,
+        shopId: f.shopId, commandId, leaseToken: claim.leaseToken,
+        expectedControlRevision: 1, recipient: "15551234567", now: new Date(),
+      });
+      expect(permit.kind).toBe("admitted");
+      expect((await new HumanSendReconciliationService(db).recordProviderUnknown({
+        commandId, leaseToken: claim.leaseToken,
+      })).kind).toBe("unknown");
+      const reconciliation = new HumanSendReconciliationService(db);
+      expect((await reconciliation.reconcileUnknown({
+        commandId, outcome: { kind: "definitive-failure", reason: "meta_rejected" }, verified: false,
+      })).kind).toBe("ignored");
+      expect((await reconciliation.reconcileUnknown({
+        commandId, outcome: { kind: "definitive-failure", reason: "meta_rejected" }, verified: true,
+      })).kind).toBe("definitive-failure");
+      expect(await db.$queryRawUnsafe(`SELECT "state"::text FROM "whatsapp"."MerchantConversationSendCommand"
+        WHERE "id"=$1`, commandId)).toEqual([{ state: "FAILED" }]);
+      expect(await new MerchantSendCommandService(db).claimDueHumanCommands({ limit: 1, now: new Date(Date.now() + 3600_000) }))
+        .toEqual([]);
+    } finally { await f.cleanup(); await db.$disconnect(); }
+  }, 60_000);
+
   it("Redis screens repeated command IDs exactly once and limits new HUMAN sends atomically",async()=>{
     const db = new PrismaClient({datasourceUrl:url!});
     const f = await fixture(db,"redis");

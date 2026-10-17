@@ -30,6 +30,16 @@ describe("ARCH-040 recovery conversation policies", () => {
     ]);
   });
 
+  it("projects no messages when the configured history count is zero", () => {
+    const history = [
+      { senderType: "HUMAN", content: "Merchant reply" },
+      { senderType: "CUSTOMER", content: "Thanks" },
+    ];
+    expect(projectRecoveryHistory(history, 0)).toEqual([]);
+    expect(projectRecoveryHistory(history, -10)).toEqual([]);
+    expect(projectRecoveryHistory(history, 1)).toHaveLength(1);
+  });
+
   it("uses monotonic provider-verified inbound time, without advancing on stale/future audio", () => {
     const existing = new Date(moment.getTime()-15_000);
     expect(latestVerifiedCustomerInbound(existing, new Date(moment.getTime()-30_000), moment)).toEqual(existing);
