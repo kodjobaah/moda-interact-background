@@ -15,6 +15,9 @@ void startReadyWorkerProcess({
       import("../workers/whatsapp.worker.js"),
     ]);
     const whatsappWorker = createWhatsappWorker();
+    const { HumanCommandDispatcherService } = await import("../services/recovery-conversation/human-command-dispatcher.service.js");
+    const humanDispatcher = new HumanCommandDispatcherService();
+    humanDispatcher.start();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -28,6 +31,7 @@ void startReadyWorkerProcess({
     return {
       workers: [whatsappWorker],
       closeResources: [
+        () => humanDispatcher.close(),
         ...closeWorkerResources,
         stopQueueConcurrencyController,
         () => backgroundRuntimeConfigService.close(),

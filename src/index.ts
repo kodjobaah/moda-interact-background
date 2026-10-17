@@ -50,6 +50,9 @@ async function startDevelopmentWorker(): Promise<void> {
     import("./workers/whatsapp.worker.js"),
     import("./workers/shopify-discount-sync.worker.js"),
   ]);
+  const { HumanCommandDispatcherService } = await import("./services/recovery-conversation/human-command-dispatcher.service.js");
+  const humanDispatcher = new HumanCommandDispatcherService();
+  humanDispatcher.start();
   const workers = [
     createCheckoutWorker(),
     createOrderWorker(),
@@ -65,6 +68,7 @@ async function startDevelopmentWorker(): Promise<void> {
     serviceName: "moda-interact-worker-development",
     workers,
     closeResources: [
+      () => humanDispatcher.close(),
       stopQueueConcurrencyController,
       () => backgroundRuntimeConfigService.close(),
       () =>

@@ -1,0 +1,29 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "endpoint": "chat",
+        "systemMessage": "System-test scenario ARCH-040-BACKGROUND-002",
+        "userMessage": "Please help me recover my basket",
+        "toolName": "finalResponse"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "id": "call_arch040_background002_recovery",
+            "name": "finalResponse",
+            "arguments": {
+              "answerKind": "ANSWER",
+              "replyText": "Your basket is ready to recover.",
+              "referralReason": null,
+              "detectedLanguageTag": "en",
+              "detectedLanguageConfidence": 0.99,
+              "evidenceIds": [],
+              "details": {}
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

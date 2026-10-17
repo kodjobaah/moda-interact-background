@@ -46,10 +46,10 @@ export class InboundWhatsAppAudioService {
     if (reservation.transcriptionStatus === "COMPLETED") {
       const state = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { inboundVersion: true, lastProcessedVersion: true, lastInboundAt: true } });
       // Recover an interrupted enqueue only while this remains the pending turn.
-      return { kind: state.inboundVersion > state.lastProcessedVersion && state.lastInboundAt?.getTime() === reservation.transcriptionCompletedAt?.getTime() ? "completed" : "ignored" };
+      return { kind: state.inboundVersion > state.lastProcessedVersion && state.lastInboundAt?.getTime() === reservation.createdAt?.getTime() ? "completed" : "ignored" };
     }
-    // Compare provider-event order with persisted inbound rows, never with the
-    // completion-time lastInboundAt used for transcript batching.
+    // Compare provider-event order with persisted inbound rows. The service-window
+    // clock is the verified provider event time, not transcription completion.
     const eventTime = reservation.createdAt ?? new Date(event.occurredAt);
     if (await this.isStale(conversationId, reservation.id, eventTime)) {
       await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
@@ -136,8 +136,15 @@ export class InboundWhatsAppAudioService {
         if (updated.count !== 1) throw duplicate;
         await tx.conversation.updateMany({
           where: { id: conversationId },
-          data: { inboundVersion: { increment: 1 }, lastInboundAt: now, lastMessageAt: now },
+          data: { inboundVersion: { increment: 1 } },
         });
+        // Preserve verified customer event ordering even when audio transcribes
+        // much later than it arrived. Pending turn settlement uses 'now' below.
+        await tx.$executeRaw`
+          UPDATE "whatsapp"."Conversation"
+          SET "lastInboundAt" = GREATEST("lastInboundAt", ${eventTime}),
+              "lastMessageAt" = GREATEST("lastMessageAt", ${eventTime})
+          WHERE "id" = ${conversationId}`;
         await tx.conversation.updateMany({ where: { id: conversationId, pendingTurnStartedAt: null }, data: { pendingTurnStartedAt: now } });
         return true;
       });

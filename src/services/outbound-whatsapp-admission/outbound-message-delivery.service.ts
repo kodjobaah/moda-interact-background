@@ -9,6 +9,9 @@ import type {
   ShopExecutionEligibilityService,
 } from "../shop-execution-eligibility.service.js";
 import { whatsAppService } from "../whatsapp.service.js";
+import { AiTurnOwnershipService } from "../recovery-conversation/ai-turn-ownership.service.js";
+import { OutboundSendFenceService } from "../recovery-conversation/outbound-send-fence.service.js";
+import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
 import type {
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -35,6 +38,8 @@ export class OutboundMessageDeliveryService {
       ShopExecutionEligibilityService,
       "evaluate"
     > = shopExecutionEligibilityService,
+    private readonly ownership = new AiTurnOwnershipService(),
+    private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
   ) {}
 
   getProviderAccountId(): string {
@@ -51,11 +56,13 @@ export class OutboundMessageDeliveryService {
     text,
     previewUrl,
     replyToProviderMessageId,
+    expectedControlRevision,
   }: AdmittedOutbound & {
     to: string;
     text: string;
     previewUrl?: boolean;
     replyToProviderMessageId?: string;
+    expectedControlRevision?: number;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
     const suppression = await this.revalidateBeforeProvider({
@@ -72,6 +79,11 @@ export class OutboundMessageDeliveryService {
       where: { id: messageId },
       data: { content: outboundText },
     });
+    const fenced = await this.fenceRecoverySend({
+      shopId, conversationId, messageId, to,
+      ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
+    });
+    if (fenced) return fenced;
 
     try {
       const result = await this.provider.sendWhatsAppText({
@@ -99,10 +111,16 @@ export class OutboundMessageDeliveryService {
 
   async sendPreparedTemplate(
     admission: AdmittedOutbound,
-    input: Omit<SendTemplateInput, "to"> & { to: string },
+    input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
+    const fenced = await this.fenceRecoverySend({
+      shopId: admission.shopId, conversationId: admission.conversationId,
+      messageId: admission.messageId, to: input.to,
+      ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
+    });
+    if (fenced) return fenced;
 
     try {
       const result = admission.terminal
@@ -128,6 +146,37 @@ export class OutboundMessageDeliveryService {
       await this.markProviderFailure(admission.messageId, error);
       throw error;
     }
+  }
+
+  /** Atomic provider permit for recovery-linked automated sends. Preflight alone
+   * cannot protect the interval between a model await and Meta submission.
+   * Never recapture a supplied turn revision after a takeover/resume cycle.
+   */
+  private async fenceRecoverySend(input: {
+    shopId: string; conversationId: string; messageId: string; to: string;
+    expectedControlRevision?: number;
+  }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
+    const ownership = await this.ownership.readTurnOwnership(input.conversationId);
+    if (!ownership) return null; // Existing non-recovery scope.
+    const message = await this.database.conversationMessage.findUnique({
+      where: { id: input.messageId }, select: { senderType: true },
+    });
+    if (!message || (message.senderType !== "AGENT" && message.senderType !== "AUTOMATION")) {
+      await this.failPrepared(input.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
+    const permit = await this.recoveryFence.admitFinalSend({
+      senderType: message.senderType,
+      conversationId: input.conversationId, shopId: input.shopId,
+      recoveryId: ownership.recoveryId,
+      expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
+      messageId: input.messageId, recipient: input.to, now: new Date(),
+    });
+    if (permit.kind === "admitted") return null;
+    if (permit.reason !== "already-admitted-or-sent") {
+      await this.failPrepared(input.messageId);
+    }
+    return { kind: "suppressed", reason: "conversation-invalid" };
   }
 
   async failPrepared(messageId: string): Promise<void> {

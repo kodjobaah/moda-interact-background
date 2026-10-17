@@ -50,6 +50,7 @@ describe("ConversationService language persistence", () => {
           updateMany: txConversationUpdateMany.mockResolvedValue({ count: 1 }),
           update: txConversationUpdate,
         },
+        $executeRaw: vi.fn().mockResolvedValue(1),
       }),
     );
 
@@ -82,8 +83,6 @@ describe("ConversationService language persistence", () => {
       where: { id: "conversation-1" },
       data: {
         inboundVersion: { increment: 1 },
-        lastInboundAt: expect.any(Date),
-        lastMessageAt: expect.any(Date),
         languageTag: "en-GB",
         languageSource: "SHOPIFY",
       },
@@ -203,6 +202,7 @@ describe("ConversationService language persistence", () => {
       callback({
         conversationMessage: { create },
         conversation: { updateMany, update },
+        $executeRaw: vi.fn().mockResolvedValue(1),
       } as any),
     );
 
@@ -327,6 +327,7 @@ describe("ConversationService turn state", () => {
             inboundVersion: nextVersion++,
           })),
         },
+        $executeRaw: vi.fn().mockResolvedValue(1),
       }),
     );
 

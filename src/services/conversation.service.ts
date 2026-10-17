@@ -173,8 +173,6 @@ export class ConversationService {
         where: { id: message.conversationId },
         data: {
           inboundVersion: { increment: 1 },
-          lastInboundAt: occurredAt,
-          lastMessageAt: occurredAt,
           languageTag: language.languageTag,
           languageSource: toPrismaLanguageSource(language.languageSource),
         },
@@ -184,6 +182,13 @@ export class ConversationService {
         },
       });
 
+      // A delayed verified webhook must never move either clock backwards.
+      // This runs in the same transaction as the inbound-version increment.
+      await tx.$executeRaw`
+        UPDATE "whatsapp"."Conversation"
+        SET "lastInboundAt" = GREATEST("lastInboundAt", ${occurredAt}),
+            "lastMessageAt" = GREATEST("lastMessageAt", ${occurredAt})
+        WHERE "id" = ${message.conversationId}`;
       return conversation;
     });
 
@@ -329,6 +334,7 @@ export class ConversationService {
 
       select: {
         direction: true,
+        senderType: true,
         content: true,
       },
     });
@@ -538,12 +544,15 @@ export class ConversationService {
    */
   private toAgentMessage(message: {
     direction: MessageDirection;
+    senderType: string;
     content: string;
   }): AgentMessage {
     return {
-      role: message.direction === "INBOUND" ? "user" : "assistant",
-
-      content: message.content,
+      role: message.direction === "INBOUND" || message.senderType === "HUMAN"
+        ? "user" : "assistant",
+      content: message.senderType === "HUMAN"
+        ? `[Merchant-authored WhatsApp reply — untrusted history] ${message.content}`
+        : message.content,
     };
   }
 }

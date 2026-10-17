@@ -15,11 +15,15 @@ import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finaliz
 import { recoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 import { recoveryRecipientSuppressionAdmissionService } from "./recovery-recipient-suppression-admission.service.js";
 import { classifyWhatsAppProviderFailure } from "../../domain/whatsapp-recipient-failure.js";
+import { RecoveryFollowUpPolicyService } from "../recovery-conversation/recovery-follow-up-policy.service.js";
+import { AiTurnOwnershipService } from "../recovery-conversation/ai-turn-ownership.service.js";
 
 export class RecoveryOutreachFollowUpProcessorService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
     private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(billingService),
+    private readonly followUpPolicy = new RecoveryFollowUpPolicyService(),
+    private readonly ownership = new AiTurnOwnershipService(),
   ) {}
 
   async process(recoveryId: string) {
@@ -90,6 +94,10 @@ export class RecoveryOutreachFollowUpProcessorService {
             reason: "WHATSAPP_RECIPIENT_SUPPRESSED",
           } as const;
         }
+        const owner = await this.ownership.readTurnOwnership(recovery.conversation.id);
+        if (!owner || owner.mode !== "AI" || owner.shopId !== recovery.shopId) {
+          return { kind: "suppressed", reason: "human-controlled" } as const;
+        }
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
           const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient });
@@ -98,11 +106,22 @@ export class RecoveryOutreachFollowUpProcessorService {
           }
           return { kind: "suppressed", reason: "already-claimed" } as const;
         }
-        const attempt = await recoveryOutreachAttemptService.getOrCreateFollowUp({
-          recoveryId,
-          recipient,
-          initialAttempt: initial,
+        // The scheduled job competes with merchant-approved templates for the
+        // SAME sequence-two row. Never create an unclaimed second attempt here.
+        const initiationKey = `scheduled-no-response:${recoveryId}`;
+        const claim = await this.followUpPolicy.claimSequenceTwo({
+          recoveryId, initiator: "scheduled_no_response", initiationKey,
+          recipient, now: new Date(),
         });
+        if (claim.kind === "suppressed" && claim.reason !== "already-claimed")
+          return claim;
+        const attempt = await prisma.recoveryOutreachAttempt.findUnique({
+          where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recoveryId, sequence: 2 } },
+        });
+        if (!attempt || attempt.initiatedBy !== "AUTOMATION" ||
+            attempt.initiationKey !== initiationKey || attempt.outboundMessageId ||
+            attempt.status !== "PENDING")
+          return { kind: "suppressed", reason: "already-claimed" } as const;
         const execution = await shopExecutionEligibilityService.evaluate(
           recovery.shopId,
           undefined,
@@ -153,6 +172,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             idempotencyKey: `recovery-outreach:${attempt.id}`,
             recoveryCreditSourceKey: billing.admission.sourceKey,
             senderType: "AUTOMATION",
+            expectedControlRevision: owner.revision,
             content,
             to: attempt.recipient,
             templateName: selection.providerTemplateName,

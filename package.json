@@ -35,7 +35,9 @@
     "test:arch040-recovery-conversation": "vitest run tests/unit/services/recovery-conversation",
     "test:arch040-recovery-conversation:postgres": "node scripts/test-integration.mjs tests/integration/recovery-conversation.services.integration.test.ts",
     "test:arch038-live-budgets": "node --experimental-strip-types --test scripts/test-arch038-live-budget-contract.mjs",
-    "test:arch038-live-budgets:postgres": "tsx scripts/test-arch038-live-budget-postgres.ts"
+    "test:arch038-live-budgets:postgres": "tsx scripts/test-arch038-live-budget-postgres.ts",
+    "test:arch040-background-runtime:postgres": "node scripts/test-integration.mjs tests/integration/recovery-human-dispatch.integration.test.ts",
+    "test:arch040-background-wiring": "vitest run tests/unit/services/recovery-conversation/background-wiring.test.ts tests/unit/services/conversation-turn-processor.service.test.ts tests/unit/services/conversation.service.test.ts tests/unit/services/inbound-whatsapp-audio.service.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -68,6 +70,7 @@
     "@types/node": "^26.2.0",
     "@types/semver": "7.7.1",
     "@types/yauzl": "^3.4.0",
+    "@whatsapp-cloudapi/emulator": "5.0.1",
     "dotenv": "^17.4.2",
     "eslint": "^10.12.0",
     "globals": "^17.13.0",

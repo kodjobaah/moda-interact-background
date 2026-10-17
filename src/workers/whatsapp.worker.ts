@@ -16,6 +16,7 @@ import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { inboundWhatsAppAudioService } from "../services/inbound-whatsapp-audio.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
+import { AiTurnOwnershipService } from "../services/recovery-conversation/ai-turn-ownership.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { sendRoutingGuidance } from "../services/routing-guidance.service.js";
@@ -61,6 +62,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
 >({
   queue: whatsappQueue,
   conversation: conversationService,
+  ownership: new AiTurnOwnershipService(),
   admission: outboundWhatsAppAdmissionService,
   abuseAdmission: inboundWhatsAppAbuseAdmissionService,
   loadTurn: loadConversationTurn,
@@ -187,6 +189,9 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
 
   const content = event.content;
   if (content.type === "audio") {
+    const audioOwnership = "conversationId" in route && route.conversationId
+      ? await new AiTurnOwnershipService().readTurnOwnership(route.conversationId)
+      : null;
     if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
     const result = await inboundWhatsAppAudioService.process(event, route.conversationId, audioOptions);
     if (result.kind === "completed") {
@@ -203,6 +208,7 @@ export async function processInboundMessage(event: WhatsAppInboundEvent, audioOp
         conversationId: route.conversationId,
         idempotencyKey: `voice-fallback:${event.providerMessageId}`,
         senderType: "AUTOMATION",
+        ...(audioOwnership ? { expectedControlRevision: audioOwnership.revision } : {}),
         to: event.customerPhone,
         text: result.fallback,
       });
