@@ -1,5 +1,5 @@
 import { WooCouponReadError } from "./woo-coupon-transport.js";
-import { defaultWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
+import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 
 export interface WooCouponPage {
   coupons: unknown;
@@ -13,8 +13,8 @@ const PAGE_SIZE = 100;
 /** Fail the entire scan on partial, duplicate, reordered or inconsistent provider pages. */
 export async function readAllWooCouponPages(
   readPage: (page: number, perPage: number) => Promise<WooCouponPage>,
-  maxPages = defaultWooCouponSyncConfig().maxPages,
-  maxScanDurationMs = defaultWooCouponSyncConfig().maxScanDurationMs,
+  maxPages = loadWooCouponSyncConfig().maxPages,
+  maxScanDurationMs = loadWooCouponSyncConfig().maxScanDurationMs,
 ): Promise<Record<string, unknown>[]> {
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 200) throw new WooCouponReadError("too_many_pages");
   if (!Number.isSafeInteger(maxScanDurationMs) || maxScanDurationMs < 1) throw new WooCouponReadError("provider_unavailable");

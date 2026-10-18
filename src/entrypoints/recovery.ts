@@ -1,7 +1,7 @@
 import { Queue } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { platformOperationalPolicyReader } from "../services/platform-operational-policy.js";
+import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 import prisma from "../lib/db.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
@@ -47,11 +47,10 @@ void startReadyWorkerProcess({
     const recoveryOutreachFollowUpWorker =
       createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
-    // BullMQ worker concurrency is immutable for this process: restart on change.
-    const startupWooCouponPolicy = await platformOperationalPolicyReader.wooCouponSync();
-    const wooCouponSyncWorker = createWooCouponSyncWorker(undefined, startupWooCouponPolicy.workerConcurrency);
+    const wooCouponSyncWorker = createWooCouponSyncWorker();
     const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
-    // Dispatcher resolves a new settings snapshot once per leased cycle.
+    const wooCouponSyncSettings = loadWooCouponSyncConfig();
+    const wooCouponDispatcher = new WooCouponDispatcherService(prisma, wooCouponSyncQueue, wooCouponSyncSettings);
     const stopQueueConcurrencyController =
       await startQueueConcurrencyController({
         config: backgroundRuntimeConfigService,
@@ -96,8 +95,7 @@ void startReadyWorkerProcess({
       intervalMs: 60_000,
       runImmediately: true,
       run: async () => {
-        const settings = await platformOperationalPolicyReader.wooCouponSync();
-        await new WooCouponDispatcherService(prisma, wooCouponSyncQueue, settings).dispatch(settings.dispatchBatchSize);
+        await wooCouponDispatcher.dispatch(wooCouponSyncSettings.dispatchBatchSize);
       },
       onError: () => {
         // Do not log arbitrary provider or database error messages.

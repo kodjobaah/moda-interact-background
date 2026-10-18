@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { encryptCredential, parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 import { PrismaClient } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createPrismaConfigurationRepository } from "../../src/services/platform-configuration/repository.js";
 import { createBackgroundPlatformConfigurationService } from "../../src/services/platform-configuration/service.js";
 
@@ -80,4 +80,69 @@ describeWithDatabase("ARCH-043 PostgreSQL Background moderation configuration", 
       await db.$disconnect();
     }
   });
+
+
+  it("reads a coherent R2/Commerce/Partner/Sender bundle and redacts revoked/malformed rows", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const env = "test";
+    const keys = ["merchant.knowledge.r2", "commerce.connectionKeys", "shopify.partner", "messaging.sender"] as const;
+    const root = parseCredentialKeyring(JSON.stringify({ root: Buffer.alloc(32, 7).toString("base64") }));
+    const seal = (key: string, version: number, value: unknown) => {
+      const encrypted = encryptCredential({ keyring: root, activeKeyId: "root", plaintext: JSON.stringify(value),
+        aad: JSON.stringify(["moda-platform-config-v1", env, key, version, 1]) });
+      return { kind: "sealed", schemaVersion: 1, algorithm: "AES-256-GCM", wrappingKeyId: encrypted.keyId,
+        nonce: Buffer.from(encrypted.nonce).toString("base64"),
+        ciphertext: Buffer.from(encrypted.ciphertext).toString("base64"),
+        authTag: Buffer.from(encrypted.authTag).toString("base64") };
+    };
+    const values = {
+      "merchant.knowledge.r2": { endpoint: "https://account.r2.cloudflarestorage.com", bucket: "merchant-data",
+        accessKeyId: "INTEGRATION-PRIVATE-R2-KEY", secretAccessKey: "INTEGRATION-PRIVATE-R2-SECRET",
+        maxUploadBytes: 20000000, maxXlsxUncompressedBytes: 100000000 },
+      "commerce.connectionKeys": { connectionKeysJson: JSON.stringify({ previous: Buffer.alloc(32, 2).toString("base64"),
+        active: Buffer.alloc(32, 3).toString("base64") }), activeKeyId: "active" },
+      "shopify.partner": { accessToken: "INTEGRATION-PRIVATE-SHOPIFY-TOKEN", organizationId: "org-42",
+        appId: "app-42", apiVersion: "2026-10" },
+      "messaging.sender": { accessToken: "INTEGRATION-PRIVATE-META-TOKEN", phoneNumberId: "123456789",
+        businessAccountId: "987654321" },
+    };
+    const versions = [3, 4, 5, 6];
+    const warn = vi.fn();
+    try {
+      for (const key of keys) {
+        if (await db.platformConfiguration.findUnique({ where: { environment_key: { environment: env, key } } })) {
+          throw new Error("Disposable test requires an empty environment/key namespace");
+        }
+      }
+      for (const [index, key] of keys.entries()) {
+        await db.platformConfiguration.create({ data: { environment: env, key, version: versions[index]!,
+          value: seal(key, versions[index]!, values[key]) } });
+      }
+      const service = createBackgroundPlatformConfigurationService({ environment: env,
+        repository: createPrismaConfigurationRepository(db), unsealKeyring: () => root,
+        logger: { info: vi.fn(), warn } });
+      const bundle = await service.readBundle(keys);
+      for (const [index, key] of keys.entries()) {
+        expect(bundle[key]).toEqual({ key, version: versions[index], value: values[key] });
+      }
+      await db.platformConfiguration.update({ where: { environment_key: { environment: env, key: keys[0] } },
+        data: { version: 7, value: { kind: "disabled", schemaVersion: 1 } } });
+      await expect(service.readBundle(keys)).rejects.toMatchObject({ code: "DISABLED", key: keys[0] });
+      expect(warn.mock.lastCall?.[1]).toMatchObject({ reasonCode: "DISABLED", correlationId: expect.any(String),
+        rowRevisions: { "merchant.knowledge.r2": 7 } });
+      await db.platformConfiguration.update({ where: { environment_key: { environment: env, key: keys[0] } },
+        data: { version: 8, value: { kind: "sealed", schemaVersion: 1, algorithm: "AES-256-GCM",
+          wrappingKeyId: "INTEGRATION-PRIVATE-R2-KEY" } } });
+      await expect(service.readBundle(keys)).rejects.toMatchObject({ code: "INVALID", key: keys[0] });
+      expect(warn.mock.lastCall?.[1]).toMatchObject({ reasonCode: "INVALID", rowRevisions: { "merchant.knowledge.r2": 8 } });
+      const exposed = JSON.stringify(warn.mock.calls);
+      for (const secret of [values["merchant.knowledge.r2"].accessKeyId,
+        values["merchant.knowledge.r2"].secretAccessKey, values["shopify.partner"].accessToken,
+        values["messaging.sender"].accessToken]) expect(exposed).not.toContain(secret);
+    } finally {
+      await db.platformConfiguration.deleteMany({ where: { environment: env, key: { in: [...keys] } } });
+      await db.$disconnect();
+    }
+  });
+
 });

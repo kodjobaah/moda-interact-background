@@ -1,13 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { platformOperationalPolicyReader } from "../../../src/services/platform-operational-policy.js";
 import { GroqSpeechTranscriptionService, OpenAISpeechTranscriptionService, speechTranscriptionService } from "../../../src/services/speech-transcription.service.js";
 
-vi.mock("../../../src/services/platform-operational-policy.js", () => ({
-  platformOperationalPolicyReader: { transcription: vi.fn() },
-}));
-const policy = {provider:"groq" as const,groqModelId:"whisper-large-v3-turbo",openaiModelId:"gpt-4o-mini-transcribe"};
 const input = { bytes: new Uint8Array([99, 1, 2, 99]).subarray(1, 3), mimeType: "audio/ogg; codecs=opus" };
-beforeEach(() => { vi.mocked(platformOperationalPolicyReader.transcription).mockResolvedValue(policy); vi.stubEnv("GROQ_API_KEY", "test-groq"); vi.stubEnv("WHATSAPP_OPENAI_API_KEY", "test-openai"); vi.stubEnv("OPENAI_TRANSCRIPTION_MODEL", ""); vi.stubEnv("GROQ_TRANSCRIPTION_MODEL", ""); vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", ""); });
+beforeEach(() => { vi.stubEnv("GROQ_API_KEY", "test-groq"); vi.stubEnv("WHATSAPP_OPENAI_API_KEY", "test-openai"); vi.stubEnv("OPENAI_TRANSCRIPTION_MODEL", ""); vi.stubEnv("GROQ_TRANSCRIPTION_MODEL", ""); vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", ""); });
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe("spoken-language transcription", () => {
   it.each(["Bonjour, pouvez-vous vérifier ma commande ?", "Can you check my order please?"])("V01 preserves provider transcript %s without language or translation instructions", async (text) => {
@@ -23,21 +18,23 @@ describe("spoken-language transcription", () => {
     expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([1,2]);
     expect(form.get("model")).toBe("gpt-4o-mini-transcribe");
   });
-  it("uses the trusted database policy and fails closed on policy errors", async () => {
-    const fetcher = vi.fn(async () => Response.json({ text: "bonjour" }));
+  it("preserves the Groq default and explicitly selects OpenAI", async () => {
+    const fetcher = vi.fn(async () => Response.json({text:"bonjour"})); vi.stubGlobal("fetch",fetcher);
+    // Explicit adapters allow injected fetch; default singleton selection is tested with missing credentials.
     const groq = await new GroqSpeechTranscriptionService(fetcher as typeof fetch).transcribe(input);
-    expect(groq).toMatchObject({ provider: "groq", model: "whisper-large-v3-turbo" });
+    expect(groq).toMatchObject({provider:"groq",model:"whisper-large-v3-turbo"});
     vi.stubEnv("GROQ_API_KEY", "");
-    await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({ code: "configuration-missing" });
-    vi.mocked(platformOperationalPolicyReader.transcription).mockRejectedValueOnce(new Error("private DB error"));
-    await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({ code: "configuration-invalid" });
+    await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({code:"configuration-missing",retryable:false});
+    vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", "invalid");
+    expect(() => speechTranscriptionService.transcribe(input)).toThrow("configuration-invalid");
+    vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", "openai"); vi.stubEnv("WHATSAPP_OPENAI_API_KEY", "");
+    await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({code:"configuration-missing"});
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it("uses the selected OpenAI model from the policy", async () => {
-    const fetcher = vi.fn(async () => Response.json({ text: "Hello" }));
-    const selected = { ...policy, provider: "openai" as const, openaiModelId: "gpt-4o-transcribe" };
-    expect(await new OpenAISpeechTranscriptionService(fetcher as typeof fetch).transcribe(input, selected))
-      .toMatchObject({ model: "gpt-4o-transcribe" });
+  it("uses the explicitly configured OpenAI model", async () => {
+    vi.stubEnv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe");
+    const fetcher=vi.fn(async()=>Response.json({text:"Hello"}));
+    expect(await new OpenAISpeechTranscriptionService(fetcher as typeof fetch).transcribe(input)).toMatchObject({model:"gpt-4o-transcribe"});
   });
   it.each([[400,false],[401,false],[408,true],[429,true],[503,true]])("V05 bounds HTTP %s without retrying or changing provider",async(status,retryable)=>{
     const fetcher=vi.fn(async()=>new Response("private provider detail",{status:status as number}));

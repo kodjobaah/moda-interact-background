@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   decryptCredential, parseCredentialKeyring, resolveActiveCredentialKey, parseCommerceConnectionCommandHmacKey,
@@ -77,7 +78,8 @@ export function createBackgroundPlatformConfigurationService(input: {
   // Never include database/provider errors, row JSON, AAD, envelope or credentials in a log.
   // Even an injected failing sink must not affect application correctness.
   const log = (level: "info" | "warn", event: string, fields: {
-    keys: readonly string[]; reasonCode?: string; revisions?: readonly number[];
+    keys: readonly string[]; correlationId: string; reasonCode?: string;
+    revisions?: readonly number[]; rowRevisions?: Readonly<Record<string, number>>;
   }): void => {
     try { input.logger?.[level](event, fields); } catch { /* logging is best effort */ }
   };
@@ -115,7 +117,12 @@ export function createBackgroundPlatformConfigurationService(input: {
   };
   const readBundle = async <const K extends BackgroundReadableKey>(keys: readonly K[]): Promise<Readonly<{ [P in K]: ConfigurationSnapshot<P> }>> => {
     // Untrusted runtime casts may contain arbitrary strings; never place them in logs.
-    const safeKeys = keys.filter((key) => readableKeys.has(key));
+    const safeKeys: readonly string[] = keys.filter((key) => readableKeys.has(key));
+    const correlationId = randomUUID();
+    // The row versions are captured only for approved requested purposes, and only
+    // when the row matches the trusted environment and has a valid positive version.
+    // We never log raw row data, invalid keys, SQL errors, or cryptographic errors.
+    const rowRevisions: Record<string, number> = {};
     try {
     for (const key of keys) assertReadable(key); // runtime defence against casts/JS callers
     if (!keys.length || new Set(keys).size !== keys.length) throw new PlatformConfigurationFailure("INVALID", "bundle");
@@ -124,6 +131,10 @@ export function createBackgroundPlatformConfigurationService(input: {
     catch { throw new PlatformConfigurationFailure("DB_UNAVAILABLE", "bundle"); }
     const byKey = new Map<string, ConfigurationRow>();
     for (const row of rows) {
+      if (safeKeys.includes(row.key) && row.environment === input.environment &&
+          Number.isSafeInteger(row.version) && row.version > 0) {
+        rowRevisions[row.key] = row.version;
+      }
       if (!keys.includes(row.key as K) || byKey.has(row.key)) throw new PlatformConfigurationFailure("INVALID", "bundle");
       byKey.set(row.key, row);
     }
@@ -139,15 +150,19 @@ export function createBackgroundPlatformConfigurationService(input: {
       throw new PlatformConfigurationFailure("INVALID", "ai.providers");
     }
     log("info", "background.platform_configuration.read_succeeded", {
-      keys: safeKeys, revisions: keys.map((key) => output[key]!.version),
+      keys: safeKeys, correlationId, revisions: keys.map((key) => output[key]!.version),
     });
     return Object.freeze(output) as { [P in K]: ConfigurationSnapshot<P> };
     } catch (error) {
+      // Unknown adapter/decoder exceptions must not escape with provider/DB details.
+      const failure = error instanceof PlatformConfigurationFailure
+        ? error : new PlatformConfigurationFailure("INVALID", "bundle");
       log("warn", "background.platform_configuration.read_failed", {
-        keys: safeKeys,
-        reasonCode: error instanceof PlatformConfigurationFailure ? error.code : "INVALID",
+        keys: safeKeys, correlationId,
+        ...(Object.keys(rowRevisions).length ? { rowRevisions } : {}),
+        reasonCode: failure.code,
       });
-      throw error;
+      throw failure;
     }
   };
   return {

@@ -6,7 +6,7 @@ import prisma from "../lib/db.js";
 import { normalizeWooCouponBatch, type NormalizedWooCoupon } from "../providers/woo-coupon-normalization.js";
 import { WooCouponReadError } from "../providers/woo-coupon-transport.js";
 import { WooCouponReaderService } from "./woo-coupon-reader.service.js";
-import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
+import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
 const ERROR_CODE_LENGTH = 128;
 const logger = createLogger({
@@ -30,7 +30,7 @@ export class WooCouponCatalogueService {
     private readonly read: (shopId: string) => Promise<Record<string, unknown>[]> =
       (shopId) => new WooCouponReaderService().fetchAll(shopId),
     private readonly clock: () => Date = () => new Date(),
-    private readonly settings: WooCouponSyncConfig = defaultWooCouponSyncConfig(),
+    private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
     private readonly reporting: Pick<StructuredLogger, "warn"> = logger,
   ) {}
 

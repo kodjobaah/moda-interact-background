@@ -48,26 +48,3 @@ export function loadWooCouponSyncConfig(environment: NodeJS.ProcessEnv = process
   }
   return values;
 }
-
-
-/** ARCH-043 DB policy must be closed and preserve ARCH-036 absolute safety limits. */
-export function defaultWooCouponSyncConfig(): WooCouponSyncConfig {
-  return Object.fromEntries(Object.entries(limits).map(([key, [fallback]]) => [key, fallback])) as unknown as WooCouponSyncConfig;
-}
-export function validateWooCouponSyncConfig(value: unknown): Readonly<WooCouponSyncConfig & { workerConcurrency: number }> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("Invalid Woo coupon policy");
-  const record = value as Record<string, unknown>;
-  const keys = [...Object.keys(limits), "workerConcurrency"];
-  if (Object.keys(record).length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) {
-    throw new RangeError("Invalid Woo coupon policy");
-  }
-  for (const [key, [, min, max]] of Object.entries(limits)) {
-    const entry = record[key];
-    if (!Number.isSafeInteger(entry) || (entry as number) < min || (entry as number) > max)
-      throw new RangeError("Invalid Woo coupon policy");
-  }
-  const concurrency = record.workerConcurrency;
-  if (!Number.isSafeInteger(concurrency) || (concurrency as number) < 1 || (concurrency as number) > 32)
-    throw new RangeError("Invalid Woo coupon policy");
-  return Object.freeze({ ...record }) as unknown as Readonly<WooCouponSyncConfig & { workerConcurrency: number }>;
-}

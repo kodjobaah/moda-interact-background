@@ -190,16 +190,17 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
       logger: { info, warn },
     });
     expect((await service.read("ai.providers")).value.openAiApiKey).toBe("ADMIN-VECTOR-OPENAI-KEY-2026-10-18");
-    expect(info).toHaveBeenCalledWith("background.platform_configuration.read_succeeded", {
-      keys: ["ai.providers"], revisions: [7],
-    });
+    expect(info).toHaveBeenCalledWith("background.platform_configuration.read_succeeded", expect.objectContaining({
+      keys: ["ai.providers"], revisions: [7], correlationId: expect.any(String),
+    }));
     returnedRows = [{ ...fixture, value: { ...(fixture.value as Record<string, unknown>), authTag: Buffer.alloc(16, 0).toString("base64") } }];
     let failure: unknown;
     try { await service.read("ai.providers"); } catch (error) { failure = error; }
     expect(failure).toMatchObject({ code: "UNSEAL_FAILED" });
-    expect(warn).toHaveBeenCalledWith("background.platform_configuration.read_failed", {
-      keys: ["ai.providers"], reasonCode: "UNSEAL_FAILED",
-    });
+    expect(warn).toHaveBeenCalledWith("background.platform_configuration.read_failed", expect.objectContaining({
+      keys: ["ai.providers"], correlationId: expect.any(String), rowRevisions: { "ai.providers": 7 },
+      reasonCode: "UNSEAL_FAILED",
+    }));
     // Both errors and logged output are checked as text, not merely by error code.
     const exposed = JSON.stringify({ message: String(failure), error: failure, info: info.mock.calls, warn: warn.mock.calls });
     const envelope = fixture.value as { nonce: string; ciphertext: string; authTag: string };
@@ -228,9 +229,88 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
     expect(caught).toMatchObject({ code: "DB_UNAVAILABLE" });
     expect(JSON.stringify(caught)).not.toContain(sensitive);
     expect(String(caught)).not.toContain(sensitive);
-    expect(logger.warn).toHaveBeenCalledWith("background.platform_configuration.read_failed", {
-      keys: ["omini.moderation"], reasonCode: "DB_UNAVAILABLE",
+    expect(logger.warn).toHaveBeenCalledWith("background.platform_configuration.read_failed", expect.objectContaining({
+      keys: ["omini.moderation"], correlationId: expect.any(String), reasonCode: "DB_UNAVAILABLE",
+    }));
+  });
+
+
+
+  it("returns one coherent four-purpose sealed bundle with complete versioned values", async () => {
+    const purposes = ["merchant.knowledge.r2", "commerce.connectionKeys", "shopify.partner", "messaging.sender"] as const;
+    const expected = {
+      "merchant.knowledge.r2": r2,
+      "commerce.connectionKeys": {
+        connectionKeysJson: JSON.stringify({ "previous": Buffer.alloc(32, 2).toString("base64"),
+          "active": Buffer.alloc(32, 3).toString("base64") }),
+        activeKeyId: "active",
+      },
+      "shopify.partner": { accessToken: "PRIVATE-PARTNER-TOKEN-235", organizationId: "org-45",
+        appId: "app-52", apiVersion: "2026-10" },
+      "messaging.sender": { accessToken: "PRIVATE-SENDER-TOKEN-563", phoneNumberId: "111222333",
+        businessAccountId: "999888777" },
+    };
+    const versions = [2, 3, 4, 5];
+    const context = setup(purposes.map((key, index) => row(key, seal(key, versions[index]!, expected[key]), versions[index]!)));
+    const bundle = await context.service.readBundle(purposes);
+    for (const [index, key] of purposes.entries()) {
+      expect(bundle[key]).toEqual({ key, version: versions[index], value: expected[key] });
+    }
+    expect(context.readRows).toHaveBeenCalledTimes(1);
+    expect(context.readRows).toHaveBeenCalledWith("test", purposes);
+    expect(Object.keys(bundle)).toEqual([...purposes]);
+  });
+
+  it("redacts denied unknown keys, malformed/revoked rows and failed unseal/DB diagnostics in errors and logs", async () => {
+    const info = vi.fn();
+    const warn = vi.fn();
+    const SENTINELS = ["SUPPLIED-KEY-PRIVATE", "SUPPLIED-ROW-PRIVATE", "SUPPLIED-DB-PRIVATE",
+      "SUPPLIED-ROOT-PRIVATE", "R2-SECRET-123"];
+    let activeRows: ConfigurationRow[] = [];
+    let databaseError: Error | null = null;
+    let rootError: Error | null = null;
+    const readRows = vi.fn(async (env: string, keys: readonly string[]) => {
+      if (databaseError) throw databaseError;
+      return activeRows.filter((r) => r.environment === env && keys.includes(r.key));
     });
+    const service = createBackgroundPlatformConfigurationService({ environment,
+      repository: { readRows }, unsealKeyring: () => {
+        if (rootError) throw rootError;
+        return wrapping;
+      }, logger: { info, warn } });
+    const failures: unknown[] = [];
+    async function expectFailure(action: () => Promise<unknown>, code: string, key: string): Promise<void> {
+      let caught: unknown;
+      try { await action(); } catch (error) { caught = error; }
+      expect(caught).toMatchObject({ code, key });
+      failures.push(caught);
+      const metadata = warn.mock.lastCall?.[1] as Record<string, unknown>;
+      expect(metadata).toMatchObject({ reasonCode: code, correlationId: expect.any(String) });
+      expect(metadata.correlationId).toMatch(/^[a-f0-9-]{36}$/);
+    }
+    await expectFailure(() => service.read("SUPPLIED-KEY-PRIVATE" as never), "DENIED", "unauthorised-key");
+    expect(readRows).not.toHaveBeenCalled();
+    activeRows = [row("merchant.knowledge.r2", { kind: "sealed", schemaVersion: 1,
+      algorithm: "AES-256-GCM", wrappingKeyId: "SUPPLIED-ROW-PRIVATE" }, 8)];
+    await expectFailure(() => service.read("merchant.knowledge.r2"), "INVALID", "merchant.knowledge.r2");
+    expect(warn.mock.lastCall?.[1]).toMatchObject({ rowRevisions: { "merchant.knowledge.r2": 8 } });
+    activeRows = [row("merchant.knowledge.r2", { kind: "disabled", schemaVersion: 1 }, 9)];
+    await expectFailure(() => service.read("merchant.knowledge.r2"), "DISABLED", "merchant.knowledge.r2");
+    expect(warn.mock.lastCall?.[1]).toMatchObject({ rowRevisions: { "merchant.knowledge.r2": 9 } });
+    activeRows = [row("merchant.knowledge.r2", seal("merchant.knowledge.r2", 10, r2), 10)];
+    rootError = new Error("SUPPLIED-ROOT-PRIVATE");
+    await expectFailure(() => service.read("merchant.knowledge.r2"), "UNSEAL_FAILED", "merchant.knowledge.r2");
+    expect(warn.mock.lastCall?.[1]).toMatchObject({ rowRevisions: { "merchant.knowledge.r2": 10 } });
+    rootError = null;
+    databaseError = new Error("SUPPLIED-DB-PRIVATE");
+    await expectFailure(() => service.read("merchant.knowledge.r2"), "DB_UNAVAILABLE", "bundle");
+    expect(warn.mock.lastCall?.[1]).not.toHaveProperty("rowRevisions");
+    expect(warn.mock.calls).toHaveLength(5);
+    const logged = JSON.stringify({ failures: failures.map((error) => ({ error, text: String(error) })),
+      info: info.mock.calls, warn: warn.mock.calls });
+    for (const privateValue of SENTINELS) expect(logged).not.toContain(privateValue);
+    const correlations = warn.mock.calls.map((call) => (call[1] as { correlationId: string }).correlationId);
+    expect(new Set(correlations).size).toBe(correlations.length);
   });
 
 });

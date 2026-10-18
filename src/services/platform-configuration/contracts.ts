@@ -20,7 +20,7 @@ export const BACKGROUND_READABLE_KEYS = [
 export type BackgroundReadableKey = typeof BACKGROUND_READABLE_KEYS[number];
 const allowed = new Set<string>(BACKGROUND_READABLE_KEYS);
 export function assertReadable(key: string): asserts key is BackgroundReadableKey {
-  if (!allowed.has(key)) throw new PlatformConfigurationFailure("DENIED", key);
+  if (!allowed.has(key)) throw new PlatformConfigurationFailure("DENIED", "unauthorised-key");
 }
 
 export type ModerationPolicy = Readonly<{ baseUrl: string | null; modelId: string }>;
