@@ -86,7 +86,9 @@ export class RecoveryAgentContextService {
         conversationId: conversation.id,
         shop: recovery.shop.domain,
         type: conversation.type,
-        summary: conversation.summary,
+        // Existing summaries have no content-specific moderation provenance.
+        // Withhold until a separate approved safe-summary contract exists.
+        summary: null,
         version: conversation.inboundVersion,
         languageTag: conversation.languageTag,
         languageSource: conversation.languageSource

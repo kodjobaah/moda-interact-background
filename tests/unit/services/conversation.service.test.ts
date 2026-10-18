@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   ConversationLanguageService,
 } from "../../../src/services/conversation-language.service.js";
 import { ConversationService } from "../../../src/services/conversation.service.js";
 
-const { prismaMock, txConversationUpdate, txConversationUpdateMany } =
+const { prismaMock, txConversationUpdate, txConversationUpdateMany, operationReader } =
   vi.hoisted(() => ({
+    operationReader: vi.fn(async () => ({ moderation: { value: { modelId: "omni-moderation-latest" } } })),
     txConversationUpdate: vi.fn(),
     txConversationUpdateMany: vi.fn(),
     prismaMock: {
@@ -15,6 +17,8 @@ const { prismaMock, txConversationUpdate, txConversationUpdateMany } =
         findMany: vi.fn(),
       },
       checkoutRecovery: { findUniqueOrThrow: vi.fn() },
+      conversationModerationAssessment: { findMany: vi.fn() },
+      merchantConversationSendCommand: { findMany: vi.fn() },
       conversation: {
         upsert: vi.fn(),
         findUniqueOrThrow: vi.fn(),
@@ -26,6 +30,9 @@ const { prismaMock, txConversationUpdate, txConversationUpdateMany } =
   }));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
+vi.mock("../../../src/services/conversation-moderation/moderation-operation.js", () => ({
+  readModerationOperation: operationReader,
+}));
 
 describe("ConversationService language persistence", () => {
   it("persists initial language during receipt and applies detection after the agent", async () => {
@@ -231,7 +238,7 @@ describe("ConversationService language persistence", () => {
 });
 
 describe("ConversationService standalone snapshots", () => {
-  it("uses the explicit shop for a standalone conversation", async () => {
+  function setupStandaloneHistory() {
     prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
       id: "conversation-1",
       type: "PRODUCT_DISCOVERY",
@@ -243,19 +250,39 @@ describe("ConversationService standalone snapshots", () => {
       checkoutRecovery: null,
     });
     prismaMock.conversationMessage.findMany.mockResolvedValue([
-      { direction: "INBOUND", content: "Need a black shirt" },
-    ] as any);
+      { id: "customer-1", direction: "INBOUND", senderType: "CUSTOMER", content: "Need a black shirt" },
+      { id: "customer-2", direction: "INBOUND", senderType: "CUSTOMER", content: "moderation-fixture-block" },
+    ]);
+    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue([{
+      conversationMessageId: "customer-1",
+      contentSha256: createHash("sha256").update("Need a black shirt", "utf8").digest("hex"),
+    }]);
+    prismaMock.merchantConversationSendCommand.findMany.mockResolvedValue([]);
+    operationReader.mockResolvedValue({ moderation: { value: { modelId: "omni-moderation-latest" } } });
+  }
 
-    const snapshot = await new ConversationService().getAgentSnapshot(
-      "conversation-1",
-    );
-
+  it("uses the explicit shop but includes only an exact moderation ALLOW", async () => {
+    setupStandaloneHistory();
+    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
     expect(snapshot).toMatchObject({
       conversationId: "conversation-1",
       shop: "example.myshopify.com",
       type: "PRODUCT_DISCOVERY",
+      summary: null,
       messages: [{ role: "user", content: "Need a black shirt" }],
     });
+    expect(prismaMock.conversationModerationAssessment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({
+        decision: "ALLOW", requestedModel: "omni-moderation-latest",
+      }) }),
+    );
+  });
+
+  it("fails closed when moderation configuration cannot be read", async () => {
+    setupStandaloneHistory();
+    operationReader.mockRejectedValueOnce(new Error("DB_UNAVAILABLE"));
+    await expect(new ConversationService().getAgentSnapshot("conversation-1"))
+      .rejects.toThrow("DB_UNAVAILABLE");
   });
 });
 

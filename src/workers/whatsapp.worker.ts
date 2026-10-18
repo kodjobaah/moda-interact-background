@@ -16,6 +16,7 @@ import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { inboundWhatsAppAudioService } from "../services/inbound-whatsapp-audio.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
+import { moderationTurnGate } from "../services/conversation-moderation/moderation-turn-gate.js";
 import { AiTurnOwnershipService } from "../services/recovery-conversation/ai-turn-ownership.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
@@ -62,6 +63,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
 >({
   queue: whatsappQueue,
   conversation: conversationService,
+  moderation: moderationTurnGate,
   ownership: new AiTurnOwnershipService(),
   admission: outboundWhatsAppAdmissionService,
   abuseAdmission: inboundWhatsAppAbuseAdmissionService,

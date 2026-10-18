@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { describe, expect, it } from "vitest";
+import { allowModerationFixture } from "./fixtures/arch040-allow-moderation.fixture.js";
 import { OutboundMessageDeliveryService } from "../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import { AiTurnOwnershipService } from "../../src/services/recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
@@ -93,6 +94,7 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         f.execution as unknown as ConstructorParameters<typeof OutboundMessageDeliveryService>[2],
         new AiTurnOwnershipService(f.db),
         new OutboundSendFenceService(f.db, f.durableEligibility),
+        allowModerationFixture(),
       );
       const result = await sender.sendPreparedText({
         kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,

@@ -12,6 +12,9 @@ import { whatsAppService } from "../whatsapp.service.js";
 import { AiTurnOwnershipService } from "../recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../recovery-conversation/outbound-send-fence.service.js";
 import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
+import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
+import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
+import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
 import type {
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -40,6 +43,7 @@ export class OutboundMessageDeliveryService {
     > = shopExecutionEligibilityService,
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
+    private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -79,6 +83,10 @@ export class OutboundMessageDeliveryService {
       where: { id: messageId },
       data: { content: outboundText },
     });
+    if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
+      await this.failPrepared(messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
     const fenced = await this.fenceRecoverySend({
       shopId, conversationId, messageId, to,
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
@@ -115,6 +123,32 @@ export class OutboundMessageDeliveryService {
   ): Promise<OutboundAdmissionResult> {
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
+    // DATABASE-005 has no structured automated-template columns: persist the
+    // *exact* deterministic template/parameter input as the prepared message
+    // TEXT before assessing it. Only those parameters are classified, not the
+    // unseen Meta-managed static template body (whose approval is independent).
+    // Terminal sends continue to moderate and send their fixed text instead.
+    let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
+    let outboundText = TERMINAL_MESSAGE;
+    if (!admission.terminal) {
+      try {
+        prepared = prepareAutomatedTemplateInput(input);
+        outboundText = prepared.effectiveText;
+      } catch {
+        await this.failPrepared(admission.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
+    }
+    await this.database.conversationMessage.update({
+      where: { id: admission.messageId }, data: { content: outboundText },
+    });
+    if (!(await this.approvePreparedOutbound({
+      shopId: admission.shopId, conversationId: admission.conversationId,
+      messageId: admission.messageId, outboundText,
+    }))) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
     const fenced = await this.fenceRecoverySend({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to,
@@ -123,28 +157,38 @@ export class OutboundMessageDeliveryService {
     if (fenced) return fenced;
 
     try {
-      const result = admission.terminal
-        ? await this.provider.sendWhatsAppText({
-            to: input.to,
-            text: TERMINAL_MESSAGE,
-          })
-        : await this.provider.sendWhatsAppTemplate({
-            to: input.to,
-            templateName: input.templateName,
-            languageCode: input.languageCode,
-            ...(input.bodyParameters
-              ? { bodyParameters: input.bodyParameters }
-              : {}),
-            ...(input.imageHeader ? { imageHeader: input.imageHeader } : {}),
-            ...(input.dynamicUrlButton
-              ? { dynamicUrlButton: input.dynamicUrlButton }
-              : {}),
-          });
+      const result = prepared
+        ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
+        : await this.provider.sendWhatsAppText({ to: input.to, text: TERMINAL_MESSAGE });
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
     } catch (error) {
       await this.markProviderFailure(admission.messageId, error);
       throw error;
+    }
+  }
+
+  private async approvePreparedOutbound(input: {
+    shopId: string; conversationId: string; messageId: string; outboundText: string;
+  }): Promise<boolean> {
+    try {
+      const message = await this.database.conversationMessage.findUnique({
+        where: { id: input.messageId }, select: { senderType: true, content: true },
+      });
+      if (!message || message.content !== input.outboundText ||
+          (message.senderType !== "AGENT" && message.senderType !== "AUTOMATION")) return false;
+      const subject = { kind: message.senderType === "AGENT" ? "AGENT_MESSAGE" as const : "AUTOMATION_MESSAGE" as const,
+        messageId: input.messageId };
+      const policyVersion = moderationConfig().policyVersion;
+      const outcome = await this.moderation.assessText({
+        subject, shopId: input.shopId, conversationId: input.conversationId,
+        effectiveText: input.outboundText, inputKind: "TEXT", policyVersion, now: new Date(),
+      });
+      return outcome.kind === "allow" && await this.moderation.requireCurrentAllowance({
+        subject, effectiveText: input.outboundText, policyVersion,
+      });
+    } catch {
+      return false;
     }
   }
 

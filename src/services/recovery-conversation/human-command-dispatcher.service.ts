@@ -11,6 +11,9 @@ import { OutboundSendFenceService } from "./outbound-send-fence.service.js";
 import { HumanSendReconciliationService } from "./human-send-reconciliation.service.js";
 import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.service.js";
 import { recoveryRuntimeEligibility } from "./recovery-runtime-eligibility.service.js";
+import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
+import { humanModerationAdmission } from "../conversation-moderation/moderation-decision-adapter.js";
+import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 
@@ -31,6 +34,7 @@ export type HumanDispatcherDependencies = {
   provider: Pick<typeof whatsAppService, "sendWhatsAppText" | "sendWhatsAppTemplate">;
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
+  moderation: ModerationAssessmentService;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -47,6 +51,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     provider: whatsAppService,
     execution: shopExecutionEligibilityService,
     now: () => new Date(),
+    moderation: moderationAssessmentService,
   };
 }
 
@@ -183,6 +188,32 @@ export class HumanCommandDispatcherService {
       return;
     }
 
+    // The command's persisted content, NOT UI text, is moderated before any
+    // sequence-two reservation, billing admission or provider permit.
+    const subject = { kind: "HUMAN_COMMAND" as const, commandId };
+    const moderation = this.deps.moderation;
+    let effectiveText: string;
+    try {
+      effectiveText = await moderation.effectiveText(subject);
+      const cfg = moderationConfig();
+      const decision = humanModerationAdmission(await moderation.assessText({
+        subject, shopId: command.shopId, conversationId: command.conversationId,
+        effectiveText, inputKind: command.kind === "HUMAN_TEXT" ? "TEXT" : "TEMPLATE_PARAMETERS",
+        policyVersion: cfg.policyVersion, now: this.deps.now(),
+      }));
+      if (decision.kind === "retry") {
+        await this.deps.commands.deferCommand(commandId, leaseToken, "moderation_unavailable", decision.retryAt);
+        return;
+      }
+      if (decision.kind === "blocked") {
+        await this.deps.commands.rejectCommand(commandId, leaseToken, decision.failureCode.toLowerCase());
+        return;
+      }
+    } catch {
+      await this.defer(commandId, leaseToken, "moderation_unavailable");
+      return;
+    }
+
     let attemptId: string | null = null;
     let credit: Awaited<ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>> | null = null;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
@@ -199,6 +230,14 @@ export class HumanCommandDispatcherService {
         await this.defer(commandId, leaseToken, safeCode(credit.reason));
         return;
       }
+    }
+    // A stale ALLOW cannot survive a concurrent change to persisted text.
+    if (!(await moderation.requireCurrentAllowance({
+      subject, effectiveText, policyVersion: moderationConfig().policyVersion,
+    }))) {
+      if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);
+      await this.defer(commandId, leaseToken, "moderation_content_stale");
+      return;
     }
     // Final provider admission commits before Meta request. No HTTP call or
     // Redis admission is made inside its transaction.

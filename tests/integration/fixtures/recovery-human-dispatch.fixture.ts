@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
 import { vi } from "vitest";
+import { allowModerationFixture } from "./arch040-allow-moderation.fixture.js";
+import type { ModerationAssessmentService } from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
 import { startArch040BackgroundMocks } from "./arch040-background-mocks.fixture.js";
 import { RecoveryOutreachAttemptService } from "../../../src/services/recovery-outreach-attempt.service.js";
 import {
@@ -61,7 +63,7 @@ export async function humanDispatchFixture(label: string) {
   };
   const execution = { evaluate: vi.fn(async () => ({ allowed: true } as const)) };
 
-  function dispatcher(limits?: HumanPolicyConfig) {
+  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture()) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
@@ -70,19 +72,19 @@ export async function humanDispatchFixture(label: string) {
       commands, followUps, evaluator,
       fence: new OutboundSendFenceService(db, durableEligibility),
       reconciliation, billing, provider, execution,
-      now: () => new Date(),
+      now: () => new Date(), moderation,
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);
   }
 
   async function addCommand(input: {
     kind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
-    idempotencyKey?: string; attemptId?: string;
+    idempotencyKey?: string; attemptId?: string; textBody?: string;
   } = {}) {
     const id = randomUUID();
     const key = input.idempotencyKey ?? id;
     const kind = input.kind ?? "HUMAN_TEXT";
-    const text = kind === "HUMAN_TEXT" ? `Hello ${id}` : null;
+    const text = kind === "HUMAN_TEXT" ? input.textBody ?? `Hello ${id}` : null;
     const digest = createHash("sha256").update(`${key}:${kind}`).digest("hex");
     await db.$executeRawUnsafe(`INSERT INTO "whatsapp"."MerchantConversationSendCommand"
       ("id","shopId","conversationId","idempotencyKey","payloadSha256", "expectedControlRevision",

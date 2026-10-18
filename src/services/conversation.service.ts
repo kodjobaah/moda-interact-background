@@ -1,4 +1,5 @@
 import prisma from "../lib/db.js";
+import { allowedHistoryCandidates } from "./conversation-moderation/moderation-history.js";
 
 import type {
   AgentMessage,
@@ -333,13 +334,15 @@ export class ConversationService {
       ...(pendingTurnStartedAt ? {} : { take: 20 }),
 
       select: {
+        id: true,
         direction: true,
         senderType: true,
         content: true,
       },
     });
 
-    const normalizedMessages: AgentMessage[] = messages
+    const safeMessages = await allowedHistoryCandidates(messages);
+    const normalizedMessages: AgentMessage[] = safeMessages
       .reverse()
       .map((message) => this.toAgentMessage(message));
     const shop =
@@ -361,7 +364,8 @@ export class ConversationService {
 
       languageSource: fromPrismaLanguageSource(conversation.languageSource),
 
-      summary: conversation.summary,
+      // Do not replay summaries without a persisted moderation identity.
+      summary: null,
 
       messages: normalizedMessages,
     };

@@ -4,20 +4,29 @@ import {
   OutboundMessageDeliveryService,
   TERMINAL_MESSAGE,
 } from "../../../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
+import { prepareAutomatedTemplateInput } from "../../../../src/services/conversation-moderation/automated-template-input.js";
 
 function harness({
   provider = {},
   executionEligibility = {
     evaluate: vi.fn(async () => ({ allowed: true as const, shopId: "shop-1" })),
   },
+  moderationOutcome = "allow",
+  currentAllowance = true,
 }: {
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
+  moderationOutcome?: "allow" | "block" | "retry";
+  currentAllowance?: boolean;
 } = {}) {
-  const conversationMessageUpdate = vi.fn().mockResolvedValue({});
-  const conversationMessageFindUnique = vi
-    .fn()
-    .mockResolvedValue({ conversationId: "conversation-1" });
+  let currentText = "Hello";
+  const conversationMessageUpdate = vi.fn().mockImplementation(async ({ data }: { data: { content?: string } }) => {
+    if (typeof data.content === "string") currentText = data.content;
+    return {};
+  });
+  const conversationMessageFindUnique = vi.fn().mockImplementation(async () => ({
+    conversationId: "conversation-1", senderType: "AGENT", content: currentText,
+  }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
   const usageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
   const transaction = {
@@ -31,7 +40,7 @@ function harness({
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),
-    conversationMessage: { update: conversationMessageUpdate },
+    conversationMessage: { update: conversationMessageUpdate, findUnique: conversationMessageFindUnique },
     usageEvent: { deleteMany: usageDeleteMany },
     conversation: { update: conversationUpdate },
   };
@@ -44,15 +53,22 @@ function harness({
     ...provider,
   };
 
+  const moderationMock = {
+    assessText: vi.fn(async () => ({ kind: moderationOutcome })),
+    requireCurrentAllowance: vi.fn(async () => currentAllowance),
+  };
   return {
     database,
     transaction,
     providerMock,
-    executionEligibility,
+    executionEligibility, moderationMock,
     service: new OutboundMessageDeliveryService(
       database as never,
       providerMock as never,
       executionEligibility as never,
+      undefined,
+      undefined,
+      moderationMock as never,
     ),
   };
 }
@@ -150,6 +166,63 @@ describe("OutboundMessageDeliveryService", () => {
       where: { id: "message-1" },
       data: { content: TERMINAL_MESSAGE },
     });
+  });
+
+  it("moderates a prepared AUTOMATION template's exact persisted parameters before Meta", async () => {
+    const test = harness();
+    const input = { to: "+15551234567", templateName: "recovery", languageCode: "en",
+      bodyParameters: ["Cart details", "Customer supplied offer"], dynamicUrlButton: { index: 0, text: "cart-7" } };
+    const effectiveText = prepareAutomatedTemplateInput(input).effectiveText;
+    await expect(test.service.sendPreparedTemplate(admission, input))
+      .resolves.toMatchObject({ kind: "admitted" });
+    expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
+      where: { id: "message-1" }, data: { content: effectiveText },
+    });
+    expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({
+      subject: { kind: "AGENT_MESSAGE", messageId: "message-1" },
+      effectiveText, inputKind: "TEXT", shopId: "shop-1", conversationId: "conversation-1",
+    }));
+    expect(test.moderationMock.requireCurrentAllowance).toHaveBeenCalledWith(expect.objectContaining({
+      effectiveText, subject: { kind: "AGENT_MESSAGE", messageId: "message-1" },
+    }));
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledWith(input);
+    expect(test.database.conversationMessage.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SENT" }),
+    }));
+  });
+
+  it("suppresses a blocked automated template and releases its reserved usage", async () => {
+    const test = harness({ moderationOutcome: "block" });
+    const result = await test.service.sendPreparedTemplate(admission, {
+      to: "+15551234567", templateName: "recovery", languageCode: "en", bodyParameters: ["flagged"] });
+    expect(result).toMatchObject({ kind: "suppressed" });
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(test.database.usageEvent.deleteMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ sourceId: "message-1" }),
+    }));
+  });
+
+  it("does not reuse stale ALLOW when the template parameters are changed", async () => {
+    const test = harness({ currentAllowance: false });
+    const result = await test.service.sendPreparedTemplate(admission, {
+      to: "+15551234567", templateName: "recovery", languageCode: "en", bodyParameters: ["changed after approval"] });
+    expect(result).toMatchObject({ kind: "suppressed" });
+    expect(test.moderationMock.assessText).toHaveBeenCalledOnce();
+    expect(test.moderationMock.requireCurrentAllowance).toHaveBeenCalledOnce();
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unmoderated image-header template without Meta admission", async () => {
+    const test = harness();
+    const result = await test.service.sendPreparedTemplate(admission, {
+      to: "+15551234567", templateName: "recovery", languageCode: "en",
+      imageHeader: { link: "https://example.test/image" },
+    });
+    expect(result).toMatchObject({ kind: "suppressed" });
+    expect(test.moderationMock.assessText).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("uses text transport instead of template transport for a terminal admission", async () => {
