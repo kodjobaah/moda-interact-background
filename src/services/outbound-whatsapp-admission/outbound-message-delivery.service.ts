@@ -14,6 +14,7 @@ import { OutboundSendFenceService } from "../recovery-conversation/outbound-send
 import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
+import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
 import type {
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -122,18 +123,28 @@ export class OutboundMessageDeliveryService {
   ): Promise<OutboundAdmissionResult> {
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
-    // Prepared templates have no persisted canonical template tuple; they
-    // cannot borrow a text approval for a provider-managed template body.
+    // DATABASE-005 has no structured automated-template columns: persist the
+    // *exact* deterministic template/parameter input as the prepared message
+    // TEXT before assessing it. Only those parameters are classified, not the
+    // unseen Meta-managed static template body (whose approval is independent).
+    // Terminal sends continue to moderate and send their fixed text instead.
+    let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
+    let outboundText = TERMINAL_MESSAGE;
     if (!admission.terminal) {
-      await this.failPrepared(admission.messageId);
-      return { kind: "suppressed", reason: "conversation-invalid" };
+      try {
+        prepared = prepareAutomatedTemplateInput(input);
+        outboundText = prepared.effectiveText;
+      } catch {
+        await this.failPrepared(admission.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
     }
     await this.database.conversationMessage.update({
-      where: { id: admission.messageId }, data: { content: TERMINAL_MESSAGE },
+      where: { id: admission.messageId }, data: { content: outboundText },
     });
     if (!(await this.approvePreparedOutbound({
       shopId: admission.shopId, conversationId: admission.conversationId,
-      messageId: admission.messageId, outboundText: TERMINAL_MESSAGE,
+      messageId: admission.messageId, outboundText,
     }))) {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
@@ -146,23 +157,9 @@ export class OutboundMessageDeliveryService {
     if (fenced) return fenced;
 
     try {
-      const result = admission.terminal
-        ? await this.provider.sendWhatsAppText({
-            to: input.to,
-            text: TERMINAL_MESSAGE,
-          })
-        : await this.provider.sendWhatsAppTemplate({
-            to: input.to,
-            templateName: input.templateName,
-            languageCode: input.languageCode,
-            ...(input.bodyParameters
-              ? { bodyParameters: input.bodyParameters }
-              : {}),
-            ...(input.imageHeader ? { imageHeader: input.imageHeader } : {}),
-            ...(input.dynamicUrlButton
-              ? { dynamicUrlButton: input.dynamicUrlButton }
-              : {}),
-          });
+      const result = prepared
+        ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
+        : await this.provider.sendWhatsAppText({ to: input.to, text: TERMINAL_MESSAGE });
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
     } catch (error) {

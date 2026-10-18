@@ -7,6 +7,10 @@ import { allowedHistoryCandidates } from "../../src/services/conversation-modera
 import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
 import { runAiTurnThroughBackgroundMocks } from "./fixtures/arch040-ai-turn.fixture.js";
 import { startArch040ModerationAimock } from "./fixtures/arch040-moderation-aimock.fixture.js";
+import { OutboundMessageDeliveryService } from "../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
+import { AiTurnOwnershipService } from "../../src/services/recovery-conversation/ai-turn-ownership.service.js";
+import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
+import { prepareAutomatedTemplateInput } from "../../src/services/conversation-moderation/automated-template-input.js";
 
 const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
   process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
@@ -152,6 +156,78 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
         where: { conversationMessageId: result.messageId },
       }))?.decision).toBe("BLOCK");
       assertModerationHttp(aimock.journal(), ["Your basket is ready to recover."]);
+    } finally { await close(); }
+  }, 120_000);
+
+  it("allows a moderated AUTOMATION template through B002 WhatsApp emulator with the exact parameter digest", async () => {
+    const { f, aimock, close } = await moderatedFixture("moderation-automation-template-allow");
+    try {
+      await f.changeOwner("HUMAN", "AI", 1);
+      const message = await f.db.conversationMessage.create({ data: {
+        conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
+        status: "PENDING", content: "[Pending automated template]",
+      } });
+      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
+      const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
+        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation);
+      const template = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
+        bodyParameters: ["Your basket is ready to recover.", "cart-123"] };
+      const expected = prepareAutomatedTemplateInput(template).effectiveText;
+      expect(await delivery.sendPreparedTemplate({
+        kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,
+        messageId: message.id, terminal: false, executionScope: "recovery",
+      }, template)).toMatchObject({ kind: "admitted" });
+      await f.whatsapp.waitForMessageCount(1);
+      expect(f.providerHttpRequests).toHaveLength(1);
+      expect((await f.db.conversationMessage.findUnique({ where: { id: message.id } })))
+        .toMatchObject({ content: expected, status: "SENT" });
+      expect(await f.db.conversationModerationAssessment.findFirst({
+        where: { conversationMessageId: message.id, decision: "ALLOW" },
+      })).toMatchObject({ contentSha256: sha256Text(expected), inputKind: "TEXT" });
+      expect(await moderation.requireCurrentAllowance({ subject: { kind: "AUTOMATION_MESSAGE", messageId: message.id },
+        effectiveText: expected, policyVersion: moderationConfig().policyVersion })).toBe(true);
+      assertModerationHttp(aimock.journal(), [expected]);
+    } finally { await close(); }
+  }, 120_000);
+
+  it("blocks changed AUTOMATION template parameters rather than reusing an earlier ALLOW", async () => {
+    const { f, aimock, close } = await moderatedFixture("moderation-automation-template-block", {
+      blockedTexts: ["moderation-fixture-block"],
+    });
+    try {
+      await f.changeOwner("HUMAN", "AI", 1);
+      const message = await f.db.conversationMessage.create({ data: {
+        conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
+        status: "PENDING", content: "[Pending automated template]",
+      } });
+      const subject = { kind: "AUTOMATION_MESSAGE" as const, messageId: message.id };
+      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
+      const allowedTemplate = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
+        bodyParameters: ["Customer-safe value"] };
+      const oldContent = prepareAutomatedTemplateInput(allowedTemplate).effectiveText;
+      await f.db.conversationMessage.update({ where: { id: message.id }, data: { content: oldContent } });
+      expect((await moderation.assessText({ subject, shopId: f.shopId, conversationId: f.conversationId,
+        effectiveText: oldContent, inputKind: "TEXT", policyVersion: moderationConfig().policyVersion,
+        now: new Date() })).kind).toBe("allow");
+      const blockedTemplate = { ...allowedTemplate, bodyParameters: ["moderation-fixture-block"] };
+      const blockedContent = prepareAutomatedTemplateInput(blockedTemplate).effectiveText;
+      const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
+        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation);
+      expect(await delivery.sendPreparedTemplate({
+        kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,
+        messageId: message.id, terminal: false, executionScope: "recovery",
+      }, blockedTemplate)).toMatchObject({ kind: "suppressed" });
+      expect(f.providerHttpRequests).toHaveLength(0);
+      await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
+      expect(await f.db.conversationModerationAssessment.findMany({
+        where: { conversationMessageId: message.id }, select: { decision: true, contentSha256: true },
+      })).toEqual(expect.arrayContaining([
+        { decision: "ALLOW", contentSha256: sha256Text(oldContent) },
+        { decision: "BLOCK", contentSha256: sha256Text(blockedContent) },
+      ]));
+      expect(await moderation.requireCurrentAllowance({ subject, effectiveText: blockedContent,
+        policyVersion: moderationConfig().policyVersion })).toBe(false);
+      assertModerationHttp(aimock.journal(), [oldContent, blockedContent]);
     } finally { await close(); }
   }, 120_000);
 

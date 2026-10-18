@@ -10,6 +10,9 @@ import type { ShopExecutionEligibilityService } from "./shop-execution-eligibili
 import { whatsAppService } from "./whatsapp.service.js";
 import type { SendTemplateInput, SendTextInput } from "../integration/whatsapp/types.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "./conversation-moderation/moderation-assessment.service.js";
+import { AiTurnOwnershipService } from "./recovery-conversation/ai-turn-ownership.service.js";
+import { OutboundSendFenceService } from "./recovery-conversation/outbound-send-fence.service.js";
+import { recoveryRuntimeEligibility } from "./recovery-conversation/recovery-runtime-eligibility.service.js";
 import { OutboundAdmissionReservationService } from "./outbound-whatsapp-admission/outbound-admission-reservation.service.js";
 import {
   OutboundMessageDeliveryService,
@@ -53,6 +56,8 @@ export class OutboundWhatsAppAdmissionService {
     createPostContractPolicyResolver = (client: Prisma.TransactionClient) =>
       new PostContractRecoveryPolicyResolver(client),
     moderation: ModerationAssessmentService = moderationAssessmentService,
+    ownership = new AiTurnOwnershipService(),
+    recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
   ) {
     this.reservation = new OutboundAdmissionReservationService(
       database,
@@ -64,8 +69,8 @@ export class OutboundWhatsAppAdmissionService {
       database,
       provider,
       executionEligibility,
-      undefined,
-      undefined,
+      ownership,
+      recoveryFence,
       moderation,
     );
   }
