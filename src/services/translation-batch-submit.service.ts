@@ -14,6 +14,7 @@ import {
   type TranslationRequest,
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
+import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
 import { connectionRedis } from "../lib/redis.js";
 import {
   backgroundRuntimeConfigService,
@@ -54,6 +55,7 @@ type SubmissionQueue = Pick<Queue, "add">;
 type ProviderFactory = (options: {
   provider: string;
   model: string;
+  apiKey?: string;
 }) => TranslationProvider;
 
 export type TranslationBatchSubmitResult =
@@ -110,6 +112,7 @@ export class TranslationBatchSubmitService {
       provider = this.provider ?? this.providerFactory({
         provider: claimed.provider,
         model: claimed.model,
+        apiKey: await readSupportTranslationCredential(claimed.provider),
       });
     } catch (error) {
       await this.persistFailure(

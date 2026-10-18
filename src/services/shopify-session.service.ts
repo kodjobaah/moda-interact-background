@@ -1,4 +1,5 @@
 import prisma  from "../lib/db.js";
+import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 
 type ShopifyRefreshResponse = {
   access_token: string;
@@ -70,11 +71,9 @@ async function refreshShopifyAccessToken({
   shop: string;
   refreshToken: string;
 }): Promise<string> {
-  const clientId =
-    process.env.SHOPIFY_API_KEY;
-
-  const clientSecret =
-    process.env.SHOPIFY_API_SECRET;
+  const oauth = (await platformConsumerConfiguration.read("shopify.oauth")).value;
+  const clientId = oauth.apiKey;
+  const clientSecret = oauth.apiSecret;
 
   if (!clientId || !clientSecret) {
     throw new Error(

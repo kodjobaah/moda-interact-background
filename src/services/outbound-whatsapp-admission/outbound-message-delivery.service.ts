@@ -42,7 +42,7 @@ export class OutboundMessageDeliveryService {
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
   ) {}
 
-  getProviderAccountId(): string {
+  async getProviderAccountId(): Promise<string> {
     return this.provider.getProviderAccountId();
   }
 

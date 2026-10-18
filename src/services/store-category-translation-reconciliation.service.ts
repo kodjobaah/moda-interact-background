@@ -60,10 +60,10 @@ type BatchRecoveryRow = {
   errorFileId: string | null;
 };
 
-function defaultCredentialResolver(): TranslationProviderCredentialResolver {
+async function defaultCredentialResolver(): Promise<TranslationProviderCredentialResolver> {
   return createTranslationProviderCredentialResolver({
     db: prisma,
-    keyring: readCommerceCredentialKeyring(),
+    keyring: await readCommerceCredentialKeyring(),
   });
 }
 
@@ -81,7 +81,7 @@ export class StoreCategoryTranslationReconciliationService {
   private readonly database: ReconciliationDatabase;
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver;
+  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
   private readonly runStateService: StoreCategoryTranslationRunStateService;
   private readonly batchAssemblyService: StoreCategoryTranslationBatchAssemblyService;
 
@@ -90,7 +90,7 @@ export class StoreCategoryTranslationReconciliationService {
     database?: ReconciliationDatabase;
     providerFactory?: ProviderFactory;
     runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver;
+    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
     runStateService?: StoreCategoryTranslationRunStateService;
     batchAssemblyService?: StoreCategoryTranslationBatchAssemblyService;
   } = {}) {
@@ -291,7 +291,7 @@ export class StoreCategoryTranslationReconciliationService {
     claimTimeoutSeconds: number,
   ): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
     const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-    const apiKey = await this.credentialResolverFactory().resolve({
+    const apiKey = await (await this.credentialResolverFactory()).resolve({
       environment,
       provider: batch.provider,
     });

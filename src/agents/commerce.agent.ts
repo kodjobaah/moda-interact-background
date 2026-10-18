@@ -38,7 +38,7 @@ export async function runCommerceAgent(
           dependencies.credentialResolver ??
           createOpenRouterCredentialResolver({
             db,
-            keyring: readCommerceCredentialKeyring(),
+            keyring: await readCommerceCredentialKeyring(),
           });
         const productionModel = await createProductionCommerceModelInvoker({
           db,

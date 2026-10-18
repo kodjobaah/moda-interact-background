@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import {
   canonicalJson,
   CommerceEvidenceSchema,
@@ -52,11 +51,14 @@ const result = (data: unknown): CommerceToolResult => ({
   renderedText: "untrusted rendered offer text",
 });
 
+// Frozen, test-only copy of docs/architecture/ARCH-020-evidence-contract-fixtures.json
+// (ARCH-020 v1; SHA-256 9fcc3a38f669ca5be292680bab0a25bff4a817fca2cf8beae407d2132fa686f0).
+// Keep it repository-local so the Background test suite requires no parent workspace.
 const canonicalFixture = JSON.parse(
   readFileSync(
-    resolve(
-      process.env.MODA_WORKSPACE_ROOT ?? resolve(process.cwd(), ".."),
-      "docs/architecture/ARCH-020-evidence-contract-fixtures.json",
+    new URL(
+      "../../fixtures/commerce/arch020-evidence-contract-fixtures.v1.json",
+      import.meta.url,
     ),
     "utf8",
   ),

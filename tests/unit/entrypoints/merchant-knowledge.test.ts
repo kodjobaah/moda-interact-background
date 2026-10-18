@@ -38,7 +38,8 @@ describe("Merchant Knowledge worker entrypoint", () => {
 
   it("starts one dedicated worker with both fixed leased schedules", () => {
     expect(source).toContain('serviceName: "moda-merchant-knowledge-worker"');
-    expect(source).toContain("createMerchantKnowledgeWorker(processingService)");
+    expect(source).toContain("const worker = createMerchantKnowledgeWorker({");
+    expect(source).toContain("processJob: async (job) => (await newProcessingService()).processJob(job)");
     expect(source.match(/createMerchantKnowledgeWorker\(/g)).toHaveLength(1);
     expect(source.match(/startDynamicLeasedScheduler\(\{/g)).toHaveLength(3);
 
@@ -60,7 +61,8 @@ describe("Merchant Knowledge worker entrypoint", () => {
       'leaseName: "MERCHANT_KNOWLEDGE_UPLOAD_CLEANUP"',
     );
     expect(source).toContain("intervalMs: 3_600_000");
-    expect(source).toContain("uploadCleanupService.cleanupOnce()");
+    expect(source).toContain("await cleanup()");
+    expect(source).toContain("const config = await readR2Configuration()");
     expect(source).toContain('queueNames: ["merchant-knowledge"]');
   });
 

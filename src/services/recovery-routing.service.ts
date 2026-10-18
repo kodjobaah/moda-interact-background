@@ -25,7 +25,7 @@ export class RecoveryRoutingService {
   async resolveInboundMessage(
     event: WhatsAppInboundEvent,
   ): Promise<RecoveryRoute> {
-    const sender = whatsAppService.resolveSender();
+    const sender = await whatsAppService.resolveSender();
     if (
       event.providerAccountId !== sender.providerAccountId ||
       event.providerPhoneNumberId !== sender.providerPhoneNumberId

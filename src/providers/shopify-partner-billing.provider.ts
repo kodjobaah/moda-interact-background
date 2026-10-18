@@ -1,3 +1,5 @@
+import { platformConsumerConfiguration } from "../services/platform-configuration/consumers.js";
+import { PlatformConfigurationFailure } from "../services/platform-configuration/errors.js";
 export type PartnerUsageSnapshot = {
   handle: string;
   quantity: string | number | null;
@@ -228,16 +230,16 @@ type SubscriptionReconciliationResponse = PartnerResponse & {
 
 export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
   constructor(
-    private readonly environment: NodeJS.ProcessEnv = process.env,
+    private readonly environment?: NodeJS.ProcessEnv,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
   async getActiveSubscription(shopifyShopId: string): Promise<PartnerSubscription | null> {
-    const config = this.readConfig();
+    const config = await this.readConfig();
 
     const response = await this.fetchImpl(
-      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
+      `https://partners.shopify.com/${config.orgId}/api/${config.apiVersion}/graphql.json`,
       {
         method: "POST",
         headers: {
@@ -262,12 +264,12 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
   }
 
   async getSubscriptionReconciliationSnapshot(shopifyShopId: string): Promise<PartnerSubscriptionReconciliationSnapshot> {
-    const config = this.readConfig();
+    const config = await this.readConfig();
     const occurredAtMax = this.now();
     const occurredAtMin = new Date(occurredAtMax.getTime() - 365 * 24 * 60 * 60 * 1000);
 
     const response = await this.fetchImpl(
-      `https://partners.shopify.com/${config.orgId}/api/2026-07/graphql.json`,
+      `https://partners.shopify.com/${config.orgId}/api/${config.apiVersion}/graphql.json`,
       {
         method: "POST",
         headers: {
@@ -364,14 +366,26 @@ export class ShopifyPartnerBillingApi implements ShopifyPartnerBillingProvider {
     };
   }
 
-  private readConfig(): { orgId: string; accessToken: string; appId: string } {
-    const orgId = this.environment.SHOPIFY_PARTNER_ORG_ID?.trim();
-    const accessToken = this.environment.SHOPIFY_PARTNER_ACCESS_TOKEN?.trim();
-    const appId = this.environment.SHOPIFY_APP_ID?.trim();
-    if (!orgId || !accessToken || !appId) {
-      throw new ShopifyPartnerBillingError("Shopify Partner API configuration is missing", "configuration-missing", false);
+  private async readConfig(): Promise<{ orgId: string; accessToken: string; appId: string; apiVersion: string }> {
+    // Explicit test adapters may supply env values; live provider always uses the sealed row.
+    if (this.environment) {
+      const orgId = this.environment.SHOPIFY_PARTNER_ORG_ID?.trim();
+      const accessToken = this.environment.SHOPIFY_PARTNER_ACCESS_TOKEN?.trim();
+      const appId = this.environment.SHOPIFY_APP_ID?.trim();
+      if (!orgId || !accessToken || !appId) {
+        throw new ShopifyPartnerBillingError("Shopify Partner API configuration is missing", "configuration-missing", false);
+      }
+      return { orgId, accessToken, appId, apiVersion: this.environment.SHOPIFY_PARTNER_API_VERSION?.trim() || "2026-07" };
     }
-    return { orgId, accessToken, appId };
+    try {
+      const value = (await platformConsumerConfiguration.read("shopify.partner")).value;
+      return { orgId: value.organizationId, accessToken: value.accessToken, appId: value.appId, apiVersion: value.apiVersion ?? "2026-07" };
+    } catch (error) {
+      const retryable = error instanceof PlatformConfigurationFailure && error.code === "DB_UNAVAILABLE";
+      throw new ShopifyPartnerBillingError(
+        "Shopify Partner configuration unavailable", retryable ? "configuration-read" : "configuration-missing", retryable,
+      );
+    }
   }
 }
 

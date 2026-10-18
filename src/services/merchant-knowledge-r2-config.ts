@@ -30,7 +30,7 @@ function requiredPositiveSafeInteger(environment: NodeJS.ProcessEnv, name: strin
 }
 
 export function loadMerchantKnowledgeR2Config(
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
 ): MerchantKnowledgeR2Config {
   const endpoint = requiredTrimmed(environment, "MERCHANT_KNOWLEDGE_R2_ENDPOINT");
   let parsedEndpoint: URL;

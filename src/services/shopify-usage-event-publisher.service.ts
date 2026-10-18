@@ -6,11 +6,11 @@ import {
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
+import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 import {
   ShopifyAppEventsError,
   ShopifyAppEventsClient,
-  readShopifyAppEventsConfig,
 } from "../providers/shopify-app-events.provider.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -49,14 +49,13 @@ export type ShopifyUsageEventPublishOptions = {
 };
 
 export class ShopifyUsageEventPublisherService {
-  private defaultProvider: BillingEventClient | undefined;
 
   constructor(
     private readonly database: PublisherDatabase = prisma,
     private readonly provider: BillingEventClient | undefined = undefined,
     private readonly now: () => Date = () => new Date(),
     private readonly pageSize = DEFAULT_PAGE_SIZE,
-    private readonly createProvider: () => BillingEventClient = createDefaultClient,
+    private readonly createProvider: () => BillingEventClient | Promise<BillingEventClient> = createDefaultClient,
   ) {}
 
   async publishDue(options: ShopifyUsageEventPublishOptions = {}): Promise<ShopifyUsageEventPublisherResult> {
@@ -135,7 +134,7 @@ export class ShopifyUsageEventPublisherService {
       }
 
       try {
-        const provider = this.getProvider();
+        const provider = await this.getProvider();
         const quantity = new Prisma.Decimal(row.quantity);
         await provider.createBillingEvent({
           shopId: row.shop.shopifyShopId!,
@@ -185,10 +184,10 @@ export class ShopifyUsageEventPublisherService {
     return updated.count === 1;
   }
 
-  private getProvider(): BillingEventClient {
+  private async getProvider(): Promise<BillingEventClient> {
     if (this.provider) return this.provider;
-    this.defaultProvider ??= this.createProvider();
-    return this.defaultProvider;
+    // Do not retain an App Events client with a cached token across billing operations.
+    return this.createProvider();
   }
 
   private async recoverStaleClaims(now: Date, options: ShopifyUsageEventPublishOptions = {}): Promise<void> {
@@ -263,8 +262,10 @@ export class ShopifyUsageEventPublisherService {
   }
 }
 
-function createDefaultClient(): BillingEventClient {
-  return new ShopifyAppEventsClient(readShopifyAppEventsConfig());
+async function createDefaultClient(): Promise<BillingEventClient> {
+  const value = (await platformConsumerConfiguration.read("shopify.appEvents")).value;
+  // A new client per operation cannot reuse a token from an older credential revision.
+  return new ShopifyAppEventsClient({ clientId: value.clientId, clientSecret: value.clientSecret });
 }
 
 function boundedPageSize(value: number): number {

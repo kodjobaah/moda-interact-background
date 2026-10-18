@@ -67,10 +67,10 @@ const admission = {
 };
 
 describe("OutboundMessageDeliveryService", () => {
-  it("delegates provider account identity", () => {
+  it("delegates provider account identity", async () => {
     const test = harness();
 
-    expect(test.service.getProviderAccountId()).toBe("phone-number-id");
+    await expect(test.service.getProviderAccountId()).resolves.toBe("phone-number-id");
     expect(test.providerMock.getProviderAccountId).toHaveBeenCalledOnce();
   });
 

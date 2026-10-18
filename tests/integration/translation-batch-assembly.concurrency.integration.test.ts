@@ -18,9 +18,11 @@ describeWithDatabase(
   () => {
     it("assigns concurrent candidates to disjoint current batches with SKIP LOCKED", async () => {
       process.env.DATABASE_URL = testDatabaseUrl;
-      process.env.TRANSLATION_MODEL = "integration-test-model";
 
       const database = new PrismaClient();
+      let fixtureAdminId: string | undefined;
+      let fixtureCredentialId: string | undefined;
+      let fixtureModelId: string | undefined;
       const shopId = randomUUID();
       const threadId = randomUUID();
       const messageIds = [randomUUID(), randomUUID()];
@@ -28,6 +30,44 @@ describeWithDatabase(
       const batchIds: string[] = [];
 
       try {
+        const configuredModel = await database.commerceTranslationModelConfiguration.findFirst({
+          where: { environment: "TEST", enabled: true, automaticDefault: true },
+          select: { id: true },
+        });
+        if (!configuredModel) {
+          const fixtureAdmin = await database.platformAdmin.create({
+            data: { email: `${randomUUID()}@arch043-background.test` },
+            select: { id: true },
+          });
+          fixtureAdminId = fixtureAdmin.id;
+          const fixtureCredential = await database.commerceTranslationProviderCredential.create({
+            data: {
+              environment: "TEST",
+              provider: "openai",
+              ciphertext: Buffer.from([1]),
+              nonce: Buffer.alloc(12, 1),
+              authTag: Buffer.alloc(16, 1),
+              keyId: "integration-test",
+              updatedByAdminId: fixtureAdmin.id,
+            },
+            select: { id: true },
+          });
+          fixtureCredentialId = fixtureCredential.id;
+          const model = await database.commerceTranslationModelConfiguration.create({
+            data: {
+              environment: "TEST",
+              provider: "openai",
+              providerModelId: `integration-test-${randomUUID()}`,
+              displayName: `ARCH-043 test ${randomUUID()}`,
+              enabled: true,
+              automaticDefault: true,
+              createdByAdminId: fixtureAdmin.id,
+              updatedByAdminId: fixtureAdmin.id,
+            },
+            select: { id: true },
+          });
+          fixtureModelId = model.id;
+        }
         await database.$executeRaw(Prisma.sql`
 INSERT INTO "commerce"."Shop" (
   "id",
@@ -163,6 +203,15 @@ VALUES (
         await database.$executeRaw(
           Prisma.sql`DELETE FROM "commerce"."Shop" WHERE "id" = ${shopId}`,
         );
+        if (fixtureModelId) {
+          await database.commerceTranslationModelConfiguration.delete({ where: { id: fixtureModelId } });
+        }
+        if (fixtureCredentialId) {
+          await database.commerceTranslationProviderCredential.delete({ where: { id: fixtureCredentialId } });
+        }
+        if (fixtureAdminId) {
+          await database.platformAdmin.delete({ where: { id: fixtureAdminId } });
+        }
         await database.$disconnect();
       }
     }, 30_000);

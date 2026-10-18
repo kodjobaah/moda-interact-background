@@ -12,7 +12,7 @@ import { MerchantKnowledgeUploadedAssetAcquirerService } from "../services/merch
 import { MerchantKnowledgeWebPageAcquirer } from "../services/merchant-knowledge-web-page-acquirer.js";
 import { MerchantKnowledgeUploadCleanupService } from "../services/merchant-knowledge-upload-cleanup.service.js";
 import { createMerchantKnowledgeR2Client } from "../services/merchant-knowledge-r2-client.js";
-import { loadMerchantKnowledgeR2Config } from "../services/merchant-knowledge-r2-config.js";
+import { readR2Configuration } from "../services/platform-configuration/consumers.js";
 import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../commerce/credential-keyring.js";
 import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import { createMerchantKnowledgeEmbeddingResolver } from "../services/merchant-knowledge-embedding-runtime.js";
@@ -23,33 +23,37 @@ import { merchantKnowledgeEntitlementReconciliationService } from "../services/m
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-knowledge-worker",
   loadWorkerProcess: async () => {
-    const embeddingResolver = createMerchantKnowledgeEmbeddingResolver({
-      db: prisma,
-      environment: resolveCommerceEnvironment(),
-      keyring: readCommerceCredentialKeyring(),
-    });
-    const r2Config = loadMerchantKnowledgeR2Config();
-    const r2 = createMerchantKnowledgeR2Client(r2Config);
-    const uploadedAssetAcquirer = new MerchantKnowledgeUploadedAssetAcquirerService({
-      database: prisma,
-      r2,
-      bucket: r2Config.bucket,
-      maxUploadBytes: r2Config.maxUploadBytes,
-      maxXlsxUncompressedBytes: r2Config.maxXlsxUncompressedBytes,
-    });
-    const processingService = new MerchantKnowledgeProcessingService({
+    const uploadedAssetAcquirer = {
+      async acquire(input: Parameters<MerchantKnowledgeUploadedAssetAcquirerService["acquire"]>[0]) {
+        const config = await readR2Configuration();
+        return new MerchantKnowledgeUploadedAssetAcquirerService({
+          database: prisma, r2: createMerchantKnowledgeR2Client(config),
+          bucket: config.bucket, maxUploadBytes: config.maxUploadBytes,
+          maxXlsxUncompressedBytes: config.maxXlsxUncompressedBytes,
+        }).acquire(input);
+      },
+    };
+    const newProcessingService = async () => new MerchantKnowledgeProcessingService({
       webPageAcquirer: new MerchantKnowledgeWebPageAcquirer(),
       uploadedAssetAcquirer,
-      embeddingResolver,
+      embeddingResolver: createMerchantKnowledgeEmbeddingResolver({
+        db: prisma, environment: resolveCommerceEnvironment(),
+        keyring: await readCommerceCredentialKeyring(),
+      }),
     });
-    const uploadCleanupService = new MerchantKnowledgeUploadCleanupService({
-      database: prisma,
-      r2,
-      bucket: r2Config.bucket,
-    });
+    // Cleanup config is obtained per scheduler tick, never from worker startup.
+    const cleanup = async () => {
+      const config = await readR2Configuration();
+      return new MerchantKnowledgeUploadCleanupService({
+        database: prisma, r2: createMerchantKnowledgeR2Client(config), bucket: config.bucket,
+      }).cleanupOnce();
+    };
 
     await backgroundRuntimeConfigService.start();
-    const worker = createMerchantKnowledgeWorker(processingService);
+    const worker = createMerchantKnowledgeWorker({
+      processJob: async (job) => (await newProcessingService()).processJob(job),
+      markTerminalFailure: async (input) => (await newProcessingService()).markTerminalFailure(input),
+    });
     const stopPendingReconciliation = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -83,7 +87,7 @@ void startReadyWorkerProcess({
       intervalMs: 3_600_000,
       runImmediately: true,
       run: async () => {
-        await uploadCleanupService.cleanupOnce();
+        await cleanup();
       },
       onError: () => console.error("Merchant Knowledge upload cleanup failed"),
     });

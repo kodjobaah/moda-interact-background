@@ -5,6 +5,16 @@ import {
   WhatsAppService,
 } from "../../../src/services/whatsapp.service.js";
 
+vi.mock("../../../src/services/platform-configuration/consumers.js", () => ({
+  platformConsumerConfiguration: {
+    read: async () => ({ value: {
+      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+      businessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
+      accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
+    } }),
+  },
+}));
+
 const phoneNumberId = "test-phone-number-id";
 const businessAccountId = "test-waba-id";
 const accessToken = "test-access-token";
@@ -123,11 +133,11 @@ describe("WhatsAppService API base URL", () => {
     expect(body.template.language.code).not.toBe(canonicalLanguageTag);
   });
 
-  it("keeps WABA identity separate from the sender phone identity", () => {
+  it("keeps WABA identity separate from the sender phone identity", async () => {
     const service = new WhatsAppService();
 
-    expect(service.getProviderAccountId()).toBe(businessAccountId);
-    expect(service.resolveSender()).toEqual({
+    expect(await service.getProviderAccountId()).toBe(businessAccountId);
+    expect(await service.resolveSender()).toEqual({
       providerAccountId: businessAccountId,
       providerPhoneNumberId: phoneNumberId,
     });
@@ -135,12 +145,12 @@ describe("WhatsAppService API base URL", () => {
 
   it.each(["WHATSAPP_BUSINESS_ACCOUNT_ID", "WHATSAPP_PHONE_NUMBER_ID"])(
     "fails boundedly when %s is missing",
-    (variable) => {
+    async (variable) => {
     vi.stubEnv(variable, "");
 
-    expect(() => new WhatsAppService().resolveSender()).toThrowError(
-      expect.objectContaining({ code: "configuration-missing" }),
-    );
+    await expect(new WhatsAppService().resolveSender()).rejects.toMatchObject({
+      code: "configuration-missing",
+    });
     },
   );
 

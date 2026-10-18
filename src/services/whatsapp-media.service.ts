@@ -1,3 +1,5 @@
+import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
+
 const DEFAULT_API_BASE_URL = "https://graph.facebook.com/v25.0";
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 30_000;
@@ -27,7 +29,7 @@ export class WhatsAppMediaService {
   constructor(private readonly fetchImplementation: typeof fetch = fetch) {}
 
   async downloadAudio(mediaId: string, expectedMimeType: string | null): Promise<DownloadedWhatsAppAudio> {
-    const token = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
+    const token = (await platformConsumerConfiguration.read("messaging.sender")).value.accessToken;
     if (!token) throw new WhatsAppMediaError("configuration-missing", false);
     const base = (process.env.WHATSAPP_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
     let metadata: Response;

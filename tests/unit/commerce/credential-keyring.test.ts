@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../../../src/services/platform-configuration/consumers.js", async () => {
+  const { parseCredentialKeyring } = await import("@modainteract/moda-interact-shared/security/credentials/node");
+  return { readCommerceKeyring: async () => parseCredentialKeyring(process.env.COMMERCE_CONNECTION_KEYS_JSON) };
+});
 import { readCanonicalCredentialKeyring as readCommerceCredentialKeyring } from "../../../src/commerce/credential-keyring.js";
 
 const secret = Buffer.alloc(32, 7).toString("base64");
@@ -7,17 +11,17 @@ beforeEach(() => vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ ac
 afterEach(() => vi.unstubAllEnvs());
 
 describe("readCommerceCredentialKeyring (Shared parser)", () => {
-  it("accepts canonical 32-byte Base64 keys without exposing secret bytes", () => {
-    const keyring = readCommerceCredentialKeyring();
+  it("accepts canonical 32-byte Base64 keys without exposing secret bytes", async () => {
+    const keyring = await readCommerceCredentialKeyring();
     expect(keyring.keyIds).toEqual(["active"]);
     expect(keyring.hasKey("active")).toBe(true);
     expect(Object.keys(keyring)).not.toContain("active");
   });
 
-  it("accepts valid key ids through the 64-character limit", () => {
+  it("accepts valid key ids through the 64-character limit", async () => {
     const id = "k".repeat(64);
     vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ [id]: secret }));
-    expect(readCommerceCredentialKeyring().hasKey(id)).toBe(true);
+    expect((await readCommerceCredentialKeyring()).hasKey(id)).toBe(true);
   });
 
   it.each([
@@ -33,22 +37,22 @@ describe("readCommerceCredentialKeyring (Shared parser)", () => {
     ["an empty keyring", "{}"],
     ["duplicate key ids", `{"active":"${secret}","active":"${secret}"}`],
     ["escaped duplicate key ids", `{"active":"${secret}","a\\u0063tive":"${secret}"}`],
-  ])("rejects %s with a bounded error", (_label, value) => {
+  ])("rejects %s with a bounded error", async (_label, value) => {
     vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", value);
-    expect(() => readCommerceCredentialKeyring()).toThrow("Commerce credential keyring is invalid");
+    await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
   });
 
-  it("never falls back to service-specific keyring variables", () => {
+  it("never falls back to service-specific keyring variables", async () => {
     vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", undefined);
     vi.stubEnv("MODA_WOO_REST_READ_KEYRING", JSON.stringify({ active: secret }));
-    expect(() => readCommerceCredentialKeyring()).toThrow("Commerce credential keyring is invalid");
+    await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
   });
 
-  it("does not expose key material in errors or console output", () => {
+  it("does not expose key material in errors or console output", async () => {
     vi.stubEnv("COMMERCE_CONNECTION_KEYS_JSON", JSON.stringify({ active: "bad-secret-material" }));
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      expect(() => readCommerceCredentialKeyring()).toThrow("Commerce credential keyring is invalid");
+      await expect(readCommerceCredentialKeyring()).rejects.toThrow("Commerce credential keyring is invalid");
       expect(log).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();

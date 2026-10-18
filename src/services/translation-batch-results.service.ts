@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { createOpenAITranslationProvider, type TranslationProvider, type TranslationProviderResult } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
+import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 import { translationItemRetryDisposition } from "./translation-batch-runtime/item-retry.js";
@@ -45,7 +46,7 @@ type ResultDatabase = {
   $transaction<T>(callback: (transaction: ResultTransaction) => Promise<T>): Promise<T>;
 };
 
-type ProviderFactory = (options: { provider: string; model: string }) => TranslationProvider;
+type ProviderFactory = (options: { provider: string; model: string; apiKey?: string }) => TranslationProvider;
 
 export type TranslationBatchResultsResult =
   | { status: "skipped"; batchId: string }
@@ -54,16 +55,19 @@ export type TranslationBatchResultsResult =
 export class TranslationBatchResultsService {
   private readonly database: ResultDatabase;
   private readonly providerFactory: ProviderFactory;
+  private readonly credentialReader: (provider: string) => Promise<string>;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     database?: ResultDatabase;
     providerFactory?: ProviderFactory;
+    credentialReader?: (provider: string) => Promise<string>;
     runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) =>
       createOpenAITranslationProvider(providerOptions));
+    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
     this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
@@ -76,7 +80,8 @@ export class TranslationBatchResultsService {
       return { status: "skipped", batchId: input.translationBatchId };
     }
 
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
+    const provider = this.providerFactory({ provider: batch.provider, model: batch.model,
+      apiKey: await this.credentialReader(batch.provider) });
     const { applied } = await applyTranslationProviderResults({
       provider,
       outputFileId: batch.outputFileId,

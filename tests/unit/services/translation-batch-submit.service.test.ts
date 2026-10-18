@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+// Unit-only trusted credential fixture. Production must always read the Commerce row;
+// deliberately setting OPENAI_API_KEY in these tests is NOT an allowed fallback.
+vi.mock("../../../src/services/platform-configuration/support-translation.js", () => ({
+  readSupportTranslationCredential: vi.fn(async () => "unit-test-commerce-credential"),
+}));
+
 process.env.REDIS_URL ??= "redis://localhost:6379/translation-submit-tests";
 process.env.OPENAI_API_KEY ??= "test-key";
 process.env.TRANSLATION_MODEL ??= "test-model";
@@ -325,6 +331,7 @@ describe("TranslationBatchSubmitService", () => {
     expect(providerFactory).toHaveBeenCalledWith({
       provider: "openai",
       model: "persisted-model",
+      apiKey: "unit-test-commerce-credential",
     });
   });
 

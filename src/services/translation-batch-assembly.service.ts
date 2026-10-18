@@ -12,6 +12,7 @@ import {
   type TranslationBatchSubmitJob,
 } from "../domain/translation-batch.js";
 import prisma from "../lib/db.js";
+import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import { connectionRedis } from "../lib/redis.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
@@ -44,16 +45,13 @@ type TranslationBatchDatabase = {
   ): Promise<T>;
 };
 
-function configuredProvider(): string {
-  return process.env.TRANSLATION_PROVIDER?.trim() || "openai";
-}
-
-function configuredModel(): string {
-  const model = process.env.TRANSLATION_MODEL?.trim();
-  if (!model) {
-    throw new Error("TRANSLATION_MODEL environment variable is not set");
-  }
-  return model;
+async function selectedAutomaticTranslationModel(): Promise<{ provider: string; model: string }> {
+  const selected = await prisma.commerceTranslationModelConfiguration.findFirst({
+    where: { environment: resolveCommerceEnvironment(), enabled: true, automaticDefault: true },
+    select: { provider: true, providerModelId: true },
+  });
+  if (!selected) throw new Error("Support translation automatic model is not configured");
+  return { provider: selected.provider, model: selected.providerModelId };
 }
 
 export class TranslationBatchAssemblyService {
@@ -77,6 +75,7 @@ export class TranslationBatchAssemblyService {
     input: unknown,
   ): Promise<TranslationBatchAssemblyResult> {
     TranslationDispatchJobSchema.parse(input);
+    const automatic = await selectedAutomaticTranslationModel();
     const result = await this.database.$transaction(async (transaction) => {
       const candidates = await transaction.$queryRaw<TranslationCandidate[]>(Prisma.sql`
         SELECT
@@ -113,8 +112,8 @@ export class TranslationBatchAssemblyService {
   )
   VALUES (
     ${batchId},
-    ${configuredProvider()},
-    ${configuredModel()},
+    ${automatic.provider},
+    ${automatic.model},
     'READY',
     NOW()
   )

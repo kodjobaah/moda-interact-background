@@ -1,7 +1,7 @@
 import { Queue } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { loadWooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
+import { readWooCouponPolicy } from "../services/platform-configuration/consumers.js";
 import prisma from "../lib/db.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
@@ -47,10 +47,8 @@ void startReadyWorkerProcess({
     const recoveryOutreachFollowUpWorker =
       createRecoveryOutreachFollowUpWorker();
     const shopifyDiscountSyncWorker = createShopifyDiscountSyncWorker();
-    const wooCouponSyncWorker = createWooCouponSyncWorker();
+    const wooCouponSyncWorker = createWooCouponSyncWorker(undefined, (await readWooCouponPolicy()).workerConcurrency);
     const wooCouponSyncQueue = new Queue(WOO_COUPON_SYNC_QUEUE_NAME, { connection: connectionRedis });
-    const wooCouponSyncSettings = loadWooCouponSyncConfig();
-    const wooCouponDispatcher = new WooCouponDispatcherService(prisma, wooCouponSyncQueue, wooCouponSyncSettings);
     const stopQueueConcurrencyController =
       await startQueueConcurrencyController({
         config: backgroundRuntimeConfigService,
@@ -95,7 +93,9 @@ void startReadyWorkerProcess({
       intervalMs: 60_000,
       runImmediately: true,
       run: async () => {
-        await wooCouponDispatcher.dispatch(wooCouponSyncSettings.dispatchBatchSize);
+        // The dispatcher is re-created with current policy on every lease cycle.
+        const cycle = await readWooCouponPolicy();
+        await new WooCouponDispatcherService(prisma, wooCouponSyncQueue, cycle).dispatch(cycle.dispatchBatchSize);
       },
       onError: () => {
         // Do not log arbitrary provider or database error messages.
