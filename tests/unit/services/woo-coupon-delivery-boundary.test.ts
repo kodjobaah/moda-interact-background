@@ -4,6 +4,15 @@ import { RecoveryOutreachAttemptService } from "../../../src/services/recovery-o
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
 
+// Server-only test policy replacing the production PostgreSQL sender lookup.
+vi.mock("../../../src/services/platform-configuration/consumers.js", () => ({
+  platformConsumerConfiguration: {
+    read: vi.fn(async () => ({
+      value: { accessToken: "test-only-not-a-real-token", businessAccountId: "business-test", phoneNumberId: "phone-test" },
+    })),
+  },
+}));
+
 // Downstream trace in Background (as of B005):
 // RecoveryPolicyService.resolve -> RecoveryOutreachAttemptService.getOrCreate
 //   -> RecoveryOutreachAttempt.offerSnapshot (Prisma JSON).

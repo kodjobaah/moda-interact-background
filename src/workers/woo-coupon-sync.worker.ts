@@ -4,6 +4,10 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { connectionRedis } from "../lib/redis.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { WooCouponCatalogueService } from "../services/woo-coupon-catalogue.service.js";
+import { WooCouponReaderService } from "../services/woo-coupon-reader.service.js";
+import { WooCouponPageTransport } from "../providers/woo-coupon-transport.js";
+import { WooCouponGrantService } from "../services/woo-coupon-grant.service.js";
+import { readWooCouponPolicy } from "../services/platform-configuration/consumers.js";
 import {
   WOO_COUPON_SYNC_JOB_NAME,
   WOO_COUPON_SYNC_QUEUE_NAME,
@@ -46,7 +50,7 @@ export function parseWooCouponSyncJob(job: Pick<Job, "name" | "id" | "data">): {
   return { shopId: data.shopId, requestedAt };
 }
 
-export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv = process.env): number {
+export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv): number {
   const raw = environment.WOO_COUPON_SYNC_WORKER_CONCURRENCY;
   if (raw === undefined || raw === "") return 4;
   if (!/^[1-9]\d*$/.test(raw)) {
@@ -63,11 +67,12 @@ export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv = proc
  * Workers share one BullMQ queue but reconcile independent shop-scoped catalogues.
  * The catalogue service owns the durable per-shop claim and its generation fence.
  */
+const defaultWooCouponCatalogue = new WooCouponCatalogueService();
 export function createWooCouponSyncWorker(
-  catalogue: Pick<WooCouponCatalogueService, "reconcile"> = new WooCouponCatalogueService(),
-  concurrency = wooCouponWorkerConcurrency(),
+  catalogue: Pick<WooCouponCatalogueService, "reconcile"> = defaultWooCouponCatalogue,
+  concurrency?: number,
 ) {
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
+  if (typeof concurrency !== "number" || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
     throw new RangeError("Woo coupon worker concurrency must be between 1 and 32");
   }
   const worker = new Worker<WooCouponSyncJobData>(
@@ -81,7 +86,16 @@ export function createWooCouponSyncWorker(
       };
       logger.info("woo.coupon_sync.received", fields);
       try {
-        const outcome = await catalogue.reconcile(shopId, requestedAt);
+        // One fresh policy snapshot for this job; no captured environment values.
+        const scoped = catalogue === defaultWooCouponCatalogue
+          ? await (async () => {
+              const settings = await readWooCouponPolicy();
+              return new WooCouponCatalogueService(undefined, (shop) => new WooCouponReaderService(
+                new WooCouponGrantService(), new WooCouponPageTransport(undefined, settings), settings,
+              ).fetchAll(shop), undefined, settings);
+            })()
+          : catalogue;
+        const outcome = await scoped.reconcile(shopId, requestedAt);
         if (outcome === "current") logger.info("woo.coupon_sync.completed", { ...fields, outcome });
         else if (outcome === "unavailable") logger.warn("woo.coupon_sync.unavailable", { ...fields, outcome });
         else logger.info("woo.coupon_sync.skipped", { ...fields, outcome });

@@ -10,7 +10,7 @@ import { isPublicIpAddress, normalizeIpAddress } from "../services/merchant-know
 import type { WooConnectionMode, WooCouponCredential } from "../services/woo-coupon-grant.service.js";
 import { signLocalWooCouponPath } from "./woo-coupon-local-oauth.js";
 import type { WooCouponPage } from "./woo-coupon-pages.js";
-import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
+import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 
 export class WooCouponReadError extends Error {
   constructor(readonly code:
@@ -77,7 +77,7 @@ export type WooCouponDnsResolver = (hostname: string) => Promise<readonly Lookup
 export class WooCouponPageTransport {
   constructor(private readonly resolve: WooCouponDnsResolver =
     (host) => dnsLookup(host, { all: true, verbatim: true }),
-    private readonly limits: WooCouponSyncConfig = loadWooCouponSyncConfig(),
+    private readonly limits: WooCouponSyncConfig = defaultWooCouponSyncConfig(),
   ) {}
 
   async readPage(site: WooCouponSite, credentials: WooCouponCredential, page: number, perPage: number): Promise<WooCouponPage> {

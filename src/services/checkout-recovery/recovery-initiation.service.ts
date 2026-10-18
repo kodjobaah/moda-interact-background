@@ -165,7 +165,7 @@ export class RecoveryInitiationService {
     });
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
-      providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
+      providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
       purpose: "checkout-recovery",
       languageTag: null,
       countryCode: event.internationalContext?.countryCode ?? null,

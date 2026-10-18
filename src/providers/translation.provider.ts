@@ -173,9 +173,11 @@ export class TranslationProviderResponseError extends Error {
 export function createOpenAITranslationProvider(
   options: OpenAITranslationProviderOptions = {},
 ): TranslationProvider {
-  const apiKey = options.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim();
-  const model = options.model?.trim() || process.env.TRANSLATION_MODEL?.trim();
-  const provider = options.provider?.trim() || process.env.TRANSLATION_PROVIDER?.trim() || "openai";
+  // All deployed callers must provide an explicit, operation-scoped credential.
+  // Never recover revoked Commerce credentials from legacy process environment.
+  const apiKey = options.apiKey?.trim();
+  const model = options.model?.trim();
+  const provider = options.provider?.trim() || "openai";
 
   if (provider !== "openai") {
     throw new TranslationProviderConfigurationError(
@@ -185,13 +187,13 @@ export function createOpenAITranslationProvider(
 
   if (!model) {
     throw new TranslationProviderConfigurationError(
-      "TRANSLATION_MODEL environment variable is not set",
+      "Translation model is required",
     );
   }
 
   if (!options.client && !apiKey) {
     throw new TranslationProviderConfigurationError(
-      "OPENAI_API_KEY environment variable is not set",
+      "Translation provider credential is unavailable",
     );
   }
 
@@ -327,7 +329,7 @@ function buildBatchRequestLine(request: TranslationRequest, model: string): stri
 function createOpenAIClient(apiKey: string | undefined): OpenAI {
   if (!apiKey) {
     throw new TranslationProviderConfigurationError(
-      "OPENAI_API_KEY environment variable is not set",
+      "Translation provider credential is unavailable",
     );
   }
   return new OpenAI({ apiKey, maxRetries: 0 });

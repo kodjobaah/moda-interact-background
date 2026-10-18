@@ -54,7 +54,7 @@ describe("ARCH-036 Woo coupon BullMQ consumer", () => {
   beforeEach(() => {
     mock.run.mockReset(); mock.info.mockReset(); mock.warn.mockReset(); mock.error.mockReset();
     mock.listeners.clear(); mock.worker = null;
-    createWooCouponSyncWorker({ reconcile: mock.run } as any);
+    createWooCouponSyncWorker({ reconcile: mock.run } as any, 4);
   });
 
   it("consumes only the private hashed shop job and forwards its exact dispatch time", async () => {

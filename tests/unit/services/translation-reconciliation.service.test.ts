@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
+const log = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: () => ({ warn: log.warn, info: vi.fn(), error: vi.fn() }),
+}));
+
 import { TranslationReconciliationService } from "../../../src/services/translation-reconciliation.service.js";
 import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
 
@@ -132,7 +137,7 @@ describe("TranslationReconciliationService", () => {
     const service = new TranslationReconciliationService({
       queue,
       database,
-      providerFactory: () => provider,
+      providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential",
       runtimeConfig,
     });
 
@@ -192,7 +197,7 @@ describe("TranslationReconciliationService", () => {
         },
       }),
     };
-    const service = new TranslationReconciliationService({ queue, database, providerFactory: () => provider, runtimeConfig });
+    const service = new TranslationReconciliationService({ queue, database, providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential", runtimeConfig });
     await service.reconcile();
     expect(queue.add).toHaveBeenCalledWith(
       "translation-batch-poll",
@@ -215,7 +220,7 @@ describe("TranslationReconciliationService", () => {
     const lostService = new TranslationReconciliationService({
       queue: lostQueue,
       database: lostCasDatabase,
-      providerFactory: () => provider,
+      providerFactory: () => provider, credentialReader: async () => "test-only-commerce-credential",
       runtimeConfig,
     });
     await lostService.reconcile();
@@ -336,5 +341,55 @@ describe("TranslationReconciliationService", () => {
     expect(database.$executeRaw).toHaveBeenLastCalledWith(expect.objectContaining({
       values: expect.arrayContaining(["request-1"]),
     }));
+  });
+});
+
+describe("ARCH-043 support translation credential revocation", () => {
+  it("fails before provider construction when Commerce credentials are revoked despite a valid legacy OPENAI_API_KEY", async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    const legacySecret = "sk-SYNTHETIC-LEGACY-KEY-DO-NOT-USE";
+    process.env.OPENAI_API_KEY = legacySecret;
+    log.warn.mockClear();
+    try {
+      const batch = {
+        id: "revoked-translation-batch", status: "SUBMISSION_UNKNOWN", pollSequence: 1,
+        provider: "openai", model: "persisted-gpt-model", inputFileId: "input-file",
+        providerBatchId: null, submissionStartedAt: null, outputFileId: null, errorFileId: null,
+      };
+      const database = emptyScanDatabase();
+      database.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([batch]);
+      const factory = vi.fn();
+      const credentialReader = vi.fn().mockRejectedValue(new Error(`database credential revoked: ${legacySecret}`));
+      const service = new TranslationReconciliationService({ database, queue: createQueue(undefined),
+        providerFactory: factory, credentialReader, runtimeConfig });
+      await expect(service.reconcile()).rejects.toThrow("Translation provider credential is unavailable");
+      expect(credentialReader).toHaveBeenCalledTimes(1);
+      expect(credentialReader).toHaveBeenCalledWith("openai");
+      expect(factory).not.toHaveBeenCalled();
+      expect(database.$executeRaw).not.toHaveBeenCalled();
+      expect(log.warn).toHaveBeenCalledWith("background.support_translation.reconciliation_credential_unavailable", {
+        batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
+      });
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain(legacySecret);
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain("database credential revoked");
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+  });
+
+  it("passes a fresh explicit Commerce credential with the previously persisted model", async () => {
+    const batch = { id: "stored-batch", status: "SUBMISSION_UNKNOWN", pollSequence: 1,
+      provider: "openai", model: "historic-model", inputFileId: "input", providerBatchId: null,
+      submissionStartedAt: null, outputFileId: null, errorFileId: null };
+    const database = emptyScanDatabase();
+    database.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([batch]);
+    const factory = vi.fn(() => ({ findBatchByCorrelation: vi.fn().mockResolvedValue({ kind: "none" }) }));
+    const service = new TranslationReconciliationService({ database, queue: createQueue(undefined),
+      providerFactory: factory, credentialReader: async () => "fresh-commerce-key", runtimeConfig });
+    await service.reconcile();
+    expect(factory).toHaveBeenCalledWith({ provider: "openai", model: "historic-model", apiKey: "fresh-commerce-key" });
   });
 });

@@ -3,7 +3,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { loadWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
+import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "./woo-coupon-sync-config.js";
 
 import prisma from "../lib/db.js";
 
@@ -52,7 +52,7 @@ export class WooCouponDispatcherService {
   constructor(
     private readonly database: DispatchDatabase = prisma,
     private readonly queue?: DispatchQueue,
-    private readonly settings: WooCouponSyncConfig = loadWooCouponSyncConfig(),
+    private readonly settings: WooCouponSyncConfig = defaultWooCouponSyncConfig(),
     private readonly reporting: Pick<StructuredLogger, "info" | "warn"> = logger,
   ) {}
 

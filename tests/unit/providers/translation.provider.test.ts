@@ -43,7 +43,7 @@ describe("OpenAI translation provider", () => {
   it("creates a tool-free Batch request and preserves untrusted source text as content", async () => {
     const client = createFakeClient();
     const provider = createOpenAITranslationProvider({
-      client: client as never,
+      client: client as never, model: "gpt-4.1-mini",
     });
 
     const prepared = await provider.prepareBatchInput([request]);
@@ -117,7 +117,7 @@ describe("OpenAI translation provider", () => {
       request_counts: { total: 57, completed: 41, failed: 0 },
     });
     const provider = createOpenAITranslationProvider({
-      client: client as never,
+      client: client as never, model: "gpt-4.1-mini",
     });
 
     await expect(provider.retrieveBatch("batch-progress")).resolves.toMatchObject({
@@ -201,7 +201,7 @@ describe("OpenAI translation provider", () => {
       last_id: null,
     });
     const provider = createOpenAITranslationProvider({
-      client: client as never,
+      client: client as never, model: "gpt-4.1-mini",
     });
 
     await expect(
@@ -233,7 +233,7 @@ describe("OpenAI translation provider", () => {
         last_id: null,
       });
     const provider = createOpenAITranslationProvider({
-      client: client as never,
+      client: client as never, model: "gpt-4.1-mini",
     });
 
     await expect(
@@ -295,7 +295,7 @@ describe("OpenAI translation provider", () => {
     client.batches.create.mockRejectedValue(
       Object.assign(new Error(`status ${status}`), { status }),
     );
-    const provider = createOpenAITranslationProvider({ client: client as never });
+    const provider = createOpenAITranslationProvider({ client: client as never, model: "gpt-4.1-mini" });
 
     await expect(provider.createBatch("logical-1", "file-input")).rejects.toMatchObject({
       classification,
@@ -305,5 +305,23 @@ describe("OpenAI translation provider", () => {
   it("uses maxRetries zero for the production OpenAI client", () => {
     const client = translationProviderTestInternals.createOpenAIClient("test-key");
     expect(client.maxRetries).toBe(0);
+  });
+});
+
+describe("ARCH-043 explicitly injected credentials", () => {
+  it("does not fall back to OPENAI_API_KEY when an explicit credential has been revoked", () => {
+    const original = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-SYNTHETIC-LEGACY-KEY-DO-NOT-USE";
+    try {
+      expect(() => createOpenAITranslationProvider({ provider: "openai", model: "historical-model", apiKey: "" }))
+        .toThrow("Translation provider credential is unavailable");
+      expect(() => createOpenAITranslationProvider({ provider: "openai", model: "historical-model" }))
+        .toThrow("Translation provider credential is unavailable");
+      expect(() => createOpenAITranslationProvider({ client: createFakeClient() as never }))
+        .toThrow("Translation model is required");
+    } finally {
+      if (original === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = original;
+    }
   });
 });

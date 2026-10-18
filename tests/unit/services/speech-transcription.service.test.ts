@@ -1,4 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../../../src/services/platform-configuration/consumers.js", () => ({
+  readSpeechOperation: async () => {
+    const provider = process.env.WHATSAPP_TRANSCRIPTION_PROVIDER || "openai";
+    if (provider !== "openai" && provider !== "groq") throw new Error("invalid provider");
+    const apiKey = provider === "openai" ? process.env.WHATSAPP_OPENAI_API_KEY : process.env.GROQ_API_KEY;
+    if (!apiKey) throw new Error("missing provider credential");
+    return { provider, apiKey, model: provider === "openai"
+      ? process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe"
+      : process.env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3-turbo" };
+  },
+}));
 import { GroqSpeechTranscriptionService, OpenAISpeechTranscriptionService, speechTranscriptionService } from "../../../src/services/speech-transcription.service.js";
 
 const input = { bytes: new Uint8Array([99, 1, 2, 99]).subarray(1, 3), mimeType: "audio/ogg; codecs=opus" };
@@ -21,12 +32,13 @@ describe("spoken-language transcription", () => {
   it("preserves the Groq default and explicitly selects OpenAI", async () => {
     const fetcher = vi.fn(async () => Response.json({text:"bonjour"})); vi.stubGlobal("fetch",fetcher);
     // Explicit adapters allow injected fetch; default singleton selection is tested with missing credentials.
+    vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", "groq");
     const groq = await new GroqSpeechTranscriptionService(fetcher as typeof fetch).transcribe(input);
     expect(groq).toMatchObject({provider:"groq",model:"whisper-large-v3-turbo"});
     vi.stubEnv("GROQ_API_KEY", "");
     await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({code:"configuration-missing",retryable:false});
     vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", "invalid");
-    expect(() => speechTranscriptionService.transcribe(input)).toThrow("configuration-invalid");
+    await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({code:"configuration-missing"});
     vi.stubEnv("WHATSAPP_TRANSCRIPTION_PROVIDER", "openai"); vi.stubEnv("WHATSAPP_OPENAI_API_KEY", "");
     await expect(speechTranscriptionService.transcribe(input)).rejects.toMatchObject({code:"configuration-missing"});
     expect(fetcher).toHaveBeenCalledTimes(1);

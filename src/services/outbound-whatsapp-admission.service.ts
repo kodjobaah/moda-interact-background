@@ -65,7 +65,7 @@ export class OutboundWhatsAppAdmissionService {
     );
   }
 
-  getProviderAccountId(): string {
+  async getProviderAccountId(): Promise<string> {
     return this.delivery.getProviderAccountId();
   }
 

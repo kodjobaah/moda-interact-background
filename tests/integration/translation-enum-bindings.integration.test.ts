@@ -155,6 +155,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
             completedAt: null,
           }),
         }) as never,
+        credentialReader: async () => "integration-api-key",
         queue: { add: async () => undefined },
         runtimeConfig,
       });
@@ -183,6 +184,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
             failureCode: "invalid_request",
           }],
         }) as never,
+        credentialReader: async () => "integration-api-key",
         runtimeConfig,
       });
 
@@ -222,6 +224,7 @@ describeWithDatabase("translation enum bindings PostgreSQL regression", () => {
             },
           }),
         }) as never,
+        credentialReader: async () => "integration-api-key",
         runtimeConfig,
       });
 

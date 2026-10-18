@@ -60,7 +60,7 @@ export type ShopifyAppEventsFetch = (
 ) => Promise<Response>;
 
 export function readShopifyAppEventsConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
 ): ShopifyAppEventsConfig {
   const clientId = env.SHOPIFY_APP_EVENTS_CLIENT_ID?.trim();
   const clientSecret = env.SHOPIFY_APP_EVENTS_CLIENT_SECRET?.trim();

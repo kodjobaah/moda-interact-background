@@ -1,3 +1,4 @@
+import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 import type {
   SendMessageResult,
   SendTemplateInput,
@@ -33,20 +34,16 @@ export class WhatsAppServiceError extends Error {
 export class WhatsAppService {
   constructor(private readonly fetchImplementation: FetchImplementation = fetch) {}
 
-  resolveSender(): ModaWhatsAppSender {
-    const providerAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim();
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    if (!providerAccountId || !phoneNumberId?.trim()) {
-      throw new WhatsAppServiceError(
-        "configuration-missing",
-        "WhatsApp configuration is missing",
-      );
+  async resolveSender(): Promise<ModaWhatsAppSender> {
+    const value = (await platformConsumerConfiguration.read("messaging.sender")).value;
+    if (!value.businessAccountId || !value.phoneNumberId) {
+      throw new WhatsAppServiceError("configuration-missing", "WhatsApp configuration is missing");
     }
-    return { providerAccountId, providerPhoneNumberId: phoneNumberId.trim() };
+    return { providerAccountId: value.businessAccountId, providerPhoneNumberId: value.phoneNumberId };
   }
 
-  getProviderAccountId(): string {
-    return this.resolveSender().providerAccountId;
+  async getProviderAccountId(): Promise<string> {
+    return (await this.resolveSender()).providerAccountId;
   }
 
   async sendWhatsAppText({
@@ -55,9 +52,9 @@ export class WhatsAppService {
     previewUrl,
     replyToProviderMessageId,
   }: SendTextInput, signal?: AbortSignal): Promise<SendMessageResult> {
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-
-    const sender = this.resolveSender();
+    const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
+    const accessToken = senderConfig.accessToken;
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
     if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
@@ -128,8 +125,9 @@ export class WhatsAppService {
     imageHeader,
     dynamicUrlButton,
   }: SendTemplateInput): Promise<SendMessageResult> {
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    const sender = this.resolveSender();
+    const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
+    const accessToken = senderConfig.accessToken;
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
     if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",

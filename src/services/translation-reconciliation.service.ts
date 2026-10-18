@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { Queue } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   createTranslationBatchPollJobId,
   createTranslationBatchResultsJobId,
@@ -20,10 +21,18 @@ import {
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
 import { createOpenAITranslationProvider, type TranslationProvider } from "../providers/translation.provider.js";
+import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 import { ensureDeterministicTranslationQueueJob } from "./translation-batch-runtime/queue-job-repair.js";
 import { routeTranslationBatchCorrelation } from "./translation-batch-runtime/provider-correlation.js";
+
+const logger = createLogger({
+  serviceName: "moda-merchant-communications-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
+const UNAVAILABLE_CREDENTIAL = "Translation provider credential is unavailable";
 
 const TERMINAL_BATCH_STATUSES = ["FAILED", "EXPIRED", "CANCELLED"] as const;
 
@@ -52,18 +61,21 @@ export type TranslationReconciliationResult = {
 export class TranslationReconciliationService {
   private readonly queue: ReconciliationQueue;
   private readonly database: ReconciliationDatabase;
-  private readonly providerFactory: (options: { provider: string; model: string }) => TranslationProvider;
+  private readonly providerFactory: (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+  private readonly credentialReader: (provider: string) => Promise<string>;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     queue?: ReconciliationQueue;
     database?: ReconciliationDatabase;
-    providerFactory?: (options: { provider: string; model: string }) => TranslationProvider;
+    providerFactory?: (options: { provider: string; model: string; apiKey: string }) => TranslationProvider;
+    credentialReader?: (provider: string) => Promise<string>;
     runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, { connection: connectionRedis });
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) => createOpenAITranslationProvider(providerOptions));
+    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
     this.runtimeConfig = options.runtimeConfig ?? backgroundRuntimeConfigService;
   }
 
@@ -190,7 +202,23 @@ export class TranslationReconciliationService {
     inputFileId: string | null;
     submissionStartedAt: Date | null;
   }, snapshot: ReturnType<typeof currentTranslationRuntimeConfig>): Promise<"poll" | "completed" | "none" | "conflict" | "stale"> {
-    const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
+    // Resolve against the Commerce translation credential row for this operation.
+    // A revoked row must never borrow legacy OPENAI_API_KEY or ai.providers.
+    let apiKey: string;
+    try {
+      apiKey = await this.credentialReader(batch.provider);
+      if (!apiKey.trim()) throw new Error(UNAVAILABLE_CREDENTIAL);
+    } catch {
+      // The shared logger receives bounded metadata only, never provider exceptions,
+      // credential text, ciphertext or untrusted environment contents.
+      try {
+        logger.warn("background.support_translation.reconciliation_credential_unavailable", {
+          batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
+        });
+      } catch { /* Logging must not affect credential enforcement. */ }
+      throw new Error(UNAVAILABLE_CREDENTIAL);
+    }
+    const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
     const submittedAfter = batch.submissionStartedAt
       ? new Date(batch.submissionStartedAt.getTime() - snapshot.translationClaimTimeoutSeconds * 1000)
       : undefined;

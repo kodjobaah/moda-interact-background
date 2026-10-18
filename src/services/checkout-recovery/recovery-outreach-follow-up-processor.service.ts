@@ -133,7 +133,7 @@ export class RecoveryOutreachFollowUpProcessorService {
         }
         const selection = await whatsappTemplateSelectorService.select({
           shopId: recovery.shopId,
-          providerAccountId: outboundWhatsAppAdmissionService.getProviderAccountId(),
+          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
           purpose: "checkout-recovery",
           languageTag: recovery.conversation?.languageTag ?? null,
           countryCode: recovery.conversation?.countryCode ?? null,

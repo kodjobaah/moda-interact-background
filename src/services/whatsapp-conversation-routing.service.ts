@@ -42,7 +42,7 @@ export class WhatsAppConversationRoutingService {
   async resolveInboundMessage(
     event: WhatsAppInboundEvent,
   ): Promise<ConversationRoute> {
-    const sender = whatsAppService.resolveSender();
+    const sender = await whatsAppService.resolveSender();
     if (
       event.providerAccountId !== sender.providerAccountId ||
       event.providerPhoneNumberId !== sender.providerPhoneNumberId

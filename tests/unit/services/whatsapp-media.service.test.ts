@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../../../src/services/platform-configuration/consumers.js", () => ({
+  platformConsumerConfiguration: {
+    read: async () => ({ value: { accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "" } }),
+  },
+}));
 import { WhatsAppMediaError, WhatsAppMediaService } from "../../../src/services/whatsapp-media.service.js";
 
 describe("WhatsAppMediaService", () => {

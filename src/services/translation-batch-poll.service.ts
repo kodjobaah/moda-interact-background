@@ -15,6 +15,7 @@ import {
   type TranslationProvider,
 } from "../providers/translation.provider.js";
 import prisma from "../lib/db.js";
+import { readSupportTranslationCredential } from "./platform-configuration/support-translation.js";
 import { connectionRedis } from "../lib/redis.js";
 import {
   backgroundRuntimeConfigService,
@@ -53,7 +54,7 @@ type PollDatabase = {
 };
 
 type PollQueue = Pick<Queue, "add">;
-type ProviderFactory = (options: { provider: string; model: string }) => TranslationProvider;
+type ProviderFactory = (options: { provider: string; model: string; apiKey?: string }) => TranslationProvider;
 
 export type TranslationBatchPollResult =
   | { status: "stale"; batchId: string }
@@ -64,18 +65,21 @@ export type TranslationBatchPollResult =
 export class TranslationBatchPollService {
   private readonly database: PollDatabase;
   private readonly providerFactory: ProviderFactory;
+  private readonly credentialReader: (provider: string) => Promise<string>;
   private readonly queue: PollQueue;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
 
   constructor(options: {
     database?: PollDatabase;
     providerFactory?: ProviderFactory;
+    credentialReader?: (provider: string) => Promise<string>;
     queue?: PollQueue;
     runtimeConfig?: TranslationRuntimeConfigReader;
   } = {}) {
     this.database = options.database ?? prisma;
     this.providerFactory = options.providerFactory ?? ((providerOptions) =>
       createOpenAITranslationProvider(providerOptions));
+    this.credentialReader = options.credentialReader ?? readSupportTranslationCredential;
     this.queue = options.queue ?? new Queue(MERCHANT_COMMUNICATIONS_QUEUE_NAME, {
       connection: connectionRedis,
     });
@@ -97,7 +101,8 @@ export class TranslationBatchPollService {
 
     return pollTranslationProviderBatch({
       retrieve: async () => {
-        const provider = this.providerFactory({ provider: batch.provider, model: batch.model });
+        const provider = this.providerFactory({ provider: batch.provider, model: batch.model,
+          apiKey: await this.credentialReader(batch.provider) });
         return provider.retrieveBatch(providerBatchId);
       },
       onReadFailure: async (error) => {

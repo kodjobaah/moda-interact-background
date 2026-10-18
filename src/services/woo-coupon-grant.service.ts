@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../lib/db.js";
+import { readCommerceKeyring } from "./platform-configuration/consumers.js";
 import {
   createWooRestReadGrantAad,
   decryptCredential,
@@ -19,7 +20,7 @@ export type WooCouponGrantDatabase = Pick<PrismaClient, "wooCommerceInstallation
 
 /** Reader-only configuration: one canonical keyring, no active-key or HMAC dependency. */
 export function loadWooCouponReadKeyring(
-  environment: Readonly<{ COMMERCE_CONNECTION_KEYS_JSON?: string }> = process.env,
+  environment: Readonly<{ COMMERCE_CONNECTION_KEYS_JSON?: string }>,
 ): CredentialKeyring {
   try {
     return parseCredentialKeyring(environment.COMMERCE_CONNECTION_KEYS_JSON);
@@ -53,7 +54,7 @@ const installationSelection = {
 export class WooCouponGrantService {
   constructor(
     private readonly database: WooCouponGrantDatabase = prisma,
-    private readonly keyring: CredentialKeyring = loadWooCouponReadKeyring(),
+    private readonly keyring?: CredentialKeyring,
     private readonly mode: WooConnectionMode = loadWooCouponConnectionMode(),
   ) {}
 
@@ -81,7 +82,7 @@ export class WooCouponGrantService {
         throw new Error("invalid rotation");
       }
       const value = decryptCredential({
-        keyring: this.keyring,
+        keyring: this.keyring ?? await readCommerceKeyring(),
         envelope: {
           keyId: grant.encryptionKeyId,
           ciphertext: grant.credentialCiphertext,

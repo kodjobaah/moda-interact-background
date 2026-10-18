@@ -55,10 +55,10 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
-function defaultCredentialResolver(): TranslationProviderCredentialResolver {
+async function defaultCredentialResolver(): Promise<TranslationProviderCredentialResolver> {
   return createTranslationProviderCredentialResolver({
     db: prisma,
-    keyring: readCommerceCredentialKeyring(),
+    keyring: await readCommerceCredentialKeyring(),
   });
 }
 
@@ -70,14 +70,14 @@ export class StoreCategoryTranslationBatchResultsService {
   private readonly database: ResultDatabase;
   private readonly providerFactory: ProviderFactory;
   private readonly runtimeConfig: TranslationRuntimeConfigReader;
-  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver;
+  private readonly credentialResolverFactory: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
   private readonly runStateService: StoreCategoryTranslationRunStateService;
 
   constructor(options: {
     database?: ResultDatabase;
     providerFactory?: ProviderFactory;
     runtimeConfig?: TranslationRuntimeConfigReader;
-    credentialResolverFactory?: () => TranslationProviderCredentialResolver;
+    credentialResolverFactory?: () => TranslationProviderCredentialResolver | Promise<TranslationProviderCredentialResolver>;
     runStateService?: StoreCategoryTranslationRunStateService;
   } = {}) {
     this.database = options.database ?? prisma;
@@ -96,7 +96,7 @@ export class StoreCategoryTranslationBatchResultsService {
     }
 
     const environment = CommerceEnvironmentSchema.parse(batch.environment) as CommerceEnvironment;
-    const apiKey = await this.credentialResolverFactory().resolve({
+    const apiKey = await (await this.credentialResolverFactory()).resolve({
       environment,
       provider: batch.provider,
     });

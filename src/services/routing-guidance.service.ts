@@ -25,7 +25,7 @@ export async function sendRoutingGuidance(
   reason: RoutingGuidanceReason,
 ): Promise<void> {
   if (event.content.type === "unsupported") return;
-  const sender = whatsAppService.resolveSender();
+  const sender = await whatsAppService.resolveSender();
   if (
     event.providerAccountId !== sender.providerAccountId ||
     event.providerPhoneNumberId !== sender.providerPhoneNumberId
