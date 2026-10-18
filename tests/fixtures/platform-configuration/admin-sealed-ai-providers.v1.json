@@ -1,0 +1,14 @@
+{
+  "environment": "test",
+  "key": "ai.providers",
+  "version": 7,
+  "value": {
+    "kind": "sealed",
+    "schemaVersion": 1,
+    "algorithm": "AES-256-GCM",
+    "wrappingKeyId": "root-v1",
+    "nonce": "d84EBqQe8jpv9fTi",
+    "ciphertext": "omokmOfLurAzcTOLpOKfcI4q/0rMCOPPMqaGb8q/LUJdOKyJTk74zLKcGoyhnNYcDncXdhA=",
+    "authTag": "Dtb7tHiOPCE9eLntDqmoaA=="
+  }
+}

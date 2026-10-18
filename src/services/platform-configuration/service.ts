@@ -1,10 +1,11 @@
 import { Buffer } from "node:buffer";
+import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   decryptCredential, parseCredentialKeyring, resolveActiveCredentialKey, parseCommerceConnectionCommandHmacKey,
   type CredentialKeyring,
 } from "@modainteract/moda-interact-shared/security/credentials/node";
 import {
-  assertReadable, decodeConfiguration, type BackgroundReadableKey,
+  assertReadable, BACKGROUND_READABLE_KEYS, decodeConfiguration, type BackgroundReadableKey,
   type ConfigurationSnapshot, type KeyValues,
 } from "./contracts.js";
 import type { ConfigurationRepository, ConfigurationRow } from "./repository.js";
@@ -69,8 +70,18 @@ export function createBackgroundPlatformConfigurationService(input: {
   /** Trusted deployment identity; NEVER derive it from a request/tenant/job. */
   environment: string;
   unsealKeyring: UnsealKeyringProvider;
+  /** Injected shared logger; production composition must supply this. */
+  logger?: Pick<StructuredLogger, "info" | "warn">;
 }): BackgroundPlatformConfigurationService {
   if (!validEnvironments.has(input.environment)) throw new PlatformConfigurationFailure("INVALID", "environment");
+  // Never include database/provider errors, row JSON, AAD, envelope or credentials in a log.
+  // Even an injected failing sink must not affect application correctness.
+  const log = (level: "info" | "warn", event: string, fields: {
+    keys: readonly string[]; reasonCode?: string; revisions?: readonly number[];
+  }): void => {
+    try { input.logger?.[level](event, fields); } catch { /* logging is best effort */ }
+  };
+  const readableKeys = new Set<string>(BACKGROUND_READABLE_KEYS);
   const parseRow = <K extends BackgroundReadableKey>(key: K, row: ConfigurationRow): ConfigurationSnapshot<K> => {
     if (row.environment !== input.environment || row.key !== key || !Number.isSafeInteger(row.version) || row.version < 1) {
       throw new PlatformConfigurationFailure("INVALID", key);
@@ -103,6 +114,9 @@ export function createBackgroundPlatformConfigurationService(input: {
     return Object.freeze({ key, version: row.version, value: Object.freeze(result) });
   };
   const readBundle = async <const K extends BackgroundReadableKey>(keys: readonly K[]): Promise<Readonly<{ [P in K]: ConfigurationSnapshot<P> }>> => {
+    // Untrusted runtime casts may contain arbitrary strings; never place them in logs.
+    const safeKeys = keys.filter((key) => readableKeys.has(key));
+    try {
     for (const key of keys) assertReadable(key); // runtime defence against casts/JS callers
     if (!keys.length || new Set(keys).size !== keys.length) throw new PlatformConfigurationFailure("INVALID", "bundle");
     let rows: readonly ConfigurationRow[];
@@ -124,7 +138,17 @@ export function createBackgroundPlatformConfigurationService(input: {
     if (speech && speechKeys && !speechKeys[speech.provider === "groq" ? "groqApiKey" : "openAiApiKey"]) {
       throw new PlatformConfigurationFailure("INVALID", "ai.providers");
     }
+    log("info", "background.platform_configuration.read_succeeded", {
+      keys: safeKeys, revisions: keys.map((key) => output[key]!.version),
+    });
     return Object.freeze(output) as { [P in K]: ConfigurationSnapshot<P> };
+    } catch (error) {
+      log("warn", "background.platform_configuration.read_failed", {
+        keys: safeKeys,
+        reasonCode: error instanceof PlatformConfigurationFailure ? error.code : "INVALID",
+      });
+      throw error;
+    }
   };
   return {
     async read<K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> {
