@@ -4,6 +4,7 @@ import { OutboundMessageDeliveryService } from "../../src/services/outbound-what
 import { AiTurnOwnershipService } from "../../src/services/recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { WhatsAppServiceError } from "../../src/services/whatsapp.service.js";
+import { WhatsAppProviderStatusService } from "../../src/services/whatsapp-provider-status.service.js";
 import { runAiTurnThroughBackgroundMocks } from "./fixtures/arch040-ai-turn.fixture.js";
 import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
 
@@ -315,6 +316,194 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       const after = await f.db.recoveryOutreachAttempt.findUnique({ where: { id: attemptId } });
       expect(after?.status).toBe("WAITING_FOR_RESPONSE");
       expect(after?.outboundMessageId).toBe((await f.commandState(id))?.outboundMessageId);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("denies queued HUMAN text after the verified customer window expires without template substitution", async () => {
+    const f = await humanDispatchFixture("expired-human-window");
+    try {
+      const commandId = await f.addCommand();
+      await f.db.conversation.update({ where: { id: f.conversationId },
+        data: { lastInboundAt: new Date(Date.now() - 25 * 60 * 60_000) } });
+      const [claim] = await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() });
+      const service = f.dispatcher();
+      await service.processClaim(commandId, claim!.leaseToken);
+      await service.close();
+
+      expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
+        state: "CANCELLED", providerDispatchKey: null, outboundMessageId: null,
+      }));
+      expect(f.provider.sendWhatsAppText).not.toHaveBeenCalled();
+      expect(f.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toHaveLength(0);
+      expect(await f.db.conversationMessage.count({
+        where: { conversationId: f.conversationId, senderType: "HUMAN" },
+      })).toBe(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("dispatches producer-neutral commands identically with one HUMAN message per command", async () => {
+    const f = await humanDispatchFixture("producer-neutral-parity");
+    try {
+      const commandIds = [await f.addCommand(), await f.addCommand()];
+      const service = f.dispatcher();
+      await service.poll();
+      await service.close();
+
+      await f.whatsapp.waitForMessageCount(2);
+      expect(f.providerHttpRequests).toEqual([{ type: "text" }, { type: "text" }]);
+      expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(2);
+      expect(f.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      expect(await f.db.conversationMessage.count({
+        where: { conversationId: f.conversationId, senderType: "HUMAN" },
+      })).toBe(2);
+      for (const commandId of commandIds) {
+        expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
+          state: "SENT", dispatchAttemptCount: 1,
+          outboundMessageId: expect.any(String), providerDispatchKey: expect.any(String),
+        }));
+      }
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("lets only the eligible HUMAN path claim the shared sequence-two attempt", async () => {
+    const f = await humanDispatchFixture("sequence-two-claim-race");
+    try {
+      await f.addInitialOutreach();
+      const [scheduled, merchant] = await Promise.all([
+        f.followUps.claimSequenceTwo({
+          recoveryId: f.recoveryId, initiator: "scheduled_no_response",
+          initiationKey: `scheduled-${f.recoveryId}`, recipient: f.recipient, now: new Date(),
+        }),
+        f.followUps.claimSequenceTwo({
+          recoveryId: f.recoveryId, initiator: "merchant_post_window",
+          initiationKey: `merchant-${f.recoveryId}`, recipient: f.recipient,
+          expectedRevision: 1, now: new Date(),
+        }),
+      ]);
+
+      expect(merchant.kind).toBe("claimed");
+      expect(scheduled).toEqual({ kind: "suppressed", reason: "human-controlled" });
+      await expect(f.followUps.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window",
+        initiationKey: `merchant-retry-${f.recoveryId}`, recipient: f.recipient,
+        expectedRevision: 1, now: new Date(),
+      })).resolves.toEqual({ kind: "suppressed", reason: "already-claimed" });
+      expect(await f.db.recoveryOutreachAttempt.count({
+        where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
+      })).toBe(1);
+      expect(await f.db.recoveryOutreachAttempt.findUnique({
+        where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: f.recoveryId, sequence: 2 } },
+        select: { initiatedBy: true, initiationKey: true, status: true, outboundMessageId: true },
+      })).toEqual(expect.objectContaining({
+        initiatedBy: "HUMAN", initiationKey: `merchant-${f.recoveryId}`,
+        status: "PENDING", outboundMessageId: null,
+      }));
+
+      const commandId = await f.addCommand({
+        kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
+        idempotencyKey: `merchant-${f.recoveryId}`,
+        attemptId: merchant.attemptId,
+      });
+      const dispatcher = f.dispatcher();
+      await dispatcher.poll();
+      await dispatcher.close();
+
+      await f.whatsapp.waitForMessageCount(1);
+      expect(f.providerHttpRequests).toEqual([{ type: "template" }]);
+      expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
+        state: "SENT", dispatchAttemptCount: 1,
+        outboundMessageId: expect.any(String), providerDispatchKey: expect.any(String),
+      }));
+      expect(await f.db.recoveryOutreachAttempt.count({
+        where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
+      })).toBe(1);
+      expect(f.billing.admitAndRevalidate).toHaveBeenCalledTimes(1);
+      expect(f.billing.onConfirmedProviderSend).toHaveBeenCalledTimes(1);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("reconciles HUMAN command receipts and keeps duplicate/out-of-order status monotonic", async () => {
+    const f = await humanDispatchFixture("human-provider-receipts");
+    try {
+      const commandIds = [await f.addCommand(), await f.addCommand()];
+      const claims = await f.commands.claimDueHumanCommands({ limit: 2, now: new Date() });
+      const dispatcher = f.dispatcher();
+      for (const claim of claims) await dispatcher.processClaim(claim.id, claim.leaseToken);
+      await dispatcher.close();
+
+      const commands = await Promise.all(commandIds.map((id) =>
+        f.db.merchantConversationSendCommand.findUniqueOrThrow({
+          where: { id }, select: { state: true, outboundMessageId: true },
+        })));
+      const followUp = await f.addMerchantFollowUpCommand();
+      const followUpDispatcher = f.dispatcher();
+      await followUpDispatcher.poll();
+      await followUpDispatcher.close();
+      const followUpCommand = await f.db.merchantConversationSendCommand.findUniqueOrThrow({
+        where: { id: followUp.commandId }, select: { state: true, outboundMessageId: true },
+      });
+      const messages = await Promise.all(commands.map((command) =>
+        f.db.conversationMessage.findUniqueOrThrow({
+          where: { id: command.outboundMessageId! }, select: { id: true, providerMessageId: true },
+        })));
+      const followUpMessage = await f.db.conversationMessage.findUniqueOrThrow({
+        where: { id: followUpCommand.outboundMessageId! },
+        select: { id: true, providerMessageId: true },
+      });
+      const statuses = new WhatsAppProviderStatusService(f.db as never, {
+        debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => ({}),
+      } as never);
+      const event = {
+        schemaVersion: 2 as const,
+        providerAccountId: "receipt-account",
+        providerPhoneNumberId: "receipt-phone",
+        providerMessageId: messages[0]!.providerMessageId!,
+        status: "READ" as const,
+        occurredAt: new Date().toISOString(),
+      };
+
+      await expect(statuses.process(event)).resolves.toBe("applied");
+      await expect(statuses.process(event)).resolves.toBe("ignored");
+      await statuses.process({ ...event, status: "DELIVERED" });
+      await statuses.process({ ...event, status: "FAILED" });
+
+      const failedEvent = {
+        ...event,
+        providerMessageId: messages[1]!.providerMessageId!,
+        schemaVersion: 3 as const,
+        status: "FAILED" as const,
+        failure: { providerCode: "131026" },
+      };
+      await expect(statuses.process(failedEvent)).resolves.toBe("applied");
+      await expect(statuses.process(failedEvent)).resolves.toBe("ignored");
+
+      const failedFollowUpEvent = {
+        ...failedEvent,
+        providerMessageId: followUpMessage.providerMessageId!,
+        schemaVersion: 3 as const,
+      };
+      await expect(statuses.process(failedFollowUpEvent)).resolves.toBe("applied");
+      expect(await f.db.recoveryOutreachAttempt.findUnique({
+        where: { id: followUp.attemptId }, select: { status: true, failureCode: true },
+      })).toEqual({ status: "FAILED", failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE" });
+
+      expect(await f.db.conversationMessage.findUnique({
+        where: { id: messages[0]!.id }, select: { status: true, readAt: true },
+      })).toEqual(expect.objectContaining({ status: "READ", readAt: expect.any(Date) }));
+      expect(await f.db.merchantConversationSendCommand.findUnique({
+        where: { id: commandIds[0] }, select: { state: true },
+      })).toEqual({ state: "SENT" });
+      expect(await f.db.conversationMessage.findUnique({
+        where: { id: messages[1]!.id }, select: { status: true, providerFailureCode: true },
+      })).toEqual({ status: "FAILED", providerFailureCode: "131026" });
+      expect(await f.db.merchantConversationSendCommand.findUnique({
+        where: { id: commandIds[1] }, select: { state: true, failureCode: true },
+      })).toEqual({ state: "SENT", failureCode: null });
+      expect(await f.db.usageEvent.count({
+        where: { shopId: f.shopId, metric: "DELIVERED_WHATSAPP_MESSAGE" },
+      })).toBe(1);
+      expect(f.providerHttpRequests).toEqual([{ type: "text" }, { type: "text" }, { type: "template" }]);
     } finally { await f.close(); }
   }, 60_000);
 });

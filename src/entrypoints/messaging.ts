@@ -5,6 +5,7 @@ import { startQueuePerformanceTelemetry } from "../observability/queue-performan
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
+import { startHumanCommandDispatcher } from "../services/recovery-conversation/start-human-command-dispatcher.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-messaging-worker",
@@ -15,9 +16,7 @@ void startReadyWorkerProcess({
       import("../workers/whatsapp.worker.js"),
     ]);
     const whatsappWorker = createWhatsappWorker();
-    const { HumanCommandDispatcherService } = await import("../services/recovery-conversation/human-command-dispatcher.service.js");
-    const humanDispatcher = new HumanCommandDispatcherService();
-    humanDispatcher.start();
+    const closeHumanDispatcher = await startHumanCommandDispatcher();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -31,7 +30,7 @@ void startReadyWorkerProcess({
     return {
       workers: [whatsappWorker],
       closeResources: [
-        () => humanDispatcher.close(),
+        closeHumanDispatcher,
         ...closeWorkerResources,
         stopQueueConcurrencyController,
         () => backgroundRuntimeConfigService.close(),

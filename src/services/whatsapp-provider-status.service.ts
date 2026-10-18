@@ -7,7 +7,7 @@ import {
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
+import { MessageStatus, MerchantConversationSendState, Prisma, UsageMetric } from "@prisma/client";
 
 import prisma from "../lib/db.js";
 import {
@@ -63,6 +63,7 @@ export class WhatsAppProviderStatusService {
           readAt: true,
           providerFailureCode: true,
           failedAt: true,
+          merchantSendCommand: { select: { id: true, state: true } },
           recoveryOutreachAttempt: { select: { id: true, status: true } },
           conversation: {
             select: {
@@ -128,6 +129,38 @@ export class WhatsAppProviderStatusService {
         if (updated.count !== 1) throw new ProviderStatusConcurrencyConflict();
       }
 
+      let commandConverged = false;
+      if (message.merchantSendCommand && canApplyStatus) {
+        if (event.status === "FAILED") {
+          const updated = await transaction.merchantConversationSendCommand.updateMany({
+            where: {
+              id: message.merchantSendCommand.id,
+              state: { in: [MerchantConversationSendState.DISPATCH_ADMITTED, MerchantConversationSendState.UNKNOWN] },
+            },
+            data: {
+              state: MerchantConversationSendState.FAILED,
+              failureCode: event.schemaVersion === 3 && event.failure
+                ? event.failure.providerCode
+                : "provider_failed",
+              completedAt: occurredAt,
+            },
+          });
+          commandConverged = updated.count === 1;
+        } else if (event.status === "SENT" || event.status === "DELIVERED" || event.status === "READ") {
+          const updated = await transaction.merchantConversationSendCommand.updateMany({
+            where: {
+              id: message.merchantSendCommand.id,
+              state: { in: [MerchantConversationSendState.DISPATCH_ADMITTED, MerchantConversationSendState.UNKNOWN] },
+            },
+            data: {
+              state: MerchantConversationSendState.SENT,
+              completedAt: occurredAt,
+            },
+          });
+          commandConverged = updated.count === 1;
+        }
+      }
+
       const updatedFailureCode = lifecycleData.providerFailureCode;
       const persistedFailureCode = typeof updatedFailureCode === "string"
         ? updatedFailureCode
@@ -177,11 +210,11 @@ export class WhatsAppProviderStatusService {
         messageId: message.id,
         status: event.status,
         outcome:
-          !lifecycleChanged && !becameDelivered && !attemptConverged
+          !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
             ? "ignored"
             : "applied",
       });
-      return !lifecycleChanged && !becameDelivered && !attemptConverged
+      return !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
         ? "ignored"
         : "applied";
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
