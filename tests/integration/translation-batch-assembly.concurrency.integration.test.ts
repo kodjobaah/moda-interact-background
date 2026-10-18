@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { Prisma, PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
@@ -18,7 +18,6 @@ describeWithDatabase(
   () => {
     it("assigns concurrent candidates to disjoint current batches with SKIP LOCKED", async () => {
       process.env.DATABASE_URL = testDatabaseUrl;
-      process.env.TRANSLATION_MODEL = "integration-test-model";
 
       const database = new PrismaClient();
       const shopId = randomUUID();
@@ -26,8 +25,23 @@ describeWithDatabase(
       const messageIds = [randomUUID(), randomUUID()];
       const translationIds = [randomUUID(), randomUUID()];
       const batchIds: string[] = [];
+      const actorId = randomUUID();
+      let modelId: string | undefined;
+      let providerCredentialId: string | undefined;
 
       try {
+        await database.platformAdmin.create({ data: { id: actorId, email: `${actorId}@example.test` } });
+        const credential = await database.commerceTranslationProviderCredential.create({
+          data: { environment: "TEST", provider: "openai", updatedByAdminId: actorId,
+            ciphertext: randomBytes(32), nonce: randomBytes(12), authTag: randomBytes(16), keyId: "integration-test" },
+        });
+        providerCredentialId = credential.id;
+        const automaticModel = await database.commerceTranslationModelConfiguration.create({
+          data: { environment: "TEST", provider: "openai", providerModelId: "integration-test-model",
+            displayName: "Integration test model", enabled: true, automaticDefault: true,
+            createdByAdminId: actorId, updatedByAdminId: actorId },
+        });
+        modelId = automaticModel.id;
         await database.$executeRaw(Prisma.sql`
 INSERT INTO "commerce"."Shop" (
   "id",
@@ -163,6 +177,9 @@ VALUES (
         await database.$executeRaw(
           Prisma.sql`DELETE FROM "commerce"."Shop" WHERE "id" = ${shopId}`,
         );
+        if (modelId) await database.commerceTranslationModelConfiguration.delete({ where: { id: modelId } });
+        if (providerCredentialId) await database.commerceTranslationProviderCredential.delete({ where: { id: providerCredentialId } });
+        await database.platformAdmin.deleteMany({ where: { id: actorId } });
         await database.$disconnect();
       }
     }, 30_000);

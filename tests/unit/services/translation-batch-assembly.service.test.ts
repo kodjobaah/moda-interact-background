@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { TranslationBatchAssemblyService } from "../../../src/services/translation-batch-assembly.service.js";
 
-process.env.TRANSLATION_MODEL = "test-model";
+
 
 function runtimeConfig(translationBatchMaxRequests = 100) {
   return { current: vi.fn(() => ({ translationBatchMaxRequests })) } as any;
@@ -18,7 +18,9 @@ function createDatabase() {
       sourceText: "Authoritative body",
     },
   ];
-  const $queryRaw = vi.fn(async () => candidates);
+  let reads = 0;
+  const $queryRaw = vi.fn(async () => ++reads % 2 === 1
+    ? candidates : [{ provider: "openai", providerModelId: "test-model" }]);
   const $executeRaw = vi.fn(async () => 1);
   const transaction = vi.fn(async (callback) =>
     callback({ $queryRaw, $executeRaw }),
@@ -108,4 +110,16 @@ describe("TranslationBatchAssemblyService", () => {
     expect(database.$executeRaw).not.toHaveBeenCalled();
     expect(add).not.toHaveBeenCalled();
   });
+  it("fails closed when no enabled automatic default exists, without writing a batch", async () => {
+    const database = createDatabase();
+    database.$queryRaw.mockResolvedValueOnce([{ id: "pending" }]);
+    database.$queryRaw.mockResolvedValueOnce([]);
+    const service = new TranslationBatchAssemblyService({
+      database: database.database, queue: { add: vi.fn() }, runtimeConfig: runtimeConfig(),
+    });
+    await expect(service.assembleFromDispatch({ schemaVersion: 1, translationId: "translation-1" }))
+      .rejects.toThrow("support_translation_automatic_model_unavailable");
+    expect(database.$executeRaw).not.toHaveBeenCalled();
+  });
+
 });

@@ -13,6 +13,7 @@ import {
 } from "../domain/translation-batch.js";
 import prisma from "../lib/db.js";
 import { connectionRedis } from "../lib/redis.js";
+import { resolveCommerceEnvironment } from "../commerce/model-environment.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { currentTranslationRuntimeConfig, type TranslationRuntimeConfigReader } from "./translation-runtime-config.js";
 
@@ -44,16 +45,16 @@ type TranslationBatchDatabase = {
   ): Promise<T>;
 };
 
-function configuredProvider(): string {
-  return process.env.TRANSLATION_PROVIDER?.trim() || "openai";
-}
+type AutomaticTranslationModel = { provider: string; providerModelId: string };
 
-function configuredModel(): string {
-  const model = process.env.TRANSLATION_MODEL?.trim();
-  if (!model) {
-    throw new Error("TRANSLATION_MODEL environment variable is not set");
+/** Only new batches select a model; previously persisted batch.model is immutable. */
+export function validateAutomaticTranslationModel(rows: readonly AutomaticTranslationModel[]): AutomaticTranslationModel {
+  if (rows.length !== 1 || rows[0]?.provider !== "openai" ||
+      typeof rows[0]?.providerModelId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(rows[0].providerModelId)) {
+    throw new Error("support_translation_automatic_model_unavailable");
   }
-  return model;
+  return rows[0];
 }
 
 export class TranslationBatchAssemblyService {
@@ -102,6 +103,15 @@ export class TranslationBatchAssemblyService {
         };
       }
 
+      const environment = resolveCommerceEnvironment();
+      const models = await transaction.$queryRaw<AutomaticTranslationModel[]>(Prisma.sql`
+        SELECT "provider", "providerModelId"
+        FROM "commerce"."CommerceTranslationModelConfiguration"
+        WHERE "environment" = CAST(${environment} AS "commerce"."CommerceEnvironment")
+          AND "enabled" = TRUE AND "automaticDefault" = TRUE
+        LIMIT 2
+      `);
+      const selected = validateAutomaticTranslationModel(models);
       const batchId = randomUUID();
       await transaction.$executeRaw(Prisma.sql`
   INSERT INTO "support"."MerchantTranslationBatch" (
@@ -113,8 +123,8 @@ export class TranslationBatchAssemblyService {
   )
   VALUES (
     ${batchId},
-    ${configuredProvider()},
-    ${configuredModel()},
+    ${selected.provider},
+    ${selected.providerModelId},
     'READY',
     NOW()
   )

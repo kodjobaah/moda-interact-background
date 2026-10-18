@@ -3,6 +3,9 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import { connectionRedis } from "../lib/redis.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { WooCouponReaderService } from "../services/woo-coupon-reader.service.js";
+import { WooCouponPageTransport } from "../providers/woo-coupon-transport.js";
+import { platformOperationalPolicyReader } from "../services/platform-operational-policy.js";
 import { WooCouponCatalogueService } from "../services/woo-coupon-catalogue.service.js";
 import {
   WOO_COUPON_SYNC_JOB_NAME,
@@ -64,7 +67,7 @@ export function wooCouponWorkerConcurrency(environment: NodeJS.ProcessEnv = proc
  * The catalogue service owns the durable per-shop claim and its generation fence.
  */
 export function createWooCouponSyncWorker(
-  catalogue: Pick<WooCouponCatalogueService, "reconcile"> = new WooCouponCatalogueService(),
+  catalogue?: Pick<WooCouponCatalogueService, "reconcile">,
   concurrency = wooCouponWorkerConcurrency(),
 ) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
@@ -81,7 +84,16 @@ export function createWooCouponSyncWorker(
       };
       logger.info("woo.coupon_sync.received", fields);
       try {
-        const outcome = await catalogue.reconcile(shopId, requestedAt);
+        // Resolve exactly once for each job, then freeze reader, transport and
+        // durable catalogue decisions to that job's policy version.
+        const currentCatalogue = catalogue ?? await (async () => {
+          const settings = await platformOperationalPolicyReader.wooCouponSync();
+          const reader = new WooCouponReaderService(
+            undefined, new WooCouponPageTransport(undefined, settings), settings,
+          );
+          return new WooCouponCatalogueService(undefined, (id) => reader.fetchAll(id), undefined, settings);
+        })();
+        const outcome = await currentCatalogue.reconcile(shopId, requestedAt);
         if (outcome === "current") logger.info("woo.coupon_sync.completed", { ...fields, outcome });
         else if (outcome === "unavailable") logger.warn("woo.coupon_sync.unavailable", { ...fields, outcome });
         else logger.info("woo.coupon_sync.skipped", { ...fields, outcome });

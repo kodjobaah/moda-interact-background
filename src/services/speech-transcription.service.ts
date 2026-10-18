@@ -1,3 +1,4 @@
+import { platformOperationalPolicyReader, type TranscriptionPolicy } from "./platform-operational-policy.js";
 export interface SpeechTranscriptionService {
   transcribe(input: { bytes: Uint8Array; mimeType: string }): Promise<{ text: string; provider: string; model: string }>;
 }
@@ -39,12 +40,12 @@ export function validateTranscriptionMedia(input: { bytes: Uint8Array; mimeType:
 class ProviderSpeechTranscriptionService implements SpeechTranscriptionService {
   constructor(private readonly provider: "groq" | "openai", private readonly fetchImplementation: typeof fetch = fetch) {}
 
-  async transcribe(input: { bytes: Uint8Array; mimeType: string }) {
+  async transcribe(input: { bytes: Uint8Array; mimeType: string }, policy?: TranscriptionPolicy) {
     const openai = this.provider === "openai";
     const apiKey = (openai ? process.env.WHATSAPP_OPENAI_API_KEY : process.env.GROQ_API_KEY)?.trim();
     if (!apiKey) throw new SpeechTranscriptionError("configuration-missing", false);
-    const model = (openai ? process.env.OPENAI_TRANSCRIPTION_MODEL : process.env.GROQ_TRANSCRIPTION_MODEL)?.trim()
-      || (openai ? "gpt-4o-mini-transcribe" : "whisper-large-v3-turbo");
+    const model = policy ? (openai ? policy.openaiModelId : policy.groqModelId)
+      : (openai ? "gpt-4o-mini-transcribe" : "whisper-large-v3-turbo");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(model)) throw new SpeechTranscriptionError("configuration-invalid", false);
     const filename = transcriptionFilename(input.mimeType);
     if (!input.bytes.length || input.bytes.length > 15 * 1024 * 1024) throw new SpeechTranscriptionError("unsupported-media", false);
@@ -83,10 +84,11 @@ export class OpenAISpeechTranscriptionService extends ProviderSpeechTranscriptio
 export const groqSpeechTranscriptionService = new GroqSpeechTranscriptionService();
 const openAISpeechTranscriptionService = new OpenAISpeechTranscriptionService();
 export const speechTranscriptionService: SpeechTranscriptionService = {
-  transcribe(input) {
-    const provider = process.env.WHATSAPP_TRANSCRIPTION_PROVIDER?.trim() || "groq";
-    if (provider === "groq") return groqSpeechTranscriptionService.transcribe(input);
-    if (provider === "openai") return openAISpeechTranscriptionService.transcribe(input);
-    throw new SpeechTranscriptionError("configuration-invalid", false);
+  async transcribe(input) {
+    let policy: TranscriptionPolicy;
+    try { policy = await platformOperationalPolicyReader.transcription(); }
+    catch { throw new SpeechTranscriptionError("configuration-invalid", false); }
+    if (policy.provider === "groq") return groqSpeechTranscriptionService.transcribe(input, policy);
+    return openAISpeechTranscriptionService.transcribe(input, policy);
   },
 };
