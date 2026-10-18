@@ -5,6 +5,7 @@ import { startWorkerProcess } from "./runtime/worker-process.js";
 import { backgroundRuntimeConfigService } from "./runtime/background-runtime-config.js";
 import { backgroundRuntimeLeaseService } from "./runtime/background-runtime-lease.js";
 import { startQueueConcurrencyController } from "./runtime/queue-concurrency-controller.js";
+import { startHumanCommandDispatcher } from "./services/recovery-conversation/start-human-command-dispatcher.js";
 
 const port = Number(process.env.PORT ?? 3000);
 
@@ -50,6 +51,7 @@ async function startDevelopmentWorker(): Promise<void> {
     import("./workers/whatsapp.worker.js"),
     import("./workers/shopify-discount-sync.worker.js"),
   ]);
+  const closeHumanDispatcher = await startHumanCommandDispatcher();
   const workers = [
     createCheckoutWorker(),
     createOrderWorker(),
@@ -65,6 +67,7 @@ async function startDevelopmentWorker(): Promise<void> {
     serviceName: "moda-interact-worker-development",
     workers,
     closeResources: [
+      closeHumanDispatcher,
       stopQueueConcurrencyController,
       () => backgroundRuntimeConfigService.close(),
       () =>

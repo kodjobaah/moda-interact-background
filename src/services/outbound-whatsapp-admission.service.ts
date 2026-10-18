@@ -78,7 +78,7 @@ export class OutboundWhatsAppAdmissionService {
   }
 
   async sendText(
-    input: OutboundAdmissionInput & Omit<SendTextInput, "to"> & { to: string },
+    input: OutboundAdmissionInput & Omit<SendTextInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
     const admission = await this.reserve({ ...input, content: input.text });
     if (admission.kind !== "admitted") return admission;
@@ -88,6 +88,7 @@ export class OutboundWhatsAppAdmissionService {
       to: input.to,
       text: admission.terminal ? TERMINAL_MESSAGE : input.text,
       ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
+      ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
       ...(input.replyToProviderMessageId
         ? { replyToProviderMessageId: input.replyToProviderMessageId }
         : {}),
@@ -96,7 +97,7 @@ export class OutboundWhatsAppAdmissionService {
 
   async sendTemplate(
     input: OutboundAdmissionInput &
-      Omit<SendTemplateInput, "to"> & { to: string },
+      Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
     const admission = await this.reserve(input);
     if (admission.kind !== "admitted") return admission;
@@ -110,6 +111,7 @@ export class OutboundWhatsAppAdmissionService {
       text: string;
       previewUrl?: boolean;
       replyToProviderMessageId?: string;
+      expectedControlRevision?: number;
     },
   ): Promise<OutboundAdmissionResult> {
     return this.delivery.sendPreparedText(input);

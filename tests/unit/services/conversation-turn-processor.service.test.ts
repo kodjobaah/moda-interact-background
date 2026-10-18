@@ -150,3 +150,52 @@ it("does not persist model language or send when the version/lease is stale", as
  await test.processor.process({conversationId:"conversation-1",observedVersion:3});
  expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
 });
+
+it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress", async () => {
+  const test = harness();
+  const ownership = {
+    readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "HUMAN", revision: 3 }),
+    checkAutomatedTurn: vi.fn().mockResolvedValue({ kind: "suppressed", reason: "human-controlled", phase: "before-agent" }),
+  };
+  const processor = new ConversationTurnProcessor({
+    queue: test.queue, conversation: test.conversation,
+    admission: test.admission, abuseAdmission: test.abuseAdmission,
+    ownership,
+    loadTurn: vi.fn().mockResolvedValue(test.loaded),
+    runAgent: test.runAgent, getResult: (result: any) => result,
+    now: () => new Date(first.getTime() + 20_000),
+    runtimeConfig: test.runtimeConfig, logger: test.logger,
+  });
+  await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+  expect(ownership.checkAutomatedTurn).toHaveBeenCalledWith({
+    conversationId: "conversation-1", expectedRevision: 3,
+    phase: "before-agent", shopId: "shop-1",
+  });
+  expect(test.runAgent).not.toHaveBeenCalled();
+  expect(test.admission.reserve).not.toHaveBeenCalled();
+  expect(test.conversation.completeTurn).toHaveBeenCalled();
+});
+
+it("does not send a model result after HUMAN takeover and subsequent AI resume", async () => {
+  const test = harness();
+  const ownership = {
+    readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "AI", revision: 2 }),
+    checkAutomatedTurn: vi.fn().mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
+      .mockResolvedValueOnce({ kind: "suppressed", reason: "stale-control-revision", phase: "after-await" }),
+  };
+  const processor = new ConversationTurnProcessor({
+    queue: test.queue, conversation: test.conversation,
+    admission: test.admission, abuseAdmission: test.abuseAdmission,
+    ownership, loadTurn: vi.fn().mockResolvedValue(test.loaded),
+    runAgent: test.runAgent, getResult: (result: any) => result,
+    now: () => new Date(first.getTime() + 20_000),
+    runtimeConfig: test.runtimeConfig, logger: test.logger,
+  });
+  await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+  expect(test.runAgent).toHaveBeenCalledOnce();
+  expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+  expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+  expect(ownership.checkAutomatedTurn).toHaveBeenNthCalledWith(2, {
+    conversationId: "conversation-1", expectedRevision: 2, phase: "after-await", shopId: "shop-1",
+  });
+});

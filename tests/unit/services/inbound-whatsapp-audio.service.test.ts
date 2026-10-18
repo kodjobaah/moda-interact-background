@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   database: {
     conversationMessage: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     conversation: { findUniqueOrThrow: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
-    $queryRaw: vi.fn(), $transaction: vi.fn(),
+    $queryRaw: vi.fn(), $executeRaw: vi.fn(), $transaction: vi.fn(),
   },
   media: { downloadAudio: vi.fn() },
   transcription: { transcribe: vi.fn() },
@@ -35,6 +35,7 @@ describe("InboundWhatsAppAudioService", () => {
     vi.resetAllMocks();
     mocks.database.conversationMessage.findFirst.mockResolvedValue(null);
     mocks.database.$queryRaw.mockResolvedValue([{id:"conversation-1"}]);
+    mocks.database.$executeRaw.mockResolvedValue(1);
     process.env.WHATSAPP_ACCESS_TOKEN = "test-token";
     mocks.database.conversationMessage.findUnique.mockResolvedValue(null);
     mocks.database.conversationMessage.create.mockResolvedValue({ id: "message-row", conversationId: "conversation-1", transcriptionStatus: "PENDING" });
@@ -167,7 +168,7 @@ describe("review R1/R2 event ordering", () => {
   else mocks.database.$queryRaw.mockImplementation(async()=>{state.lastProcessedVersion=2;return[{id:"conversation-1"}];});
   expect(await new InboundWhatsAppAudioService(mocks.media,mocks.transcription).process(event,"conversation-1")).toEqual({kind:"completed"});
   expect(state.lastProcessedVersion).toBe(2);
-  expect(mocks.database.conversation.updateMany.mock.calls.filter(([a])=>a.data.inboundVersion)).toEqual([[{where:{id:"conversation-1"},data:{inboundVersion:{increment:1},lastInboundAt:expect.any(Date),lastMessageAt:expect.any(Date)}}]]);
+  expect(mocks.database.conversation.updateMany.mock.calls.filter(([a])=>a.data.inboundVersion)).toEqual([[{where:{id:"conversation-1"},data:{inboundVersion:{increment:1}}}]]);
  });
  it("R1 a genuinely newer persisted inbound rejects an older note before download",async()=>{
   mocks.database.conversationMessage.findFirst.mockResolvedValue({id:"newer-message"});

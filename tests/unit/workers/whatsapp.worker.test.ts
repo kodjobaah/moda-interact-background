@@ -150,7 +150,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       shopId: "shop-1",
     });
 
-    await processInboundMessage(event);
+    await processInboundJobData(event);
 
     expect(mocks.recovery.recordExternalActivity).toHaveBeenCalledWith(
       "recovery-1",
@@ -163,6 +163,24 @@ describe("WhatsApp worker inbound execution gate", () => {
       content: event.content.text,
       occurredAt: new Date(event.occurredAt),
     });
+    expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+  });
+
+  it("persists and enqueues inbound for downstream HUMAN-mode turn suppression", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "resolved",
+      conversationId: "conversation-1",
+      checkoutRecoveryId: "recovery-1",
+      shopId: "shop-1",
+    });
+
+    await processInboundJobData(event);
+
+    expect(mocks.conversation.receiveMessage).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conversation-1",
+      providerMessageId: event.providerMessageId,
+      content: event.content.text,
+    }));
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
   });
 

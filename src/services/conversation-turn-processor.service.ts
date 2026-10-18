@@ -3,6 +3,7 @@ import type {
   ConversationTurnState,
 } from "./conversation.service.js";
 import { DelayedError } from "bullmq";
+import type { AiTurnOwnershipService } from "./recovery-conversation/ai-turn-ownership.service.js";
 import {
   createLogger,
   type StructuredLogger,
@@ -95,10 +96,11 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       content?: string;
     }) => Promise<OutboundAdmissionResult>;
     sendPreparedText: (
-      input: Admitted & { to: string; text: string },
+      input: Admitted & { to: string; text: string; expectedControlRevision?: number },
     ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
   };
+  ownership?: Pick<AiTurnOwnershipService, "readTurnOwnership" | "checkAutomatedTurn">;
   abuseAdmission: {
     admitSettledTurn: (input: {
       conversationId: string;
@@ -237,6 +239,23 @@ export class ConversationTurnProcessor<TContext, TResult> {
       processingStartedAt: now.toISOString(),
     });
 
+    // This is captured once. After a HUMAN -> AI cycle an obsolete model reply
+    // must never inherit the new AI revision.
+    let controlRevision: number | undefined;
+    try {
+      controlRevision = (await this.dependencies.ownership?.readTurnOwnership(conversationId))?.revision;
+    } catch (error) {
+      await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+      throw error;
+    }
+    const checkControl = async (phase: "before-agent" | "after-await" | "before-provider", shopId?: string) => {
+      if (controlRevision === undefined || !this.dependencies.ownership) return true;
+      const result = await this.dependencies.ownership.checkAutomatedTurn({
+        conversationId, expectedRevision: controlRevision, phase,
+        ...(shopId ? { shopId } : {}),
+      });
+      return result.kind === "allowed";
+    };
     let admission: Admitted | null = null;
     let providerSendAttempted = false;
     let reservationFailed = false;
@@ -247,8 +266,15 @@ export class ConversationTurnProcessor<TContext, TResult> {
     const sendPreparedText = async (
       input: Admitted & { to: string; text: string },
     ) => {
+      if (!(await checkControl("before-provider", input.shopId))) {
+        await failPrepared(input.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" } as const;
+      }
       providerSendAttempted = true;
-      return this.dependencies.admission.sendPreparedText(input);
+      return this.dependencies.admission.sendPreparedText({
+        ...input,
+        ...(controlRevision === undefined ? {} : { expectedControlRevision: controlRevision }),
+      });
     };
 
     try {
@@ -266,6 +292,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
         clarificationRequired: Boolean(loaded.clarificationText),
         shopUnavailable: loaded.shopUnavailable === true,
       });
+
+      if (!(await checkControl("before-agent", loaded.shopId))) {
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
 
       if (loaded.shopUnavailable) {
         await this.finishInactiveTurn(conversationId, observedVersion);
@@ -390,6 +421,12 @@ export class ConversationTurnProcessor<TContext, TResult> {
           observedVersion,
           outcome: "terminal-admission-response",
         });
+        return;
+      }
+
+      if (!(await checkControl("after-await", loaded.shopId))) {
+        await failPrepared(reserved.messageId);
+        await this.finishSuppressedTurn(conversationId, observedVersion);
         return;
       }
 

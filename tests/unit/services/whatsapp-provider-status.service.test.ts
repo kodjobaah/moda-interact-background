@@ -17,6 +17,12 @@ vi.mock("@prisma/client", () => ({
     TransactionIsolationLevel: { Serializable: "Serializable" },
   },
   UsageMetric: { DELIVERED_WHATSAPP_MESSAGE: "DELIVERED_WHATSAPP_MESSAGE" },
+  MerchantConversationSendState: {
+    DISPATCH_ADMITTED: "DISPATCH_ADMITTED",
+    UNKNOWN: "UNKNOWN",
+    SENT: "SENT",
+    FAILED: "FAILED",
+  },
 }));
 
 import { WhatsAppProviderStatusService } from "../../../src/services/whatsapp-provider-status.service.js";
@@ -30,10 +36,17 @@ const baseEvent = {
   occurredAt: "2026-09-08T15:00:00.000Z",
 };
 
-function harness(status = "SENT", attemptStatus: string | null = "WAITING_FOR_RESPONSE") {
+function harness(
+  status = "SENT",
+  attemptStatus: string | null = "WAITING_FOR_RESPONSE",
+  commandState: string | null = null,
+) {
   const linkedAttempt = attemptStatus === null
     ? null
     : { id: "attempt-1", status: attemptStatus };
+  const linkedCommand = commandState === null
+    ? null
+    : { id: "command-1", state: commandState };
   const message = {
     id: "message-1",
     direction: "OUTBOUND",
@@ -44,6 +57,7 @@ function harness(status = "SENT", attemptStatus: string | null = "WAITING_FOR_RE
     providerFailureCode: null as string | null,
     failedAt: null as Date | null,
     recoveryOutreachAttempt: linkedAttempt,
+    merchantSendCommand: linkedCommand,
     conversation: {
       shopId: null,
       checkoutRecovery: { shopId: "shop-1" },
@@ -83,6 +97,20 @@ function harness(status = "SENT", attemptStatus: string | null = "WAITING_FOR_RE
           where.status !== linkedAttempt.status
         ) return { count: 0 };
         Object.assign(linkedAttempt, data);
+        return { count: 1 };
+      }),
+    },
+    merchantConversationSendCommand: {
+      updateMany: vi.fn().mockImplementation(async ({ where, data }: {
+        where: { id: string; state: { in: string[] } };
+        data: Record<string, unknown>;
+      }) => {
+        if (
+          !linkedCommand ||
+          where.id !== linkedCommand.id ||
+          !where.state.in.includes(linkedCommand.state)
+        ) return { count: 0 };
+        Object.assign(linkedCommand, data);
         return { count: 1 };
       }),
     },
@@ -127,6 +155,7 @@ function harness(status = "SENT", attemptStatus: string | null = "WAITING_FOR_RE
   return {
     message,
     linkedAttempt,
+    linkedCommand,
     usageEvents,
     transaction,
     database,
@@ -463,6 +492,32 @@ describe("WhatsAppProviderStatusService", () => {
 
     expect(test.message.status).toBe("DELIVERED");
     expect(test.usageEvents).toHaveLength(1);
+  });
+
+  it("converges a HUMAN command from DISPATCH_ADMITTED when SENT receipt arrives", async () => {
+    const test = harness("SENT", null, "DISPATCH_ADMITTED");
+
+    await expect(test.service.process({ ...baseEvent, status: "SENT" })).resolves.toBe("applied");
+
+    expect(test.linkedCommand).toMatchObject({ id: "command-1", state: "SENT" });
+    expect(test.transaction.merchantConversationSendCommand.updateMany).toHaveBeenCalledWith({
+      where: { id: "command-1", state: { in: ["DISPATCH_ADMITTED", "UNKNOWN"] } },
+      data: { state: "SENT", completedAt: new Date(baseEvent.occurredAt) },
+    });
+  });
+
+  it("converges an UNKNOWN HUMAN command to FAILED on a definitive provider receipt", async () => {
+    const test = harness("SENT", null, "UNKNOWN");
+    const failedEvent = {
+      ...baseEvent,
+      schemaVersion: 3 as const,
+      status: "FAILED" as const,
+      failure: { providerCode: "131026" },
+    };
+
+    await expect(test.service.process(failedEvent)).resolves.toBe("applied");
+
+    expect(test.linkedCommand).toMatchObject({ id: "command-1", state: "FAILED", failureCode: "131026" });
   });
 });
 

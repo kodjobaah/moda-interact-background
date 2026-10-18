@@ -4,7 +4,7 @@ import { first, rows, changed, recoveryDatabase, readRecoveryContext,
   type RecoveryDatabase } from "./recovery-conversation.sql.js";
 
 export type HumanCommand = {
-  id: string; shopId: string; conversationId: string;
+  id: string; idempotencyKey: string; shopId: string; conversationId: string;
   kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
   state: "ACCEPTED" | "CLAIMED" | "DISPATCH_ADMITTED" | "SENT" | "FAILED" | "CANCELLED" | "UNKNOWN";
   leaseToken: string | null; leaseExpiresAt: Date | null;
