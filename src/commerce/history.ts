@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import prisma from "../lib/db.js";
+import { allowedHistoryCandidates } from "../services/conversation-moderation/moderation-history.js";
 import type { AgentMessage } from "../agents/types.js";
 
 const visible: Prisma.ConversationMessageWhereInput = {
@@ -84,5 +85,8 @@ export async function loadCommerceHistory(
       select,
     }),
   ]);
-  return boundHistory(prior.reverse(), current);
+  const [safePrior, safeCurrent] = await Promise.all([
+    allowedHistoryCandidates(prior), allowedHistoryCandidates(current),
+  ]);
+  return boundHistory(safePrior.reverse(), safeCurrent);
 }

@@ -14,10 +14,14 @@ function harness({
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
 } = {}) {
-  const conversationMessageUpdate = vi.fn().mockResolvedValue({});
-  const conversationMessageFindUnique = vi
-    .fn()
-    .mockResolvedValue({ conversationId: "conversation-1" });
+  let currentText = "Hello";
+  const conversationMessageUpdate = vi.fn().mockImplementation(async ({ data }: { data: { content?: string } }) => {
+    if (typeof data.content === "string") currentText = data.content;
+    return {};
+  });
+  const conversationMessageFindUnique = vi.fn().mockImplementation(async () => ({
+    conversationId: "conversation-1", senderType: "AGENT", content: currentText,
+  }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
   const usageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
   const transaction = {
@@ -31,7 +35,7 @@ function harness({
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),
-    conversationMessage: { update: conversationMessageUpdate },
+    conversationMessage: { update: conversationMessageUpdate, findUnique: conversationMessageFindUnique },
     usageEvent: { deleteMany: usageDeleteMany },
     conversation: { update: conversationUpdate },
   };
@@ -53,6 +57,10 @@ function harness({
       database as never,
       providerMock as never,
       executionEligibility as never,
+      undefined,
+      undefined,
+      { assessText: vi.fn(async () => ({ kind: "allow" })),
+        requireCurrentAllowance: vi.fn(async () => true) } as never,
     ),
   };
 }

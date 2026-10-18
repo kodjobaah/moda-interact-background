@@ -12,6 +12,8 @@ import { whatsAppService } from "../whatsapp.service.js";
 import { AiTurnOwnershipService } from "../recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../recovery-conversation/outbound-send-fence.service.js";
 import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
+import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
+import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import type {
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -40,6 +42,7 @@ export class OutboundMessageDeliveryService {
     > = shopExecutionEligibilityService,
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
+    private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -79,6 +82,10 @@ export class OutboundMessageDeliveryService {
       where: { id: messageId },
       data: { content: outboundText },
     });
+    if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
+      await this.failPrepared(messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
     const fenced = await this.fenceRecoverySend({
       shopId, conversationId, messageId, to,
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
@@ -115,6 +122,22 @@ export class OutboundMessageDeliveryService {
   ): Promise<OutboundAdmissionResult> {
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
+    // Prepared templates have no persisted canonical template tuple; they
+    // cannot borrow a text approval for a provider-managed template body.
+    if (!admission.terminal) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
+    await this.database.conversationMessage.update({
+      where: { id: admission.messageId }, data: { content: TERMINAL_MESSAGE },
+    });
+    if (!(await this.approvePreparedOutbound({
+      shopId: admission.shopId, conversationId: admission.conversationId,
+      messageId: admission.messageId, outboundText: TERMINAL_MESSAGE,
+    }))) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
     const fenced = await this.fenceRecoverySend({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to,
@@ -145,6 +168,30 @@ export class OutboundMessageDeliveryService {
     } catch (error) {
       await this.markProviderFailure(admission.messageId, error);
       throw error;
+    }
+  }
+
+  private async approvePreparedOutbound(input: {
+    shopId: string; conversationId: string; messageId: string; outboundText: string;
+  }): Promise<boolean> {
+    try {
+      const message = await this.database.conversationMessage.findUnique({
+        where: { id: input.messageId }, select: { senderType: true, content: true },
+      });
+      if (!message || message.content !== input.outboundText ||
+          (message.senderType !== "AGENT" && message.senderType !== "AUTOMATION")) return false;
+      const subject = { kind: message.senderType === "AGENT" ? "AGENT_MESSAGE" as const : "AUTOMATION_MESSAGE" as const,
+        messageId: input.messageId };
+      const policyVersion = moderationConfig().policyVersion;
+      const outcome = await this.moderation.assessText({
+        subject, shopId: input.shopId, conversationId: input.conversationId,
+        effectiveText: input.outboundText, inputKind: "TEXT", policyVersion, now: new Date(),
+      });
+      return outcome.kind === "allow" && await this.moderation.requireCurrentAllowance({
+        subject, effectiveText: input.outboundText, policyVersion,
+      });
+    } catch {
+      return false;
     }
   }
 

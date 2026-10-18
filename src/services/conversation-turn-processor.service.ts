@@ -101,6 +101,10 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     failPrepared: (messageId: string) => Promise<void>;
   };
   ownership?: Pick<AiTurnOwnershipService, "readTurnOwnership" | "checkAutomatedTurn">;
+  /** Installed by the production worker, before agent context loading. */
+  moderation?: {
+    moderatePending: (conversationId: string, pendingTurnStartedAt: Date) => Promise<"allowed" | "suppressed" | "retry">;
+  };
   abuseAdmission: {
     admitSettledTurn: (input: {
       conversationId: string;
@@ -278,6 +282,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
     };
 
     try {
+      if (this.dependencies.moderation) {
+        const gate = await this.dependencies.moderation.moderatePending(
+          conversationId, state.pendingTurnStartedAt as Date,
+        );
+        if (gate === "retry") {
+          await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+          await this.schedule(conversationId, observedVersion, 2_000, activeJob);
+          return;
+        }
+        if (gate === "suppressed") {
+          await this.finishSuppressedTurn(conversationId, observedVersion);
+          return;
+        }
+      }
       const loaded = await this.dependencies.loadTurn(
         conversationId,
         state.pendingTurnStartedAt as Date,

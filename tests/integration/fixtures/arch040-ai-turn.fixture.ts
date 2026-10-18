@@ -1,3 +1,5 @@
+import type { ModerationAssessmentService } from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
+import { allowModerationFixture } from "./arch040-allow-moderation.fixture.js";
 import { ConversationTurnProcessor } from "../../../src/services/conversation-turn-processor.service.js";
 import { OutboundMessageDeliveryService } from "../../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import { AiTurnOwnershipService } from "../../../src/services/recovery-conversation/ai-turn-ownership.service.js";
@@ -58,7 +60,7 @@ async function queryAimock(baseUrl: string): Promise<ModelAnswer> {
  * billing-plan/credit ledger certification belongs to system-test.
  */
 export async function runAiTurnThroughBackgroundMocks(
-  f: Fixture, options: { takeoverThenResume: boolean },
+  f: Fixture, options: { takeoverThenResume: boolean; moderation?: ModerationAssessmentService },
 ) {
   const aimock = await f.startAimock();
   const url = aimock.snapshot().openRouterBaseUrl;
@@ -83,6 +85,7 @@ export async function runAiTurnThroughBackgroundMocks(
     f.execution as unknown as ConstructorParameters<typeof OutboundMessageDeliveryService>[2],
     new AiTurnOwnershipService(f.db),
     new OutboundSendFenceService(f.db, f.durableEligibility),
+    options.moderation ?? allowModerationFixture(),
   );
   const conversation = {
     getTurnState: async (id: string) => f.db.conversation.findUniqueOrThrow({

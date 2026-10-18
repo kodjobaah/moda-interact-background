@@ -107,6 +107,8 @@ export function admissionHarness({
         conversationId: "conversation-1",
         status: "PENDING",
         sentAt: null,
+        content: messages.get(where.id)?.content ?? "",
+        senderType: "AGENT",
       })),
       create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
         const message = {
@@ -193,6 +195,8 @@ export function admissionHarness({
       3,
       executionEligibility as never,
       createPostContractPolicyResolver as never,
+      { assessText: vi.fn(async () => ({ kind: "allow" })),
+        requireCurrentAllowance: vi.fn(async () => true) } as never,
     ),
   };
 }
