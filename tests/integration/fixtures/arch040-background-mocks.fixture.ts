@@ -1,6 +1,10 @@
 import { vi } from "vitest";
 import { WhatsAppService } from "../../../src/services/whatsapp.service.js";
 import type { SendTemplateInput, SendTextInput } from "../../../src/integration/whatsapp/types.js";
+import { platformConsumerConfiguration } from "../../../src/services/platform-configuration/consumers.js";
+import type {
+  BackgroundReadableKey, ConfigurationSnapshot,
+} from "../../../src/services/platform-configuration/contracts.js";
 import { Arch040Aimock } from "./arch040-aimock.fixture.js";
 import { Arch040WhatsAppEmulator } from "./arch040-whatsapp-emulator.fixture.js";
 
@@ -17,6 +21,27 @@ export async function startArch040BackgroundMocks() {
   const values = { ...whatsapp.environment, WHATSAPP_BUSINESS_ACCOUNT_ID: "arch040-test-business-account" };
   const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
   for (const [key, value] of Object.entries(values)) process.env[key] = value;
+
+  // ARCH-043 makes messaging.sender a sealed database configuration. The
+  // disposable HTTP emulator must supply its own sender identity rather than
+  // reading developer/production credentials or relying on legacy env vars.
+  // Mock only this configuration key; other reads retain the real reader.
+  const readConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
+  const senderRead = vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
+    async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
+      if (key === "messaging.sender") {
+        return {
+          key, version: 1,
+          value: {
+            accessToken: values.WHATSAPP_ACCESS_TOKEN,
+            phoneNumberId: whatsapp.phoneNumberId,
+            businessAccountId: values.WHATSAPP_BUSINESS_ACCOUNT_ID,
+          },
+        } as ConfigurationSnapshot<K>;
+      }
+      return readConfiguration(key);
+    },
+  );
 
   type Fault = "timeout" | "provider-rejected";
   let nextFault: Fault | null = null;
@@ -80,6 +105,7 @@ export async function startArch040BackgroundMocks() {
         try {
           await whatsapp.cleanup();
         } finally {
+          senderRead.mockRestore();
           for (const [key, value] of previous) {
             if (value === undefined) delete process.env[key];
             else process.env[key] = value;
