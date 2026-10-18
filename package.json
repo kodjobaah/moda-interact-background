@@ -37,7 +37,8 @@
     "test:arch038-live-budgets": "node --experimental-strip-types --test scripts/test-arch038-live-budget-contract.mjs",
     "test:arch038-live-budgets:postgres": "tsx scripts/test-arch038-live-budget-postgres.ts",
     "test:arch040-background-runtime:postgres": "node scripts/test-integration.mjs tests/integration/recovery-human-dispatch.integration.test.ts",
-    "test:arch040-background-wiring": "vitest run tests/unit/services/recovery-conversation/background-wiring.test.ts tests/unit/services/recovery-conversation/start-human-command-dispatcher.test.ts tests/unit/services/conversation-turn-processor.service.test.ts tests/unit/services/conversation.service.test.ts tests/unit/services/inbound-whatsapp-audio.service.test.ts tests/unit/workers/whatsapp.worker.test.ts"
+    "test:arch040-background-wiring": "vitest run tests/unit/services/recovery-conversation/background-wiring.test.ts tests/unit/services/recovery-conversation/start-human-command-dispatcher.test.ts tests/unit/services/conversation-turn-processor.service.test.ts tests/unit/services/conversation.service.test.ts tests/unit/services/inbound-whatsapp-audio.service.test.ts tests/unit/workers/whatsapp.worker.test.ts",
+    "test:arch043-platform-configuration:postgres": "node scripts/test-integration.mjs tests/integration/platform-configuration-reader.integration.test.ts"
   },
   "keywords": [],
   "author": "",
