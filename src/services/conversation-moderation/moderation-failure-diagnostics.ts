@@ -51,7 +51,7 @@ export function boundedModerationExceptionMessage(error: unknown): string | unde
   // Only scan a bounded prefix of untrusted provider text.
   const redacted = raw.slice(0, MAX_EXCEPTION_SOURCE_CHARS)
     .replace(/\b(?:postgres(?:ql)?|https?|redis(?:s)?|amqps?|mysql):\/\/[^\s"'<>]+/giu, "[redacted-url]")
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{6,}/giu, "$1 [redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/giu, "$1 [redacted]")
     .replace(/\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{6,}|ghp_[A-Za-z0-9_]{6,}|xox[baprs]-[^\s"']{6,})/giu, "[redacted-credential]")
     .replace(/\b((?:api[\s_-]?key|access[_-]?token|password|secret|authorization|client[_-]?secret|token)\s*[:=]\s*)\S+/giu, "$1[redacted]");
   const message = Array.from(redacted, (character) => {
