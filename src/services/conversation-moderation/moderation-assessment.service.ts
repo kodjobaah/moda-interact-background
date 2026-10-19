@@ -4,13 +4,15 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { openAiModerateText, type ModerateText } from "./moderation-client.js";
+import { ModerationDependencyFailure, moderationExceptionLogFields, moderationFailureDiagnostic } from "./moderation-failure-diagnostics.js";
 import { readModerationOperation, type ModerationOperationReader } from "./moderation-operation.js";
 import {
   classifyModeration, moderationConfig, MODERATION_TIMEOUT_MS,
   type ModerationActor, type ClassifiedModeration,
 } from "./moderation-policy.js";
 
-const logger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() });
+const deploymentEnvironment = resolveDeploymentEnvironmentName();
+const logger = createLogger({ serviceName: "moda-messaging-worker", environment: deploymentEnvironment });
 const LEASE_MS = 45_000;
 const BACKOFF_MS = [10_000, 30_000, 120_000] as const;
 export const sha256Text = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -184,7 +186,12 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
           categories: null, scores: null, returnedModel: "not-invoked", requestId: null };
       } else {
         const response = await this.moderate({ text: source.content, model, timeoutMs: MODERATION_TIMEOUT_MS, operation });
-        classified = classifyModeration(response, subject.kind as ModerationActor);
+        try { classified = classifyModeration(response, subject.kind as ModerationActor); }
+        catch (error) {
+          throw new ModerationDependencyFailure("moderation_response_invalid", {
+            stage: "provider_response", code: "provider_response_invalid", providerRequestAttempted: true,
+          }, error);
+        }
       }
     } catch (error) {
       const attempt = row.attemptCount + 1;
@@ -196,9 +203,19 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
         classified = { decision: "REVIEW_REQUIRED", flagged: null, reasonCode: "moderation_dependency_retry",
           categories: null, scores: null, returnedModel: null, requestId: null };
       }
+      // Provide a 512-character exception-message excerpt in test/development.
+      // The excerpt is scrubbed; raw Error objects/stacks/causes are never logged.
+      const diagnostic = moderationFailureDiagnostic(error);
       logger.warn("conversation.moderation.dependency_unavailable", {
         assessmentId: id, shopId: input.shopId, conversationId: input.conversationId,
-        errorType: error instanceof Error ? error.name.slice(0, 64) : "unknown",
+        actor: subject.kind, assessmentAttempt: attempt, maxAssessmentAttempts: BACKOFF_MS.length,
+        failureStage: diagnostic.stage, failureCode: diagnostic.code,
+        providerRequestAttempted: diagnostic.providerRequestAttempted,
+        ...(diagnostic.httpStatus === undefined ? {} : { providerHttpStatus: diagnostic.httpStatus }),
+        retryScheduled: retryAt !== null,
+        moderationConfigVersion: operation.moderation.version,
+        providerCredentialVersion: operation.providerVersion,
+        ...moderationExceptionLogFields(error, deploymentEnvironment),
       });
     }
     const decision = retryAt ? "RETRYABLE_ERROR" : classified.decision;

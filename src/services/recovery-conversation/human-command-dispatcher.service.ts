@@ -13,11 +13,13 @@ import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.ser
 import { recoveryRuntimeEligibility } from "./recovery-runtime-eligibility.service.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { humanModerationAdmission } from "../conversation-moderation/moderation-decision-adapter.js";
+import { moderationExceptionLogFields } from "../conversation-moderation/moderation-failure-diagnostics.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 
-const logger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() });
+const deploymentEnvironment = resolveDeploymentEnvironmentName();
+const logger = createLogger({ serviceName: "moda-messaging-worker", environment: deploymentEnvironment });
 const POLL_MS = 3_000;
 const MAX_PER_POLL = 25;
 const MAX_IN_FLIGHT = 4;
@@ -202,14 +204,25 @@ export class HumanCommandDispatcherService {
         policyVersion: cfg.policyVersion, now: this.deps.now(),
       }));
       if (decision.kind === "retry") {
+        logger.info("arch040.human_dispatcher.moderation_deferred", {
+          commandId, reasonCode: "moderation_assessment_retry", retryAt: decision.retryAt.toISOString(),
+        });
         await this.deps.commands.deferCommand(commandId, leaseToken, "moderation_unavailable", decision.retryAt);
         return;
       }
       if (decision.kind === "blocked") {
+        logger.info("arch040.human_dispatcher.moderation_not_admitted", {
+          commandId, reasonCode: decision.failureCode.toLowerCase(),
+        });
         await this.deps.commands.rejectCommand(commandId, leaseToken, decision.failureCode.toLowerCase());
         return;
       }
-    } catch {
+    } catch (error) {
+      // Only a capped, scrubbed message preview is permitted in test/development.
+      logger.warn("arch040.human_dispatcher.moderation_pipeline_retry", {
+        commandId, reasonCode: "moderation_pipeline_exception", retryDelayMs: 30_000,
+        ...moderationExceptionLogFields(error, deploymentEnvironment),
+      });
       await this.defer(commandId, leaseToken, "moderation_unavailable");
       return;
     }

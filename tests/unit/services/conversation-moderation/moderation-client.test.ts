@@ -10,6 +10,8 @@ vi.mock("openai", () => ({
 }));
 import { moderationSdkBaseUrl, openAiModerateText } from
   "../../../../src/services/conversation-moderation/moderation-client.js";
+import { ModerationDependencyFailure, moderationExceptionLogFields } from
+  "../../../../src/services/conversation-moderation/moderation-failure-diagnostics.js";
 
 const operation = (options: { key?: string; modelId?: string; baseUrl?: string | null } = {}): ModerationOperation => ({
   moderation: { key: "omini.moderation", version: 7,
@@ -68,7 +70,35 @@ describe("ARCH-040 moderation client uses ARCH-043 operation snapshot", () => {
       flagged: false, categories: {}, category_scores: {},
     }] });
     await expect(openAiModerateText(request())).rejects.toThrow("moderation_response_invalid");
-    mocks.create.mockRejectedValue(Object.assign(new Error("rate limited"), { status: 429 }));
-    await expect(openAiModerateText(request())).rejects.toThrow("rate limited");
+    mocks.create.mockRejectedValue(Object.assign(new Error("Bearer very-secret postgres://user:password@host/db"), { status: 429 }));
+    await expect(openAiModerateText(request())).rejects.toMatchObject({
+      message: "moderation_dependency_unavailable",
+      diagnostic: { stage: "provider_request", code: "provider_rate_limited",
+        providerRequestAttempted: true, httpStatus: 429 },
+    });
+  });
+
+  it("distinguishes pre-call, request, and response failures without the upstream error", async () => {
+    await expect(openAiModerateText(request(operation({ baseUrl: "https://example.com/v1" }))))
+      .rejects.toMatchObject({ diagnostic: { stage: "configuration",
+        code: "configured_endpoint_invalid", providerRequestAttempted: false } });
+    mocks.create.mockRejectedValueOnce(Object.assign(new Error("secret-rich upstream body"), { status: 401 }));
+    try {
+      await openAiModerateText(request());
+      throw new Error("Expected an API failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModerationDependencyFailure);
+      expect(JSON.stringify(error)).not.toContain("secret-rich");
+      expect(moderationExceptionLogFields(error, "test")).toEqual({ exceptionMessage: "secret-rich upstream body" });
+      expect(moderationExceptionLogFields(error, "production")).toEqual({});
+      expect(error).toMatchObject({ diagnostic: { code: "provider_authentication_failed", httpStatus: 401 } });
+    }
+    mocks.create.mockResolvedValueOnce({ model: "different-model", results: [{
+      flagged: false, categories: {}, category_scores: {},
+    }] });
+    await expect(openAiModerateText(request())).rejects.toMatchObject({
+      diagnostic: { stage: "provider_response", code: "provider_model_mismatch",
+        providerRequestAttempted: true },
+    });
   });
 });
