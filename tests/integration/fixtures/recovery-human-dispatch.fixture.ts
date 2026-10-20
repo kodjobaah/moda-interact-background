@@ -15,6 +15,7 @@ import { HumanSendPolicyService, type HumanPolicyConfig } from "../../../src/ser
 import { RecoveryFollowUpPolicyService } from "../../../src/services/recovery-conversation/recovery-follow-up-policy.service.js";
 import { OutboundSendFenceService } from "../../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { HumanSendReconciliationService } from "../../../src/services/recovery-conversation/human-send-reconciliation.service.js";
+import { FollowUpClaimCancellationService } from "../../../src/services/recovery-conversation/follow-up-claim-cancellation.service.js";
 
 export async function humanDispatchFixture(label: string) {
   const url = process.env.TEST_DATABASE_URL;
@@ -72,6 +73,7 @@ export async function humanDispatchFixture(label: string) {
       commands, followUps, evaluator,
       fence: new OutboundSendFenceService(db, durableEligibility),
       reconciliation, billing, provider, execution,
+      followUpCancellations: new FollowUpClaimCancellationService(db, commands),
       now: () => new Date(), moderation, incidents, senderPreflight,
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);

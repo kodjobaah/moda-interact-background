@@ -1,9 +1,11 @@
 import "dotenv/config";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { describe, expect, it, vi } from "vitest";
 import { allowModerationFixture } from "./fixtures/arch040-allow-moderation.fixture.js";
 import { OutboundMessageDeliveryService } from "../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import { AiTurnOwnershipService } from "../../src/services/recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
+import { FollowUpClaimCancellationService } from "../../src/services/recovery-conversation/follow-up-claim-cancellation.service.js";
 import { WhatsAppServiceError } from "../../src/services/whatsapp.service.js";
 import { PlatformConfigurationFailure } from "../../src/services/platform-configuration/errors.js";
 import { WhatsAppProviderStatusService } from "../../src/services/whatsapp-provider-status.service.js";
@@ -551,4 +553,120 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       expect(f.providerHttpRequests).toEqual([{ type: "text" }, { type: "text" }, { type: "template" }]);
     } finally { await f.close(); }
   }, 60_000);
+
+  it.each(["block", "review_required"] as const)(
+    "releases the same sequence-two attempt after HUMAN moderation %s, without billing or Meta",
+    async (outcome) => {
+      const f = await humanDispatchFixture(`moderation-reclaim-${outcome}`);
+      try {
+        const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+        const moderation = allowModerationFixture();
+        moderation.assessText = async () => ({
+          kind: outcome, assessmentId: `denied-${outcome}`, reasonCode: "fixture_denial",
+        });
+        const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+        await f.dispatcher(undefined, moderation).processClaim(commandId, claim.leaseToken);
+
+        expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
+          state: "CANCELLED", outboundMessageId: null, providerDispatchKey: null,
+        }));
+        expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId },
+          select: { initiatedBy: true, initiationKey: true, claimedAt: true, outboundMessageId: true },
+        })).toEqual({ initiatedBy: null, initiationKey: null, claimedAt: null, outboundMessageId: null });
+        expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+        expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
+        expect(f.providerHttpRequests).toHaveLength(0);
+        expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(0);
+        expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+
+        const correctedKey = `corrected-${f.recoveryId}`;
+        expect(await f.followUps.claimSequenceTwo({
+          recoveryId: f.recoveryId, initiator: "merchant_post_window", expectedRevision: 1,
+          initiationKey: correctedKey, recipient: f.recipient, now: new Date(),
+        })).toEqual({ kind: "claimed", attemptId, billingSource: `recovery-outreach:${attemptId}` });
+        expect(await f.db.recoveryOutreachAttempt.count({
+          where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
+        })).toBe(1);
+        expect((await f.db.merchantConversationSendCommand.findUniqueOrThrow({ where: { id: commandId } }))
+          .idempotencyKey).toBe(`merchant-${f.recoveryId}`);
+      } finally { await f.close(); }
+    }, 60_000,
+  );
+
+  it("recovers cancelled-but-claimed follow-ups after a crash without resending", async () => {
+    const f = await humanDispatchFixture("historical-cancel-reclaim");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const lease = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      expect(await f.commands.rejectCommand(commandId, lease.leaseToken, "human_content_moderation_blocked"))
+        .toBe(true); // Simulates a previous worker's cancellation before claim release.
+      const a = new FollowUpClaimCancellationService(f.db, f.commands);
+      const b = new FollowUpClaimCancellationService(f.db, f.commands);
+      const results = await Promise.all([a.repairCancelledClaims(), b.repairCancelledClaims()]);
+      expect(results.reduce((sum, value) => sum + value, 0)).toBe(1);
+      expect(await a.repairCancelledClaims()).toBe(0);
+      expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId },
+        select: { initiationKey: true, initiatedBy: true },
+      })).toEqual({ initiationKey: null, initiatedBy: null });
+      expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("cancels a blocked command but retains its claim when a credit reservation already exists", async () => {
+    const f = await humanDispatchFixture("reserved-credit-fail-closed");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
+      // Reserved credit must name its capacity source. Match the live billing
+      // constraint rather than inserting an impossible reservation row.
+      const counter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+      } });
+      const moderation = allowModerationFixture();
+      moderation.assessText = async () => ({
+        kind: "block", assessmentId: "denied-existing-reservation", reasonCode: "fixture_denial",
+      });
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      await f.dispatcher(undefined, moderation).processClaim(commandId, claim.leaseToken);
+      expect((await f.commandState(commandId))?.state).toBe("CANCELLED");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } }))
+        .status).toBe("RESERVED");
+      expect(await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
+        .toMatchObject({ grantedQuantity: 1, reservedQuantity: 1, committedQuantity: 0 });
+      expect(await f.followUps.claimSequenceTwo({
+        recoveryId: f.recoveryId, initiator: "merchant_post_window", expectedRevision: 1,
+        initiationKey: "second-command", recipient: f.recipient, now: new Date(),
+      })).toEqual({ kind: "suppressed", reason: "already-claimed" });
+      expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("refuses any release after the durable provider permit", async () => {
+    const f = await humanDispatchFixture("permit-irreversible");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const lease = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const permit = await new OutboundSendFenceService(f.db, f.durableEligibility).admitFinalSend({
+        senderType: "HUMAN", conversationId: f.conversationId, shopId: f.shopId,
+        recoveryId: f.recoveryId, expectedControlRevision: 1, commandId, leaseToken: lease.leaseToken,
+        recipient: f.recipient, now: new Date(),
+      });
+      expect(permit.kind).toBe("admitted");
+      const service = new FollowUpClaimCancellationService(f.db, f.commands);
+      expect(await service.cancelClaimed(commandId, lease.leaseToken, "human_moderation_review_required"))
+        .toBe("stale");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+      expect(await service.repairCancelledClaims()).toBe(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
 });
