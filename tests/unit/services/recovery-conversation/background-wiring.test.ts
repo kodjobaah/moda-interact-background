@@ -12,11 +12,15 @@ function harness(decision: { kind: "terminal" | "retryable"; reason: string }) {
     deferCommand: vi.fn(async () => true),
   };
   const provider = { sendWhatsAppText: vi.fn(), sendWhatsAppTemplate: vi.fn() };
+  const followUpCancellations = {
+    cancelClaimed: vi.fn(async () => "not-follow-up" as const),
+    repairCancelledClaims: vi.fn(async () => 0),
+  };
   const evaluator = { evaluateHumanCommand: vi.fn(async () => decision) };
   const deps = {
-    commands, provider, evaluator, now: () => new Date("2026-10-17T12:00:00Z"),
+    commands, provider, evaluator, followUpCancellations, now: () => new Date("2026-10-17T12:00:00Z"),
   } as unknown as HumanDispatcherDependencies;
-  return { service: new HumanCommandDispatcherService(deps), commands, provider, evaluator };
+  return { service: new HumanCommandDispatcherService(deps), commands, provider, evaluator, followUpCancellations };
 }
 
 describe("ARCH-040 BACKGROUND-002 production adapter", () => {
@@ -37,6 +41,20 @@ describe("ARCH-040 BACKGROUND-002 production adapter", () => {
     expect(evaluator.evaluateHumanCommand).toHaveBeenCalledOnce();
     expect(commands.rejectCommand).toHaveBeenCalledWith("merchant-command", "lease", "human_messaging_suspended");
     expect(provider.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    await service.close();
+  });
+
+  it("routes terminal follow-up denials through the injected claim-release service", async () => {
+    const { service, commands, followUpCancellations, provider } = harness({
+      kind: "terminal", reason: "human_content_moderation_blocked",
+    });
+    followUpCancellations.cancelClaimed.mockResolvedValueOnce("released");
+    await service.processClaim("merchant-command", "lease");
+    expect(followUpCancellations.cancelClaimed).toHaveBeenCalledWith(
+      "merchant-command", "lease", "human_content_moderation_blocked",
+    );
+    expect(commands.rejectCommand).not.toHaveBeenCalled();
     expect(provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
     await service.close();
   });

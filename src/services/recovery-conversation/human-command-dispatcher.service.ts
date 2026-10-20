@@ -10,9 +10,10 @@ import { HumanCommandEvaluationService } from "./human-command-evaluation.servic
 import { OutboundSendFenceService } from "./outbound-send-fence.service.js";
 import { HumanSendReconciliationService } from "./human-send-reconciliation.service.js";
 import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.service.js";
+import { FollowUpClaimCancellationService, type FollowUpClaimCancellation } from "./follow-up-claim-cancellation.service.js";
 import { recoveryRuntimeEligibility } from "./recovery-runtime-eligibility.service.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
-import { humanModerationAdmission } from "../conversation-moderation/moderation-decision-adapter.js";
+import { humanModerationAdmission, type ModerationAdmission } from "../conversation-moderation/moderation-decision-adapter.js";
 import { moderationExceptionLogFields } from "../conversation-moderation/moderation-failure-diagnostics.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
@@ -34,6 +35,7 @@ export type HumanDispatcherDependencies = {
   fence: OutboundSendFenceService;
   reconciliation: HumanSendReconciliationService;
   billing: RecoveryFollowUpBillingService;
+  followUpCancellations: FollowUpClaimCancellation;
   provider: Pick<typeof whatsAppService, "sendWhatsAppText" | "sendWhatsAppTemplate">;
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
@@ -55,6 +57,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     fence: new OutboundSendFenceService(recoveryDatabase, recoveryRuntimeEligibility),
     reconciliation: new HumanSendReconciliationService(),
     billing: new RecoveryFollowUpBillingService(),
+    followUpCancellations: new FollowUpClaimCancellationService(),
     provider: whatsAppService,
     execution: shopExecutionEligibilityService,
     now: () => new Date(),
@@ -100,6 +103,7 @@ export class HumanCommandDispatcherService {
     if (!available || this.stopped) return;
     await this.reconcileExpiredPermits();
     await this.reconcileConfirmedFollowUps();
+    await this.deps.followUpCancellations.repairCancelledClaims();
     const commands = await this.deps.commands.claimDueHumanCommands({
       limit: Math.min(MAX_PER_POLL, available), now: this.deps.now(),
     });
@@ -173,7 +177,7 @@ export class HumanCommandDispatcherService {
     const now = this.deps.now();
     const evaluated = await this.deps.evaluator.evaluateHumanCommand(commandId, leaseToken, now);
     if (evaluated.kind === "terminal") {
-      await this.deps.commands.rejectCommand(commandId, leaseToken, safeCode(evaluated.reason));
+      await this.rejectTerminal(commandId, leaseToken, evaluated.reason);
       return;
     }
     if (evaluated.kind === "retryable") {
@@ -182,18 +186,18 @@ export class HumanCommandDispatcherService {
     }
     const resolved = await this.deps.commands.loadClaimedCommand(commandId, leaseToken, this.deps.now());
     if (resolved.kind !== "claimed") {
-      await this.deps.commands.rejectCommand(commandId, leaseToken, safeCode(resolved.reason));
+      await this.rejectTerminal(commandId, leaseToken, resolved.reason);
       return;
     }
     const command = resolved.command;
     const context = await readRecoveryContext(this.deps.database, command.conversationId);
     if (!context || context.shopId !== command.shopId) {
-      await this.deps.commands.rejectCommand(commandId, leaseToken, "not_recovery_linked");
+      await this.rejectTerminal(commandId, leaseToken, "not_recovery_linked");
       return;
     }
     const eligibility = await this.deps.execution.evaluate(command.shopId, undefined, "recovery");
     if (!eligibility.allowed) {
-      await this.deps.commands.rejectCommand(commandId, leaseToken, safeCode(eligibility.reason));
+      await this.rejectTerminal(commandId, leaseToken, eligibility.reason);
       return;
     }
 
@@ -202,35 +206,37 @@ export class HumanCommandDispatcherService {
     const subject = { kind: "HUMAN_COMMAND" as const, commandId };
     const moderation = this.deps.moderation;
     let effectiveText: string;
+    let decision: ModerationAdmission;
     try {
       effectiveText = await moderation.effectiveText(subject);
       const cfg = moderationConfig();
-      const decision = humanModerationAdmission(await moderation.assessText({
+      decision = humanModerationAdmission(await moderation.assessText({
         subject, shopId: command.shopId, conversationId: command.conversationId,
         effectiveText, inputKind: command.kind === "HUMAN_TEXT" ? "TEXT" : "TEMPLATE_PARAMETERS",
         policyVersion: cfg.policyVersion, now: this.deps.now(),
       }));
-      if (decision.kind === "retry") {
-        logger.info("arch040.human_dispatcher.moderation_deferred", {
-          commandId, reasonCode: "moderation_assessment_retry", retryAt: decision.retryAt.toISOString(),
-        });
-        await this.deps.commands.deferCommand(commandId, leaseToken, "moderation_unavailable", decision.retryAt);
-        return;
-      }
-      if (decision.kind === "blocked") {
-        logger.info("arch040.human_dispatcher.moderation_not_admitted", {
-          commandId, reasonCode: decision.failureCode.toLowerCase(),
-        });
-        await this.deps.commands.rejectCommand(commandId, leaseToken, decision.failureCode.toLowerCase());
-        return;
-      }
     } catch (error) {
-      // Only a capped, scrubbed message preview is permitted in test/development.
+      // Only moderation failures are retryable here. Database cancellation
+      // errors must not be mistaken for a new chance to send denied content.
       logger.warn("arch040.human_dispatcher.moderation_pipeline_retry", {
         commandId, reasonCode: "moderation_pipeline_exception", retryDelayMs: 30_000,
         ...moderationExceptionLogFields(error, deploymentEnvironment),
       });
       await this.defer(commandId, leaseToken, "moderation_unavailable");
+      return;
+    }
+    if (decision.kind === "retry") {
+      logger.info("arch040.human_dispatcher.moderation_deferred", {
+        commandId, reasonCode: "moderation_assessment_retry", retryAt: decision.retryAt.toISOString(),
+      });
+      await this.deps.commands.deferCommand(commandId, leaseToken, "moderation_unavailable", decision.retryAt);
+      return;
+    }
+    if (decision.kind === "blocked") {
+      logger.info("arch040.human_dispatcher.moderation_not_admitted", {
+        commandId, reasonCode: decision.failureCode.toLowerCase(),
+      });
+      await this.rejectTerminal(commandId, leaseToken, decision.failureCode.toLowerCase());
       return;
     }
 
@@ -250,7 +256,7 @@ export class HumanCommandDispatcherService {
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
       const claimed = await this.claimMerchantFollowUp(command, context.recoveryId, now);
       if (!claimed) {
-        await this.deps.commands.rejectCommand(commandId, leaseToken, "follow_up_unavailable");
+        await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
         return;
       }
       attemptId = claimed;
@@ -280,7 +286,7 @@ export class HumanCommandDispatcherService {
     });
     if (permit.kind !== "admitted") {
       if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);
-      await this.deps.commands.rejectCommand(commandId, leaseToken, safeCode(permit.reason));
+      await this.rejectTerminal(commandId, leaseToken, permit.reason);
       return;
     }
     // From here onwards there is NO safe automatic retry—even if the worker
@@ -348,6 +354,19 @@ export class HumanCommandDispatcherService {
       await this.deps.incidents.record({ commandId, shopId, error, outcome });
     } catch {
       logger.error("arch040.human_dispatcher.incident_report_failed", { commandId });
+    }
+  }
+
+  /** All terminal pre-provider denials share one application-owned path.
+   * Ordinary HUMAN_TEXT retains its established command-only cancellation.
+   */
+  private async rejectTerminal(commandId: string, leaseToken: string, reason: string): Promise<void> {
+    const failureCode = safeCode(reason);
+    const outcome = await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
+    if (outcome === "not-follow-up") {
+      await this.deps.commands.rejectCommand(commandId, leaseToken, failureCode);
+    } else if (outcome === "released" || outcome === "held") {
+      logger.info("arch040.follow_up_claim_cancellation", { commandId, outcome, reasonCode: failureCode });
     }
   }
 
