@@ -2,6 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
+  createOperationalIncidentReporter,
+  createPrismaOperationalIncidentPersistence,
+  OPERATIONAL_INCIDENT_CONTRACT_VERSION,
+} from "@modainteract/moda-interact-shared/incidents";
+import {
   createLogger,
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
@@ -15,6 +20,7 @@ import type {
   MerchantKnowledgeUploadedAssetAcquirer,
   MerchantKnowledgeWebPageAcquirer,
 } from "./merchant-knowledge-acquisition.js";
+import { MerchantKnowledgeUploadedAssetAcquisitionError } from "./merchant-knowledge-uploaded-asset-acquirer.js";
 import {
   chunkMerchantKnowledgeText,
   type MerchantKnowledgeChunkContent,
@@ -58,6 +64,7 @@ export interface MerchantKnowledgeProcessingDependencies {
   embedding?: MerchantKnowledgeEmbeddingService;
   embeddingResolver?: MerchantKnowledgeEmbeddingResolver;
   logger?: StructuredLogger;
+  incidentReporter?: Pick<ReturnType<typeof createOperationalIncidentReporter>, "report">;
   now?: () => Date;
 }
 
@@ -66,10 +73,26 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
+const defaultIncidentReporter = createOperationalIncidentReporter({
+  persistence: createPrismaOperationalIncidentPersistence({ prisma }),
+  logger,
+});
+
+const xlsxFormatFailureDetails = new Set([
+  "INVALID_FILENAME",
+  "INVALID_XLSX",
+  "ASSET_NOT_FOUND",
+  "ASSET_NOT_ACQUIRABLE",
+  "INVALID_ASSET_METADATA",
+  "UPLOAD_TOO_LARGE",
+  "ASSET_EXTRACTION_FAILED",
+]);
+
 export class MerchantKnowledgeProcessingService {
   private readonly database: ProcessingDatabase;
   private readonly eligibility: EligibilityResolver;
   private readonly logger: StructuredLogger;
+  private readonly incidentReporter: Pick<ReturnType<typeof createOperationalIncidentReporter>, "report">;
   private readonly now: () => Date;
 
   constructor(private readonly dependencies: MerchantKnowledgeProcessingDependencies) {
@@ -79,6 +102,7 @@ export class MerchantKnowledgeProcessingService {
     this.database = dependencies.database ?? prisma;
     this.eligibility = dependencies.eligibility ?? merchantKnowledgeEntitlementService;
     this.logger = dependencies.logger ?? logger;
+    this.incidentReporter = dependencies.incidentReporter ?? defaultIncidentReporter;
     this.now = dependencies.now ?? (() => new Date());
   }
 
@@ -199,7 +223,11 @@ export class MerchantKnowledgeProcessingService {
     } catch (error) {
       const processingError = classifyMerchantKnowledgeProcessingError(error);
       if (processingError.retryable) throw processingError;
-      await this.markPermanentFailure(job, processingError.failureCode);
+      await this.markPermanentFailure(job, processingError.failureCode, {
+        formatKey: revision.source.dataFormat.key,
+        detailCode: error instanceof MerchantKnowledgeUploadedAssetAcquisitionError
+          ? error.code : null,
+      });
       return;
     }
 
@@ -290,6 +318,7 @@ export class MerchantKnowledgeProcessingService {
   private async markPermanentFailure(
     job: MerchantKnowledgeProcessSourceRevisionJob,
     failureCode: string,
+    context?: { formatKey: string; detailCode: string | null },
   ): Promise<void> {
     const result = await this.database.merchantKnowledgeSourceRevision.updateMany({
       where: {
@@ -308,6 +337,33 @@ export class MerchantKnowledgeProcessingService {
     });
     if (result.count > 0) {
       this.logOutcome(job.sourceRevisionId, "FAILED", failureCode);
+      // Report only the persisted XLSX format failure. No incidents for retries,
+      // stale jobs, or other merchant-source outcomes.
+      if (context?.formatKey === "XLSX" && failureCode === "UPLOAD_FORMAT_INVALID") {
+        const reasonCode = context.detailCode && xlsxFormatFailureDetails.has(context.detailCode)
+          ? `${failureCode}.${context.detailCode}` : failureCode;
+        try {
+          await this.incidentReporter.report({
+            contractVersion: OPERATIONAL_INCIDENT_CONTRACT_VERSION,
+            sourceService: "moda-merchant-knowledge-worker",
+            environment: resolveDeploymentEnvironmentName(),
+            category: "MERCHANT_KNOWLEDGE_XLSX",
+            reasonCode,
+            resourceKey: job.sourceRevisionId,
+            shopId: job.shopId,
+            severity: "MEDIUM",
+            occurrenceId: randomUUID(),
+            correlationId: job.sourceRevisionId,
+            occurredAt: this.now().toISOString(),
+          });
+        } catch {
+          // An incident-reporting failure must not undo the terminal source state.
+          this.logger.error("merchant_knowledge.incident.report_failed", {
+            shopId: job.shopId,
+            sourceRevisionId: job.sourceRevisionId,
+          });
+        }
+      }
     }
   }
 

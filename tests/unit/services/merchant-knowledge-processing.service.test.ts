@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { parseOperationalIncidentOccurrenceV1 } from "@modainteract/moda-interact-shared/incidents";
 import { MERCHANT_KNOWLEDGE_PROCESS_SCHEMA_VERSION } from "@modainteract/moda-interact-shared/merchant-knowledge";
 
 import { MerchantKnowledgeAcquisitionError } from "../../../src/services/merchant-knowledge-web-page-acquirer.js";
+import { MerchantKnowledgeUploadedAssetAcquisitionError } from "../../../src/services/merchant-knowledge-uploaded-asset-acquirer.js";
 import { MerchantKnowledgeProcessingService } from "../../../src/services/merchant-knowledge-processing.service.js";
 
 type RevisionStatus = "PENDING" | "PROCESSING" | "ACTIVE" | "FAILED" | "SUPERSEDED";
@@ -80,6 +82,7 @@ function createFixture(options: {
   maxContentUnits?: number;
   eligibilityResults?: ReturnType<typeof eligible>[];
   embed?: (content: string) => Promise<number[]>;
+  incidentReporter?: { report: (occurrence: unknown) => Promise<unknown> };
 } = {}) {
   const state: FixtureState = {
     source: {
@@ -230,6 +233,7 @@ function createFixture(options: {
   );
   const embed = options.embed ?? vi.fn(async () => [0.1, 0.2]);
   const logInfo = vi.fn();
+  const logError = vi.fn();
   const service = new MerchantKnowledgeProcessingService({
     database: database as never,
     eligibility: { resolveSourceEligibility } as never,
@@ -239,7 +243,8 @@ function createFixture(options: {
       config: { provider: "openai", model: "test-model", dimensions: 2, indexVersion: "v1" },
       embed,
     } as never,
-    logger: { info: logInfo } as never,
+    logger: { info: logInfo, error: logError } as never,
+    incidentReporter: options.incidentReporter as never,
     now: () => now,
   });
 
@@ -253,6 +258,7 @@ function createFixture(options: {
     resolveSourceEligibility,
     embed,
     logInfo,
+    logError,
   };
 }
 
@@ -435,4 +441,69 @@ describe("MerchantKnowledgeProcessingService", () => {
     await stale.service.markTerminalFailure({ job, failureCode: "anything" });
     expect(stale.state.revision.status).toBe("PROCESSING");
   });
+
+  it("records one operational incident for a persisted XLSX format failure", async () => {
+    const report = vi.fn(async (_occurrence: unknown) => ({ recorded: true }));
+    const fixture = createFixture({
+      inputKind: "UPLOAD", dataFormatKey: "XLSX", uploadedAssetId: "asset-1",
+      incidentReporter: { report },
+    });
+    fixture.uploadAcquire.mockRejectedValue(
+      new MerchantKnowledgeUploadedAssetAcquisitionError("INVALID_XLSX"),
+    );
+
+    await fixture.service.processJob(job);
+    expect(fixture.state.revision).toMatchObject({
+      status: "FAILED", failureCode: "UPLOAD_FORMAT_INVALID",
+    });
+    expect(report).toHaveBeenCalledWith(expect.objectContaining({
+      contractVersion: "operational-incident.v1",
+      sourceService: "moda-merchant-knowledge-worker",
+      category: "MERCHANT_KNOWLEDGE_XLSX",
+      environment: expect.any(String),
+      reasonCode: "UPLOAD_FORMAT_INVALID.INVALID_XLSX",
+      resourceKey: revisionId,
+      correlationId: revisionId,
+      shopId,
+      severity: "MEDIUM",
+      occurrenceId: expect.any(String),
+    }));
+    const occurrence = parseOperationalIncidentOccurrenceV1(report.mock.calls[0]![0]);
+    expect(occurrence.reasonCode).toBe("UPLOAD_FORMAT_INVALID.INVALID_XLSX");
+    expect(occurrence).not.toHaveProperty("filename");
+    await fixture.service.processJob(job);
+    expect(report).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report a CSV format failure as an XLSX incident", async () => {
+    const report = vi.fn(async (_occurrence: unknown) => ({ recorded: true }));
+    const fixture = createFixture({
+      inputKind: "UPLOAD", dataFormatKey: "CSV", uploadedAssetId: "asset-1",
+      incidentReporter: { report },
+    });
+    fixture.uploadAcquire.mockRejectedValue(
+      new MerchantKnowledgeUploadedAssetAcquisitionError("INVALID_CSV"),
+    );
+    await fixture.service.processJob(job);
+    expect(fixture.state.revision.status).toBe("FAILED");
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it("does not undo a permanent failure when incident reporting fails", async () => {
+    const report = vi.fn(async (_occurrence: unknown) => { throw new Error("incident storage unavailable"); });
+    const fixture = createFixture({
+      inputKind: "UPLOAD", dataFormatKey: "XLSX", uploadedAssetId: "asset-1",
+      incidentReporter: { report },
+    });
+    fixture.uploadAcquire.mockRejectedValue(
+      new MerchantKnowledgeUploadedAssetAcquisitionError("ASSET_EXTRACTION_FAILED"),
+    );
+    await expect(fixture.service.processJob(job)).resolves.toBeUndefined();
+    expect(fixture.state.revision.status).toBe("FAILED");
+    expect(fixture.logError).toHaveBeenCalledWith(
+      "merchant_knowledge.incident.report_failed",
+      expect.objectContaining({ sourceRevisionId: revisionId, shopId }),
+    );
+  });
+
 });
