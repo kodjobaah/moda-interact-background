@@ -1,10 +1,11 @@
 import "dotenv/config";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { allowModerationFixture } from "./fixtures/arch040-allow-moderation.fixture.js";
 import { OutboundMessageDeliveryService } from "../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import { AiTurnOwnershipService } from "../../src/services/recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { WhatsAppServiceError } from "../../src/services/whatsapp.service.js";
+import { PlatformConfigurationFailure } from "../../src/services/platform-configuration/errors.js";
 import { WhatsAppProviderStatusService } from "../../src/services/whatsapp-provider-status.service.js";
 import { runAiTurnThroughBackgroundMocks } from "./fixtures/arch040-ai-turn.fixture.js";
 import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
@@ -13,6 +14,48 @@ const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
   process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 
 suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta", () => {
+  it("missing sender config defers before permit and records a safe operational incident", async () => {
+    const f = await humanDispatchFixture("sender-preflight-incident");
+    try {
+      const commandId = await f.addCommand();
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const incidents = { record: vi.fn(async () => {}) };
+      const preflight = vi.fn(async () => { throw new PlatformConfigurationFailure("MISSING", "messaging.sender"); });
+      const service = f.dispatcher(undefined, allowModerationFixture(), incidents, preflight);
+      await service.processClaim(commandId, claim.leaseToken);
+      expect(preflight).toHaveBeenCalledOnce();
+      expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
+        state: "FAILED", providerDispatchKey: null, outboundMessageId: null,
+      }));
+      expect(incidents.record).toHaveBeenCalledWith(expect.objectContaining({
+        commandId, shopId: f.shopId, error: expect.any(PlatformConfigurationFailure), outcome: "pre_dispatch",
+      }));
+      expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      expect(f.provider.sendWhatsAppText).not.toHaveBeenCalled();
+      await service.close();
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("incident reporter observes original sender-config exception after a durable UNKNOWN", async () => {
+    const f = await humanDispatchFixture("sender-missing-incident");
+    try {
+      const commandId = await f.addCommand();
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const incidents = { record: vi.fn(async () => {}) };
+      const original = f.provider.sendWhatsAppText;
+      f.provider.sendWhatsAppText = vi.fn(async () => { throw new PlatformConfigurationFailure("MISSING", "messaging.sender"); });
+      try {
+        const service = f.dispatcher(undefined, allowModerationFixture(), incidents);
+        await service.processClaim(commandId, claim.leaseToken);
+        expect((await f.commandState(commandId))?.state).toBe("UNKNOWN");
+        expect(incidents.record).toHaveBeenCalledWith(expect.objectContaining({
+          commandId, shopId: f.shopId, error: expect.any(PlatformConfigurationFailure), outcome: "unknown",
+        }));
+        await service.close();
+      } finally { f.provider.sendWhatsAppText = original; }
+    } finally { await f.close(); }
+  }, 60_000);
+
   it("uses Background-local Aimock and WhatsApp emulator for an allowed AI recovery reply", async () => {
     const f = await humanDispatchFixture("aimock-allowed-ai-turn");
     try {

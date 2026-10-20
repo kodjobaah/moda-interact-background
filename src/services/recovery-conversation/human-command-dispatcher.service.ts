@@ -17,6 +17,7 @@ import { moderationExceptionLogFields } from "../conversation-moderation/moderat
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
+import { createHumanSendIncidentSink, type HumanSendIncidentSink } from "./human-send-operational-incident.service.js";
 
 const deploymentEnvironment = resolveDeploymentEnvironmentName();
 const logger = createLogger({ serviceName: "moda-messaging-worker", environment: deploymentEnvironment });
@@ -37,6 +38,10 @@ export type HumanDispatcherDependencies = {
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
   moderation: ModerationAssessmentService;
+  /** Optional for existing injected tests; production validates sender before any permit. */
+  senderPreflight?: () => Promise<void>;
+  /** Optional injected incident reporter; production always supplies it. */
+  incidents?: HumanSendIncidentSink;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -54,6 +59,8 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     execution: shopExecutionEligibilityService,
     now: () => new Date(),
     moderation: moderationAssessmentService,
+    senderPreflight: () => whatsAppService.assertOutboundSenderConfigured(),
+    incidents: createHumanSendIncidentSink(),
   };
 }
 
@@ -227,6 +234,17 @@ export class HumanCommandDispatcherService {
       return;
     }
 
+    // Missing sender credentials are a known pre-provider failure. Record them
+    // before any sequence-two reservation, billing admission or dispatch permit.
+    try {
+      await this.deps.senderPreflight?.();
+    } catch (error) {
+      const deferred = await this.deps.commands.deferCommand(commandId, leaseToken,
+        "sender_configuration_unavailable", new Date(this.deps.now().getTime() + 120_000));
+      if (deferred) await this.reportIncident(commandId, command.shopId, error, "pre_dispatch");
+      return;
+    }
+
     let attemptId: string | null = null;
     let credit: Awaited<ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>> | null = null;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
@@ -295,19 +313,41 @@ export class HumanCommandDispatcherService {
     } catch (error) {
       const definitive = error instanceof Error && error.name === "WhatsAppServiceError" &&
         ["provider-rejected", "configuration-missing"].includes((error as Error & { code?: string }).code ?? "");
+      let recordedOutcome: "unknown" | "definitive_failure" | null = null;
       if (definitive) {
         const outcome = await this.deps.reconciliation.recordDefinitiveFailure({
           commandId, leaseToken, reason: "provider_rejected", definitiveProviderEvidence: true,
         });
-        if (outcome.kind === "definitive-failure" && credit?.kind === "admitted") {
-          await this.deps.billing.onDefinitiveProviderFailure({ admission: credit.admission, error });
+        if (outcome.kind === "definitive-failure") {
+          recordedOutcome = "definitive_failure";
+          if (credit?.kind === "admitted") {
+            await this.deps.billing.onDefinitiveProviderFailure({ admission: credit.admission, error });
+          }
         }
       } else {
-        await this.deps.reconciliation.recordProviderUnknown({ commandId, leaseToken });
+        const outcome = await this.deps.reconciliation.recordProviderUnknown({ commandId, leaseToken });
+        if (outcome.kind === "unknown") recordedOutcome = "unknown";
       }
       logger.warn("arch040.human_dispatcher.provider_outcome", {
         commandId, outcome: definitive ? "definitive_failure" : "unknown",
       });
+      // Incidents are reported only after the durable command disposition is recorded.
+      // Failure of the support pipeline cannot change that disposition or re-send to Meta.
+      if (recordedOutcome && (recordedOutcome === "unknown" ||
+          (error instanceof Error && error.name === "WhatsAppServiceError" &&
+            (error as Error & { code?: string }).code === "configuration-missing"))) {
+        await this.reportIncident(commandId, command.shopId, error, recordedOutcome);
+      }
+    }
+  }
+
+  private async reportIncident(commandId: string, shopId: string, error: unknown,
+    outcome: "pre_dispatch" | "unknown" | "definitive_failure"): Promise<void> {
+    if (!this.deps.incidents) return;
+    try {
+      await this.deps.incidents.record({ commandId, shopId, error, outcome });
+    } catch {
+      logger.error("arch040.human_dispatcher.incident_report_failed", { commandId });
     }
   }
 

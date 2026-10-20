@@ -34,6 +34,17 @@ export class WhatsAppServiceError extends Error {
 export class WhatsAppService {
   constructor(private readonly fetchImplementation: FetchImplementation = fetch) {}
 
+  /** Validate encrypted sender credentials before a HUMAN dispatch permit is committed.
+   * The provider send still reads the latest credentials independently.
+   */
+  async assertOutboundSenderConfigured(): Promise<void> {
+    const { value } = await platformConsumerConfiguration.read("messaging.sender");
+    if (![value.accessToken, value.phoneNumberId, value.businessAccountId]
+      .every((entry) => typeof entry === "string" && entry.trim().length > 0)) {
+      throw new WhatsAppServiceError("configuration-missing", "WhatsApp configuration is missing");
+    }
+  }
+
   async resolveSender(): Promise<ModaWhatsAppSender> {
     const value = (await platformConsumerConfiguration.read("messaging.sender")).value;
     if (!value.businessAccountId || !value.phoneNumberId) {

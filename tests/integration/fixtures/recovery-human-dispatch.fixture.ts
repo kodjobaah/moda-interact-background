@@ -63,7 +63,7 @@ export async function humanDispatchFixture(label: string) {
   };
   const execution = { evaluate: vi.fn(async () => ({ allowed: true } as const)) };
 
-  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture()) {
+  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
@@ -72,7 +72,7 @@ export async function humanDispatchFixture(label: string) {
       commands, followUps, evaluator,
       fence: new OutboundSendFenceService(db, durableEligibility),
       reconciliation, billing, provider, execution,
-      now: () => new Date(), moderation,
+      now: () => new Date(), moderation, incidents, senderPreflight,
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);
   }
