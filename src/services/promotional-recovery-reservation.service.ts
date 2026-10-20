@@ -86,7 +86,7 @@ export class PromotionalRecoveryReservationService {
     );
   }
 
-  async release(input: PromotionalRecoveryReservationInput): Promise<PromotionalReservationOutcome> {
+  async release(input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string }): Promise<PromotionalReservationOutcome> {
     const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
     return this.withRetry(() =>
       this.database.$transaction(
@@ -218,7 +218,7 @@ export class PromotionalRecoveryReservationService {
 
   private async releaseInTransaction(
     transaction: ReservationTransaction,
-    input: PromotionalRecoveryReservationInput,
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
     quantity: number,
   ): Promise<PromotionalReservationOutcome> {
     const reservation = await this.requirePromotionalReservation(transaction, input);
@@ -313,7 +313,7 @@ export class PromotionalRecoveryReservationService {
 
   private async requirePromotionalReservation(
     transaction: ReservationTransaction,
-    input: PromotionalRecoveryReservationInput,
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
   ): Promise<UsageReservation> {
     const reservation = await transaction.usageReservation.findUnique({ where: { sourceKey: input.sourceKey } });
     if (!reservation) throw new PromotionalRecoveryReservationError("Reservation does not exist");

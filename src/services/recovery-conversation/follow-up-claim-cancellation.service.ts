@@ -1,12 +1,14 @@
-import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { MerchantSendCommandService } from "./merchant-send-command.service.js";
+import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from "./recovery-follow-up-billing.service.js";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
   changed, first, lockRecoveryContext, recoveryDatabase, rows,
   type RecoveryDatabase, type SqlTransaction,
 } from "./recovery-conversation.sql.js";
 
-/** The dispatcher needs only these two operations. No billing mutations occur here:
- * moderation is evaluated before a follow-up credit is admitted.
+/** The dispatcher needs only cancellation and bounded repair operations.
+ * Credit release is owned by the injected billing service, never by moderation.
  */
 export interface FollowUpClaimCancellation {
   cancelClaimed(commandId: string, leaseToken: string, failureCode: string): Promise<CancellationResult>;
@@ -14,6 +16,9 @@ export interface FollowUpClaimCancellation {
 }
 
 export type CancellationResult = "not-follow-up" | "stale" | "released" | "held";
+type InternalResult = CancellationResult | "no-context" |
+  { kind: "reserved"; admission: PersistedFollowUpReservation };
+const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 type CommandPointer = { conversationId: string; shopId: string; kind: string };
 type LockedCommand = {
@@ -29,23 +34,26 @@ type LockedAttempt = {
 
 /** Application-owned cancellation of a HUMAN sequence-two claim. The accepted
  * DATABASE-006 guard permits a reset but does not decide who may perform it.
- * A single short transaction serializes with claimSequenceTwo/admitFinalSend by
- * locking Shop -> Conversation -> Command -> Attempt. Neither Meta nor Redis is
- * contacted, and there is deliberately no second credit ledger.
+ * Short transactions serialize with claimSequenceTwo/admitFinalSend by locking
+ * Shop -> Conversation -> Command -> Attempt. Provisional credit release happens
+ * between short transactions after durable cancellation, never under those
+ * locks. Neither Meta nor Redis is contacted; there is no second credit ledger.
  */
 export class FollowUpClaimCancellationService implements FollowUpClaimCancellation {
   constructor(
     private readonly database: RecoveryDatabase = recoveryDatabase,
     private readonly commands: Pick<MerchantSendCommandService, "rejectCommand"> =
       new MerchantSendCommandService(database),
+    private readonly billing: Pick<RecoveryFollowUpBillingService,
+      "inspectBeforePermit" | "releaseBeforePermit"> = new RecoveryFollowUpBillingService(),
   ) {}
 
   async cancelClaimed(commandId: string, leaseToken: string, failureCode: string): Promise<CancellationResult> {
     if (!/^[a-z][a-z0-9_-]{0,63}$/.test(failureCode)) throw new Error("invalid bounded failure code");
     const pointer = await this.pointer(commandId);
     if (!pointer || pointer.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE") return "not-follow-up";
-    const result = await this.database.$transaction((tx) =>
-      this.transition(tx, commandId, pointer, { kind: "claimed", leaseToken, failureCode }));
+    const result = await this.transitionAndReconcile(commandId, pointer,
+      { kind: "claimed", leaseToken, failureCode });
     if (result === "no-context") {
       // Invalid recovery linkage cannot authorise an attempt reset. Still fence
       // the original command using the existing lease-protected cancellation.
@@ -75,11 +83,38 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       ORDER BY cmd."createdAt",cmd."id" LIMIT $1`, boundedLimit);
     let repaired = 0;
     for (const candidate of pending) {
-      const outcome = await this.database.$transaction((tx) =>
-        this.transition(tx, candidate.id, candidate, { kind: "cancelled" }));
+      const outcome = await this.transitionAndReconcile(candidate.id, candidate, { kind: "cancelled" });
       if (outcome === "released") repaired++;
     }
     return repaired;
+  }
+
+  /** Cancel under the canonical locks first: no subsequent worker may send
+   * content that moderation has denied. A provisional credit is released only
+   * AFTER that transaction commits. The second short transaction rechecks the
+   * same owner and durable credit disposition before freeing the claim.
+   * A crash between transactions is repaired by the bounded CANCELLED scan.
+   */
+  private async transitionAndReconcile(
+    commandId: string, pointer: CommandPointer,
+    mode: { kind: "claimed"; leaseToken: string; failureCode: string } | { kind: "cancelled" },
+  ): Promise<CancellationResult | "no-context"> {
+    const result = await this.database.$transaction((tx) =>
+      this.transition(tx, commandId, pointer, mode));
+    if (typeof result === "string") return result;
+    try {
+      await this.billing.releaseBeforePermit(result.admission);
+      // A successful call alone is not evidence of durable release.
+      const verified = await this.database.$transaction((tx) =>
+        this.transition(tx, commandId, pointer, { kind: "cancelled" }));
+      return typeof verified === "string" ? verified : "held";
+    } catch (error) {
+      logger.warn("arch040.follow_up_credit_release_deferred", {
+        commandId, reasonCode: "credit_release_unverified",
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+      return "held";
+    }
   }
 
   private async pointer(commandId: string): Promise<CommandPointer | null> {
@@ -93,7 +128,7 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
     commandId: string,
     pointer: CommandPointer,
     mode: { kind: "claimed"; leaseToken: string; failureCode: string } | { kind: "cancelled" },
-  ): Promise<CancellationResult | "no-context"> {
+  ): Promise<InternalResult> {
     const context = await lockRecoveryContext(tx, pointer.conversationId);
     if (!context || context.shopId !== pointer.shopId) return "no-context";
     const command = await first<LockedCommand>(tx, `
@@ -118,9 +153,16 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
     const ownerMatches = !!attempt && attempt.status === "PENDING" &&
       attempt.initiatedBy === "HUMAN" && attempt.initiationKey === command.idempotencyKey &&
       !attempt.outboundMessageId && !attempt.sentAt;
-    const safeToRelease = ownerMatches && attempt !== null &&
-      !(await this.hasProviderEvidence(tx, attempt.id)) &&
-      (await this.creditIsUnused(tx, context.shopId, attempt.id));
+    const providerSafe = ownerMatches && attempt !== null &&
+      !(await this.hasProviderEvidence(tx, attempt.id));
+    // Billing is an independently persisted lifecycle. Read through its owner
+    // so period-qualified paid reservations cannot be missed. On read errors,
+    // still cancel denied content but keep the claim for bounded repair.
+    const credit = providerSafe && attempt
+      ? await this.billing.inspectBeforePermit(tx, { shopId: context.shopId, attemptId: attempt.id })
+          .catch(() => ({ kind: "unsafe" as const }))
+      : { kind: "unsafe" as const };
+    const safeToRelease = providerSafe && credit.kind === "clear";
 
     if (mode.kind === "claimed") {
       const cancelled = await changed(tx, `
@@ -135,13 +177,15 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       if (cancelled !== 1) throw new Error("Follow-up cancellation lost its lease");
     }
     if (!safeToRelease || !attempt) {
-      // A terminal command cannot be dispatched again. A pre-existing RESERVED,
-      // COMMITTED or ambiguous credit is never discarded just to free a slot.
-      // Defer repeated historical checks to keep the bounded scan moving.
+      // A terminal command cannot be dispatched again. Persist a bounded repair
+      // delay whether the provisional release is pending or billing is unsafe.
       if (ownerMatches) await changed(tx, `
         UPDATE "whatsapp"."MerchantConversationSendCommand"
         SET "nextAttemptAt"=statement_timestamp()+interval '1 minute',"updatedAt"=statement_timestamp()
         WHERE "id"=$1 AND "state"='CANCELLED'`, commandId);
+      if (providerSafe && credit.kind === "reserved") {
+        return { kind: "reserved", admission: credit.admission };
+      }
       return "held";
     }
     const released = await changed(tx, `
@@ -153,6 +197,10 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
         AND "outboundMessageId" IS NULL AND "sentAt" IS NULL`,
       attempt.id, context.recoveryId, command.idempotencyKey);
     if (released !== 1) throw new Error("Follow-up claim reset lost its owner");
+    if (mode.kind === "cancelled") await changed(tx, `
+      UPDATE "whatsapp"."MerchantConversationSendCommand"
+      SET "nextAttemptAt"=NULL,"updatedAt"=statement_timestamp()
+      WHERE "id"=$1 AND "state"='CANCELLED'`, commandId);
     return "released";
   }
 
@@ -165,18 +213,4 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       LIMIT 1`, attemptId));
   }
 
-  private async creditIsUnused(tx: SqlTransaction, shopId: string, attemptId: string): Promise<boolean> {
-    const sourceKey = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${attemptId}`);
-    const reservation = await first<{
-      status: string; committedUsageEventId: string | null; compensationUsageEventId: string | null;
-    }>(tx, `
-      SELECT "status"::text,"committedUsageEventId","compensationUsageEventId"
-      FROM "billing"."UsageReservation" WHERE "sourceKey"=$1`, sourceKey);
-    if (reservation && (reservation.status !== "RELEASED" ||
-      reservation.committedUsageEventId || reservation.compensationUsageEventId)) return false;
-    const usage = await first<{ id: string }>(tx, `
-      SELECT "id" FROM "billing"."UsageEvent" WHERE "idempotencyKey"=$1 LIMIT 1`,
-      createRecoveryIdempotencyKey(shopId, sourceKey));
-    return !usage;
-  }
 }

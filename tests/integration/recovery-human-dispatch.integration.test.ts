@@ -613,7 +613,7 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
     } finally { await f.close(); }
   }, 60_000);
 
-  it("cancels a blocked command but retains its claim when a credit reservation already exists", async () => {
+  it("releases a provisional credit after moderation rejection before resetting the same follow-up", async () => {
     const f = await humanDispatchFixture("reserved-credit-fail-closed");
     try {
       const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
@@ -635,16 +635,203 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       await f.dispatcher(undefined, moderation).processClaim(commandId, claim.leaseToken);
       expect((await f.commandState(commandId))?.state).toBe("CANCELLED");
       expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
-        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+        .initiationKey).toBeNull();
       expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } }))
-        .status).toBe("RESERVED");
+        .status).toBe("RELEASED");
       expect(await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
-        .toMatchObject({ grantedQuantity: 1, reservedQuantity: 1, committedQuantity: 0 });
+        .toMatchObject({ grantedQuantity: 1, reservedQuantity: 0, committedQuantity: 0 });
+      expect(f.releaseExistingCredit).toHaveBeenCalledTimes(1);
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
       expect(await f.followUps.claimSequenceTwo({
         recoveryId: f.recoveryId, initiator: "merchant_post_window", expectedRevision: 1,
         initiationKey: "second-command", recipient: f.recipient, now: new Date(),
-      })).toEqual({ kind: "suppressed", reason: "already-claimed" });
+      })).toEqual({ kind: "claimed", attemptId, billingSource: `recovery-outreach:${attemptId}` });
       expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("keeps the claim and cancelled command when releasing a provisional credit fails", async () => {
+    const f = await humanDispatchFixture("reserved-credit-release-failed");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
+      const counter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+      } });
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const failure = f.cancellationService(async () => { throw new Error("simulated release outage"); });
+      expect(await failure.cancelClaimed(commandId, claim.leaseToken, "human_content_moderation_blocked"))
+        .toBe("held");
+      expect((await f.commandState(commandId))?.state).toBe("CANCELLED");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } })).status)
+        .toBe("RESERVED");
+      expect(f.providerHttpRequests).toHaveLength(0);
+      // The next bounded repair poll uses the original command and credit.
+      await f.db.merchantConversationSendCommand.update({ where: { id: commandId },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
+      expect(await f.cancellationService().repairCancelledClaims()).toBe(1);
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } })).status)
+        .toBe("RELEASED");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBeNull();
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("repairs a crash after durable release but before attempt reset", async () => {
+    const f = await humanDispatchFixture("released-before-claim-reset");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
+      const counter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+      } });
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const crashesAfterRelease = f.cancellationService(async (admission) => {
+        await f.releaseExistingCredit(admission);
+        throw new Error("simulated crash after durable release");
+      });
+      expect(await crashesAfterRelease.cancelClaimed(commandId, claim.leaseToken,
+        "human_content_moderation_blocked")).toBe("held");
+      expect((await f.commandState(commandId))?.state).toBe("CANCELLED");
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } })).status)
+        .toBe("RELEASED");
+      await f.db.merchantConversationSendCommand.update({ where: { id: commandId },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
+      f.releaseExistingCredit.mockClear();
+      expect(await f.cancellationService().repairCancelledClaims()).toBe(1);
+      expect(f.releaseExistingCredit).not.toHaveBeenCalled();
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBeNull();
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("does not release an ambiguous credit or let a new claimant take its attempt", async () => {
+    const f = await humanDispatchFixture("ambiguous-credit-holds");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
+      const counter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "AMBIGUOUS",
+      } });
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      expect(await f.cancellationService().cancelClaimed(commandId, claim.leaseToken,
+        "human_content_moderation_blocked")).toBe("held");
+      expect((await f.commandState(commandId))?.state).toBe("CANCELLED");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+      expect(f.releaseExistingCredit).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("serializes HUMAN cancellation with a scheduled AUTOMATION claim", async () => {
+    const f = await humanDispatchFixture("human-automation-race");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      await f.changeOwner("HUMAN", "AI", 1);
+      const [cancel, automation] = await Promise.all([
+        f.cancellationService().cancelClaimed(commandId, claim.leaseToken,
+          "human_content_moderation_blocked"),
+        f.followUps.claimSequenceTwo({ recoveryId: f.recoveryId,
+          initiator: "scheduled_no_response", initiationKey: "automated-follow-up",
+          recipient: f.recipient, now: new Date(),
+        }),
+      ]);
+      expect(cancel).toBe("released");
+      if (automation.kind !== "claimed") {
+        expect(automation).toEqual({ kind: "suppressed", reason: "already-claimed" });
+        expect(await f.followUps.claimSequenceTwo({ recoveryId: f.recoveryId,
+          initiator: "scheduled_no_response", initiationKey: "automated-follow-up",
+          recipient: f.recipient, now: new Date(),
+        })).toEqual({ kind: "claimed", attemptId, billingSource: `recovery-outreach:${attemptId}` });
+      } else {
+        expect(automation.attemptId).toBe(attemptId);
+      }
+      expect(await f.db.recoveryOutreachAttempt.count({
+        where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
+      })).toBe(1);
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe("automated-follow-up");
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("preserves the claim if the current worker lease expires before cancellation", async () => {
+    const f = await humanDispatchFixture("cancel-lease-expiry");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      // The ARCH-040 database guard deliberately forbids shortening an active
+      // CLAIMED lease with UPDATE. Let the shortest supported real lease expire
+      // and use PostgreSQL's clock, which also governs the cancellation CAS.
+      const claim = (await f.commands.claimDueHumanCommands({
+        limit: 1, now: new Date(), leaseMs: 5_000,
+      }))[0]!;
+      await vi.waitFor(async () => {
+        const [lease] = await f.db.$queryRawUnsafe<Array<{ expired: boolean }>>(`
+          SELECT ("leaseExpiresAt" <= statement_timestamp()) AS "expired"
+          FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`, commandId);
+        expect(lease?.expired).toBe(true);
+      }, { timeout: 12_000, interval: 100 });
+
+      // A second worker may reclaim only after expiry; an old worker must
+      // never cancel that new lease or release the HUMAN sequence-two claim.
+      const [cancel, successors] = await Promise.all([
+        f.cancellationService().cancelClaimed(commandId, claim.leaseToken,
+          "human_content_moderation_blocked"),
+        f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }),
+      ]);
+      expect(cancel).toBe("stale");
+      expect(successors).toHaveLength(1);
+      expect(successors[0]?.id).toBe(commandId);
+      expect(successors[0]?.leaseToken).not.toBe(claim.leaseToken);
+      expect((await f.commandState(commandId))?.state).toBe("CLAIMED");
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
+        .initiationKey).toBe(`merchant-${f.recoveryId}`);
+      expect(f.releaseExistingCredit).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toHaveLength(0);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it("serializes final provider admission against cancellation of the same command", async () => {
+    const f = await humanDispatchFixture("provider-permit-cancel-race");
+    try {
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      const [cancel, permit] = await Promise.all([
+        f.cancellationService().cancelClaimed(commandId, claim.leaseToken,
+          "human_content_moderation_blocked"),
+        new OutboundSendFenceService(f.db, f.durableEligibility).admitFinalSend({
+          senderType: "HUMAN", conversationId: f.conversationId, shopId: f.shopId,
+          recoveryId: f.recoveryId, expectedControlRevision: 1, commandId,
+          leaseToken: claim.leaseToken, recipient: f.recipient, now: new Date(),
+        }),
+      ]);
+      const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } });
+      if (permit.kind === "admitted") {
+        expect(cancel).toBe("stale");
+        expect(attempt.initiationKey).toBe(`merchant-${f.recoveryId}`);
+      } else {
+        expect(cancel).toBe("released");
+        expect(attempt.initiationKey).toBeNull();
+      }
       expect(f.providerHttpRequests).toHaveLength(0);
     } finally { await f.close(); }
   }, 60_000);

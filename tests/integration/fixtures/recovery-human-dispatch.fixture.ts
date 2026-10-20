@@ -16,6 +16,9 @@ import { RecoveryFollowUpPolicyService } from "../../../src/services/recovery-co
 import { OutboundSendFenceService } from "../../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { HumanSendReconciliationService } from "../../../src/services/recovery-conversation/human-send-reconciliation.service.js";
 import { FollowUpClaimCancellationService } from "../../../src/services/recovery-conversation/follow-up-claim-cancellation.service.js";
+import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from
+  "../../../src/services/recovery-conversation/recovery-follow-up-billing.service.js";
+import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 
 export async function humanDispatchFixture(label: string) {
   const url = process.env.TEST_DATABASE_URL;
@@ -63,6 +66,19 @@ export async function humanDispatchFixture(label: string) {
     releaseBeforePermit: vi.fn(async () => {}),
   };
   const execution = { evaluate: vi.fn(async () => ({ allowed: true } as const)) };
+  const releaseExistingCredit = vi.fn(async (admission: PersistedFollowUpReservation) => {
+    if (admission.capacity !== "free") throw new Error("Unsupported fixture credit type");
+    const released = await new FreeRecoveryReservationService(db).release(admission);
+    if (released.kind !== "released" && released.kind !== "already-released") {
+      throw new Error("Fixture release did not release credit");
+    }
+  });
+  function cancellationService(
+    release: (admission: PersistedFollowUpReservation) => Promise<void> = releaseExistingCredit,
+  ) {
+    return new FollowUpClaimCancellationService(db, commands,
+      new RecoveryFollowUpBillingService(undefined, release));
+  }
 
   function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
     const screening = new HumanSendPolicyService(db, redis, limits);
@@ -73,7 +89,7 @@ export async function humanDispatchFixture(label: string) {
       commands, followUps, evaluator,
       fence: new OutboundSendFenceService(db, durableEligibility),
       reconciliation, billing, provider, execution,
-      followUpCancellations: new FollowUpClaimCancellationService(db, commands),
+      followUpCancellations: cancellationService(),
       now: () => new Date(), moderation, incidents, senderPreflight,
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);
@@ -170,6 +186,7 @@ export async function humanDispatchFixture(label: string) {
   return {
     db, redis, shopId, recoveryId, conversationId, recipient,
     commands, followUps, reconciliation, billing, execution, provider,
+    releaseExistingCredit, cancellationService,
     whatsapp: mocks.whatsapp, providerHttpRequests: mocks.requests,
     failNextProviderHttp: mocks.failNextHttp, holdNextProviderHttp: mocks.holdNextHttp,
     startAimock: mocks.startAimock,
