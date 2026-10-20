@@ -58,6 +58,7 @@
     "csv-parse": "^7.0.3",
     "exceljs": "^4.4.0",
     "ioredis": "^6.0.0",
+    "jszip": "^3.10.1",
     "music-metadata": "^11.15.0",
     "openai": "^7.10.0",
     "parse5": "8.0.0",

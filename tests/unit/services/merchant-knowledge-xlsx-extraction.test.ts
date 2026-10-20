@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
 
@@ -34,6 +37,25 @@ async function workbookBytes(): Promise<Uint8Array> {
 }
 
 describe("extractMerchantKnowledgeXlsx", () => {
+  it("extracts the exact originally failed XLSX containing prefixed SpreadsheetML tags", async () => {
+    const bytes = await readFile(new URL(
+      "../../fixtures/merchant-knowledge/moda_merchant_knowledge_support_test.xlsx",
+      import.meta.url,
+    ));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+      "ed12cb0742ee5d5033ba2d982bb58150ccbf56827a3a6a751736b684a3ce2ef7",
+    );
+
+    const extracted = await extractMerchantKnowledgeXlsx(
+      "moda_merchant_knowledge_support_test.xlsx", bytes, 1_000_000,
+    );
+    expect(extracted).toContain("Worksheet: Products");
+    expect(extracted).toContain("Classic Cotton T-Shirt");
+    expect(extracted).toContain("Worksheet: Policies");
+    expect(extracted).toContain("Standard UK delivery");
+    expect(extracted).toContain("Worksheet: FAQ");
+    expect(extracted).toContain("How do I track my order?");
+  });
   it("extracts only visible worksheets in order with deterministic scalar values and cached formulas", async () => {
     const extracted = await extractMerchantKnowledgeXlsx(
       "catalog.XLSX",

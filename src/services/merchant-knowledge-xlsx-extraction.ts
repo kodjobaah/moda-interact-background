@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import yauzl, { type Entry } from "yauzl";
 
 export class MerchantKnowledgeXlsxExtractionError extends Error {
@@ -59,6 +60,44 @@ export function assertValidMerchantKnowledgeXlsxEntries(
   if (!paths.has("[content_types].xml") || !paths.has("xl/workbook.xml")) {
     throw new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX");
   }
+}
+
+/**
+ * ExcelJS 4.4 expects unprefixed SpreadsheetML element names. Some valid
+ * workbooks (including the original merchant upload) use <x:workbook>,
+ * <x:worksheet>, etc. with the same namespace URI instead.
+ *
+ * Run this only after the ZIP security/expansion checks, and never modify the
+ * original uploaded bytes or the object stored in R2.
+ */
+async function normalizeExcelJsWorkbook(bytes: Uint8Array): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(Buffer.from(bytes));
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
+  const namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  if (!workbookXml?.includes("<x:workbook") || !workbookXml.includes(`xmlns:x="${namespace}"`)) {
+    return Buffer.from(bytes);
+  }
+
+  for (const [name, entry] of Object.entries(zip.files)) {
+    if (entry.dir || !name.startsWith("xl/")) continue;
+    if (/^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/.test(name)) {
+      // ExcelJS resolves table references relative to xl/worksheets/.
+      const rels = await entry.async("string");
+      const relativeRels = rels.replace(/Target="\/xl\/tables\/([^"/]+\.xml)"/g, 'Target="../tables/$1"');
+      if (relativeRels !== rels) zip.file(name, relativeRels);
+      continue;
+    }
+    if (!name.endsWith(".xml")) continue;
+    const xml = await entry.async("string");
+    if (!xml.includes(`xmlns:x="${namespace}"`)) continue;
+    zip.file(
+      name,
+      xml.replaceAll(`xmlns:x="${namespace}"`, `xmlns="${namespace}"`)
+        .replace(/(<\/?)(x:)([A-Za-z][\w.-]*)/g, "$1$3"),
+    );
+  }
+
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
 async function readCentralDirectory(bytes: Uint8Array): Promise<Entry[]> {
@@ -136,7 +175,8 @@ export async function extractMerchantKnowledgeXlsx(
 
   const workbook = new ExcelJS.Workbook();
   try {
-    await workbook.xlsx.load(Buffer.from(bytes) as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+    const normalizedBytes = await normalizeExcelJsWorkbook(bytes);
+    await workbook.xlsx.load(normalizedBytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
   } catch {
     throw new MerchantKnowledgeXlsxExtractionError("INVALID_XLSX");
   }
