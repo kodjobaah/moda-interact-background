@@ -40,12 +40,14 @@ async function startDevelopmentWorker(): Promise<void> {
   await backgroundRuntimeConfigService.start();
   const [
     { createCheckoutWorker },
+    { createWooCheckoutCaptureWorker },
     { createOrderWorker },
     { createPendingRecoveryCandidateWorker },
     { createWhatsappWorker },
     { createShopifyDiscountSyncWorker },
   ] = await Promise.all([
     import("./workers/checkout.worker.js"),
+    import("./workers/woo-checkout-capture.worker.js"),
     import("./workers/orders.worker.js"),
     import("./workers/pending-recovery-candidate.worker.js"),
     import("./workers/whatsapp.worker.js"),
@@ -54,6 +56,7 @@ async function startDevelopmentWorker(): Promise<void> {
   const closeHumanDispatcher = await startHumanCommandDispatcher();
   const workers = [
     createCheckoutWorker(),
+    createWooCheckoutCaptureWorker(),
     createOrderWorker(),
     createPendingRecoveryCandidateWorker(),
     createWhatsappWorker(),

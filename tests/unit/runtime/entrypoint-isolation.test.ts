@@ -11,7 +11,7 @@ const entrypoints = [
     readinessScript: "readiness:shopify-event-worker",
     readinessCommand: "node dist/readiness.js moda-shopify-event-worker",
     serviceName: "moda-shopify-event-worker",
-    ownedWorkers: ["checkout.worker.js", "orders.worker.js"],
+    ownedWorkers: ["checkout.worker.js", "orders.worker.js", "woo-checkout-capture.worker.js"],
     excludedWorkers: ["pending-recovery-candidate.worker.js", "whatsapp.worker.js"],
   },
   {
@@ -26,7 +26,7 @@ const entrypoints = [
       "pending-recovery-candidate.worker.js",
       "shopify-discount-sync.worker.js",
     ],
-    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "whatsapp.worker.js"],
+    excludedWorkers: ["checkout.worker.js", "orders.worker.js", "woo-checkout-capture.worker.js", "whatsapp.worker.js"],
   },
   {
     file: "src/entrypoints/messaging.ts",
@@ -40,6 +40,7 @@ const entrypoints = [
     excludedWorkers: [
       "checkout.worker.js",
       "orders.worker.js",
+      "woo-checkout-capture.worker.js",
       "pending-recovery-candidate.worker.js",
     ],
   },
@@ -55,6 +56,7 @@ const entrypoints = [
     excludedWorkers: [
       "checkout.worker.js",
       "orders.worker.js",
+      "woo-checkout-capture.worker.js",
       "pending-recovery-candidate.worker.js",
       "whatsapp.worker.js",
     ],
