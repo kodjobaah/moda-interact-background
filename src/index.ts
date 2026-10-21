@@ -41,6 +41,7 @@ async function startDevelopmentWorker(): Promise<void> {
   const [
     { createCheckoutWorker },
     { createWooCheckoutCaptureWorker },
+    { createWooOrderCaptureWorker },
     { createOrderWorker },
     { createPendingRecoveryCandidateWorker },
     { createWhatsappWorker },
@@ -48,6 +49,7 @@ async function startDevelopmentWorker(): Promise<void> {
   ] = await Promise.all([
     import("./workers/checkout.worker.js"),
     import("./workers/woo-checkout-capture.worker.js"),
+    import("./workers/woo-order-capture.worker.js"),
     import("./workers/orders.worker.js"),
     import("./workers/pending-recovery-candidate.worker.js"),
     import("./workers/whatsapp.worker.js"),
@@ -57,6 +59,7 @@ async function startDevelopmentWorker(): Promise<void> {
   const workers = [
     createCheckoutWorker(),
     createWooCheckoutCaptureWorker(),
+    createWooOrderCaptureWorker(),
     createOrderWorker(),
     createPendingRecoveryCandidateWorker(),
     createWhatsappWorker(),
