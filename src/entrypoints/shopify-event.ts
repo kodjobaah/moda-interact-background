@@ -10,16 +10,18 @@ void startReadyWorkerProcess({
   serviceName: "moda-shopify-event-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createCheckoutWorker }, { createOrderWorker }, { createWooCheckoutCaptureWorker }] =
+    const [{ closeWorkerResources }, { createCheckoutWorker }, { createOrderWorker }, { createWooCheckoutCaptureWorker }, { createWooOrderCaptureWorker }] =
       await Promise.all([
         import("./resources.js"),
         import("../workers/checkout.worker.js"),
         import("../workers/orders.worker.js"),
         import("../workers/woo-checkout-capture.worker.js"),
+        import("../workers/woo-order-capture.worker.js"),
       ]);
     const checkoutWorker = createCheckoutWorker();
     const orderWorker = createOrderWorker();
     const wooCheckoutCaptureWorker = createWooCheckoutCaptureWorker();
+    const wooOrderCaptureWorker = createWooOrderCaptureWorker();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -27,11 +29,11 @@ void startReadyWorkerProcess({
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
-      queueNames: ["checkout-events", "order-events", "woo-checkout-capture-v1"],
+      queueNames: ["checkout-events", "order-events", "woo-checkout-capture-v1", "woo-order-capture-v1"],
     });
 
     return {
-      workers: [checkoutWorker, orderWorker, wooCheckoutCaptureWorker],
+      workers: [checkoutWorker, orderWorker, wooCheckoutCaptureWorker, wooOrderCaptureWorker],
       closeResources: [stopQueueConcurrencyController, () => backgroundRuntimeConfigService.close(), ...closeWorkerResources, closeWorkerObservability, closeQueuePerformanceTelemetry],
     };
   },

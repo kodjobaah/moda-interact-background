@@ -11,6 +11,7 @@ import { recordQueueWait } from "./queue-performance.js";
 type WorkerName =
   | "checkout"
   | "woo-checkout-capture"
+  | "woo-order-capture"
   | "order"
   | "pending-recovery-candidate"
   | "whatsapp"
@@ -21,6 +22,7 @@ type WorkerName =
 type QueueName =
   | "checkout-events"
   | "woo-checkout-capture-v1"
+  | "woo-order-capture-v1"
   | "order-events"
   | "pending-recovery-candidates"
   | "recovery-capacity-resume"

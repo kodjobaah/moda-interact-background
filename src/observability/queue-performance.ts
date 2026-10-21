@@ -17,6 +17,7 @@ export type QueueName =
   | "shopify-discount-sync"
   | "woo-coupon-sync"
   | "woo-checkout-capture-v1"
+  | "woo-order-capture-v1"
   | "whatsapp-events"
   | "merchant-communications"
   | "billing-subscription-reconcile"
