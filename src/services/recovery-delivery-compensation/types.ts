@@ -11,7 +11,8 @@ export type RecoveryDeliveryCompensationOutcome =
   | "already-released"
   | "restored-spendable"
   | "historical-only"
-  | "purchased-compensation-required";
+  | "purchased-compensation-required"
+  | "held-for-refund";
 
 /** A lineage error is retryable by the provider-status job; never guess another credit. */
 export class RecoveryCompensationLineageError extends Error {

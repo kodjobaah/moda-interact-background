@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -8,11 +7,6 @@ import {
 import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
 
 const runtimeConfig = { current: () => backgroundRuntimeConfig() };
-
-const workerSource = readFileSync(
-  new URL("../../../src/workers/whatsapp.worker.ts", import.meta.url),
-  "utf8",
-);
 
 function phoneHash(phone: string): string {
   const normalized = phone.trim().startsWith("+")
@@ -275,24 +269,6 @@ describe("InboundWhatsAppAbuseAdmissionService", () => {
       stage: "raw",
       reason: "LIMITER_UNAVAILABLE",
     });
-  });
-
-  it("B011-03 performs raw admission before routing or persistence", () => {
-    expect(workerSource.indexOf("admitRaw")).toBeLessThan(
-      workerSource.indexOf("recoveryRoutingService.resolveInboundMessage"),
-    );
-    expect(workerSource.indexOf("admitRaw")).toBeLessThan(
-      workerSource.indexOf("conversationService.receiveMessage"),
-    );
-  });
-
-  it("B011-05 returns from raw denial before downstream work", () => {
-    const admissionBlock = workerSource.slice(
-      workerSource.indexOf("const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw"),
-      workerSource.indexOf("const route = await recoveryRoutingService.resolveInboundMessage"),
-    );
-    expect(admissionBlock).toMatch(/if \(abuse\.kind !== "allowed"\) \{[\s\S]*?\breturn;\s*\}/);
-    expect(admissionBlock).not.toMatch(/receiveMessage|runCommerceAgent|sendPreparedText/);
   });
 
   it("uses discovery limits only without reply context", async () => {

@@ -110,36 +110,44 @@ async function fixture(input: TestCase = {}) {
     } });
     counterId = counter.id;
     if (source === "purchased") {
-      // A confirmed Shopify purchase needs its immutable billing-context and
-      // valuation evidence; a bare ACTIVE/COMPLETED lot is not a valid row.
+      // ARCH-027 requires distinct evidence shapes. WooCommerce purchases
+      // use their provider reference and must NOT contain Shopify usage fields.
       const purchaseId = randomUUID();
-      const billingPeriod = await db.billingPeriod.create({ data: {
-        shopId, subscriptionId: subscription.id, planId: plan.id,
-        periodStart, periodEnd, status: "OPEN",
-      } });
-      const purchaseEvent = await db.usageEvent.create({ data: {
-        shopId, provider, billingPeriodId: billingPeriod.id,
-        metric: "RECOVERY_CREDIT_PACK_PURCHASE", quantity: 1,
-        idempotencyKey: `purchase-event:${purchaseId}`,
-        sourceType: "RECOVERY_CREDIT_PACK_PURCHASE", sourceId: purchaseId,
-        shopifyReportState: "REPORTED", shopifyEventHandle: `purchase-${id}`,
-      } });
+      const shopifyEvidence = async () => {
+        const billingPeriod = await db.billingPeriod.create({ data: {
+          shopId, subscriptionId: subscription.id, planId: plan.id,
+          periodStart, periodEnd, status: "OPEN",
+        } });
+        const purchaseEvent = await db.usageEvent.create({ data: {
+          shopId, provider, billingPeriodId: billingPeriod.id,
+          metric: "RECOVERY_CREDIT_PACK_PURCHASE", quantity: 1,
+          idempotencyKey: `purchase-event:${purchaseId}`,
+          sourceType: "RECOVERY_CREDIT_PACK_PURCHASE", sourceId: purchaseId,
+          shopifyReportState: "REPORTED", shopifyEventHandle: `purchase-${id}`,
+        } });
+        return {
+          billingPeriodId: billingPeriod.id,
+          shopifyPlanHandleSnapshot: plan.shopifyPlanHandle,
+          shopifyEventHandleSnapshot: `purchase-${id}`,
+          providerSubscriptionIdSnapshot: `gid://shopify/AppSubscription/${id}`,
+          providerUsageQuantityBeforeSnapshot: 0,
+          providerUsageCostBeforeSnapshot: new Prisma.Decimal("10.00"),
+          providerUsageCostCurrencyBeforeSnapshot: "USD",
+          providerUsageQuantityAfterSnapshot: 1,
+          providerUsageCostAfterSnapshot: new Prisma.Decimal("11.00"),
+          providerUsageCostCurrencyAfterSnapshot: "USD",
+          usageEventId: purchaseEvent.id,
+        };
+      };
+      const providerEvidence = provider === "SHOPIFY"
+        ? await shopifyEvidence()
+        : { providerReference: `woo-credit-pack-${id}` };
       const purchase = await db.recoveryCreditPurchase.create({ data: {
         id: purchaseId, shopId, planId: plan.id, provider,
-        billingPeriodId: billingPeriod.id,
-        shopifyPlanHandleSnapshot: plan.shopifyPlanHandle,
-        shopifyEventHandleSnapshot: `purchase-${id}`,
-        providerSubscriptionIdSnapshot: `gid://shopify/AppSubscription/${id}`,
-        providerUsageQuantityBeforeSnapshot: 0,
-        providerUsageCostBeforeSnapshot: new Prisma.Decimal("10.00"),
-        providerUsageCostCurrencyBeforeSnapshot: "USD",
-        providerUsageQuantityAfterSnapshot: 1,
-        providerUsageCostAfterSnapshot: new Prisma.Decimal("11.00"),
-        providerUsageCostCurrencyAfterSnapshot: "USD",
+        ...providerEvidence,
         providerPurchaseAmount: new Prisma.Decimal("1.00"),
         providerPurchaseCurrency: "USD", providerValuationConfirmedAt: now,
         providerPriceSnapshot: { amount: "1.00", currency: "USD" },
-        usageEventId: purchaseEvent.id,
         creditsGranted: 1,
         currentAmount: state === "RESERVED" ? 1 : 0,
         reservedAmount: state === "RESERVED" ? 1 : 0,
@@ -287,13 +295,13 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
     },
   );
 
-  it("defers COMMITTED purchased compensation but removes exact outbound usage", async () => {
+  it("restores COMMITTED purchased compensation and removes exact outbound usage", async () => {
     const f = await fixture({ source: "purchased" });
     try {
-      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("purchased-compensation-required");
-      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("purchased-compensation-required");
+      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("restored-spendable");
+      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("restored-spendable");
       const source = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } });
-      expect(source.compensationUsageEventId).toBeNull();
+      expect(source.compensationUsageEventId).not.toBeNull();
       expect(source.status).toBe("COMMITTED");
       expect(await f.db.usageEvent.count({ where: { sourceId: f.messageId,
         metric: "OUTBOUND_AUTOMATED_MESSAGE" } })).toBe(0);
@@ -371,5 +379,205 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
       expect((await failed.db.conversationMessage.findUniqueOrThrow({ where: { id: failed.messageId } })).status).toBe("DELIVERED");
       expect((await failed.db.usageReservation.findUniqueOrThrow({ where: { id: failed.reservationId } })).compensationUsageEventId).not.toBeNull();
     } finally { await delivered.close(); await failed.close(); }
+  });
+});
+
+/** State setup mirrors ARCH-027's lot/counter ownership; no provider API calls. */
+async function preparePurchasedRefund(
+  f: Awaited<ReturnType<typeof fixture>>,
+  provider: "SHOPIFY" | "WOOCOMMERCE",
+  status: "REQUESTED" | "PROVIDER_ACTION_REQUIRED" | "COMPLETED",
+): Promise<string> {
+  const purchaseId = f.purchasedCreditPurchaseId!;
+  const purchase = await f.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: purchaseId } });
+  const historical = status === "COMPLETED";
+  await f.db.recoveryCreditPurchase.update({ where: { id: purchaseId }, data: {
+    creditsGranted: 2, currentAmount: historical ? 0 : 1,
+    status: historical ? "REFUNDED" : "WITHDRAWN", version: { increment: 1 },
+  } });
+  await f.db.shopEntitlementCounter.update({ where: { id: f.counterId! }, data: {
+    grantedQuantity: historical ? 1 : 2,
+    refundingQuantity: historical ? 0 : 1,
+    version: { increment: 1 },
+  } });
+  const refund = await f.db.recoveryCreditRefund.create({ data: {
+    shopId: f.shopId, purchaseId, provider, source: "ADMIN",
+    status, requestKey: `arch028-refund:${purchaseId}`,
+    purchaseCreditsGrantedSnapshot: purchase.creditsGranted,
+    currentAmountAtRequestSnapshot: 1,
+    reservedAmountAtRequestSnapshot: 0, availableAmountAtRequestSnapshot: 1,
+    billingPeriodIdSnapshot: purchase.billingPeriodId,
+    providerSubscriptionIdSnapshot: purchase.providerSubscriptionIdSnapshot,
+    planHandleSnapshot: purchase.shopifyPlanHandleSnapshot,
+    eventHandleSnapshot: purchase.shopifyEventHandleSnapshot,
+    purchaseProviderAmountSnapshot: purchase.providerPurchaseAmount ?? new Prisma.Decimal("1.00"),
+    purchaseProviderCurrencySnapshot: purchase.providerPurchaseCurrency ?? "USD",
+    ...(status !== "REQUESTED" ? { finalCreditQuantity: 1 } : {}),
+    ...(historical ? {
+      completedAt: new Date(), providerConfirmedAt: new Date(),
+      providerReference: `refund-${purchaseId}`, providerActionKind: "REFUND",
+      providerAmount: new Prisma.Decimal("1.00"), providerCurrency: "USD",
+    } : {}),
+  } });
+  return refund.id;
+}
+
+suite("ARCH-028 committed purchased compensation (PostgreSQL)", () => {
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "restores exact %s purchased lot, copies provider and never reports correction", async (provider) => {
+      const f = await fixture({ source: "purchased", provider });
+      try {
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("restored-spendable");
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("restored-spendable");
+        const reservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } });
+        const lot = await f.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: f.purchasedCreditPurchaseId! } });
+        const counter = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+        const corrected = await f.db.usageEvent.findUniqueOrThrow({ where: { id: reservation.compensationUsageEventId! } });
+        expect([lot.status, lot.currentAmount, counter.committedQuantity]).toEqual(["ACTIVE", 1, 0]);
+        expect(reservation.compensationDisposition).toBe("RESTORED_SPENDABLE");
+        expect(corrected).toMatchObject({
+          provider, shopId: f.shopId, sourceId: f.reservationId,
+          correctionOfUsageEventId: reservation.committedUsageEventId,
+          shopifyReportState: "NOT_APPLICABLE", shopifyIdempotencyKey: null,
+          shopifyEventHandle: null, nextReportAt: null, lastReportAttemptAt: null,
+          reportedAt: null,
+        });
+        expect(corrected.quantity.toNumber()).toBe(-1);
+        expect(await f.db.usageEvent.count({ where: { correctionOfUsageEventId: reservation.committedUsageEventId } })).toBe(1);
+      } finally { await f.close(); }
+    },
+  );
+
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "keeps a %s live refund held and notifies only after correction/suppression", async (provider) => {
+      const f = await fixture({ source: "purchased", provider });
+      try {
+        const refundId = await preparePurchasedRefund(f, provider, "REQUESTED");
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("held-for-refund");
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("held-for-refund");
+        const lot = await f.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: f.purchasedCreditPurchaseId! } });
+        const counter = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+        expect([lot.status, lot.currentAmount, counter.committedQuantity, counter.refundingQuantity])
+          .toEqual(["WITHDRAWN", 2, 0, 2]);
+        expect((await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } })).compensationDisposition)
+          .toBe("HELD_FOR_REFUND");
+        expect((await f.db.recoveryCreditRefund.findUniqueOrThrow({ where: { id: refundId } })).status)
+          .toBe("REQUESTED");
+        expect(await f.db.recoveryCreditRefund.count({ where: { purchaseId: f.purchasedCreditPurchaseId! } })).toBe(1);
+        const { RecipientReachabilityFailureService } = await import(
+          "../../src/services/recipient-reachability-failure.service.js");
+        const { RecipientReachabilityStore } = await import(
+          "../../src/services/recipient-reachability-store.js");
+        const { RecoveryDeliveryMerchantNotificationService } = await import(
+          "../../src/services/recovery-delivery-merchant-notification.service.js");
+        const { RecoveryDeliverySupportMessageService } = await import(
+          "../../src/services/recovery-delivery-support-message.service.js");
+        const reach = new RecipientReachabilityFailureService(f.db, new RecipientReachabilityStore(f.db));
+        const notice = new RecoveryDeliveryMerchantNotificationService(f.db, new RecoveryDeliverySupportMessageService(f.db));
+        const disposition = await f.compensate.reconcile(f.providerMessageId);
+        const reachability = await reach.afterCorrection({ providerMessageId: f.providerMessageId }, disposition);
+        expect(reachability).toMatch(/suppressed|unchanged/);
+        expect(await notice.notify({ providerMessageId: f.providerMessageId }, disposition, reachability)).toBe("created");
+        expect(await notice.notify({ providerMessageId: f.providerMessageId }, disposition, reachability)).toBe("duplicate");
+        const messages = await f.db.merchantSupportMessage.findMany({
+          where: { thread: { shopId: f.shopId }, systemCode: "ARCH028_RECOVERY_DELIVERY_FAILED" },
+        });
+        expect(messages).toHaveLength(1);
+        expect(messages[0]?.originalBody).toContain("held for refund");
+      } finally { await f.close(); }
+    },
+  );
+
+  it("holds restored credits for operator review when a Woo provider refund amount is frozen", async () => {
+    const f = await fixture({ source: "purchased", provider: "WOOCOMMERCE" });
+    try {
+      const refundId = await preparePurchasedRefund(f, "WOOCOMMERCE", "PROVIDER_ACTION_REQUIRED");
+      expect(await f.compensate.reconcileMessage(f.messageId)).toBe("held-for-refund");
+      const refund = await f.db.recoveryCreditRefund.findUniqueOrThrow({ where: { id: refundId } });
+      expect(refund.status).toBe("NEEDS_ATTENTION");
+      expect(refund.finalCreditQuantity).toBe(1); // frozen financial snapshot is unchanged
+      expect(refund.reason).toBe("ARCH028_DELIVERY_CORRECTION_REQUIRES_REFUND_REVIEW");
+      const lot = await f.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: f.purchasedCreditPurchaseId! } });
+      expect([lot.status, lot.currentAmount]).toEqual(["WITHDRAWN", 2]);
+      expect(await f.compensate.reconcileMessage(f.messageId)).toBe("held-for-refund");
+    } finally { await f.close(); }
+  });
+
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "keeps a %s refunded source closed and corrects only historical committed usage", async (provider) => {
+      const f = await fixture({ source: "purchased", provider });
+      try {
+        const refundId = await preparePurchasedRefund(f, provider, "COMPLETED");
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("historical-only");
+        expect(await f.compensate.reconcile(f.providerMessageId)).toBe("historical-only");
+        const lot = await f.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: f.purchasedCreditPurchaseId! } });
+        const counter = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+        expect([lot.status, lot.currentAmount, counter.grantedQuantity, counter.committedQuantity])
+          .toEqual(["REFUNDED", 0, 0, 0]);
+        expect((await f.db.recoveryCreditRefund.findUniqueOrThrow({ where: { id: refundId } })).status)
+          .toBe("COMPLETED");
+        expect((await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } })).compensationDisposition)
+          .toBe("HISTORICAL_ONLY");
+      } finally { await f.close(); }
+    },
+  );
+
+  it("provider FAILED/131026 replay drives purchased correction, suppression and one notice", async () => {
+    const f = await fixture({ source: "purchased", provider: "WOOCOMMERCE" });
+    try {
+      const status = new WhatsAppProviderStatusService(f.db);
+      const event = { schemaVersion: 3 as const, providerAccountId: "account",
+        providerPhoneNumberId: "phone", providerMessageId: f.providerMessageId,
+        status: "FAILED" as const, failure: { providerCode: "131026" },
+        occurredAt: new Date().toISOString() };
+      await status.process(event);
+      await status.process(event);
+      const reservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } });
+      expect(reservation.compensationDisposition).toBe("RESTORED_SPENDABLE");
+      expect(await f.db.usageEvent.count({ where: { correctionOfUsageEventId: reservation.committedUsageEventId } })).toBe(1);
+      expect(await f.db.merchantSupportMessage.count({ where: {
+        thread: { shopId: f.shopId }, systemCode: "ARCH028_RECOVERY_DELIVERY_FAILED",
+      } })).toBe(1);
+      const reachability = await f.db.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count FROM "whatsapp"."WhatsAppRecipientReachability"
+        WHERE "shopId"=${f.shopId}`;
+      expect(reachability[0]?.count).toBe(1n);
+    } finally { await f.close(); }
+  });
+
+  it("fails closed on orphan WITHDRAWN state and does not consume outbound usage", async () => {
+    const f = await fixture({ source: "purchased" });
+    try {
+      // The database prohibits WITHDRAWN with a zero balance. Model an
+      // orphaned *positive* withdrawn lot to exercise the application guard.
+      await f.db.shopEntitlementCounter.update({ where: { id: f.counterId! },
+        data: { grantedQuantity: 2 } });
+      await f.db.recoveryCreditPurchase.update({ where: { id: f.purchasedCreditPurchaseId! },
+        data: { creditsGranted: 2, currentAmount: 1, status: "WITHDRAWN" } });
+      await expect(f.compensate.reconcile(f.providerMessageId)).rejects.toThrow(/live refund hold/);
+      expect(await f.db.usageEvent.count({ where: { correctionOfUsageEventId: { not: null }, shopId: f.shopId } })).toBe(0);
+      expect(await f.db.usageEvent.count({ where: { metric: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: f.messageId } })).toBe(1);
+      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } })).committedQuantity).toBe(1);
+    } finally { await f.close(); }
+  });
+
+  it("excludes unlinked HUMAN_TEXT, but corrects an exact linked sequence-two purchased template", async () => {
+    const ordinary = await fixture({ source: "purchased", sender: "HUMAN", humanKind: "HUMAN_TEXT" });
+    const followUp = await fixture({ source: "purchased", sender: "HUMAN" });
+    try {
+      expect(await ordinary.compensate.reconcile(ordinary.providerMessageId)).toBe("not-recovery");
+      expect((await ordinary.db.usageReservation.findUniqueOrThrow({ where: { id: ordinary.reservationId } })).compensationUsageEventId).toBeNull();
+      expect(await followUp.compensate.reconcile(followUp.providerMessageId)).toBe("restored-spendable");
+    } finally { await ordinary.close(); await followUp.close(); }
+  });
+
+  it("ignores other provider failures and disallows fabricated suppression", async () => {
+    const f = await fixture({ source: "purchased" });
+    try {
+      await f.db.conversationMessage.update({ where: { id: f.messageId },
+        data: { providerFailureCode: "131047" } });
+      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("not-terminal");
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } })).compensationUsageEventId).toBeNull();
+    } finally { await f.close(); }
   });
 });
