@@ -191,7 +191,13 @@ export class RecoveryOutreachFollowUpProcessorService {
               if (existing?.status === "PENDING") {
                 throw new Error(`Recovery outreach send is still pending for attempt ${attempt.id}`);
               }
-              if (existing?.status === "FAILED") {
+              if (
+                existing?.status === "FAILED" &&
+                classifyWhatsAppProviderFailure(existing.providerFailureCode) ===
+                  "RECIPIENT_UNDELIVERABLE"
+              ) {
+                // Only persisted 131026 evidence permits this classification.
+                // Keep the corrected attempt's terminal evidence intact.
                 await this.billingService.releaseBeforeProvider(billing.admission);
                 return { kind: "suppressed", reason: "recipient-undeliverable" } as const;
               }

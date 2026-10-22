@@ -61,7 +61,7 @@ export class OutboundAdmissionReservationService {
     }
     return this.database.conversationMessage.findUnique({
       where: { id: usage.sourceId },
-      select: { id: true, conversationId: true, status: true, sentAt: true },
+      select: { id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true },
     });
   }
 

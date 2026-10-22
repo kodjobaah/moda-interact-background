@@ -9,6 +9,7 @@ export async function failedRecipientOutreach(
   database: AttemptReader, idempotencyKey: string,
 ): Promise<null | { shopId: string; message: {
   id: string; conversationId: string; status: string; sentAt: Date | null;
+  providerFailureCode: string | null;
 } }> {
   const attemptId = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(idempotencyKey)?.[1];
   if (!attemptId) return null;
