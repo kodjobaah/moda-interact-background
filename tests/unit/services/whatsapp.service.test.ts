@@ -228,4 +228,32 @@ describe("WhatsAppService API base URL", () => {
       language: { code: "en_US" },
     });
   });
+
+  it.each([
+    { method: "sendWhatsAppText", providerCode: 131026, expected: "131026" },
+    { method: "sendWhatsAppTemplate", providerCode: "131026", expected: "131026" },
+  ])("preserves only the bounded provider code for $method", async ({ method, providerCode, expected }) => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: providerCode, message: "do not retain" } }), { status: 400 }),
+    );
+    const service = new WhatsAppService(fetchMock);
+
+    await expect(method === "sendWhatsAppText"
+      ? service.sendWhatsAppText(input)
+      : service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en_US" }))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: expected });
+    await expect(method === "sendWhatsAppText"
+      ? service.sendWhatsAppText(input)
+      : service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en_US" }))
+      .rejects.not.toMatchObject({ message: "do not retain" });
+  });
+
+  it("ignores unbounded provider codes", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: "131026".repeat(10) } }), { status: 400 }),
+    );
+
+    await expect(new WhatsAppService(fetchMock).sendWhatsAppText(input))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: undefined });
+  });
 });

@@ -350,4 +350,25 @@ describe("OutboundMessageDeliveryService", () => {
       data: { content: "Hello" },
     });
   });
+
+  it("converges synchronous 131026 through compensation and reachability owners", async () => {
+    const error = Object.assign(new Error("rejected"), {
+      name: "WhatsAppServiceError", code: "provider-rejected", providerCode: "131026",
+    });
+    const compensation = { reconcileMessage: vi.fn().mockResolvedValue("released") };
+    const failureReachability = { afterCorrection: vi.fn().mockResolvedValue("suppressed") };
+    const test = harness({ provider: { sendWhatsAppText: vi.fn().mockRejectedValue(error) } });
+    const service = new OutboundMessageDeliveryService(
+      test.database as never, test.providerMock as never, test.executionEligibility as never,
+      undefined, undefined, test.moderationMock as never, compensation as never,
+      failureReachability as never,
+    );
+
+    await expect(service.sendPreparedText({ ...admission, to: "+15551234567", text: "Hello" }))
+      .rejects.toBe(error);
+    expect(compensation.reconcileMessage).toHaveBeenCalledWith("message-1");
+    expect(failureReachability.afterCorrection).toHaveBeenCalledWith(
+      { messageId: "message-1" }, "released",
+    );
+  });
 });
