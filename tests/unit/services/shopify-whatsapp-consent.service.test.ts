@@ -79,9 +79,16 @@ function fakeDatabase() {
         if (where.whatsappConsentSource !== undefined && p.whatsappConsentSource !== where.whatsappConsentSource) return false;
         if (where.whatsappConsentDecision !== undefined && p.whatsappConsentDecision !== where.whatsappConsentDecision) return false;
         if (where.whatsappCanonicalPhone === null && p.whatsappCanonicalPhone !== null) return false;
-        if (where.OR && !where.OR.some((clause: any) =>
-          clause.whatsappCanonicalPhone !== undefined ? p.whatsappCanonicalPhone === clause.whatsappCanonicalPhone :
-          clause.phone?.in?.includes(p.phone))) return false;
+        if (where.OR && !where.OR.some((clause: any) => {
+          if ("whatsappConsentSource" in clause) {
+            return p.whatsappConsentSource === clause.whatsappConsentSource &&
+              (clause.whatsappConsentProviderObservedAt === undefined ||
+               (clause.whatsappConsentProviderObservedAt.not === null && p.whatsappConsentProviderObservedAt !== null));
+          }
+          return clause.whatsappCanonicalPhone !== undefined
+            ? p.whatsappCanonicalPhone === clause.whatsappCanonicalPhone
+            : clause.phone?.in?.includes(p.phone);
+        })) return false;
         return true;
       }).slice(0, take ?? Infinity).map((p) => select ?
         Object.fromEntries(Object.keys(select).filter((k) => select[k]).map((k) => [k, p[k as keyof Phone]])) : p)),
@@ -96,8 +103,26 @@ function fakeDatabase() {
           p.id === where.id && p.customerId === where.customerId && p.endedAt === null &&
           p.phone === where.phone && p.whatsappCanonicalPhone === where.whatsappCanonicalPhone &&
           p.whatsappConsentRevision === where.whatsappConsentRevision &&
-          p.whatsappConsentDecisionSequence === where.whatsappConsentDecisionSequence);
+          p.whatsappConsentDecisionSequence === where.whatsappConsentDecisionSequence &&
+          (where.whatsappConsentDecision === undefined || p.whatsappConsentDecision === where.whatsappConsentDecision) &&
+          (where.whatsappConsentSource === undefined || p.whatsappConsentSource === where.whatsappConsentSource) &&
+          (where.whatsappConsentProviderObservedAt === undefined ||
+            p.whatsappConsentProviderObservedAt?.getTime() === where.whatsappConsentProviderObservedAt?.getTime()));
         if (!row) return { count: 0 };
+        // Mirror the Database trigger: a decision change with a non-null
+        // consent source requires a strictly later provider-observation time.
+        // A displaced-recipient withdrawal must therefore clear the source,
+        // retain the old timestamp, and advance both revision counters.
+        const nextSource = "whatsappConsentSource" in data
+          ? data.whatsappConsentSource : row.whatsappConsentSource;
+        const nextObservedAt = "whatsappConsentProviderObservedAt" in data
+          ? data.whatsappConsentProviderObservedAt : row.whatsappConsentProviderObservedAt;
+        const decisionChanged = data.whatsappConsentDecision !== undefined &&
+          data.whatsappConsentDecision !== row.whatsappConsentDecision;
+        if (decisionChanged && nextSource !== null && nextObservedAt &&
+            row.whatsappConsentProviderObservedAt && nextObservedAt <= row.whatsappConsentProviderObservedAt) {
+          throw new Error("stale consent observation (Database trigger)");
+        }
         // Emulates the native consent fields and revision CAS; no-contact is not
         // allowed in update payload and always remains independently mutable.
         for (const field of ["whatsappNoContact", "whatsappNoContactReason",
@@ -205,6 +230,136 @@ describe("ShopifyWhatsAppConsentService", () => {
     expect((await instance.evaluateStoredRecipient({ shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient })).status)
       .toBe("NOT_AUTHORISED");
     expect(ctx.mocks.customer.create).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an old grant when a different Shopify default phone has an older consent timestamp", async () => {
+    const ctx = fakeDatabase();
+    const otherPhone = phone("phone-changed", "customer-a", "+447400123457");
+    // A STOP on another recipient must not be modified by native consent sync.
+    otherPhone.whatsappNoContact = true;
+    otherPhone.whatsappNoContactReason = "CUSTOMER_STOP";
+    otherPhone.whatsappNoContactRevision = 9n;
+    otherPhone.whatsappNoContactAt = new Date("2026-10-21T08:00:00Z");
+    ctx.phones.push(otherPhone);
+    const newerGrant = { ...SUBSCRIBED, updatedAt: "2026-10-21T09:00:00Z" };
+    const olderChangedDefault = {
+      ...SUBSCRIBED, phoneNumber: "+447400123457", updatedAt: "2026-10-20T08:00:00Z",
+    };
+    const { instance, readCurrent } = service(ctx.db, [
+      newerGrant, olderChangedDefault, olderChangedDefault, newerGrant,
+    ]);
+    expect((await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).status).toBe("UPDATED");
+    const a = ctx.phones[0]!;
+    const previousObservedAt = a.whatsappConsentProviderObservedAt;
+    expect((await instance.evaluateStoredRecipient({
+      shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient,
+    })).status).toBe("ALLOWED");
+
+    // Consent updatedAt describes a subscription change, not when Shopify's
+    // default phone changed. A must still lose eligibility, while an older
+    // observation must not give B a new grant.
+    expect(await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).toEqual({
+      status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
+    });
+    expect(a).toMatchObject({
+      whatsappConsentDecision: "UNKNOWN", whatsappConsentSource: null,
+      whatsappConsentRevision: 2n, whatsappConsentDecisionSequence: 2n,
+      whatsappConsentProviderObservedAt: previousObservedAt,
+    });
+    expect((await instance.evaluateStoredRecipient({
+      shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient,
+    })).status).toBe("NOT_AUTHORISED");
+    expect(otherPhone).toMatchObject({
+      whatsappConsentDecision: "UNKNOWN", whatsappConsentRevision: 0n,
+      whatsappConsentProviderObservedAt: null, whatsappNoContact: true,
+      whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 9n,
+    });
+    // Repeating the same older B observation must not grant B after A's
+    // source has been cleared: A's retained timestamp remains the fence.
+    expect(await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).toEqual({
+      status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
+    });
+    expect(otherPhone.whatsappConsentDecision).toBe("UNKNOWN");
+    expect((await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).status)
+      .toBe("UNAVAILABLE");
+    expect(a.whatsappConsentDecision).toBe("UNKNOWN");
+    expect(a.whatsappConsentProviderObservedAt).toEqual(previousObservedAt);
+    expect(readCurrent).toHaveBeenCalledTimes(4);
+  });
+
+  it("allows a genuinely newer consent observation for the new default without clearing its STOP", async () => {
+    const ctx = fakeDatabase();
+    const newDefault = phone("phone-changed", "customer-a", "+447400123457");
+    newDefault.whatsappNoContact = true;
+    newDefault.whatsappNoContactReason = "CUSTOMER_STOP";
+    newDefault.whatsappNoContactAt = new Date("2026-10-21T10:00:00Z");
+    newDefault.whatsappNoContactRevision = 3n;
+    ctx.phones.push(newDefault);
+    const { instance } = service(ctx.db, [
+      { ...SUBSCRIBED, updatedAt: "2026-10-21T09:00:00Z" },
+      { ...SUBSCRIBED, phoneNumber: "+447400123457", updatedAt: "2026-10-20T08:00:00Z" },
+      { ...SUBSCRIBED, phoneNumber: "+447400123457", updatedAt: "2026-10-22T10:00:00Z" },
+    ]);
+    const identity = { shopId: "shop-a", shopifyCustomerId: GID };
+    expect((await instance.syncCustomer(identity)).status).toBe("UPDATED");
+    expect((await instance.syncCustomer(identity)).status).toBe("UNAVAILABLE");
+    expect((await instance.syncCustomer(identity)).status).toBe("UPDATED");
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "UNKNOWN", whatsappConsentSource: null,
+      whatsappConsentProviderObservedAt: new Date("2026-10-21T09:00:00Z"),
+    });
+    expect(newDefault).toMatchObject({
+      whatsappConsentDecision: "GRANTED", whatsappConsentSource: "SHOPIFY_NATIVE",
+      whatsappConsentProviderObservedAt: new Date("2026-10-22T10:00:00Z"),
+      whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
+      whatsappNoContactRevision: 3n,
+    });
+    expect((await instance.evaluateStoredRecipient({
+      shopId: "shop-a", customerId: "customer-a", recipient: "+447400123457",
+    })).status).toBe("NOT_AUTHORISED");
+  });
+
+  it("denies a new checkout on the previous number despite an older timestamp on Shopify's new default", async () => {
+    const ctx = fakeDatabase();
+    ctx.phones.push(phone("phone-changed", "customer-a", "+447400123457"));
+    const { instance } = service(ctx.db, [
+      { ...SUBSCRIBED, updatedAt: "2026-10-21T09:00:00Z" },
+      { ...SUBSCRIBED, phoneNumber: "+447400123457", updatedAt: "2026-10-20T08:00:00Z" },
+    ]);
+    expect((await instance.evaluateRecipient(checkout)).status).toBe("ALLOWED");
+    expect(await instance.evaluateRecipient(checkout)).toEqual({
+      status: "NOT_AUTHORISED", reason: "SHOPIFY_DEFAULT_PHONE_CHANGED",
+    });
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "UNKNOWN", whatsappConsentRevision: 2n,
+      whatsappConsentProviderObservedAt: new Date("2026-10-21T09:00:00Z"),
+    });
+    expect(ctx.phones[2]).toMatchObject({ whatsappConsentDecision: "UNKNOWN", whatsappConsentRevision: 0n });
+    expect((await instance.evaluateStoredRecipient({
+      shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient,
+    })).status).toBe("NOT_AUTHORISED");
+  });
+
+  it("preserves STOP written concurrently with an older-timestamp default-phone invalidation", async () => {
+    const ctx = fakeDatabase();
+    const { instance } = service(ctx.db, [
+      { ...SUBSCRIBED, updatedAt: "2026-10-21T09:00:00Z" },
+      { ...SUBSCRIBED, phoneNumber: "+447400123457", updatedAt: "2026-10-20T08:00:00Z" },
+    ]);
+    expect((await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).status).toBe("UPDATED");
+    ctx.raceWith(() => {
+      ctx.phones[0]!.whatsappNoContact = true;
+      ctx.phones[0]!.whatsappNoContactReason = "CUSTOMER_STOP";
+      ctx.phones[0]!.whatsappNoContactRevision = 7n;
+      ctx.phones[0]!.whatsappNoContactAt = new Date("2026-10-21T10:00:00Z");
+    });
+    expect((await instance.syncCustomer({ shopId: "shop-a", shopifyCustomerId: GID })).status)
+      .toBe("UNAVAILABLE"); // no active B, but A must be invalidated
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "UNKNOWN", whatsappNoContact: true,
+      whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 7n,
+      whatsappConsentProviderObservedAt: new Date("2026-10-21T09:00:00Z"),
+    });
   });
 
   it("rejects legacy duplicate phones even when presentation differs", async () => {

@@ -55,6 +55,10 @@ type RecipientResult =
   | { ok: true; phone: CustomerPhone; canonical: string }
   | { ok: false; failure: Failure };
 type RefreshResult = ShopifyWhatsAppConsentSyncResult;
+type InvalidationResult = {
+  failure: Failure | null;
+  hasNewerDisplacedObservation: boolean;
+};
 
 const defaultLogger = createLogger({
   serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
@@ -264,7 +268,7 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
       // Shopify no longer has the linked customer/default number. Invalidate
       // any old Shopify grant for that Customer; never transfer it by phone.
       const invalidated = await this.invalidateOtherNumbers(scoped, null, startedAt);
-      if (invalidated) return invalidated;
+      if (invalidated.failure) return invalidated.failure;
       return notAuthorised("SHOPIFY_CUSTOMER_OR_PHONE_NOT_FOUND");
     }
     if (observation.customerGid !== scoped.identity.gid) {
@@ -279,9 +283,16 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
       return unavailable("INVALID_SHOPIFY_OBSERVATION_TIME");
     }
     const invalidated = await this.invalidateOtherNumbers(scoped, providerCanonical, updatedAt);
-    if (invalidated) return invalidated;
+    if (invalidated.failure) return invalidated.failure;
     if (expected && expected.canonical !== providerCanonical) {
       return notAuthorised("SHOPIFY_DEFAULT_PHONE_CHANGED");
+    }
+    // A consent updatedAt is not the time Shopify's *default phone* changed.
+    // A displaced phone may have a newer consent observation even though the
+    // current default is different. Invalidate its grant, but never use the
+    // older observation to grant the newly reported number.
+    if (invalidated.hasNewerDisplacedObservation) {
+      return unavailable("STALE_OR_CONFLICTING_OBSERVATION");
     }
     const match = await this.findRecipient(scoped, observation.phoneNumber);
     if (!match.ok) return match.failure;
@@ -297,24 +308,116 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
     scoped: ScopedCustomer,
     authoritativeCanonical: string | null,
     observedAt: Date,
-  ): Promise<Failure | null> {
+  ): Promise<InvalidationResult> {
     const phones = await this.database.customerPhone.findMany({
       where: {
         customerId: scoped.customerId,
         endedAt: null,
-        whatsappConsentSource: "SHOPIFY_NATIVE",
-        whatsappConsentDecision: "GRANTED",
+        // The first invalidation withdraws the source without fabricating a
+        // later Shopify consent timestamp. Keep its retained observedAt as an
+        // ordering fence on retries, even after the native source is cleared.
+        OR: [
+          { whatsappConsentSource: "SHOPIFY_NATIVE" },
+          { whatsappConsentSource: null, whatsappConsentProviderObservedAt: { not: null } },
+        ],
       },
     });
+    let hasNewerDisplacedObservation = false;
     for (const phone of phones) {
       const local = this.canonical(phone.phone, scoped.shop);
-      if (local === authoritativeCanonical && phone.whatsappCanonicalPhone === local?.slice(1)) continue;
-      const result = await this.persist(scoped, phone.id, local, "UNKNOWN", observedAt, this.now());
-      if (result.status === "NOT_AUTHORISED" || result.status === "UNAVAILABLE" || result.status === "AMBIGUOUS") {
-        return result;
+      const stillDefault = authoritativeCanonical !== null && local !== null &&
+        local === authoritativeCanonical && phone.whatsappCanonicalPhone === local.slice(1);
+      if (stillDefault) continue;
+      if (phone.whatsappConsentProviderObservedAt &&
+          phone.whatsappConsentProviderObservedAt >= observedAt) {
+        hasNewerDisplacedObservation = true;
       }
+      if (phone.whatsappConsentDecision !== "GRANTED") continue;
+      const failure = await this.invalidateDisplacedGrant(scoped, phone.id, authoritativeCanonical);
+      if (failure) return { failure, hasNewerDisplacedObservation };
     }
-    return null;
+    return { failure: null, hasNewerDisplacedObservation };
+  }
+
+  /**
+   * A changed Shopify default phone invalidates the previous recipient even
+   * when the new default's consent updatedAt predates the old grant. This is
+   * a recipient-identity invalidation, NOT a new provider consent observation:
+   * retain the stored observedAt/verification evidence and only withdraw the
+   * grant under a native-consent CAS. Clearing the source records that this
+   * withdrawal is NOT a new Shopify observation; the Database trigger requires
+   * a strictly later provider timestamp for any decision change retaining a
+   * non-null source. A concurrent STOP remains untouched.
+   */
+  private async invalidateDisplacedGrant(
+    scoped: ScopedCustomer,
+    phoneId: string,
+    authoritativeCanonical: string | null,
+  ): Promise<Failure | null> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const phone = await this.database.customerPhone.findFirst({
+        where: {
+          id: phoneId,
+          customerId: scoped.customerId,
+          endedAt: null,
+          customer: {
+            shopId: scoped.shop.id,
+            shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
+            shop: { platform: "SHOPIFY", status: "ACTIVE" },
+          },
+        },
+      });
+      if (!phone) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
+      if (phone.whatsappConsentSource !== "SHOPIFY_NATIVE" || phone.whatsappConsentDecision !== "GRANTED") {
+        return null;
+      }
+      const local = this.canonical(phone.phone, scoped.shop);
+      if (authoritativeCanonical !== null && local !== null &&
+          local === authoritativeCanonical && phone.whatsappCanonicalPhone === local.slice(1)) {
+        return null;
+      }
+      try {
+        const updated = await this.database.customerPhone.updateMany({
+          where: {
+            id: phone.id,
+            customerId: scoped.customerId,
+            endedAt: null,
+            phone: phone.phone,
+            whatsappCanonicalPhone: phone.whatsappCanonicalPhone,
+            whatsappConsentSource: "SHOPIFY_NATIVE",
+            whatsappConsentDecision: "GRANTED",
+            whatsappConsentRevision: phone.whatsappConsentRevision,
+            whatsappConsentDecisionSequence: phone.whatsappConsentDecisionSequence,
+            whatsappConsentProviderObservedAt: phone.whatsappConsentProviderObservedAt,
+            customer: {
+              shopId: scoped.shop.id,
+              shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
+              shop: { platform: "SHOPIFY", status: "ACTIVE" },
+            },
+          },
+          data: {
+            whatsappConsentDecision: "UNKNOWN",
+            whatsappConsentSource: null,
+            whatsappConsentRevision: { increment: 1 },
+            whatsappConsentDecisionSequence: { increment: 1 },
+          },
+        });
+        if (updated.count === 1) {
+          this.logger.info("shopify.whatsapp_consent.sync", {
+            shopId: scoped.shop.id, outcome: "displaced_recipient_invalidated",
+          });
+          return null;
+        }
+      } catch {
+        this.logger.warn("shopify.whatsapp_consent.sync", {
+          shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE",
+        });
+        return unavailable("CONSENT_WRITE_FAILURE");
+      }
+      // Re-read after any competing native consent update; never overwrite its
+      // revision, provider timestamp, or an independently recorded STOP.
+    }
+    return unavailable("CONCURRENT_CONSENT_UPDATE");
   }
 
   private async persist(

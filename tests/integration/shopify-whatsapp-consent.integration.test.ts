@@ -110,6 +110,85 @@ describeWithDatabase("ARCH-045 native Shopify consent PostgreSQL projection", ()
     }
   });
 
+  it("invalidates a newer grant on a changed default with older updatedAt, without regranting or altering STOP", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const suffix = randomUUID().replaceAll("-", "");
+    const shopId = `consent-stale-default-${suffix}`;
+    try {
+      await db.shop.create({ data: {
+        id: shopId, domain: `${shopId}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "GB",
+      } });
+      const customer = await db.customer.create({ data: { shopId, shopifyCustomerId: "125678912345" } });
+      const a = await db.customerPhone.create({ data: {
+        customerId: customer.id, phone: "+447400123456",
+      } });
+      const b = await db.customerPhone.create({ data: {
+        customerId: customer.id, phone: "+447400123457",
+        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
+        whatsappNoContactAt: new Date("2026-10-21T09:00:00Z"),
+        whatsappNoContactRevision: 4n,
+      } });
+      const identity = { shopId, shopifyCustomerId: gid };
+      const recipientA = { shopId, customerId: customer.id, recipient: "+447400123456" };
+      const recipientB = { shopId, customerId: customer.id, recipient: "+447400123457" };
+      expect((await service(db, native("SUBSCRIBED", t3)).syncCustomer(identity)).status).toBe("UPDATED");
+      expect((await service(db, native("SUBSCRIBED", t3)).evaluateStoredRecipient(recipientA)).status)
+        .toBe("ALLOWED");
+
+      // The new default B reports an earlier *consent* timestamp (t1). It
+      // must invalidate A, but cannot override A's provider observation (t3)
+      // or turn B into an affirmative grant based on the older observation.
+      expect(await service(db, native("SUBSCRIBED", t1, "+447400123457")).syncCustomer(identity)).toEqual({
+        status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
+      });
+      const afterA = await db.customerPhone.findUniqueOrThrow({ where: { id: a.id } });
+      const afterB = await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } });
+      expect(afterA).toMatchObject({
+        // Identity invalidation is not a new provider consent observation.
+        whatsappConsentSource: null, whatsappConsentDecision: "UNKNOWN",
+        whatsappConsentProviderObservedAt: new Date(t3), whatsappConsentRevision: 2n,
+        whatsappConsentDecisionSequence: 2n, whatsappNoContact: false,
+      });
+      expect(afterB).toMatchObject({
+        whatsappConsentDecision: "UNKNOWN", whatsappConsentProviderObservedAt: null,
+        whatsappConsentRevision: 0n, whatsappNoContact: true,
+        whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 4n,
+        whatsappNoContactAt: new Date("2026-10-21T09:00:00Z"),
+      });
+      expect((await service(db, native("SUBSCRIBED", t1)).evaluateStoredRecipient(recipientA)).status)
+        .toBe("NOT_AUTHORISED");
+      expect((await service(db, native("SUBSCRIBED", t1)).evaluateStoredRecipient(recipientB)).status)
+        .toBe("NOT_AUTHORISED");
+      // Duplicate and slightly later-but-still-stale observations must not
+      // grant B now that A's source is null. Its stored timestamp remains an
+      // ordering fence even though its native grant is withdrawn.
+      expect(await service(db, native("SUBSCRIBED", t1, "+447400123457")).syncCustomer(identity)).toEqual({
+        status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
+      });
+      expect((await service(db, native("SUBSCRIBED", t2, "+447400123457")).syncCustomer(identity)).status)
+        .toBe("UNAVAILABLE");
+      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: a.id } })).whatsappConsentDecision)
+        .toBe("UNKNOWN");
+      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } })).whatsappConsentDecision)
+        .toBe("UNKNOWN");
+      // A truly newer observation can project B, but its independent local
+      // STOP continues to override that native grant for outbound eligibility.
+      const t4 = "2026-10-22T10:00:00Z";
+      expect((await service(db, native("SUBSCRIBED", t4, "+447400123457")).syncCustomer(identity)).status)
+        .toBe("UPDATED");
+      expect((await service(db, native("SUBSCRIBED", t4)).evaluateStoredRecipient(recipientB)).status)
+        .toBe("NOT_AUTHORISED");
+      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({
+        whatsappConsentDecision: "GRANTED", whatsappConsentSource: "SHOPIFY_NATIVE",
+        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
+        whatsappNoContactRevision: 4n,
+      });
+    } finally {
+      await db.shop.deleteMany({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  });
+
   it("refuses a changed Shopify default recipient, and refuses cross-customer matching within one shop", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
