@@ -145,6 +145,17 @@ export class PaidIncludedRecoveryReservationService {
     );
   }
 
+  /** ARCH-028: release using the existing source owner's ledger within the locked
+   * provider-failure compensation transaction (no nested transaction). */
+  async releaseInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> & Pick<PaidIncludedRecoveryReservationInput, "quantity">,
+  ): Promise<PaidIncludedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message));
+    return this.releaseInTransaction(transaction, input, quantity);
+  }
+
   async markAmbiguous(
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
       Pick<PaidIncludedRecoveryReservationInput, "quantity">,
