@@ -228,4 +228,46 @@ describe("WhatsAppService API base URL", () => {
       language: { code: "en_US" },
     });
   });
+
+  it.each([
+    { method: "sendWhatsAppText", providerCode: 131026, expected: "131026" },
+    { method: "sendWhatsAppTemplate", providerCode: "131026", expected: "131026" },
+  ])("preserves only the bounded provider code for $method", async ({ method, providerCode, expected }) => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: providerCode, message: "do not retain" } }), { status: 400 }),
+    );
+    const service = new WhatsAppService(fetchMock);
+
+    await expect(method === "sendWhatsAppText"
+      ? service.sendWhatsAppText(input)
+      : service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en_US" }))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: expected });
+    await expect(method === "sendWhatsAppText"
+      ? service.sendWhatsAppText(input)
+      : service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en_US" }))
+      .rejects.not.toMatchObject({ message: "do not retain" });
+  });
+
+  it("ignores unbounded provider codes", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: "131026".repeat(10) } }), { status: 400 }),
+    );
+
+    await expect(new WhatsAppService(fetchMock).sendWhatsAppText(input))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: undefined });
+  });
+  it.each(["sendWhatsAppText", "sendWhatsAppTemplate"] as const)(
+    "treats a non-JSON HTTP rejection as definitive without inventing a Meta code (%s)", async (method) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        new Response("gateway error without JSON", { status: 400 }));
+      const service = new WhatsAppService(fetchMock);
+      const call = method === "sendWhatsAppText"
+        ? service.sendWhatsAppText(input)
+        : service.sendWhatsAppTemplate({ to: input.to, templateName: "test", languageCode: "en" });
+      await expect(call).rejects.toMatchObject({
+        name: "WhatsAppServiceError", code: "provider-rejected", providerCode: undefined,
+      });
+    },
+  );
+
 });

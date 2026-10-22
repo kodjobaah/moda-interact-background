@@ -1,4 +1,4 @@
-import { MessageStatus, UsageMetric } from "@prisma/client";
+import { MessageStatus } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../../lib/db.js";
@@ -14,7 +14,8 @@ import { moderationConfig } from "../conversation-moderation/moderation-policy.j
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
 import type { OutboundAdmissionResult } from "./outbound-whatsapp-admission.types.js";
-import { definitiveProviderFailure, suppressionReason } from "./outbound-delivery-errors.js";
+import { OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
+import { suppressionReason } from "./outbound-delivery-errors.js";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
@@ -40,6 +41,7 @@ export class OutboundMessageDeliveryService {
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
     private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
+    private readonly providerFailure = new OutboundProviderFailureService(database),
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -113,7 +115,7 @@ export class OutboundMessageDeliveryService {
         executionScope,
       };
     } catch (error) {
-      await this.markProviderFailure(messageId, error);
+      await this.providerFailure.afterProviderError(messageId, to, error);
       throw error;
     }
   }
@@ -168,7 +170,7 @@ export class OutboundMessageDeliveryService {
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
     } catch (error) {
-      await this.markProviderFailure(admission.messageId, error);
+      await this.providerFailure.afterProviderError(admission.messageId, input.to, error);
       throw error;
     }
   }
@@ -229,16 +231,7 @@ export class OutboundMessageDeliveryService {
   }
 
   async failPrepared(messageId: string): Promise<void> {
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: { status: MessageStatus.FAILED },
-    });
-    await this.database.usageEvent.deleteMany({
-      where: {
-        sourceId: messageId,
-        metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
-      },
-    });
+    await this.providerFailure.failPrepared(messageId);
   }
 
   private async revalidateBeforeProvider(
@@ -287,10 +280,4 @@ export class OutboundMessageDeliveryService {
     });
   }
 
-  private async markProviderFailure(
-    messageId: string,
-    error: unknown,
-  ): Promise<void> {
-    if (definitiveProviderFailure(error)) await this.failPrepared(messageId);
-  }
 }

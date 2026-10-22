@@ -402,10 +402,16 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(billing.commitSuccessfulInitiation).not.toHaveBeenCalled();
   });
 
-  it("releases and marks non-confirmed durable duplicate messages as failed", async () => {
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["unrelated", "131027"],
+  ])("keeps a FAILED duplicate with %s provider code on the generic path", async (_label, providerFailureCode) => {
     setRecovery();
     mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
-    mocks.outbound.findExistingAdmission.mockResolvedValue({ ...confirmedMessage, status: "FAILED", sentAt: null });
+    mocks.outbound.findExistingAdmission.mockResolvedValue({
+      ...confirmedMessage, status: "FAILED", sentAt: null, providerFailureCode,
+    });
     const { processor, billing } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "duplicate" });
@@ -413,6 +419,25 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
     expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", { failureCode: "duplicate" });
     expect(billing.handleProviderFailure).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves exact persisted 131026 on a compensated FAILED duplicate", async () => {
+    setRecovery();
+    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.findExistingAdmission.mockResolvedValue({
+      ...confirmedMessage, status: "FAILED", sentAt: null, providerFailureCode: "131026",
+    });
+    const { processor, billing } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed", reason: "recipient-undeliverable",
+    });
+
+    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+    expect(mocks.attempt.markStatus).not.toHaveBeenCalled();
+    expect(billing.handleProviderFailure).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
   });
 
   it("finalizes a successful sequence-two send through the shared finalizer", async () => {

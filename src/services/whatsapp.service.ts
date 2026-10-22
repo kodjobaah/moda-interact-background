@@ -25,6 +25,7 @@ export class WhatsAppServiceError extends Error {
   constructor(
     readonly code: WhatsAppServiceErrorCode,
     message: string,
+    readonly providerCode?: string,
   ) {
     super(message);
     this.name = "WhatsAppServiceError";
@@ -108,10 +109,16 @@ export class WhatsAppService {
       },
     );
 
-    const body = await response.json();
+    // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
+    // A successful response with invalid JSON remains an uncertain send result.
+    const body = response.ok ? await response.json() : await response.json().catch(() => null);
 
     if (!response.ok) {
-      throw new WhatsAppServiceError("provider-rejected", "WhatsApp provider rejected the message");
+      throw new WhatsAppServiceError(
+        "provider-rejected",
+        "WhatsApp provider rejected the message",
+        extractProviderCode(body),
+      );
     }
 
     const providerMessageId = body.messages?.[0]?.id;
@@ -197,11 +204,14 @@ export class WhatsAppService {
       },
     );
 
-    const body = await response.json();
+    // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
+    // A successful response with invalid JSON remains an uncertain send result.
+    const body = response.ok ? await response.json() : await response.json().catch(() => null);
     if (!response.ok) {
       throw new WhatsAppServiceError(
         "provider-rejected",
         "WhatsApp provider rejected the template",
+        extractProviderCode(body),
       );
     }
 
@@ -215,6 +225,19 @@ export class WhatsAppService {
 
     return { providerMessageId };
   }
+}
+
+function extractProviderCode(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || !("error" in body) ||
+      typeof body.error !== "object" || body.error === null) return undefined;
+  const providerCode = (body.error as { code?: unknown }).code;
+  if (typeof providerCode === "number" && Number.isSafeInteger(providerCode) && providerCode >= 0) {
+    return String(providerCode);
+  }
+  if (typeof providerCode === "string" && /^[0-9]{1,32}$/.test(providerCode)) {
+    return providerCode;
+  }
+  return undefined;
 }
 
 export const whatsAppService = new WhatsAppService();

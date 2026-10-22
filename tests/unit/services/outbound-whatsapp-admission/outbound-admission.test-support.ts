@@ -86,6 +86,9 @@ export function admissionHarness({
     usageReservation: {
       findUnique: vi.fn().mockResolvedValue(durableReservation),
     },
+    recoveryOutreachAttempt: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
     conversation: {
       findUnique: vi.fn().mockResolvedValue({
         shopId: recoveryLinked ? null : "shop-1",

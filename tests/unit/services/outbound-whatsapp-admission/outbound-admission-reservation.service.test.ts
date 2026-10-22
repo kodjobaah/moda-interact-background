@@ -50,6 +50,54 @@ describe("OutboundAdmissionReservationService", () => {
       conversationId: "conversation-1",
       status: "PENDING",
     });
+    expect(test.transaction.conversationMessage.findUnique).toHaveBeenCalledWith({
+      where: { id: "message-existing" },
+      select: {
+        id: true, conversationId: true, status: true, sentAt: true,
+        providerFailureCode: true,
+      },
+    });
+  });
+
+  it("checks a missing historical recovery attempt when the usage row is gone", async () => {
+    const test = admissionHarness();
+
+    await expect(test.reservation.findExistingAdmission("recovery-outreach:attempt-old"))
+      .resolves.toBeNull();
+
+    expect(test.transaction.recoveryOutreachAttempt.findUnique).toHaveBeenCalledWith({
+      where: { id: "attempt-old" },
+      select: {
+        checkoutRecovery: { select: { shopId: true } },
+        outboundMessage: { select: {
+          id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true,
+        } },
+      },
+    });
+  });
+
+  it("retains the failed recovery-attempt fence after its hard-limit usage row is removed", async () => {
+    const test = admissionHarness();
+    const failedMessage = {
+      id: "message-failed", conversationId: "conversation-1",
+      status: "FAILED", sentAt: null, providerFailureCode: "131026",
+    };
+    test.transaction.recoveryOutreachAttempt.findUnique.mockResolvedValue({
+      checkoutRecovery: { shopId: "shop-1" },
+      outboundMessage: failedMessage,
+    });
+    const idempotencyKey = "recovery-outreach:attempt-failed";
+
+    await expect(test.reservation.findExistingAdmission(idempotencyKey))
+      .resolves.toEqual(failedMessage);
+    await expect(test.reservation.reserve({ ...baseAdmissionInput, idempotencyKey }))
+      .resolves.toEqual({ kind: "suppressed", reason: "duplicate" });
+
+    expect(test.transaction.recoveryOutreachAttempt.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "attempt-failed" } }),
+    );
+    expect(test.transaction.conversationMessage.create).not.toHaveBeenCalled();
+    expect(test.transaction.usageEvent.create).not.toHaveBeenCalled();
   });
 
   it("suppresses a duplicate before creating another message", async () => {
