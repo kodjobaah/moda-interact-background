@@ -148,6 +148,8 @@ function harness(
       ),
   };
   const compensation = { reconcile: vi.fn().mockResolvedValue("not-recovery") };
+  const failureReachability = { afterCorrection: vi.fn().mockResolvedValue("not-applicable") };
+  const positiveReachability = { fromProviderDelivery: vi.fn().mockResolvedValue("unchanged") };
   const serviceLogger = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -165,11 +167,15 @@ function harness(
     database,
     serviceLogger,
     compensation,
+    failureReachability,
+    positiveReachability,
     service: new WhatsAppProviderStatusService(
       database as never,
       serviceLogger as never,
       3,
       compensation,
+      failureReachability,
+      positiveReachability,
     ),
   };
 }
@@ -560,6 +566,45 @@ describe("WhatsAppProviderStatusService", () => {
 
     expect(test.linkedCommand).toMatchObject({ id: "command-1", state: "FAILED", failureCode: "131026" });
   });
+
+  it("orders failure reachability strictly after successful compensation, even on replay", async () => {
+    const test = harness("SENT", "NO_RESPONSE");
+    const event = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode: "131026" } };
+    test.compensation.reconcile.mockImplementation(async () => {
+      expect(test.failureReachability.afterCorrection).toHaveBeenCalledTimes(
+        test.compensation.reconcile.mock.calls.length - 1,
+      );
+      return "released";
+    });
+    await test.service.process(event);
+    await test.service.process(event);
+    expect(test.failureReachability.afterCorrection).toHaveBeenCalledTimes(2);
+    expect(test.failureReachability.afterCorrection).toHaveBeenCalledWith(
+      { providerMessageId: "wamid-1" }, "released",
+    );
+  });
+
+  it("never reaches the suppression writer when compensation throws", async () => {
+    const test = harness();
+    test.compensation.reconcile.mockRejectedValue(new Error("correction did not commit"));
+    await expect(test.service.process({ ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED", failure: { providerCode: "131026" } })).rejects.toThrow(
+      "correction did not commit",
+    );
+    expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();
+  });
+
+  it("clears positive evidence without invoking compensation", async () => {
+    const test = harness("FAILED", "FAILED");
+    test.message.providerFailureCode = "131026";
+    await test.service.process({ ...baseEvent, status: "READ" });
+    expect(test.positiveReachability.fromProviderDelivery).toHaveBeenCalledWith(
+      "wamid-1",
+    );
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+  });
+
 });
 
 function lifecycleDataFor(status: "DELIVERED"): Record<string, unknown> {

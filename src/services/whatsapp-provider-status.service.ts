@@ -7,7 +7,7 @@ import {
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
-import { MessageStatus, MerchantConversationSendState, Prisma, UsageMetric } from "@prisma/client";
+import { MerchantConversationSendState, Prisma, UsageMetric } from "@prisma/client";
 
 import prisma from "../lib/db.js";
 import {
@@ -16,6 +16,17 @@ import {
 } from "../domain/whatsapp-provider-status-transition.js";
 import { classifyWhatsAppProviderFailure } from "../domain/whatsapp-recipient-failure.js";
 import { recoveryDeliveryCompensationService } from "./recovery-delivery-compensation/reconcile.service.js";
+import {
+  RecipientReachabilityFailureService,
+} from "./recipient-reachability-failure.service.js";
+import {
+  RecipientReachabilityPositiveService,
+} from "./recipient-reachability-positive.service.js";
+import { RecipientReachabilityStore } from "./recipient-reachability-store.js";
+import {
+  ProviderStatusConcurrencyConflict, lifecycleUpdate, deliveredUsageKey,
+  providerSummary, isRetryableConflict,
+} from "./whatsapp-provider-status-lifecycle.js";
 
 type Database = typeof prisma;
 const MAX_TRANSACTION_RETRIES = 3;
@@ -34,6 +45,10 @@ export class WhatsAppProviderStatusService {
     private readonly serviceLogger: StructuredLogger = logger,
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
     private readonly compensation: Pick<typeof recoveryDeliveryCompensationService, "reconcile"> = recoveryDeliveryCompensationService,
+    private readonly failureReachability: Pick<RecipientReachabilityFailureService, "afterCorrection"> =
+      new RecipientReachabilityFailureService(database, new RecipientReachabilityStore(database)),
+    private readonly positiveReachability: Pick<RecipientReachabilityPositiveService, "fromProviderDelivery"> =
+      new RecipientReachabilityPositiveService(database, new RecipientReachabilityStore(database)),
   ) {}
 
   async process(input: unknown): Promise<ProviderStatusOutcome> {
@@ -224,7 +239,21 @@ export class WhatsAppProviderStatusService {
     // Never perform credit accounting inside provider-status convergence. Retry
     // even if the FAILED row was already persisted in an earlier job attempt.
     if (event.status === "FAILED" && outcome !== "unknown-message") {
-      await this.compensation.reconcile(event.providerMessageId);
+      const corrected = await this.compensation.reconcile(event.providerMessageId);
+      const reachability = await this.failureReachability.afterCorrection(
+        { providerMessageId: event.providerMessageId }, corrected,
+      );
+      this.serviceLogger.info("whatsapp.reachability.failure_converged", {
+        providerMessageId: event.providerMessageId, correction: corrected, outcome: reachability,
+      });
+    } else if ((event.status === "DELIVERED" || event.status === "READ") &&
+      outcome !== "unknown-message") {
+      const reachability = await this.positiveReachability.fromProviderDelivery(
+        event.providerMessageId,
+      );
+      this.serviceLogger.info("whatsapp.reachability.positive_converged", {
+        providerMessageId: event.providerMessageId, outcome: reachability,
+      });
     }
     return outcome;
   }
@@ -241,71 +270,6 @@ export class WhatsAppProviderStatusService {
     }
     throw new Error("Provider status retry limit exceeded");
   }
-}
-
-class ProviderStatusConcurrencyConflict extends Error {}
-
-function lifecycleUpdate(
-  message: {
-    status: MessageStatus;
-    sentAt: Date | null;
-    deliveredAt: Date | null;
-    readAt: Date | null;
-    providerFailureCode: string | null;
-    failedAt: Date | null;
-  },
-  nextStatus: MessageStatus,
-  occurredAt: Date,
-  eventStatus: NormalizedWhatsAppStatus["status"],
-  canApplyStatus: boolean,
-  event: NormalizedWhatsAppStatus,
-): Prisma.ConversationMessageUpdateInput {
-  const data: Prisma.ConversationMessageUpdateInput = {};
-  if (nextStatus !== message.status) {
-    data.status = nextStatus;
-  }
-  if (canApplyStatus && eventStatus === "SENT" && !message.sentAt) {
-    data.sentAt = occurredAt;
-  }
-  if (
-    (canApplyStatus || message.status === "READ") &&
-    (eventStatus === "DELIVERED" || eventStatus === "READ") &&
-    !message.deliveredAt
-  ) {
-    data.deliveredAt = occurredAt;
-  }
-  if (canApplyStatus && eventStatus === "READ" && !message.readAt) {
-    data.readAt = occurredAt;
-  }
-  if (canApplyStatus && eventStatus === "FAILED") {
-    if (!message.failedAt) data.failedAt = occurredAt;
-    if (
-      !message.providerFailureCode &&
-      event.schemaVersion === 3 &&
-      event.failure
-    ) {
-      data.providerFailureCode = event.failure.providerCode;
-    }
-  }
-  return data;
-}
-
-function deliveredUsageKey(messageId: string): string {
-  return `whatsapp-delivered:${messageId}`;
-}
-
-function providerSummary(event: NormalizedWhatsAppStatus): string {
-  return JSON.stringify({
-    providerAccountId: event.providerAccountId,
-    providerPhoneNumberId: event.providerPhoneNumberId,
-    status: event.status,
-    ...(event.pricing ? { pricing: event.pricing } : {}),
-  }).slice(0, 2000);
-}
-
-function isRetryableConflict(error: unknown): boolean {
-  return error instanceof ProviderStatusConcurrencyConflict ||
-    (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034");
 }
 
 export const whatsappProviderStatusService =
