@@ -21,6 +21,9 @@ vi.mock("../../../src/services/recovery-outreach-attempt.service.js",()=>({recov
 vi.mock("../../../src/services/recovery-routing.service.js",()=>({recoveryRoutingService:{resolveInboundMessage:async()=>{h.steps.push("route");return{kind:"resolved",conversationId:"c",shopId:"s",checkoutRecoveryId:"r"};}}}));
 vi.mock("../../../src/services/routing-guidance.service.js",()=>({sendRoutingGuidance:vi.fn()}));
 vi.mock("../../../src/services/whatsapp-provider-status.service.js",()=>({whatsappProviderStatusService:{}}));
+vi.mock("../../../src/services/recipient-reachability-positive.service.js",()=>({
+  recipientReachabilityPositiveService: {fromRoutedInbound:vi.fn().mockResolvedValue("recorded")},
+}));
 vi.mock("../../../src/services/shop-execution-eligibility.service.js",()=>({shopExecutionEligibilityService:{isShopExecutionActive:async()=>true}}));
 vi.mock("../../../src/services/inbound-whatsapp-abuse-admission.service.js",()=>({inboundWhatsAppAbuseAdmissionService:{admitRaw:async()=>{h.steps.push("raw-abuse");return{kind:"allowed"};},admitSettledTurn:async()=>({kind:"allowed"})}}));
 vi.mock("../../../src/services/conversation.service.js",()=>({conversationService:h.conversation}));

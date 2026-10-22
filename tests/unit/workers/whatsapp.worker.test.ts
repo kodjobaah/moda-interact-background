@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   guidance: vi.fn(),
+  reachability: vi.fn(),
   audio: vi.fn(),
   logger: (() => {
     const logger = {
@@ -33,6 +34,9 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: vi.fn(() => "test"),
 }));
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
+vi.mock("../../../src/services/recipient-reachability-positive.service.js", () => ({
+  recipientReachabilityPositiveService: { fromRoutedInbound: mocks.reachability },
+}));
 vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { process: mocks.audio } }));
 vi.mock("bullmq", () => ({
   Queue: class {
@@ -113,6 +117,7 @@ describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
+    mocks.reachability.mockResolvedValue("recorded");
     mocks.conversation.receiveMessage.mockResolvedValue({
       duplicate: false,
       version: 4,
@@ -164,6 +169,10 @@ describe("WhatsApp worker inbound execution gate", () => {
       occurredAt: new Date(event.occurredAt),
     });
     expect(mocks.processor.enqueue).toHaveBeenCalledWith("conversation-1", 4);
+    expect(mocks.reachability).toHaveBeenCalledWith({
+      shopId: "shop-1", conversationId: "conversation-1",
+      providerMessageId: event.providerMessageId, customerPhone: event.customerPhone,
+    });
   });
 
   it("persists and enqueues inbound for downstream HUMAN-mode turn suppression", async () => {
@@ -308,4 +317,47 @@ it("routes ambiguous voice to guidance before downloading or recording engagemen
  mocks.audio.mockClear(); mocks.recovery.recordExternalActivity.mockClear();
  await processInboundMessage({...event,content:{type:"audio",mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}} as any);
  expect(mocks.audio).not.toHaveBeenCalled(); expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled(); expect(mocks.guidance).toHaveBeenCalled();
+});
+
+
+describe("ARCH-028 inbound reachability route gate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
+    mocks.guidance.mockResolvedValue(undefined);
+    mocks.reachability.mockResolvedValue("recorded");
+    mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: false, version: 1 });
+    mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
+  });
+
+  it("does not clear either shop for an ambiguous same-phone route", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "guidance", reason: "MULTIPLE_RECOVERIES",
+    });
+    await processInboundMessage(event);
+    expect(mocks.reachability).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+  });
+
+  it("retries clearing after a persisted inbound duplicate", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "resolved", conversationId: "conversation-2",
+      checkoutRecoveryId: "recovery-2", shopId: "shop-2",
+    });
+    mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: true, version: 1 });
+    await processInboundMessage(event);
+    expect(mocks.reachability).toHaveBeenCalledWith(expect.objectContaining({
+      shopId: "shop-2", conversationId: "conversation-2",
+    }));
+  });
+
+  it("never clears on failed inbound persistence", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "resolved", conversationId: "conversation-2",
+      checkoutRecoveryId: "recovery-2", shopId: "shop-2",
+    });
+    mocks.conversation.receiveMessage.mockRejectedValueOnce(new Error("database unavailable"));
+    await expect(processInboundMessage(event)).rejects.toThrow("database unavailable");
+    expect(mocks.reachability).not.toHaveBeenCalled();
+  });
 });

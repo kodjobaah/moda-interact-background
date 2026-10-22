@@ -7,21 +7,19 @@ import {
 } from "@modainteract/moda-interact-shared/whatsapp";
 
 import { connectionRedis } from "../lib/redis.js";
+import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
+import { processRoutedInboundMessage } from "../services/whatsapp-inbound-processing.service.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 
 import { runCommerceAgent } from "../agents/commerce.agent.js";
 import type { RecoveryAgentContext } from "../agents/types.js";
-import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
-import { inboundWhatsAppAudioService } from "../services/inbound-whatsapp-audio.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { conversationService } from "../services/conversation.service.js";
 import { moderationTurnGate } from "../services/conversation-moderation/moderation-turn-gate.js";
 import { AiTurnOwnershipService } from "../services/recovery-conversation/ai-turn-ownership.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
-import { sendRoutingGuidance } from "../services/routing-guidance.service.js";
-import { recoveryRoutingService } from "../services/recovery-routing.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
 import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
 import {
@@ -140,146 +138,12 @@ export function createWhatsappWorker() {
 }
 
 export {};
-export async function processInboundMessage(event: WhatsAppInboundEvent, audioOptions: { finalAttempt?: boolean } = {}) {
-  logger.debug("whatsapp.inbound.processing_started", {
-    providerMessageId: event.providerMessageId,
-    contentType: event.content.type,
-  });
-
-  const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
-    providerMessageId: event.providerMessageId,
-    customerPhone: event.customerPhone,
-  });
-  if (abuse.kind !== "allowed") {
-    logger.debug("whatsapp.inbound.processing_stopped", {
-      providerMessageId: event.providerMessageId,
-      reason: "raw-abuse-admission-denied",
-    });
-    return;
-  }
-
-  const route = await recoveryRoutingService.resolveInboundMessage(event);
-
-  logger.debug("whatsapp.inbound.route_resolved", {
-    providerMessageId: event.providerMessageId,
-    routeKind: route.kind,
-    ...routeIdentifiers(route),
-  });
-
-  if (route.kind === "ignored") {
-    logger.debug("whatsapp.inbound.processing_stopped", {
-      providerMessageId: event.providerMessageId,
-      reason: "route-ignored",
-    });
-    return;
-  }
-  if (route.kind === "guidance") {
-    await sendRoutingGuidance(event, route.reason);
-    logger.debug("whatsapp.inbound.guidance_sent", {
-      providerMessageId: event.providerMessageId,
-      reason: route.reason,
-    });
-    return;
-  }
-
-  if (route.kind === "resolved") {
-    await checkoutRecoveryService.recordExternalActivity(
-      route.checkoutRecoveryId,
-      new Date(event.occurredAt),
-    );
-  }
-
-  const content = event.content;
-  if (content.type === "audio") {
-    const audioOwnership = "conversationId" in route && route.conversationId
-      ? await new AiTurnOwnershipService().readTurnOwnership(route.conversationId)
-      : null;
-    if (!("conversationId" in route) || !("shopId" in route) || !route.conversationId || !route.shopId) return;
-    const result = await inboundWhatsAppAudioService.process(event, route.conversationId, audioOptions);
-    if (result.kind === "completed") {
-      const state = await conversationService.getTurnState(route.conversationId);
-      logger.debug("whatsapp.inbound.audio_ready_for_turn", {
-        providerMessageId: event.providerMessageId,
-        conversationId: route.conversationId,
-        observedVersion: state.inboundVersion,
-      });
-      await conversationTurnProcessor.enqueue(route.conversationId, state.inboundVersion);
-    } else if (result.fallback) {
-      await outboundWhatsAppAdmissionService.sendText({
-        shopId: route.shopId,
-        conversationId: route.conversationId,
-        idempotencyKey: `voice-fallback:${event.providerMessageId}`,
-        senderType: "AUTOMATION",
-        ...(audioOwnership ? { expectedControlRevision: audioOwnership.revision } : {}),
-        to: event.customerPhone,
-        text: result.fallback,
-      });
-      logger.debug("whatsapp.inbound.audio_fallback_sent", {
-        providerMessageId: event.providerMessageId,
-        conversationId: route.conversationId,
-      });
-    }
-    return;
-  }
-
-  if (content.type === "unsupported") {
-    if (!("conversationId" in route)) return;
-    const conversationId = route.conversationId;
-    if (!conversationId) return;
-    const received = await conversationService.receiveMessage({
-      conversationId,
-      providerMessageId: event.providerMessageId,
-      inReplyToProviderId: event.contextMessageId,
-      content: `[Unsupported WhatsApp content: ${content.providerType.slice(0, 64)}]`,
-      occurredAt: new Date(event.occurredAt),
-    });
-    logger.debug("whatsapp.inbound.persisted", {
-      providerMessageId: event.providerMessageId,
-      conversationId,
-      observedVersion: received.version,
-      duplicate: received.duplicate,
-      contentType: "unsupported",
-    });
-    if (!received.duplicate) {
-      await prisma.conversationMessage.update({
-        where: { providerMessageId: event.providerMessageId },
-        data: { contentType: "UNSUPPORTED" },
-      });
-    }
-    return;
-  }
-
-  const received = await conversationService.receiveMessage({
-    conversationId: route.conversationId,
-
-    providerMessageId: event.providerMessageId,
-
-    inReplyToProviderId: event.contextMessageId,
-
-    content: content.text,
-    occurredAt: new Date(event.occurredAt),
-  });
-
-  logger.debug("whatsapp.inbound.persisted", {
-    providerMessageId: event.providerMessageId,
-    conversationId: route.conversationId,
-    observedVersion: received.version,
-    duplicate: received.duplicate,
-    contentType: "text",
-  });
-
-  if (received.duplicate) {
-    logger.debug("whatsapp.inbound.duplicate_repair_requested", {
-      providerMessageId: event.providerMessageId,
-      conversationId: route.conversationId,
-      observedVersion: received.version,
-    });
-  }
-
-  await conversationTurnProcessor.enqueue(
-    route.conversationId,
-    received.version,
-  );
+export async function processInboundMessage(
+  event: WhatsAppInboundEvent,
+  audioOptions: { finalAttempt?: boolean } = {},
+) {
+  return processRoutedInboundMessage(event, audioOptions, logger,
+    (conversationId, version) => conversationTurnProcessor.enqueue(conversationId, version));
 }
 
 function isContinuingRecoveryStatus(status: string | null | undefined): boolean {
@@ -316,18 +180,6 @@ function boundedError(error: unknown): { errorName: string; errorMessage: string
   return {
     errorName: "UnknownError",
     errorMessage: String(error).slice(0, 256),
-  };
-}
-
-function routeIdentifiers(route: Awaited<ReturnType<typeof recoveryRoutingService.resolveInboundMessage>>): {
-  conversationId?: string | null;
-  checkoutRecoveryId?: string | null;
-  shopId?: string | null;
-} {
-  return {
-    ...("conversationId" in route ? { conversationId: route.conversationId ?? null } : {}),
-    ...("checkoutRecoveryId" in route ? { checkoutRecoveryId: route.checkoutRecoveryId ?? null } : {}),
-    ...("shopId" in route ? { shopId: route.shopId ?? null } : {}),
   };
 }
 
