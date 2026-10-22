@@ -94,6 +94,17 @@ export class PurchasedRecoveryReservationService {
     );
   }
 
+  /** ARCH-028: release using the existing source owner's ledger within the locked
+   * provider-failure compensation transaction (no nested transaction). */
+  async releaseInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: PurchasedRecoveryReservationInput,
+  ): Promise<PurchasedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new PurchasedRecoveryReservationError(message));
+    return this.releaseInTransaction(transaction, input, quantity);
+  }
+
   async markAmbiguous(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
     validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>

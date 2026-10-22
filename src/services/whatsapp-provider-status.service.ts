@@ -15,6 +15,7 @@ import {
   statusForProviderEvent,
 } from "../domain/whatsapp-provider-status-transition.js";
 import { classifyWhatsAppProviderFailure } from "../domain/whatsapp-recipient-failure.js";
+import { recoveryDeliveryCompensationService } from "./recovery-delivery-compensation/reconcile.service.js";
 
 type Database = typeof prisma;
 const MAX_TRANSACTION_RETRIES = 3;
@@ -32,6 +33,7 @@ export class WhatsAppProviderStatusService {
     private readonly database: Database = prisma,
     private readonly serviceLogger: StructuredLogger = logger,
     private readonly maxRetries = MAX_TRANSACTION_RETRIES,
+    private readonly compensation: Pick<typeof recoveryDeliveryCompensationService, "reconcile"> = recoveryDeliveryCompensationService,
   ) {}
 
   async process(input: unknown): Promise<ProviderStatusOutcome> {
@@ -51,7 +53,7 @@ export class WhatsAppProviderStatusService {
   ): Promise<ProviderStatusOutcome> {
     const occurredAt = new Date(event.occurredAt);
 
-    return this.withRetry(() => this.database.$transaction(async (transaction) => {
+    const outcome = await this.withRetry(() => this.database.$transaction(async (transaction) => {
       const message = await transaction.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
         select: {
@@ -218,6 +220,13 @@ export class WhatsAppProviderStatusService {
         ? "ignored"
         : "applied";
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+
+    // Never perform credit accounting inside provider-status convergence. Retry
+    // even if the FAILED row was already persisted in an earlier job attempt.
+    if (event.status === "FAILED" && outcome !== "unknown-message") {
+      await this.compensation.reconcile(event.providerMessageId);
+    }
+    return outcome;
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {

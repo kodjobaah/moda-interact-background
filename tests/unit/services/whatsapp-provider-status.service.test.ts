@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
+vi.mock("../../../src/services/recovery-delivery-compensation/reconcile.service.js", () => ({
+  recoveryDeliveryCompensationService: { reconcile: vi.fn() },
+}));
 vi.mock("@prisma/client", () => ({
   MessageStatus: {
     PENDING: "PENDING",
@@ -144,6 +147,7 @@ function harness(
           operation(transaction),
       ),
   };
+  const compensation = { reconcile: vi.fn().mockResolvedValue("not-recovery") };
   const serviceLogger = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -160,9 +164,12 @@ function harness(
     transaction,
     database,
     serviceLogger,
+    compensation,
     service: new WhatsAppProviderStatusService(
       database as never,
       serviceLogger as never,
+      3,
+      compensation,
     ),
   };
 }
@@ -322,6 +329,40 @@ describe("WhatsAppProviderStatusService", () => {
       expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
     },
   );
+
+  it("reinvokes compensation outside the status transaction on a failed replay", async () => {
+    const test = harness("SENT", "NO_RESPONSE");
+    const failure = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode: "131026" } };
+    test.compensation.reconcile.mockImplementation(async () => {
+      expect(test.database.$transaction).toHaveBeenCalledTimes(test.compensation.reconcile.mock.calls.length);
+      expect(test.message.status).toBe("FAILED");
+      return "restored-spendable";
+    });
+    await test.service.process(failure);
+    await test.service.process(failure);
+    expect(test.compensation.reconcile).toHaveBeenCalledTimes(2);
+    expect(test.compensation.reconcile).toHaveBeenCalledWith("wamid-1");
+  });
+
+  it("propagates a post-status compensation failure for provider-job retry", async () => {
+    const test = harness("SENT", "NO_RESPONSE");
+    const failure = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode: "131026" } };
+    test.compensation.reconcile.mockRejectedValueOnce(new Error("ledger not available"));
+    await expect(test.service.process(failure)).rejects.toThrow("ledger not available");
+    expect(test.message.status).toBe("FAILED");
+    await expect(test.service.process(failure)).resolves.toBe("ignored");
+    expect(test.compensation.reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call compensation for positive delivery evidence", async () => {
+    const test = harness("FAILED", "FAILED");
+    test.message.providerFailureCode = "131026";
+    await test.service.process(baseEvent);
+    expect(test.message.status).toBe("DELIVERED");
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+  });
 
   it("records v2 failure time without fabricating a provider code", async () => {
     const test = harness("PENDING");
