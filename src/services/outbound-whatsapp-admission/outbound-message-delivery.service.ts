@@ -11,11 +11,11 @@ import { OutboundSendFenceService } from "../recovery-conversation/outbound-send
 import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
-import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
 import type { OutboundAdmissionResult } from "./outbound-whatsapp-admission.types.js";
 import { OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
 import { suppressionReason } from "./outbound-delivery-errors.js";
+import { GeneralOutboundSendFenceService } from "./general-outbound-send-fence.service.js";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
@@ -42,6 +42,7 @@ export class OutboundMessageDeliveryService {
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
     private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
     private readonly providerFailure = new OutboundProviderFailureService(database),
+    private readonly generalFence = new GeneralOutboundSendFenceService(database),
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -85,12 +86,7 @@ export class OutboundMessageDeliveryService {
       await this.failPrepared(messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
-    // General as well as recovery-linked sends must honour local STOP.
-    if (await hasLocalNoContact(this.database, { shopId, recipient: to })) {
-      await this.failPrepared(messageId);
-      return { kind: "suppressed", reason: "conversation-invalid" };
-    }
-    const fenced = await this.fenceRecoverySend({
+    const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to,
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
     });
@@ -152,11 +148,7 @@ export class OutboundMessageDeliveryService {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
-    if (await hasLocalNoContact(this.database, { shopId: admission.shopId, recipient: input.to })) {
-      await this.failPrepared(admission.messageId);
-      return { kind: "suppressed", reason: "conversation-invalid" };
-    }
-    const fenced = await this.fenceRecoverySend({
+    const fenced = await this.fenceProviderSend({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to,
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
@@ -199,16 +191,25 @@ export class OutboundMessageDeliveryService {
     }
   }
 
-  /** Atomic provider permit for recovery-linked automated sends. Preflight alone
-   * cannot protect the interval between a model await and Meta submission.
-   * Never recapture a supplied turn revision after a takeover/resume cycle.
+  /** Both general and recovery sends must commit a final Shop-ordered permit
+   * before Meta I/O. Never recapture a recovery turn revision after takeover.
    */
-  private async fenceRecoverySend(input: {
+  private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
     expectedControlRevision?: number;
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
-    if (!ownership) return null; // Existing non-recovery scope.
+    if (!ownership) {
+      const permit = await this.generalFence.admitFinalSend({
+        shopId: input.shopId, conversationId: input.conversationId,
+        messageId: input.messageId, recipient: input.to,
+      });
+      if (permit.kind === "admitted") return null;
+      if (permit.reason === "already-admitted-or-sent")
+        return { kind: "suppressed", reason: "duplicate" };
+      await this.failPrepared(input.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
     const message = await this.database.conversationMessage.findUnique({
       where: { id: input.messageId }, select: { senderType: true },
     });

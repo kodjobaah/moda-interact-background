@@ -13,11 +13,13 @@ function harness({
   },
   moderationOutcome = "allow",
   currentAllowance = true,
+  generalFence,
 }: {
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
   moderationOutcome?: "allow" | "block" | "retry";
   currentAllowance?: boolean;
+  generalFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
 } = {}) {
   let currentText = "Hello";
   const conversationMessageUpdate = vi.fn().mockImplementation(async ({ data }: { data: { content?: string } }) => {
@@ -29,7 +31,19 @@ function harness({
   }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
   const usageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
+  const queryRawUnsafe = vi.fn(async (statement: string): Promise<Array<Record<string, unknown>>> => {
+    if (statement.includes('FROM "commerce"."Shop"') && statement.includes('FOR UPDATE'))
+      return [{ status: "ACTIVE" }];
+    if (statement.includes('FROM "whatsapp"."Conversation"'))
+      return [{ controlRevision: 0 }];
+    if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
+      return [{ status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null }];
+    if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
+      return [{ id: "message-1" }];
+    return [];
+  });
   const transaction = {
+    $queryRawUnsafe: queryRawUnsafe,
     conversationMessage: {
       update: conversationMessageUpdate,
       findUnique: conversationMessageFindUnique,
@@ -37,7 +51,7 @@ function harness({
     conversation: { update: conversationUpdate },
   };
   const database = {
-    $queryRawUnsafe: vi.fn(async () => []),
+    $queryRawUnsafe: queryRawUnsafe,
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),
@@ -67,9 +81,11 @@ function harness({
       database as never,
       providerMock as never,
       executionEligibility as never,
-      undefined,
+      { readTurnOwnership: vi.fn(async () => null) } as never,
       undefined,
       moderationMock as never,
+      undefined,
+      generalFence as never,
     ),
   };
 }
@@ -86,10 +102,18 @@ const admission = {
 describe("OutboundMessageDeliveryService", () => {
   it("blocks prepared AI/automation messages when the recipient has locally stopped", async () => {
     const test = harness();
-    test.database.$queryRawUnsafe.mockResolvedValue([{
-      phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
-      defaultCountryCode: "GB",
-    }]);
+    test.database.$queryRawUnsafe.mockImplementation(async (statement: string) => {
+      if (statement.includes('FROM "commerce"."Shop"')) return [{ status: "ACTIVE" }];
+      if (statement.includes('FROM "whatsapp"."Conversation"')) return [{ controlRevision: 0 }];
+      if (statement.includes('FROM "whatsapp"."ConversationMessage"')) return [{
+        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+      }];
+      if (statement.includes('FROM "commerce"."CustomerPhone"')) return [{
+        phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
+        defaultCountryCode: "GB",
+      }];
+      return [];
+    });
     await expect(test.service.sendPreparedText({
       ...admission, to: "+447400123456", text: "Don't send this",
     })).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
@@ -97,6 +121,49 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.database.conversationMessage.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "message-1" }, data: { status: "FAILED" },
     }));
+  });
+
+  it.each(["text", "template"])(
+    "serializes general %s provider admission with STOP using Shop-first SQL",
+    async (kind) => {
+      const test = harness();
+      const result = kind === "text"
+        ? await test.service.sendPreparedText({ ...admission, to: "+14155552671", text: "Hello" })
+        : await test.service.sendPreparedTemplate(admission, {
+          to: "+14155552671", templateName: "support", languageCode: "en",
+        });
+      expect(result.kind).toBe("admitted");
+      const statements = test.database.$queryRawUnsafe.mock.calls.map(([sql]) => String(sql));
+      const shop = statements.findIndex((sql) => sql.includes('"commerce"."Shop"') && sql.includes("FOR UPDATE"));
+      const conversation = statements.findIndex((sql) => sql.includes('"whatsapp"."Conversation"') && sql.includes("FOR UPDATE"));
+      const message = statements.findIndex((sql) => sql.includes('FROM "whatsapp"."ConversationMessage"') && sql.includes("FOR UPDATE"));
+      const stopCheck = statements.findIndex((sql) => sql.includes('"commerce"."CustomerPhone"'));
+      const permit = statements.findIndex((sql) => sql.includes('UPDATE "whatsapp"."ConversationMessage"'));
+      expect([shop, conversation, message, stopCheck, permit].every((i) => i >= 0)).toBe(true);
+      expect(shop).toBeLessThan(conversation);
+      expect(conversation).toBeLessThan(message);
+      expect(message).toBeLessThan(stopCheck);
+      expect(stopCheck).toBeLessThan(permit);
+      expect(test.database.$transaction).toHaveBeenCalled();
+      expect(kind === "text" ? test.providerMock.sendWhatsAppText : test.providerMock.sendWhatsAppTemplate)
+        .toHaveBeenCalledOnce();
+    },
+  );
+
+  it("does not fail or release a previously admitted message on a duplicate dispatch", async () => {
+    const test = harness({
+      generalFence: { admitFinalSend: vi.fn(async () => ({
+        kind: "suppressed", reason: "already-admitted-or-sent",
+      })) },
+    });
+    expect(await test.service.sendPreparedText({
+      ...admission, to: "+15551234567", text: "Already admitted",
+    })).toEqual({ kind: "suppressed", reason: "duplicate" });
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(test.database.conversationMessage.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: "FAILED" } }),
+    );
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 
   it("delegates provider account identity", async () => {

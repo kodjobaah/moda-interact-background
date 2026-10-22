@@ -135,8 +135,20 @@ export function admissionHarness({
       ),
     },
   };
+  const queryRawUnsafe = vi.fn(async (statement: string): Promise<Array<Record<string, unknown>>> => {
+    if (statement.includes('FROM "commerce"."Shop"') && statement.includes('FOR UPDATE'))
+      return [{ status: "ACTIVE" }];
+    if (statement.includes('FROM "whatsapp"."Conversation"') && statement.includes('FOR UPDATE'))
+      return [{ controlRevision: 0 }];
+    if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
+      return [{ status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null }];
+    if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
+      return [{ id: "message-1" }];
+    return [];
+  });
+  Object.assign(transaction, { $queryRawUnsafe: queryRawUnsafe });
   const database = {
-    $queryRawUnsafe: vi.fn(async () => []),
+    $queryRawUnsafe: queryRawUnsafe,
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),
