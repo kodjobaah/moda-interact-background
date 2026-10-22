@@ -1,4 +1,5 @@
 import { recoveryDeliveryCompensationService } from "./recovery-delivery-compensation/reconcile.service.js";
+import { recoveryDeliveryMerchantNotificationService } from "./recovery-delivery-merchant-notification.service.js";
 import { recipientReachabilityFailureService } from "./recipient-reachability-failure.service.js";
 import { synchronousRecipientFailureEvidenceService } from "./synchronous-recipient-failure-evidence.service.js";
 
@@ -13,6 +14,8 @@ export class SynchronousRecipientFailureService {
       recoveryDeliveryCompensationService,
     private readonly reachability: Pick<typeof recipientReachabilityFailureService, "afterCorrection"> =
       recipientReachabilityFailureService,
+    private readonly notification: Pick<typeof recoveryDeliveryMerchantNotificationService, "notify"> =
+      recoveryDeliveryMerchantNotificationService,
   ) {}
 
   async afterAutomatedRejection(messageId: string, recipient: string): Promise<void> {
@@ -25,7 +28,8 @@ export class SynchronousRecipientFailureService {
    */
   async afterPersistedRejection(messageId: string): Promise<void> {
     const corrected = await this.correction.reconcileMessage(messageId);
-    await this.reachability.afterCorrection({ messageId }, corrected);
+    const reachability = await this.reachability.afterCorrection({ messageId }, corrected);
+    await this.notification.notify({ messageId }, corrected, reachability);
   }
 }
 

@@ -17,6 +17,10 @@ import {
 import { classifyWhatsAppProviderFailure } from "../domain/whatsapp-recipient-failure.js";
 import { recoveryDeliveryCompensationService } from "./recovery-delivery-compensation/reconcile.service.js";
 import {
+  RecoveryDeliveryMerchantNotificationService,
+} from "./recovery-delivery-merchant-notification.service.js";
+import { RecoveryDeliverySupportMessageService } from "./recovery-delivery-support-message.service.js";
+import {
   RecipientReachabilityFailureService,
 } from "./recipient-reachability-failure.service.js";
 import {
@@ -49,6 +53,10 @@ export class WhatsAppProviderStatusService {
       new RecipientReachabilityFailureService(database, new RecipientReachabilityStore(database)),
     private readonly positiveReachability: Pick<RecipientReachabilityPositiveService, "fromProviderDelivery"> =
       new RecipientReachabilityPositiveService(database, new RecipientReachabilityStore(database)),
+    private readonly notification: Pick<RecoveryDeliveryMerchantNotificationService, "notify"> =
+      new RecoveryDeliveryMerchantNotificationService(
+        database, new RecoveryDeliverySupportMessageService(database),
+      ),
   ) {}
 
   async process(input: unknown): Promise<ProviderStatusOutcome> {
@@ -243,8 +251,11 @@ export class WhatsAppProviderStatusService {
       const reachability = await this.failureReachability.afterCorrection(
         { providerMessageId: event.providerMessageId }, corrected,
       );
+      const notice = await this.notification.notify(
+        { providerMessageId: event.providerMessageId }, corrected, reachability,
+      );
       this.serviceLogger.info("whatsapp.reachability.failure_converged", {
-        providerMessageId: event.providerMessageId, correction: corrected, outcome: reachability,
+        providerMessageId: event.providerMessageId, correction: corrected, outcome: reachability, notice,
       });
     } else if ((event.status === "DELIVERED" || event.status === "READ") &&
       outcome !== "unknown-message") {

@@ -150,6 +150,7 @@ function harness(
   const compensation = { reconcile: vi.fn().mockResolvedValue("not-recovery") };
   const failureReachability = { afterCorrection: vi.fn().mockResolvedValue("not-applicable") };
   const positiveReachability = { fromProviderDelivery: vi.fn().mockResolvedValue("unchanged") };
+  const notification = { notify: vi.fn().mockResolvedValue("skipped") };
   const serviceLogger = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -169,6 +170,7 @@ function harness(
     compensation,
     failureReachability,
     positiveReachability,
+    notification,
     service: new WhatsAppProviderStatusService(
       database as never,
       serviceLogger as never,
@@ -176,6 +178,7 @@ function harness(
       compensation,
       failureReachability,
       positiveReachability,
+      notification,
     ),
   };
 }
@@ -565,6 +568,41 @@ describe("WhatsAppProviderStatusService", () => {
     await expect(test.service.process(failedEvent)).resolves.toBe("applied");
 
     expect(test.linkedCommand).toMatchObject({ id: "command-1", state: "FAILED", failureCode: "131026" });
+  });
+
+  it("notifies only after accepted compensation and reachability, including on replay", async () => {
+    const test = harness("SENT", "NO_RESPONSE");
+    const event = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode: "131026" } };
+    test.compensation.reconcile.mockResolvedValue("released");
+    test.failureReachability.afterCorrection.mockImplementation(async () => {
+      expect(test.compensation.reconcile).toHaveBeenCalled();
+      return "suppressed";
+    });
+    test.notification.notify.mockImplementation(async () => {
+      expect(test.failureReachability.afterCorrection).toHaveBeenCalled();
+      return "created";
+    });
+    await test.service.process(event);
+    await test.service.process(event);
+    expect(test.notification.notify).toHaveBeenCalledTimes(2);
+    expect(test.notification.notify).toHaveBeenCalledWith(
+      { providerMessageId: "wamid-1" }, "released", "suppressed",
+    );
+  });
+
+  it("retries a notification failure without undoing durable provider status/correction", async () => {
+    const test = harness("SENT", "NO_RESPONSE");
+    const event = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode: "131026" } };
+    test.compensation.reconcile.mockResolvedValue("restored-spendable");
+    test.failureReachability.afterCorrection.mockResolvedValue("unchanged");
+    test.notification.notify.mockRejectedValueOnce(new Error("support offline"));
+    await expect(test.service.process(event)).rejects.toThrow("support offline");
+    expect(test.message.status).toBe("FAILED");
+    await expect(test.service.process(event)).resolves.toBe("ignored");
+    expect(test.compensation.reconcile).toHaveBeenCalledTimes(2);
+    expect(test.notification.notify).toHaveBeenCalledTimes(2);
   });
 
   it("orders failure reachability strictly after successful compensation, even on replay", async () => {
