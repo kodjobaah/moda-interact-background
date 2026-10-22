@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import { connectionRedis } from "../lib/redis.js";
+import prisma from "../lib/db.js";
+import { hasLocalNoContact } from "./whatsapp-contact-opt-out/local-no-contact.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import type { RoutingGuidanceReason } from "./recovery-routing.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
@@ -42,6 +44,9 @@ export async function sendRoutingGuidance(
     return;
   }
   try {
+    // Platform guidance has no merchant ownership; any registered STOP for
+    // this recipient must suppress the otherwise unscoped outbound message.
+    if (await hasLocalNoContact(prisma, { recipient: event.customerPhone })) return;
     await whatsAppService.sendWhatsAppText(
       { to: event.customerPhone, text: routingGuidanceText[reason] },
       AbortSignal.timeout(10_000),

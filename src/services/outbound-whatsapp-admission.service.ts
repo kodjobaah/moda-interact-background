@@ -32,6 +32,7 @@ const MAX_TRANSACTION_RETRIES = 3;
 type AdmissionDatabase = Pick<
   PrismaClient,
   | "$transaction"
+  | "$queryRawUnsafe"
   | "conversation"
   | "conversationMessage"
   | "usageEvent"

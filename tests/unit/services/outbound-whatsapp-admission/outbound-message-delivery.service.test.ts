@@ -37,6 +37,7 @@ function harness({
     conversation: { update: conversationUpdate },
   };
   const database = {
+    $queryRawUnsafe: vi.fn(async () => []),
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),
@@ -83,6 +84,21 @@ const admission = {
 };
 
 describe("OutboundMessageDeliveryService", () => {
+  it("blocks prepared AI/automation messages when the recipient has locally stopped", async () => {
+    const test = harness();
+    test.database.$queryRawUnsafe.mockResolvedValue([{
+      phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
+      defaultCountryCode: "GB",
+    }]);
+    await expect(test.service.sendPreparedText({
+      ...admission, to: "+447400123456", text: "Don't send this",
+    })).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(test.database.conversationMessage.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "message-1" }, data: { status: "FAILED" },
+    }));
+  });
+
   it("delegates provider account identity", async () => {
     const test = harness();
 

@@ -4,28 +4,24 @@ import type { PrismaClient } from "@prisma/client";
 import prisma from "../../lib/db.js";
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
-import type {
-  ShopExecutionDenialReason,
-  ShopExecutionEligibilityService,
-} from "../shop-execution-eligibility.service.js";
+import type { ShopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import { whatsAppService } from "../whatsapp.service.js";
 import { AiTurnOwnershipService } from "../recovery-conversation/ai-turn-ownership.service.js";
 import { OutboundSendFenceService } from "../recovery-conversation/outbound-send-fence.service.js";
 import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-runtime-eligibility.service.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
+import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
-import type {
-  OutboundAdmissionResult,
-  OutboundSuppressionReason,
-} from "./outbound-whatsapp-admission.types.js";
+import type { OutboundAdmissionResult } from "./outbound-whatsapp-admission.types.js";
+import { definitiveProviderFailure, suppressionReason } from "./outbound-delivery-errors.js";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
 
 type DeliveryDatabase = Pick<
   PrismaClient,
-  "$transaction" | "conversation" | "conversationMessage" | "usageEvent"
+  "$transaction" | "$queryRawUnsafe" | "conversation" | "conversationMessage" | "usageEvent"
 >;
 
 type AdmittedOutbound = Extract<
@@ -84,6 +80,11 @@ export class OutboundMessageDeliveryService {
       data: { content: outboundText },
     });
     if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
+      await this.failPrepared(messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
+    // General as well as recovery-linked sends must honour local STOP.
+    if (await hasLocalNoContact(this.database, { shopId, recipient: to })) {
       await this.failPrepared(messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
@@ -146,6 +147,10 @@ export class OutboundMessageDeliveryService {
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, outboundText,
     }))) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "conversation-invalid" };
+    }
+    if (await hasLocalNoContact(this.database, { shopId: admission.shopId, recipient: input.to })) {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
@@ -286,20 +291,6 @@ export class OutboundMessageDeliveryService {
     messageId: string,
     error: unknown,
   ): Promise<void> {
-    const definitive =
-      error instanceof Error &&
-      error.name === "WhatsAppServiceError" &&
-      ["configuration-missing", "provider-rejected"].includes(
-        (error as Error & { code?: string }).code ?? "",
-      );
-    if (definitive) await this.failPrepared(messageId);
+    if (definitiveProviderFailure(error)) await this.failPrepared(messageId);
   }
-}
-
-function suppressionReason(
-  reason: ShopExecutionDenialReason,
-): OutboundSuppressionReason {
-  if (reason === "CONTRACT_REQUIRED") return "contract-required";
-  if (reason === "SUBSCRIPTION_FROZEN") return "subscription-frozen";
-  return "shop-unavailable";
 }

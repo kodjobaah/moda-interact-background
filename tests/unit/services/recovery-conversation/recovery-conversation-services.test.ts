@@ -126,6 +126,33 @@ describe("ARCH-040 recovery conversation policies", () => {
     expect(firstCall[5]).not.toContain("123"); // hashed recipient, not PII
   });
 
+  it.each(["HUMAN", "AGENT"] as const)(
+    "refuses an in-window %s provider permit after durable STOP, before any provider send",
+    async (senderType) => {
+      const { db, query } = reader((sql) => {
+        if (sql.includes('FROM "whatsapp"."Conversation" c')) return [{
+          ...context,
+          mode: senderType === "HUMAN" ? "HUMAN" : "AI",
+        }];
+        if (sql.includes('FROM "commerce"."Shop" WHERE')) return [{ id: "shop", status: "ACTIVE" }];
+        if (sql.includes('FROM "whatsapp"."Conversation" WHERE')) return [{ id: "conversation" }];
+        if (sql.includes('FROM "commerce"."CustomerPhone" cp')) return [{
+          phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
+          defaultCountryCode: "GB",
+        }];
+        return [];
+      });
+      const permit = await new OutboundSendFenceService(db, async () => null).admitFinalSend({
+        senderType, conversationId: "conversation", shopId: "shop", recoveryId: "recovery",
+        expectedControlRevision: 4,
+        ...(senderType === "HUMAN" ? { commandId: "command", leaseToken: "lease" } : { messageId: "message" }),
+        recipient: "+447400123456", now: moment,
+      });
+      expect(permit).toEqual({ kind: "suppressed", reason: "local-no-contact" });
+      expect(query.mock.calls.some(([sql]) => String(sql).includes('FROM "commerce"."CustomerPhone" cp'))).toBe(true);
+    },
+  );
+
   it("fails closed when no durable eligibility checker is wired", async () => {
     const { db, query } = reader(() => [context]);
     expect(await new OutboundSendFenceService(db).admitFinalSend({

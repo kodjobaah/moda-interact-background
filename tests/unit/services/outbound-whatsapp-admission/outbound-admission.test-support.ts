@@ -133,6 +133,7 @@ export function admissionHarness({
     },
   };
   const database = {
+    $queryRawUnsafe: vi.fn(async () => []),
     $transaction: vi.fn().mockImplementation(async (operation: unknown) =>
       typeof operation === "function" ? operation(transaction) : undefined,
     ),

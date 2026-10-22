@@ -1,6 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-const mocks = vi.hoisted(() => ({ set: vi.fn(), send: vi.fn() }));
+const mocks = vi.hoisted(() => ({ set: vi.fn(), send: vi.fn(), noContact: vi.fn() }));
+vi.mock("../../../src/services/whatsapp-contact-opt-out/local-no-contact.js", () => ({
+  hasLocalNoContact: mocks.noContact,
+}));
 vi.mock("../../../src/lib/redis.js", () => ({
   connectionRedis: { set: mocks.set },
 }));
@@ -33,6 +36,7 @@ const identify =
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.set.mockResolvedValue("OK");
+  mocks.noContact.mockResolvedValue(false);
 });
 it.each([
   ["MULTIPLE_RECOVERIES", identify],
@@ -97,4 +101,10 @@ it("ignores unsupported content and wrong sender", async () => {
     "NO_RECOVERY",
   );
   expect(mocks.set).not.toHaveBeenCalled();
+});
+
+it("does not send platform guidance to a STOP-recipient without a merchant route", async () => {
+  mocks.noContact.mockResolvedValue(true);
+  await sendRoutingGuidance({ ...event, customerPhone: "447400123456" }, "NO_RECOVERY");
+  expect(mocks.send).not.toHaveBeenCalled();
 });
