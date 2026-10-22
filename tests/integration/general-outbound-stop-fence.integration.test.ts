@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 import { OutboundMessageDeliveryService } from "../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
@@ -7,8 +7,12 @@ import { writeLocalStop } from "../../src/services/whatsapp-contact-opt-out/stop
 
 const url = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
-const phone = "+447400123456";
-const canonical = "447400123456";
+// Disjoint from STOP-suite fixtures; the same recipient stays shared within
+// each single scenario when testing Shop-lock ordering.
+function recipientFor(group: number) {
+  const phone = `+447400${group}${randomInt(1000, 10_000)}`;
+  return { phone, canonical: phone.slice(1) };
+}
 
 function deferred() {
   let resolve!: () => void;
@@ -22,6 +26,7 @@ describeWithDatabase("ARCH-045 general WhatsApp send / STOP Shop-lock ordering",
     async (kind) => {
       const db = new PrismaClient({ datasourceUrl: url! });
       const suffix = randomUUID().replaceAll("-", "");
+      const { phone, canonical } = recipientFor(kind === "text" ? 21 : 22);
       const shopId = `general-stop-${suffix}`;
       const stopLockedShop = deferred();
       const releaseStop = deferred();
@@ -80,6 +85,7 @@ describeWithDatabase("ARCH-045 general WhatsApp send / STOP Shop-lock ordering",
           undefined,
           { assessText: vi.fn(async () => ({ kind: "allow" })),
             requireCurrentAllowance: vi.fn(async () => true) } as never,
+          undefined, // providerFailure: use default adapter
           new GeneralOutboundSendFenceService(observingSendDatabase as never),
         );
         const stop = writeLocalStop(pausedStopDatabase as never, {
@@ -125,6 +131,7 @@ describeWithDatabase("ARCH-045 general WhatsApp send / STOP Shop-lock ordering",
   it("permits an already-committed general dispatch before STOP, but not a replay", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
+    const { phone, canonical } = recipientFor(23);
     const shopId = `general-admitted-${suffix}`;
     try {
       await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.com`, defaultCountryCode: "GB" } });
@@ -140,7 +147,15 @@ describeWithDatabase("ARCH-045 general WhatsApp send / STOP Shop-lock ordering",
         content: "Prepared message", status: "PENDING",
       } });
       const fence = new GeneralOutboundSendFenceService(db);
-      const input = { shopId, conversationId: conversation.id, messageId: message.id, recipient: phone };
+      const input = {
+        shopId, conversationId: conversation.id, messageId: message.id,
+        recipient: phone, expectedContent: "Prepared message",
+      };
+      expect(await fence.admitFinalSend({ ...input, expectedContent: "Other text" })).toEqual({
+        kind: "suppressed", reason: "invalid-scope",
+      });
+      expect((await db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } })).providerDispatchKey)
+        .toBeNull();
       expect(await fence.admitFinalSend(input)).toEqual({ kind: "admitted" });
       const admitted = await db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } });
       expect(admitted.providerDispatchKey).toMatch(/^arch045-general-/);
@@ -150,7 +165,25 @@ describeWithDatabase("ARCH-045 general WhatsApp send / STOP Shop-lock ordering",
         at: new Date() })).changed).toBe(1);
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: record.id } })).whatsappNoContact)
         .toBe(true);
-      expect(await fence.admitFinalSend(input)).toEqual({ kind: "suppressed" });
+      expect(await fence.admitFinalSend(input)).toEqual({
+        kind: "suppressed", reason: "already-admitted-or-sent",
+      });
+
+      // A transport retry cannot overwrite the immutable content or release
+      // usage after dispatch admission, even if STOP commits in the meantime.
+      const provider = { sendWhatsAppText: vi.fn(), sendWhatsAppTemplate: vi.fn() };
+      const delivery = new OutboundMessageDeliveryService(
+        db, provider as never,
+        { evaluate: vi.fn(async () => ({ allowed: true, shopId })) } as never,
+      );
+      expect(await delivery.sendPreparedText({
+        kind: "admitted", shopId, conversationId: conversation.id, messageId: message.id,
+        executionScope: "general", terminal: false, to: phone, text: "Unapproved retry body",
+      })).toEqual({ kind: "suppressed", reason: "duplicate" });
+      expect(provider.sendWhatsAppText).not.toHaveBeenCalled();
+      expect(provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      expect((await db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } })).content)
+        .toBe("Prepared message");
     } finally {
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();

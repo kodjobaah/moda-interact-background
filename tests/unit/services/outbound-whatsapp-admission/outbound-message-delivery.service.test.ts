@@ -28,6 +28,7 @@ function harness({
   });
   const conversationMessageFindUnique = vi.fn().mockImplementation(async () => ({
     conversationId: "conversation-1", senderType: "AGENT", content: currentText,
+    status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
   }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
   const usageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -37,7 +38,8 @@ function harness({
     if (statement.includes('FROM "whatsapp"."Conversation"'))
       return [{ controlRevision: 0 }];
     if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
-      return [{ status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null }];
+      return [{ status: "PENDING", content: currentText,
+        providerDispatchKey: null, providerDispatchAdmittedAt: null }];
     if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
       return [{ id: "message-1" }];
     return [];
@@ -84,6 +86,7 @@ function harness({
       { readTurnOwnership: vi.fn(async () => null) } as never,
       undefined,
       moderationMock as never,
+      undefined, // providerFailure uses its production adapter
       generalFence as never,
     ),
   };
@@ -105,7 +108,8 @@ describe("OutboundMessageDeliveryService", () => {
       if (statement.includes('FROM "commerce"."Shop"')) return [{ status: "ACTIVE" }];
       if (statement.includes('FROM "whatsapp"."Conversation"')) return [{ controlRevision: 0 }];
       if (statement.includes('FROM "whatsapp"."ConversationMessage"')) return [{
-        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+        status: "PENDING", content: "Don't send this",
+        providerDispatchKey: null, providerDispatchAdmittedAt: null,
       }];
       if (statement.includes('FROM "commerce"."CustomerPhone"')) return [{
         phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
@@ -149,19 +153,52 @@ describe("OutboundMessageDeliveryService", () => {
     },
   );
 
-  it("does not fail or release a previously admitted message on a duplicate dispatch", async () => {
-    const test = harness({
-      generalFence: { admitFinalSend: vi.fn(async () => ({
-        kind: "suppressed", reason: "already-admitted-or-sent",
-      })) },
-    });
+  it.each(["text", "template"])(
+    "does not re-prepare or release an already admitted %s message", async (kind) => {
+      const test = harness();
+      test.database.conversationMessage.findUnique.mockResolvedValue({
+        conversationId: "conversation-1", senderType: "AGENT", content: "Original approved text",
+        status: "PENDING", providerDispatchKey: "arch045-general-existing",
+        providerDispatchAdmittedAt: new Date(),
+      });
+      const result = kind === "text"
+        ? await test.service.sendPreparedText({
+          ...admission, to: "+447400123456", text: "Changed text",
+        })
+        : await test.service.sendPreparedTemplate(admission, {
+          to: "+447400123456", templateName: "changed", languageCode: "en",
+        });
+      expect(result).toEqual({ kind: "suppressed", reason: "duplicate" });
+      expect(test.database.conversationMessage.update).not.toHaveBeenCalled();
+      expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+      expect(test.moderationMock.assessText).not.toHaveBeenCalled();
+      expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+      expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses the injected general fence and preserves an already-admitted message", async () => {
+    const generalFence = { admitFinalSend: vi.fn(async () => ({
+      kind: "suppressed", reason: "already-admitted-or-sent",
+    })) };
+    const test = harness({ generalFence });
     expect(await test.service.sendPreparedText({
-      ...admission, to: "+15551234567", text: "Already admitted",
+      ...admission, to: "+447400123456", text: "Prepared text",
+    })).toEqual({ kind: "suppressed", reason: "duplicate" });
+    expect(generalFence.admitFinalSend).toHaveBeenCalledOnce();
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+  });
+
+  it("suppresses a prepared text when admission wins the content-update race", async () => {
+    const test = harness();
+    test.database.conversationMessage.update.mockRejectedValueOnce(
+      Object.assign(new Error("no matching unadmitted message"), { code: "P2025" }),
+    );
+    expect(await test.service.sendPreparedText({
+      ...admission, to: "+447400123456", text: "Stale response",
     })).toEqual({ kind: "suppressed", reason: "duplicate" });
     expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
-    expect(test.database.conversationMessage.update).not.toHaveBeenCalledWith(
-      expect.objectContaining({ data: { status: "FAILED" } }),
-    );
     expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 
@@ -187,7 +224,9 @@ describe("OutboundMessageDeliveryService", () => {
 
     expect(test.executionEligibility.evaluate).toHaveBeenCalledWith("shop-1");
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
-      where: { id: "message-1" },
+      where: { id: "message-1", AND: {
+        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+      } },
       data: { content: "Hello" },
     });
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
@@ -245,7 +284,9 @@ describe("OutboundMessageDeliveryService", () => {
       text: TERMINAL_MESSAGE,
     });
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
-      where: { id: "message-1" },
+      where: { id: "message-1", AND: {
+        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+      } },
       data: { content: TERMINAL_MESSAGE },
     });
   });
@@ -258,7 +299,9 @@ describe("OutboundMessageDeliveryService", () => {
     await expect(test.service.sendPreparedTemplate(admission, input))
       .resolves.toMatchObject({ kind: "admitted" });
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
-      where: { id: "message-1" }, data: { content: effectiveText },
+      where: { id: "message-1", AND: {
+        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+      } }, data: { content: effectiveText },
     });
     expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({
       subject: { kind: "AGENT_MESSAGE", messageId: "message-1" },
@@ -428,7 +471,9 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
     expect(test.database.conversationMessage.update).toHaveBeenCalledTimes(1);
     expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
-      where: { id: "message-1" },
+      where: { id: "message-1", AND: {
+        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+      } },
       data: { content: "Hello" },
     });
   });

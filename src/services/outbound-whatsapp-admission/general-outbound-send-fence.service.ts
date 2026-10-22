@@ -16,6 +16,7 @@ export class GeneralOutboundSendFenceService {
 
   async admitFinalSend(input: {
     shopId: string; conversationId: string; messageId: string; recipient: string;
+    expectedContent: string;
   }): Promise<GeneralSendPermit> {
     return this.database.$transaction(async (tx): Promise<GeneralSendPermit> => {
       const shops = await tx.$queryRawUnsafe<Array<{ status: string }>>(`
@@ -33,9 +34,10 @@ export class GeneralOutboundSendFenceService {
       if (conversations.length !== 1) return { kind: "suppressed", reason: "invalid-scope" };
 
       const messages = await tx.$queryRawUnsafe<Array<{
-        status: string; providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null;
+        status: string; content: string;
+        providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null;
       }>>(`
-        SELECT "status"::text,"providerDispatchKey","providerDispatchAdmittedAt"
+        SELECT "status"::text,"content","providerDispatchKey","providerDispatchAdmittedAt"
         FROM "whatsapp"."ConversationMessage"
         WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND'
           AND "senderType" IN ('AGENT','AUTOMATION')
@@ -44,6 +46,10 @@ export class GeneralOutboundSendFenceService {
       if (messages[0]!.status !== "PENDING" || messages[0]!.providerDispatchKey ||
           messages[0]!.providerDispatchAdmittedAt)
         return { kind: "suppressed", reason: "already-admitted-or-sent" };
+      // A different concurrent preparation must not replace the content that
+      // passed moderation. The message lock protects this equality through admit.
+      if (messages[0]!.content !== input.expectedContent)
+        return { kind: "suppressed", reason: "invalid-scope" };
 
       if (await hasLocalNoContact(tx, { shopId: input.shopId, recipient: input.recipient }))
         return { kind: "suppressed", reason: "local-no-contact" };

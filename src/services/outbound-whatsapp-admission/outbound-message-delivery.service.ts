@@ -68,6 +68,10 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision?: number;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
+    // Check the durable admission before any failure/usage side effects. An
+    // already-admitted message must never be re-prepared or dispatched again.
+    if (await this.hasCompletedPreparation(messageId))
+      return { kind: "suppressed", reason: "duplicate" };
     const suppression = await this.revalidateBeforeProvider({
       kind: "admitted",
       shopId,
@@ -78,16 +82,14 @@ export class OutboundMessageDeliveryService {
     });
     if (suppression) return suppression;
 
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: { content: outboundText },
-    });
+    if (!(await this.prepareUnadmittedContent(messageId, outboundText)))
+      return { kind: "suppressed", reason: "duplicate" };
     if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
       await this.failPrepared(messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
     const fenced = await this.fenceProviderSend({
-      shopId, conversationId, messageId, to,
+      shopId, conversationId, messageId, to, expectedContent: outboundText,
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -120,6 +122,8 @@ export class OutboundMessageDeliveryService {
     admission: AdmittedOutbound,
     input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
+    if (await this.hasCompletedPreparation(admission.messageId))
+      return { kind: "suppressed", reason: "duplicate" };
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
     // DATABASE-005 has no structured automated-template columns: persist the
@@ -138,9 +142,8 @@ export class OutboundMessageDeliveryService {
         return { kind: "suppressed", reason: "conversation-invalid" };
       }
     }
-    await this.database.conversationMessage.update({
-      where: { id: admission.messageId }, data: { content: outboundText },
-    });
+    if (!(await this.prepareUnadmittedContent(admission.messageId, outboundText)))
+      return { kind: "suppressed", reason: "duplicate" };
     if (!(await this.approvePreparedOutbound({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, outboundText,
@@ -150,7 +153,7 @@ export class OutboundMessageDeliveryService {
     }
     const fenced = await this.fenceProviderSend({
       shopId: admission.shopId, conversationId: admission.conversationId,
-      messageId: admission.messageId, to: input.to,
+      messageId: admission.messageId, to: input.to, expectedContent: outboundText,
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -163,6 +166,46 @@ export class OutboundMessageDeliveryService {
       return admission;
     } catch (error) {
       await this.providerFailure.afterProviderError(admission.messageId, input.to, error);
+      throw error;
+    }
+  }
+
+  /** A read avoids cleanup or moderation side effects on a replay; the guarded
+   * write below is the definitive protection against an admission racing it.
+   */
+  private async hasCompletedPreparation(messageId: string): Promise<boolean> {
+    const message = await this.database.conversationMessage.findUnique({
+      where: { id: messageId },
+      select: {
+        status: true, providerDispatchKey: true, providerDispatchAdmittedAt: true,
+      },
+    });
+    return !message || message.status !== MessageStatus.PENDING ||
+      message.providerDispatchKey !== null || message.providerDispatchAdmittedAt !== null;
+  }
+
+  /** Never change persisted content once any sender has acquired a dispatch
+   * permit. The unique id plus AND predicates form an atomic compare-and-set.
+   * Nullable unique fields belong in a nested WhereInput, not at the top level
+   * of Prisma's WhereUniqueInput (which rejects null for providerDispatchKey).
+   */
+  private async prepareUnadmittedContent(messageId: string, content: string): Promise<boolean> {
+    try {
+      await this.database.conversationMessage.update({
+        where: {
+          id: messageId,
+          AND: {
+            status: MessageStatus.PENDING,
+            providerDispatchKey: null,
+            providerDispatchAdmittedAt: null,
+          },
+        },
+        data: { content },
+      });
+      return true;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "P2025")
+        return false;
       throw error;
     }
   }
@@ -196,13 +239,14 @@ export class OutboundMessageDeliveryService {
    */
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
-    expectedControlRevision?: number;
+    expectedContent: string; expectedControlRevision?: number;
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (!ownership) {
       const permit = await this.generalFence.admitFinalSend({
         shopId: input.shopId, conversationId: input.conversationId,
         messageId: input.messageId, recipient: input.to,
+        expectedContent: input.expectedContent,
       });
       if (permit.kind === "admitted") return null;
       if (permit.reason === "already-admitted-or-sent")

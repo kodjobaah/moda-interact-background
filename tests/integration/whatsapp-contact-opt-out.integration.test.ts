@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 import { WhatsAppContactOptOutService } from "../../src/services/whatsapp-contact-opt-out.service.js";
@@ -10,10 +10,14 @@ import type { WhatsAppInboundEvent } from "../../src/integration/whatsapp/types.
 
 const url = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
-const phone = "+447400123456";
-const canonical = phone.slice(1);
+// Standalone STOP is deliberately number-wide. Each scenario gets a distinct
+// registered number so concurrent suites cannot suppress each other's shops.
+function recipientFor(group: number) {
+  const phone = `+447400${group}${randomInt(1000, 10_000)}`;
+  return { phone, canonical: phone.slice(1) };
+}
 const now = new Date("2026-10-22T19:00:00Z");
-const incoming = (patch: Record<string, unknown> = {}): WhatsAppInboundEvent => ({
+const incoming = (canonical: string, patch: Record<string, unknown> = {}): WhatsAppInboundEvent => ({
   schemaVersion: 1, provider: "whatsapp", providerAccountId: "waba-1", providerPhoneNumberId: "phone-1",
   providerMessageId: `wamid-${randomUUID()}`, customerPhone: canonical,
   contextMessageId: null, occurredAt: "2026-10-22T18:00:00Z",
@@ -26,6 +30,7 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
   it("updates Shopify and Woo registered phones, never another number; duplicate, later Shopify grant and merchant re-enable cannot clear STOP", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
+    const { phone, canonical } = recipientFor(11);
     const shopA = `stop-a-${suffix}`;
     const shopB = `stop-b-${suffix}`;
     try {
@@ -38,7 +43,8 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       const b = await db.customer.create({ data: { shopId: shopB } });
       const ap = await db.customerPhone.create({ data: { customerId: a.id, phone, whatsappCanonicalPhone: canonical } });
       const bp = await db.customerPhone.create({ data: { customerId: b.id, phone, whatsappCanonicalPhone: canonical } });
-      const different = await db.customerPhone.create({ data: { customerId: b.id, phone: "+447400123457" } });
+      const differentPhone = "+447409000000";
+      const different = await db.customerPhone.create({ data: { customerId: b.id, phone: differentPhone } });
       const identity = { shopId: shopA, shopifyCustomerId: "gid://shopify/Customer/125678912345" };
       const first = new ShopifyWhatsAppConsentService({ readCurrent: vi.fn(async () => ({
         kind: "OBSERVED" as const, customerGid: identity.shopifyCustomerId, phoneNumber: phone,
@@ -47,8 +53,8 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       expect((await first.syncCustomer(identity)).status).toBe("UPDATED");
       // The legacy same-shop matching number is registered after the native
       // grant; positive consent never transfers to another Customer by phone.
-      const ap2 = await db.customerPhone.create({ data: { customerId: a2.id, phone: "07400 123456" } });
-      const stop = incoming({ providerMessageId: `wamid-${suffix}` });
+      const ap2 = await db.customerPhone.create({ data: { customerId: a2.id, phone: `0${phone.slice(3, 7)} ${phone.slice(7)}` } });
+      const stop = incoming(canonical, { providerMessageId: `wamid-${suffix}` });
       expect(await optOut(db).handleInbound(stop)).toBe(true);
       const all = await db.customerPhone.findMany({ where: { id: { in: [ap.id, ap2.id, bp.id, different.id] } } });
       expect(all.filter((r) => r.whatsappNoContact)).toHaveLength(3);
@@ -56,7 +62,7 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       expect(all.filter((r) => r.whatsappNoContact).every((r) => r.whatsappNoContactReason === "CUSTOMER_STOP")).toBe(true);
       expect(await hasLocalNoContact(db, { shopId: shopA, recipient: phone })).toBe(true);
       expect(await hasLocalNoContact(db, { shopId: shopB, recipient: phone })).toBe(true);
-      expect(await hasLocalNoContact(db, { shopId: shopB, recipient: "+447400123457" })).toBe(false);
+      expect(await hasLocalNoContact(db, { shopId: shopB, recipient: differentPhone })).toBe(false);
       const before = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
       expect(await optOut(db).handleInbound(stop)).toBe(true);
       const after = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
@@ -95,6 +101,7 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
   it("quoted STOP blocks only its verified shop; unresolvable quoted STOP falls back to every shop", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
+    const { phone, canonical } = recipientFor(12);
     const shopA = `quoted-a-${suffix}`;
     const shopB = `quoted-b-${suffix}`;
     try {
@@ -119,10 +126,10 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
         direction: "OUTBOUND", senderType: "AUTOMATION", content: "Your basket",
         status: "SENT", sentAt: now,
       } });
-      await optOut(db).handleInbound(incoming({ contextMessageId: originalId }));
+      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: originalId }));
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } })).whatsappNoContact).toBe(true);
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(false);
-      await optOut(db).handleInbound(incoming({ contextMessageId: "unknown-quoted-provider-id" }));
+      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: "unknown-quoted-provider-id" }));
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(true);
     } finally {
       await db.shop.deleteMany({ where: { id: { in: [shopA, shopB] } } });
@@ -133,6 +140,7 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
   it("resumes partial merchant Support publication from durable STOP without duplicating notices", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
+    const { phone, canonical } = recipientFor(13);
     const shops = [`notice-a-${suffix}`, `notice-b-${suffix}`];
     try {
       await db.shop.createMany({ data: shops.map((id) => ({
