@@ -84,7 +84,6 @@ function harness({
       { readTurnOwnership: vi.fn(async () => null) } as never,
       undefined,
       moderationMock as never,
-      undefined,
       generalFence as never,
     ),
   };
