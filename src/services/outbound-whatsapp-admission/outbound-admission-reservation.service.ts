@@ -7,6 +7,7 @@ import type { BillingPolicyClient } from "../effective-billing-policy.service.js
 import { PostContractRecoveryPolicyResolver } from "../post-contract-recovery-policy.service.js";
 import { OutboundAdmissionPolicyService } from "./outbound-admission-policy.service.js";
 import { TERMINAL_MESSAGE } from "./outbound-message-delivery.service.js";
+import { failedRecipientOutreach } from "./failed-outreach-admission.js";
 import type {
   OutboundAdmissionInput,
   OutboundAdmissionResult,
@@ -22,6 +23,7 @@ type AdmissionDatabase = Pick<
   | "conversationMessage"
   | "usageEvent"
   | "usageReservation"
+  | "recoveryOutreachAttempt"
 >;
 type PolicyResolverFactory = (
   client: BillingPolicyClient,
@@ -53,7 +55,10 @@ export class OutboundAdmissionReservationService {
       where: { idempotencyKey },
       select: { sourceId: true },
     });
-    if (!usage?.sourceId) return null;
+    if (!usage?.sourceId) {
+      const historical = await failedRecipientOutreach(this.database, idempotencyKey);
+      return historical?.message ?? null;
+    }
     return this.database.conversationMessage.findUnique({
       where: { id: usage.sourceId },
       select: { id: true, conversationId: true, status: true, sentAt: true },
@@ -79,6 +84,11 @@ export class OutboundAdmissionReservationService {
       select: { sourceId: true },
     });
     if (existing) return { kind: "suppressed", reason: "duplicate" };
+    const historical = await failedRecipientOutreach(transaction, input.idempotencyKey);
+    if (historical?.shopId === input.shopId &&
+        historical.message.conversationId === input.conversationId) {
+      return { kind: "suppressed", reason: "duplicate" };
+    }
 
     const conversation = await transaction.conversation.findUnique({
       where: { id: input.conversationId },

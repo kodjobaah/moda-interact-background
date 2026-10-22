@@ -36,6 +36,7 @@ type AdmissionDatabase = Pick<
   | "conversationMessage"
   | "usageEvent"
   | "usageReservation"
+  | "recoveryOutreachAttempt"
 >;
 type PolicyResolverFactory = (
   client: BillingPolicyClient,

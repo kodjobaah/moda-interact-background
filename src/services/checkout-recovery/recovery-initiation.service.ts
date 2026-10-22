@@ -5,6 +5,7 @@ import { customerService } from "../customer.service.js";
 import { conversationService } from "../conversation.service.js";
 import { conversationMessageService } from "../conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
+import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
 import {
   recoveryBillingService,
@@ -233,10 +234,14 @@ export class RecoveryInitiationService {
         languageCode: selection.providerLanguageCode,
       });
     } catch (error) {
-      await this.billingService.handleProviderFailure({ admission: billing.admission, error });
-      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
-        failureCode: "PROVIDER_FAILURE",
-      });
+      // The exact 131026 message, attempt and credit were already reconciled
+      // at the provider boundary. Never reclassify or overwrite that evidence.
+      if (!isSynchronousRecipientFailure(error)) {
+        await this.billingService.handleProviderFailure({ admission: billing.admission, error });
+        await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
+          failureCode: "PROVIDER_FAILURE",
+        });
+      }
       throw error;
     }
 
@@ -256,6 +261,12 @@ export class RecoveryInitiationService {
         }
         if (existing?.status === "PENDING") {
           throw new Error(`Recovery outreach send is still pending for attempt ${attempt.id}`);
+        }
+        if (existing?.status === "FAILED") {
+          // Synchronous 131026 remains a consumed attempt after the hard-limit
+          // usage row is corrected; do not overwrite its terminal evidence.
+          await this.billingService.releaseBeforeProvider(billing.admission);
+          return recovery;
         }
         if (!existing) {
           throw new Error(`Recovery outreach admission has no durable message for attempt ${attempt.id}`);

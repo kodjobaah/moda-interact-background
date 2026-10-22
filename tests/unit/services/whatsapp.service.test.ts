@@ -256,4 +256,18 @@ describe("WhatsAppService API base URL", () => {
     await expect(new WhatsAppService(fetchMock).sendWhatsAppText(input))
       .rejects.toMatchObject({ code: "provider-rejected", providerCode: undefined });
   });
+  it.each(["sendWhatsAppText", "sendWhatsAppTemplate"] as const)(
+    "treats a non-JSON HTTP rejection as definitive without inventing a Meta code (%s)", async (method) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        new Response("gateway error without JSON", { status: 400 }));
+      const service = new WhatsAppService(fetchMock);
+      const call = method === "sendWhatsAppText"
+        ? service.sendWhatsAppText(input)
+        : service.sendWhatsAppTemplate({ to: input.to, templateName: "test", languageCode: "en" });
+      await expect(call).rejects.toMatchObject({
+        name: "WhatsAppServiceError", code: "provider-rejected", providerCode: undefined,
+      });
+    },
+  );
+
 });

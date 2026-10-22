@@ -1,5 +1,6 @@
 import prisma from "../../lib/db.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
+import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { recoveryOutreachFollowUpService } from "../recovery-outreach-follow-up.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
@@ -190,6 +191,10 @@ export class RecoveryOutreachFollowUpProcessorService {
               if (existing?.status === "PENDING") {
                 throw new Error(`Recovery outreach send is still pending for attempt ${attempt.id}`);
               }
+              if (existing?.status === "FAILED") {
+                await this.billingService.releaseBeforeProvider(billing.admission);
+                return { kind: "suppressed", reason: "recipient-undeliverable" } as const;
+              }
               if (!existing) {
                 throw new Error(`Recovery outreach admission has no durable message for attempt ${attempt.id}`);
               }
@@ -203,7 +208,7 @@ export class RecoveryOutreachFollowUpProcessorService {
           await this.finalizationService.finalizeConfirmedOutreach({ recovery, attempt, admission: billing.admission, message: persistedMessage });
           return { kind: "sent", attemptId: attempt.id } as const;
         } catch (error) {
-          if (!providerSendCompleted) {
+          if (!providerSendCompleted && !isSynchronousRecipientFailure(error)) {
             await this.billingService.handleProviderFailure({ admission: billing.admission, error });
             await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: "PROVIDER_FAILURE" });
           }

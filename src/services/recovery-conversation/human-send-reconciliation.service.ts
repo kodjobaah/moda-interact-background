@@ -53,7 +53,8 @@ export class HumanSendReconciliationService {
     commandId: string; leaseToken?: string; reason: string;
     definitiveProviderEvidence: boolean;
   }): Promise<ProviderDisposition> {
-    if (!input.definitiveProviderEvidence || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.reason))
+    if (!input.definitiveProviderEvidence ||
+      (!/^[a-z][a-z0-9_-]{0,63}$/.test(input.reason) && input.reason !== "131026"))
       return { kind: "ignored", reason: "unverified-provider-outcome" };
     return this.database.$transaction(async (tx) => {
       const command = await first<{ state: string; leaseToken: string | null; outboundMessageId: string | null }>(tx, `

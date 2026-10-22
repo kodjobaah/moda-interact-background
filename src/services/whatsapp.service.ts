@@ -109,7 +109,9 @@ export class WhatsAppService {
       },
     );
 
-    const body = await response.json();
+    // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
+    // A successful response with invalid JSON remains an uncertain send result.
+    const body = response.ok ? await response.json() : await response.json().catch(() => null);
 
     if (!response.ok) {
       throw new WhatsAppServiceError(
@@ -202,7 +204,9 @@ export class WhatsAppService {
       },
     );
 
-    const body = await response.json();
+    // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
+    // A successful response with invalid JSON remains an uncertain send result.
+    const body = response.ok ? await response.json() : await response.json().catch(() => null);
     if (!response.ok) {
       throw new WhatsAppServiceError(
         "provider-rejected",

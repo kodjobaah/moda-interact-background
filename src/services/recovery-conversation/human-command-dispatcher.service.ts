@@ -1,6 +1,8 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { connectionRedis } from "../../lib/redis.js";
 import { whatsAppService } from "../whatsapp.service.js";
+import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
+import { synchronousRecipientFailureService } from "../synchronous-recipient-failure.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import { recoveryOutreachAttemptService, type RecoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { MerchantSendCommandService, type HumanCommand } from "./merchant-send-command.service.js";
@@ -44,6 +46,8 @@ export type HumanDispatcherDependencies = {
   senderPreflight?: () => Promise<void>;
   /** Optional injected incident reporter; production always supplies it. */
   incidents?: HumanSendIncidentSink;
+  /** Recovery-template only: ordinary HUMAN_TEXT must never invoke this. */
+  recipientFailure?: Pick<typeof synchronousRecipientFailureService, "afterPersistedRejection">;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -64,6 +68,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     moderation: moderationAssessmentService,
     senderPreflight: () => whatsAppService.assertOutboundSenderConfigured(),
     incidents: createHumanSendIncidentSink(),
+    recipientFailure: synchronousRecipientFailureService,
   };
 }
 
@@ -317,17 +322,24 @@ export class HumanCommandDispatcherService {
         });
       }
     } catch (error) {
+      const terminalRecipient = isSynchronousRecipientFailure(error);
       const definitive = error instanceof Error && error.name === "WhatsAppServiceError" &&
         ["provider-rejected", "configuration-missing"].includes((error as Error & { code?: string }).code ?? "");
       let recordedOutcome: "unknown" | "definitive_failure" | null = null;
       if (definitive) {
         const outcome = await this.deps.reconciliation.recordDefinitiveFailure({
-          commandId, leaseToken, reason: "provider_rejected", definitiveProviderEvidence: true,
+          commandId, leaseToken,
+          reason: terminalRecipient && command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE"
+            ? "131026" : "provider_rejected",
+          definitiveProviderEvidence: true,
         });
         if (outcome.kind === "definitive-failure") {
           recordedOutcome = "definitive_failure";
           if (credit?.kind === "admitted") {
             await this.deps.billing.onDefinitiveProviderFailure({ admission: credit.admission, error });
+            if (terminalRecipient && command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" && attemptId) {
+              await this.deps.recipientFailure?.afterPersistedRejection(outcome.messageId);
+            }
           }
         }
       } else {

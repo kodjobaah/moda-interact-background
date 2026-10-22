@@ -1,4 +1,4 @@
-import { MessageStatus, UsageMetric } from "@prisma/client";
+import { MessageStatus } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../../lib/db.js";
@@ -15,9 +15,7 @@ import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-ru
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
-import { classifyWhatsAppProviderFailure } from "../../domain/whatsapp-recipient-failure.js";
-import { recoveryDeliveryCompensationService } from "../recovery-delivery-compensation/reconcile.service.js";
-import { RecipientReachabilityFailureService } from "../recipient-reachability-failure.service.js";
+import { OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
 import type {
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -47,8 +45,7 @@ export class OutboundMessageDeliveryService {
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
     private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
-    private readonly compensation = recoveryDeliveryCompensationService,
-    private readonly failureReachability = new RecipientReachabilityFailureService(),
+    private readonly providerFailure = new OutboundProviderFailureService(database),
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -117,8 +114,7 @@ export class OutboundMessageDeliveryService {
         executionScope,
       };
     } catch (error) {
-      await this.markProviderFailure(messageId, error);
-      await this.convergeTerminalRecipientFailure(messageId, error);
+      await this.providerFailure.afterProviderError(messageId, to, error);
       throw error;
     }
   }
@@ -169,8 +165,7 @@ export class OutboundMessageDeliveryService {
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
     } catch (error) {
-      await this.markProviderFailure(admission.messageId, error);
-      await this.convergeTerminalRecipientFailure(admission.messageId, error);
+      await this.providerFailure.afterProviderError(admission.messageId, input.to, error);
       throw error;
     }
   }
@@ -231,28 +226,7 @@ export class OutboundMessageDeliveryService {
   }
 
   async failPrepared(messageId: string): Promise<void> {
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: { status: MessageStatus.FAILED },
-    });
-    await this.database.usageEvent.deleteMany({
-      where: {
-        sourceId: messageId,
-        metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
-      },
-    });
-  }
-
-  private async convergeTerminalRecipientFailure(
-    messageId: string,
-    error: unknown,
-  ): Promise<void> {
-    const providerCode = error instanceof Error
-      ? (error as Error & { providerCode?: string }).providerCode
-      : undefined;
-    if (classifyWhatsAppProviderFailure(providerCode) !== "RECIPIENT_UNDELIVERABLE") return;
-    const correction = await this.compensation.reconcileMessage(messageId);
-    await this.failureReachability.afterCorrection({ messageId }, correction);
+    await this.providerFailure.failPrepared(messageId);
   }
 
   private async revalidateBeforeProvider(
@@ -301,39 +275,6 @@ export class OutboundMessageDeliveryService {
     });
   }
 
-  private async markProviderFailure(
-    messageId: string,
-    error: unknown,
-  ): Promise<void> {
-    const definitive =
-      error instanceof Error &&
-      error.name === "WhatsAppServiceError" &&
-      ["configuration-missing", "provider-rejected"].includes(
-        (error as Error & { code?: string }).code ?? "",
-      );
-    if (!definitive) return;
-    const providerCode = error instanceof Error
-      ? (error as Error & { providerCode?: string }).providerCode
-      : undefined;
-    if (!providerCode) {
-      await this.failPrepared(messageId);
-      return;
-    }
-    await this.database.conversationMessage.update({
-      where: { id: messageId },
-      data: {
-        status: MessageStatus.FAILED,
-        failedAt: new Date(),
-        ...(providerCode ? { providerFailureCode: providerCode } : {}),
-      },
-    });
-    await this.database.usageEvent.deleteMany({
-      where: {
-        sourceId: messageId,
-        metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE,
-      },
-    });
-  }
 }
 
 function suppressionReason(
