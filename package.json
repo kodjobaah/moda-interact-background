@@ -8,6 +8,8 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:shopify": "vitest run tests/integration/shopify.service.integration.test.ts",
+    "test:arch046-woo-consent-reader:unit": "vitest run tests/unit/services/woocommerce-recovery-consent/reader.test.ts",
+    "test:arch046-woo-consent-reader:postgres": "node scripts/test-integration.mjs tests/integration/woo-recovery-consent-reader.integration.test.ts",
     "test:arch035-woo-order-capture:unit": "vitest run tests/unit/events/woo-order-capture.test.ts tests/unit/workers/woo-order-capture.worker.test.ts tests/unit/runtime/entrypoint-isolation.test.ts",
     "test:arch035-woo-order-capture:redis": "node scripts/test-integration.mjs tests/integration/woo-order-capture.integration.test.ts",
     "test:integration": "node scripts/test-integration.mjs",
