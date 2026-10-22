@@ -90,7 +90,8 @@ describe("RecoveryAgentContextService", () => {
         conversationId: "conversation-1",
         shop: "canonical-shop.myshopify.com",
         type: "RECOVERY",
-        summary: "A bounded summary",
+        // Old persisted summaries lack content-specific moderation provenance.
+        summary: null,
         version: 7,
         languageTag: "fr-CA",
         languageSource: "shopify-import",
