@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { processShopifyWhatsAppConsentSyncJob } from "../../../src/services/shopify-whatsapp-consent-sync-job.service.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ShopifyWhatsAppConsentService,
@@ -457,4 +458,53 @@ describe("ShopifyWhatsAppConsentService", () => {
       expect(ctx.phones[0]!.whatsappConsentDecision).toBe("UNKNOWN");
     }
   });
+
+  it("projects grant/revoke through the actual consent job handler without overriding STOP or creating customers", async () => {
+    const ctx = fakeDatabase();
+    ctx.phones[0]!.whatsappNoContact = true;
+    ctx.phones[0]!.whatsappNoContactReason = "CUSTOMER_STOP";
+    ctx.phones[0]!.whatsappNoContactRevision = 5n;
+    const { instance, readCurrent } = service(ctx.db, [SUBSCRIBED, REVOKED, SUBSCRIBED]);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const event = { schemaVersion: 1, shopId: "shop-a", shopifyCustomerId: "12345",
+      deliveryId: "delivery-1", triggeredAt: "2026-10-19T10:00:00.000Z" };
+
+    expect(await processShopifyWhatsAppConsentSyncJob(event, instance, logger)).toBe("updated");
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "GRANTED", whatsappNoContact: true,
+      whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 5n,
+    });
+    expect(await processShopifyWhatsAppConsentSyncJob({ ...event, deliveryId: "delivery-2" }, instance, logger))
+      .toBe("updated");
+    expect(ctx.phones[0]!.whatsappConsentDecision).toBe("REVOKED");
+    expect(await processShopifyWhatsAppConsentSyncJob({ ...event, deliveryId: "delayed-delivery" }, instance, logger))
+      .toBe("stale");
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "REVOKED", whatsappNoContact: true,
+      whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 5n,
+    });
+    expect(readCurrent).toHaveBeenCalledTimes(3);
+    expect(ctx.mocks.customer.create).not.toHaveBeenCalled();
+    expect(ctx.mocks.customer.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps incoming sync identity shop-scoped, without writing to another shop or phone-only customer", async () => {
+    const ctx = fakeDatabase();
+    const { instance, readCurrent } = service(ctx.db);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const event = { schemaVersion: 1, shopId: "shop-a", shopifyCustomerId: "98765",
+      deliveryId: "delivery-other", triggeredAt: "2026-10-23T10:00:00.000Z" };
+    expect(await processShopifyWhatsAppConsentSyncJob(event, instance, logger)).toBe("skipped");
+    expect(readCurrent).not.toHaveBeenCalled();
+    expect(ctx.phones.every((row) => row.whatsappConsentRevision === 0n)).toBe(true);
+
+    expect(await processShopifyWhatsAppConsentSyncJob({
+      ...event, shopId: "shop-b", shopifyCustomerId: "12345",
+    }, instance, logger)).toBe("updated");
+    expect(ctx.phones[0]!.whatsappConsentRevision).toBe(0n);
+    expect(ctx.phones[1]!.whatsappConsentDecision).toBe("GRANTED");
+    expect(ctx.mocks.customer.create).not.toHaveBeenCalled();
+    expect(ctx.mocks.customer.update).not.toHaveBeenCalled();
+  });
+
 });
