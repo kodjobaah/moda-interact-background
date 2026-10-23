@@ -12,6 +12,7 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string }
   | { outcome: "recovery-reentered"; checkoutToken: string }
   | { outcome: "deferred-no-recipient"; checkoutToken: string }
+  | { outcome: "discarded-admission-denied"; checkoutToken: string }
   | { outcome: "no-op-existing"; checkoutToken: string; status: string }
   | { outcome: "discarded-terminal"; checkoutToken: string; status: string }
   | { outcome: "discarded-superseded"; checkoutToken: string }
@@ -36,6 +37,7 @@ type RecoveryMaterializationDependencies = {
   snapshotBuilder: Pick<RecoverySnapshotBuilderService, "build">;
   recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
   initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string) => Promise<unknown>;
+  noticeMissingRecipient?: (shopId: string, checkoutToken: string) => Promise<void>;
 };
 
 export class RecoveryMaterializationService {
@@ -152,9 +154,13 @@ export class RecoveryMaterializationService {
         const seed = await this.dependencies.snapshotBuilder.build(candidate, shopDomain, checkout);
         const recipient = await this.dependencies.recipientResolver.resolve(seed);
         if (!recipient) {
+          await this.dependencies.noticeMissingRecipient?.(candidate.shopId, candidate.checkoutToken);
           return { outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken } as const;
         }
-        await this.dependencies.initiate(seed, generation, recipient);
+        const initiated = await this.dependencies.initiate(seed, generation, recipient);
+        if (initiated === null) {
+          return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken } as const;
+        }
 
         return {
           outcome: reenterSuppressionRetry ? "recovery-reentered" : "recovery-created",

@@ -32,6 +32,8 @@ export type SelectedWhatsAppTemplate = {
   providerTemplateId: string | null;
   selectionSource: "exact" | "base" | "merchant-fallback" | "platform-fallback";
   marketCapability: "supported" | "provider-check-required";
+  /** Provider-verified Meta category. Unset until BACKGROUND-004 supplies a trusted category source. */
+  verifiedCategory?: "MARKETING" | "UTILITY" | "AUTHENTICATION";
 };
 
 export type WhatsAppTemplateSelectionResult =
