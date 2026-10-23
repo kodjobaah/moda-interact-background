@@ -208,6 +208,45 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
+  it("blocks an existing DETECTED first-send if local no-contact arrives after the first stored check", async () => {
+    // The first gate observes a grant; a concurrent STOP / merchant opt-out
+    // reaches CustomerPhone before the post-upsert first-send check.
+    mocks.consent.evaluateReentry.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const { service, billing, ports } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(mocks.consent.evaluateFirst).not.toHaveBeenCalled();
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledTimes(2);
+    expect(ports.upsertRecovery).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    expect(mocks.followUp.schedule).not.toHaveBeenCalled();
+  });
+
+  it("never reuses the checkout's old phone grant for a changed current recipient", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.consent.evaluateFirst.mockResolvedValueOnce(false);
+    const { service, ports, billing } = createInitiation();
+
+    await expect(service.handleCheckoutCreated({
+      ...event,
+      customer: { ...event.customer, shopifyCustomerId: "gid://shopify/Customer/123" },
+    }, 1, "+44 7700 900002")).resolves.toBeNull();
+
+    expect(mocks.consent.evaluateFirst).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: "customer-1",
+      shopifyCustomerId: "gid://shopify/Customer/123",
+      recipient: "447700900002",
+    }));
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("releases a reserved initial charge when consent is revoked before provider admission", async () => {
     // Pre-insert, post-upsert and pre-provider checks are three separate gates.
     // The revocation occurs only after the credit has been reserved.
