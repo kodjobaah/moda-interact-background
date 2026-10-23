@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { first, rows, changed, lockRecoveryContext, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
+import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
 export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date }
@@ -59,6 +60,11 @@ export class OutboundSendFenceService {
         WHERE "shopId"=$1`, context.shopId);
       if (input.senderType === "HUMAN" && restriction?.status === "SUSPENDED")
         return { kind: "suppressed", reason: "human_messaging_suspended" } as const;
+      // STOP/merchant blocks apply to all outbound actors, even during the
+      // customer-service window. Shop locking serialises this negative check
+      // with committed STOP updates; no external I/O in the transaction.
+      if (await hasLocalNoContact(tx, { shopId: context.shopId, recipient: input.recipient }))
+        return { kind: "suppressed", reason: "local-no-contact" } as const;
       const recipient = await first<{ suppressUntil: Date | null }>(tx, `
         SELECT "suppressUntil" FROM "whatsapp"."WhatsAppRecipientReachability"
         WHERE "shopId"=$1 AND "recipient"=$2`, context.shopId, input.recipient);

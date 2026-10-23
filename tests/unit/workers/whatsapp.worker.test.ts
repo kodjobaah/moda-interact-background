@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   guidance: vi.fn(),
+  optOut: vi.fn(),
   reachability: vi.fn(),
   audio: vi.fn(),
   logger: (() => {
@@ -34,6 +35,9 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: vi.fn(() => "test"),
 }));
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
+vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({
+  whatsAppContactOptOutService: { handleInbound: mocks.optOut },
+}));
 vi.mock("../../../src/services/recipient-reachability-positive.service.js", () => ({
   recipientReachabilityPositiveService: { fromRoutedInbound: mocks.reachability },
 }));
@@ -117,6 +121,7 @@ describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
+    mocks.optOut.mockResolvedValue(false);
     mocks.reachability.mockResolvedValue("recorded");
     mocks.conversation.receiveMessage.mockResolvedValue({
       duplicate: false,
@@ -189,6 +194,19 @@ describe("WhatsApp worker inbound execution gate", () => {
       expect(status).toMatch(/UNINSTALLED|SUSPENDED/);
     },
   );
+
+  it("handles authenticated STOP ahead of raw-abuse denial and ignored routing", async () => {
+    mocks.optOut.mockResolvedValueOnce(true);
+    // Use a persistent denial within this test: the STOP shortcut MUST NOT
+    // consume it, and a queued mockResolvedValueOnce would leak into the next test.
+    mocks.abuse.admitRaw.mockResolvedValue({ kind: "denied", reason: "RAW_SENDER" });
+    await processInboundMessage({ ...event, content: { type: "text", text: "STOP" } });
+    expect(mocks.optOut).toHaveBeenCalledOnce();
+    expect(mocks.abuse.admitRaw).not.toHaveBeenCalled();
+    expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.guidance).not.toHaveBeenCalled();
+    expect(mocks.processor.enqueue).not.toHaveBeenCalled();
+  });
 
   it("persists and enqueues an active context-linked inbound message", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
@@ -367,6 +385,7 @@ describe("ARCH-028 inbound reachability route gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
+    mocks.optOut.mockResolvedValue(false);
     mocks.guidance.mockResolvedValue(undefined);
     mocks.reachability.mockResolvedValue("recorded");
     mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: false, version: 1 });

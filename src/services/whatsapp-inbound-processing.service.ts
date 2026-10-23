@@ -1,6 +1,7 @@
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
+import { whatsAppContactOptOutService } from "./whatsapp-contact-opt-out.service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "./inbound-whatsapp-abuse-admission.service.js";
 import { recoveryRoutingService } from "./recovery-routing.service.js";
 import { sendRoutingGuidance } from "./routing-guidance.service.js";
@@ -21,6 +22,10 @@ export async function processRoutedInboundMessage(
     providerMessageId: event.providerMessageId,
     contentType: event.content.type,
   });
+
+  // Negative customer STOP is an authenticated, priority operation. Do not let
+  // raw abuse admission, moderation or ignored/guidance routing discard it.
+  if (await whatsAppContactOptOutService.handleInbound(event)) return;
 
   const abuse = await inboundWhatsAppAbuseAdmissionService.admitRaw({
     providerMessageId: event.providerMessageId,
