@@ -1,14 +1,13 @@
 import { Worker } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
-import {
-  mapCheckoutCreatedContractInput,
-  mapCheckoutUpdatedContractInput,
-  mapCartActivityContractInput,
-  parseRuntimeShopifyEvent,
-} from "../events/shopify-contract-adapter.js";
+import { dispatchCheckoutQueueJob } from "../events/checkout-worker-dispatch.js";
+import { ShopifyWhatsAppConsentService } from "../services/shopify-whatsapp-consent.service.js";
+import { processShopifyWhatsAppConsentSyncJob } from "../services/shopify-whatsapp-consent-sync-job.service.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
 import { SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
@@ -22,6 +21,7 @@ const workerMetricDefinition = {
   workerName: "checkout",
   queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
   jobNames: [
+    SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.WHATSAPP_CONSENT_SYNC.jobName,
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName,
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName,
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName,
@@ -29,37 +29,24 @@ const workerMetricDefinition = {
 } as const;
 
 export function createCheckoutWorker() {
+  const consentSynchroniser = new ShopifyWhatsAppConsentService();
+  const logger = createLogger({
+    serviceName: "moda-shopify-event-worker",
+    environment: resolveDeploymentEnvironmentName(),
+  });
+  const handlers = {
+    checkoutCreated: (input: Parameters<typeof checkoutRecoveryService.handleCheckoutCreatedContract>[0]) =>
+      checkoutRecoveryService.handleCheckoutCreatedContract(input),
+    checkoutUpdated: (input: Parameters<typeof checkoutRecoveryService.handleCheckoutUpdatedContract>[0]) =>
+      checkoutRecoveryService.handleCheckoutUpdatedContract(input),
+    cartActivity: (input: Parameters<typeof checkoutRecoveryService.handleCartActivityContract>[0]) =>
+      checkoutRecoveryService.handleCartActivityContract(input),
+    consentSync: (data: unknown) =>
+      processShopifyWhatsAppConsentSyncJob(data, consentSynchroniser, logger),
+  };
   const worker = new Worker<unknown>(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
-    async (job) =>
-      observeWorkerJob(workerMetricDefinition, job, async () => {
-        const parsedEvent = parseRuntimeShopifyEvent(job.data);
-
-        switch (job.name) {
-          case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName:
-            await checkoutRecoveryService.handleCheckoutCreatedContract(
-              mapCheckoutCreatedContractInput(parsedEvent),
-            );
-            return;
-
-          case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName:
-            await checkoutRecoveryService.handleCheckoutUpdatedContract(
-              mapCheckoutUpdatedContractInput(parsedEvent),
-            );
-            return;
-
-          case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName:
-            await checkoutRecoveryService.handleCartActivityContract(
-              mapCartActivityContractInput(parsedEvent),
-            );
-            return;
-
-          default:
-            throw new Error(
-              `Unknown checkout job: ${job.name}`,
-            );
-        }
-      }),
+    async (job) => observeWorkerJob(workerMetricDefinition, job, () => dispatchCheckoutQueueJob(job, handlers)),
 
     {
       connection: connectionRedis,
