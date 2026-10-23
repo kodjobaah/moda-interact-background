@@ -10,7 +10,7 @@ export type ReachabilityFailureOutcome =
 export type FailedMessageIdentity = { providerMessageId: string } | { messageId: string };
 
 const CORRECTED: readonly RecoveryDeliveryCompensationOutcome[] = [
-  "released", "already-released", "restored-spendable", "historical-only",
+  "released", "already-released", "restored-spendable", "historical-only", "held-for-refund",
 ];
 
 /** The compensation result is an explicit prerequisite, not inferred from FAILED. */

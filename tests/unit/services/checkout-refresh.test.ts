@@ -149,6 +149,13 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   },
 }));
 
+// This file tests checkout and history ordering, not moderation admission.
+// Treat its synthetic history as already approved; production history still
+// requires content-specific moderation evidence and fails closed on errors.
+vi.mock("../../../src/services/conversation-moderation/moderation-history.js", () => ({
+  allowedHistoryCandidates: vi.fn(async (items: unknown[]) => items),
+}));
+
 import { CheckoutRecoveryService } from "../../../src/services/checkout-recovery.service.js";
 
 const service = new CheckoutRecoveryService();

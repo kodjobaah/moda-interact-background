@@ -135,6 +135,49 @@ describe("WhatsApp worker inbound execution gate", () => {
     mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
   });
 
+  it("B011-03 performs raw admission before routing and persistence", async () => {
+    mocks.routing.resolveInboundMessage.mockResolvedValue({
+      kind: "resolved",
+      conversationId: "conversation-1",
+      checkoutRecoveryId: "recovery-1",
+      shopId: "shop-1",
+    });
+
+    await processInboundMessage(event);
+
+    expect(mocks.abuse.admitRaw).toHaveBeenCalledWith({
+      providerMessageId: event.providerMessageId,
+      customerPhone: event.customerPhone,
+    });
+    expect(mocks.routing.resolveInboundMessage).toHaveBeenCalledOnce();
+    expect(mocks.conversation.receiveMessage).toHaveBeenCalledOnce();
+    const admissionOrder = mocks.abuse.admitRaw.mock.invocationCallOrder[0]!;
+    expect(admissionOrder).toBeLessThan(
+      mocks.routing.resolveInboundMessage.mock.invocationCallOrder[0]!,
+    );
+    expect(admissionOrder).toBeLessThan(
+      mocks.conversation.receiveMessage.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("B011-05 prevents all downstream work on raw denial", async () => {
+    mocks.abuse.admitRaw.mockResolvedValueOnce({
+      kind: "denied",
+      stage: "raw",
+      reason: "RAW_SENDER",
+    });
+
+    await processInboundMessage(event);
+
+    expect(mocks.abuse.admitRaw).toHaveBeenCalledOnce();
+    expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+    expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled();
+    expect(mocks.reachability).not.toHaveBeenCalled();
+    expect(mocks.guidance).not.toHaveBeenCalled();
+    expect(mocks.processor.enqueue).not.toHaveBeenCalled();
+  });
+
   it.each(["UNINSTALLED", "SUSPENDED"])(
     "does not persist or enqueue a context-linked %s inbound message",
     async (status) => {
