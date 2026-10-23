@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { first, rows, changed, recoveryDatabase, readRecoveryContext, lockRecoveryContext,
+import { first, rows, changed, recoveryDatabase, readRecoveryContext, readRecoveryWindowEvidence, lockRecoveryContext,
   terminalRecovery, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 
 export const CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
 export type FollowUpClaim = { kind: "claimed"; attemptId: string; billingSource: string }
-  | { kind: "suppressed"; reason: "not-recovery-linked" | "terminal-recovery" | "human-controlled" | "customer-window-open" | "customer-engaged" | "no-initial-outreach" | "already-claimed" | "recipient-mismatch" | "invalid-claim" | "human-inactive-or-stale" };
+  | { kind: "suppressed"; reason: "not-recovery-linked" | "terminal-recovery" | "human-controlled" | "customer-window-open" | "customer-engaged" | "no-initial-outreach" | "already-claimed" | "recipient-mismatch" | "invalid-claim" | "human-inactive-or-stale" | "follow-up-not-due" };
 export type FollowUpInitiation = "scheduled_no_response" | "merchant_post_window";
 export type FollowUpClaimInput = {
   recoveryId: string; initiationKey: string; recipient: string; now: Date;
@@ -15,7 +15,8 @@ export type FollowUpClaimInput = {
 
 export function customerWindow(lastVerifiedInbound: Date | null, now: Date) {
   const closesAt = lastVerifiedInbound ? new Date(lastVerifiedInbound.getTime() + CUSTOMER_WINDOW_MS) : null;
-  return { open: closesAt !== null && now.getTime() < closesAt.getTime(), closesAt };
+  return { open: closesAt !== null && lastVerifiedInbound!.getTime() <= now.getTime() &&
+    now.getTime() < closesAt.getTime(), closesAt };
 }
 
 export class RecoveryFollowUpPolicyService {
@@ -23,8 +24,14 @@ export class RecoveryFollowUpPolicyService {
 
   async checkServiceWindow(conversationId: string, now = new Date()) {
     const context = await readRecoveryContext(this.database, conversationId);
-    return context ? { kind: "known" as const, ...customerWindow(context.lastInboundAt, now) }
-      : { kind: "not-recovery-linked" as const };
+    if (!context) return { kind: "not-recovery-linked" as const };
+    const evidence = await readRecoveryWindowEvidence(this.database, {
+      recoveryId: context.recoveryId, conversationId: context.id, now,
+    });
+    return { kind: "known" as const,
+      ...customerWindow(evidence?.initialSentAt && evidence.initialSentAt <= now
+        ? evidence.verifiedInboundAt : null, now),
+    };
   }
 
   async validateHumanFollowUp(input: { conversationId: string; now: Date; expectedRevision: number }) {
@@ -33,8 +40,15 @@ export class RecoveryFollowUpPolicyService {
     if (context.mode !== "HUMAN" || context.revision !== input.expectedRevision)
       return { kind: "suppressed", reason: "human-inactive-or-stale" } as const;
     if (terminalRecovery(context.recoveryStatus)) return { kind: "suppressed", reason: "terminal-recovery" } as const;
-    if (customerWindow(context.lastInboundAt, input.now).open)
+    const evidence = await readRecoveryWindowEvidence(this.database, {
+      recoveryId: context.recoveryId, conversationId: context.id, now: input.now,
+    });
+    if (!evidence?.initialSentAt || evidence.initialSentAt > input.now)
+      return { kind: "suppressed", reason: "no-initial-outreach" } as const;
+    if (customerWindow(evidence.verifiedInboundAt, input.now).open)
       return { kind: "suppressed", reason: "customer-window-open" } as const;
+    if (!evidence.followUpDueAt || evidence.followUpDueAt > input.now)
+      return { kind: "suppressed", reason: "follow-up-not-due" } as const;
     return { kind: "allowed" } as const;
   }
 
@@ -64,18 +78,24 @@ export class RecoveryFollowUpPolicyService {
         return { kind: "suppressed", reason: "human-inactive-or-stale" } as const;
       if (input.initiator === "scheduled_no_response" && context.mode === "HUMAN")
         return { kind: "suppressed", reason: "human-controlled" } as const;
-      if (input.initiator === "merchant_post_window" && customerWindow(context.lastInboundAt, input.now).open)
+      const evidence = await readRecoveryWindowEvidence(tx, {
+        recoveryId: input.recoveryId, conversationId: context.id, now: input.now, lockInitial: true,
+      });
+      if (!evidence?.initialSentAt || evidence.initialSentAt > input.now)
+        return { kind: "suppressed", reason: "no-initial-outreach" } as const;
+      if (evidence.recipient !== input.recipient)
+        return { kind: "suppressed", reason: "recipient-mismatch" } as const;
+      if (input.initiator === "merchant_post_window" && customerWindow(evidence.verifiedInboundAt, input.now).open)
         return { kind: "suppressed", reason: "customer-window-open" } as const;
-      const initial = await first<{ id: string; recipient: string; sentAt: Date | null; status: string }>(tx, `
-        SELECT "id", "recipient", "sentAt", "status"::text FROM "commerce"."RecoveryOutreachAttempt"
-        WHERE "checkoutRecoveryId"=$1 AND "sequence"=1 FOR UPDATE`, input.recoveryId);
-      if (!initial?.sentAt) return { kind: "suppressed", reason: "no-initial-outreach" } as const;
-      if (initial.recipient !== input.recipient) return { kind: "suppressed", reason: "recipient-mismatch" } as const;
+      // Effective due time is persisted when sequence 1 is finalised; never
+      // recompute it from mutable shop settings or impose a fixed 24-hour wait.
+      if (!evidence.followUpDueAt || evidence.followUpDueAt > input.now)
+        return { kind: "suppressed", reason: "follow-up-not-due" } as const;
       if (input.initiator === "scheduled_no_response") {
         const inbound = await first<{ id: string }>(tx, `
           SELECT "id" FROM "whatsapp"."ConversationMessage"
           WHERE "conversationId"=$1 AND "senderType"='CUSTOMER' AND "direction"='INBOUND'
-            AND "createdAt">=$2 LIMIT 1`, context.id, initial.sentAt);
+            AND "createdAt">=$2 LIMIT 1`, context.id, evidence.initialSentAt);
         if (inbound) return { kind: "suppressed", reason: "customer-engaged" } as const;
       }
       // Reuse existing attempt. A prior empty PENDING scheduled row can be won by HUMAN.
@@ -90,7 +110,7 @@ export class RecoveryFollowUpPolicyService {
           statement_timestamp(),statement_timestamp()
         FROM "commerce"."RecoveryOutreachAttempt" a WHERE a."id"=$3
         ON CONFLICT ("checkoutRecoveryId","sequence") DO NOTHING`,
-        input.recoveryId, randomUUID(), initial.id);
+        input.recoveryId, randomUUID(), evidence.initialAttemptId);
       const attempt = await first<{ id: string; initiatedBy: string | null; initiationKey: string | null; status: string; outboundMessageId: string | null }>(tx, `
         SELECT "id", "initiatedBy"::text, "initiationKey", "status"::text, "outboundMessageId"
         FROM "commerce"."RecoveryOutreachAttempt"

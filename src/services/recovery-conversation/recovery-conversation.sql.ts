@@ -69,3 +69,39 @@ export async function lockRecoveryContext(
 export type Decision = { kind: "allowed" } | { kind: "denied"; reason: string };
 export const allowed = (): Decision => ({ kind: "allowed" });
 export const denied = (reason: string): Decision => ({ kind: "denied", reason });
+
+/** Evidence for RECOVERY-only WhatsApp window/follow-up admission. A conversation
+ * timestamp is a cache, not proof of a provider-verified customer message.
+ * The caller must already have resolved (and for writes locked) Shop -> Conversation.
+ * lockInitial preserves claim's initial-outreach row lock before sequence 2.
+ */
+export type RecoveryWindowEvidence = {
+  initialAttemptId: string;
+  recipient: string;
+  initialSentAt: Date | null;
+  followUpDueAt: Date | null;
+  verifiedInboundAt: Date | null;
+};
+
+export async function readRecoveryWindowEvidence(
+  tx: SqlTransaction,
+  input: { recoveryId: string; conversationId: string; now: Date; lockInitial?: boolean },
+): Promise<RecoveryWindowEvidence | null> {
+  return first<RecoveryWindowEvidence>(tx, `
+    SELECT initial."id" AS "initialAttemptId", initial."recipient",
+      initial."sentAt" AS "initialSentAt", initial."followUpDueAt",
+      verified."createdAt" AS "verifiedInboundAt"
+    FROM "commerce"."RecoveryOutreachAttempt" initial
+    LEFT JOIN LATERAL (
+      SELECT msg."createdAt"
+      FROM "whatsapp"."ConversationMessage" msg
+      WHERE msg."conversationId"=$2 AND msg."direction"='INBOUND'
+        AND msg."senderType"='CUSTOMER' AND msg."providerMessageId" IS NOT NULL
+        AND initial."sentAt" IS NOT NULL
+        AND msg."createdAt">=initial."sentAt" AND msg."createdAt"<=$3
+      ORDER BY msg."createdAt" DESC, msg."id" DESC LIMIT 1
+    ) verified ON TRUE
+    WHERE initial."checkoutRecoveryId"=$1 AND initial."sequence"=1
+    ${input.lockInitial ? 'FOR UPDATE OF initial' : ''}`,
+    input.recoveryId, input.conversationId, input.now);
+}

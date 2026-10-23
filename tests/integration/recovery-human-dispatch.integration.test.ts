@@ -156,7 +156,17 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
   it("releases reserved recovery credit when suspension wins after billing but before permit", async () => {
     const f = await humanDispatchFixture("suspension-after-credit");
     try {
-      const { commandId } = await f.addMerchantFollowUpCommand();
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
+      // Billing admission must have a real durable reservation. BG007, not the
+      // dispatcher's mock billing port, owns its pre-provider release.
+      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
+      const counter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+      } });
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
       f.billing.admitAndRevalidate.mockImplementationOnce(async (input) => {
         await f.suspendShop();
@@ -166,10 +176,12 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       await service.processClaim(commandId, claim.leaseToken);
       await service.close();
       expect(f.billing.admitAndRevalidate).toHaveBeenCalledTimes(1);
-      expect(f.billing.releaseBeforePermit).toHaveBeenCalledTimes(1);
-      expect(f.billing.releaseBeforePermit).toHaveBeenCalledWith(
-        expect.objectContaining({ sourceKey: expect.stringContaining("recovery-outreach:") }),
-      );
+      expect(f.releaseExistingCredit).toHaveBeenCalledTimes(1);
+      expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
+      expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } })).status)
+        .toBe("RELEASED");
+      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
+        .reservedQuantity).toBe(0);
       expect(f.billing.onConfirmedProviderSend).not.toHaveBeenCalled();
       expect(f.billing.onDefinitiveProviderFailure).not.toHaveBeenCalled();
       expect(f.durableEligibility).not.toHaveBeenCalled();
@@ -369,9 +381,15 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
   it("denies queued HUMAN text after the verified customer window expires without template substitution", async () => {
     const f = await humanDispatchFixture("expired-human-window");
     try {
-      const commandId = await f.addCommand();
+      const commandId = await f.addCommand({ seedVerifiedInbound: false });
+      const expiredInboundAt = new Date(Date.now() - 25 * 60 * 60_000);
+      await f.db.conversationMessage.create({ data: {
+        conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
+        status: "DELIVERED", providerMessageId: `arch040-expired-${commandId}`,
+        content: "Earlier customer reply", createdAt: expiredInboundAt,
+      } });
       await f.db.conversation.update({ where: { id: f.conversationId },
-        data: { lastInboundAt: new Date(Date.now() - 25 * 60 * 60_000) } });
+        data: { lastInboundAt: expiredInboundAt } });
       const [claim] = await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() });
       const service = f.dispatcher();
       await service.processClaim(commandId, claim!.leaseToken);
@@ -483,6 +501,17 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         f.db.merchantConversationSendCommand.findUniqueOrThrow({
           where: { id }, select: { state: true, outboundMessageId: true },
         })));
+      // The two prior HUMAN_TEXT sends occurred during a verified service window.
+      // Advance the customer's recorded inbound evidence beyond 24 hours before
+      // opening a deliberate template follow-up; cached lastInboundAt alone is
+      // not sufficient to close a newly verified window.
+      const postWindowInboundAt = new Date(Date.now() - 25 * 60 * 60_000);
+      await f.db.conversationMessage.updateMany({
+        where: { conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER" },
+        data: { createdAt: postWindowInboundAt },
+      });
+      await f.db.conversation.update({ where: { id: f.conversationId },
+        data: { lastInboundAt: postWindowInboundAt } });
       const followUp = await f.addMerchantFollowUpCommand();
       const followUpDispatcher = f.dispatcher();
       await followUpDispatcher.poll();
@@ -497,6 +526,30 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       const followUpMessage = await f.db.conversationMessage.findUniqueOrThrow({
         where: { id: followUpCommand.outboundMessageId! },
         select: { id: true, providerMessageId: true },
+      });
+      // The dispatcher deliberately uses a billing mock. Seed the *committed*
+      // source that real billing would persist after Meta accepted the template,
+      // so ARCH-028 provider-status compensation has verifiable original lineage.
+      const followUpSourceKey = createRecoveryIdempotencyKey(
+        f.shopId, `recovery-outreach:${followUp.attemptId}`,
+      );
+      const followUpCounter = await f.db.shopEntitlementCounter.create({ data: {
+        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+        grantedQuantity: 1, committedQuantity: 1,
+      } });
+      const followUpReservation = await f.db.usageReservation.create({ data: {
+        shopId: f.shopId, counterId: followUpCounter.id,
+        sourceKey: followUpSourceKey, quantity: 1, status: "COMMITTED",
+      } });
+      const originalUsage = await f.db.usageEvent.create({ data: {
+        shopId: f.shopId, provider: "SHOPIFY", metric: "RECOVERY_CONVERSATION", quantity: 1,
+        idempotencyKey: createRecoveryIdempotencyKey(f.shopId, followUpSourceKey),
+        sourceType: "FREE_RECOVERY_RESERVATION", sourceId: followUpReservation.id,
+        shopifyReportState: "NOT_APPLICABLE",
+      } });
+      await f.db.usageReservation.update({
+        where: { id: followUpReservation.id },
+        data: { committedUsageEventId: originalUsage.id },
       });
       const statuses = new WhatsAppProviderStatusService(f.db as never, {
         debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => ({}),
@@ -531,6 +584,21 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         schemaVersion: 3 as const,
       };
       await expect(statuses.process(failedFollowUpEvent)).resolves.toBe("applied");
+      // A repeated FAILED receipt must not credit the same recovery twice.
+      await expect(statuses.process(failedFollowUpEvent)).resolves.toBe("ignored");
+      expect(await f.db.usageReservation.findUniqueOrThrow({
+        where: { id: followUpReservation.id },
+        select: { status: true, compensationDisposition: true, compensationUsageEventId: true },
+      })).toEqual({
+        status: "COMMITTED", compensationDisposition: "RESTORED_SPENDABLE",
+        compensationUsageEventId: expect.any(String),
+      });
+      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({
+        where: { id: followUpCounter.id },
+      })).committedQuantity).toBe(0);
+      expect(await f.db.usageEvent.count({
+        where: { correctionOfUsageEventId: originalUsage.id },
+      })).toBe(1);
       expect(await f.db.recoveryOutreachAttempt.findUnique({
         where: { id: followUp.attemptId }, select: { status: true, failureCode: true },
       })).toEqual({ status: "FAILED", failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE" });
@@ -791,17 +859,22 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         expect(lease?.expired).toBe(true);
       }, { timeout: 12_000, interval: 100 });
 
-      // A second worker may reclaim only after expiry; an old worker must
-      // never cancel that new lease or release the HUMAN sequence-two claim.
-      const [cancel, successors] = await Promise.all([
-        f.cancellationService().cancelClaimed(commandId, claim.leaseToken,
-          "human_content_moderation_blocked"),
-        f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }),
-      ]);
-      expect(cancel).toBe("stale");
+      // Reclaim first, then prove the expired worker cannot cancel that newer
+      // lease. Concurrent reclaim/cancellation can legitimately return no rows:
+      // the reclaimer uses FOR UPDATE SKIP LOCKED while cancellation owns the row.
+      const [databaseClock] = await f.db.$queryRawUnsafe<Array<{ now: Date }>>(
+        `SELECT statement_timestamp() AS "now"`,
+      );
+      const successors = await f.commands.claimDueHumanCommands({
+        limit: 1, now: databaseClock!.now,
+      });
       expect(successors).toHaveLength(1);
       expect(successors[0]?.id).toBe(commandId);
       expect(successors[0]?.leaseToken).not.toBe(claim.leaseToken);
+      const cancel = await f.cancellationService().cancelClaimed(
+        commandId, claim.leaseToken, "human_content_moderation_blocked",
+      );
+      expect(cancel).toBe("stale");
       expect((await f.commandState(commandId))?.state).toBe("CLAIMED");
       expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } }))
         .initiationKey).toBe(`merchant-${f.recoveryId}`);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { first, rows, changed, lockRecoveryContext, recoveryDatabase, terminalRecovery,
+import { first, rows, changed, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
@@ -13,6 +13,8 @@ export type DispatchInput = {
   expectedControlRevision: number;
   commandId?: string; leaseToken?: string; messageId?: string;
   recipient: string; now: Date;
+  /** Explicitly distinguish approved Meta templates from automated free text. */
+  deliveryKind?: "TEXT" | "TEMPLATE";
 };
 
 /** BG002 injects synchronous, database-only checks for shop entitlement, recovery
@@ -26,6 +28,7 @@ export class OutboundSendFenceService {
   constructor(
     private readonly database: RecoveryDatabase = recoveryDatabase,
     private readonly durableEligibility?: DurableEligibility,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   async admitProviderDispatch(input: DispatchInput): Promise<DispatchPermit> {
@@ -44,6 +47,10 @@ export class OutboundSendFenceService {
       // serializes initial restriction INSERT (restriction row may be absent).
       const context = await lockRecoveryContext(tx, input.conversationId);
       if (!context) return { kind: "suppressed", reason: "not-recovery-linked" } as const;
+      // Sample after waiting for the Shop/Conversation lock, not when a queued
+      // worker began preflight. An expired window cannot pass a delayed permit.
+      const now = this.clock();
+      if (!Number.isFinite(now.getTime())) return { kind: "suppressed", reason: "invalid-clock" } as const;
       if (context.shopId !== input.shopId || context.recoveryId !== input.recoveryId)
         return { kind: "suppressed", reason: "shop-mismatch" } as const;
       if (terminalRecovery(context.recoveryStatus))
@@ -68,45 +75,75 @@ export class OutboundSendFenceService {
       const recipient = await first<{ suppressUntil: Date | null }>(tx, `
         SELECT "suppressUntil" FROM "whatsapp"."WhatsAppRecipientReachability"
         WHERE "shopId"=$1 AND "recipient"=$2`, context.shopId, input.recipient);
-      if (recipient?.suppressUntil && recipient.suppressUntil > input.now)
+      if (recipient?.suppressUntil && recipient.suppressUntil > now)
         return { kind: "suppressed", reason: "recipient-suppressed" } as const;
       let command: {
         state: string; leaseToken: string | null; leaseExpiresAt: Date | null;
         expectedControlRevision: number; kind: string; recipientSnapshot: string;
         textBody: string | null; templateName: string | null;
-        recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
+        idempotencyKey: string; recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
       } | null = null;
       if (input.senderType === "HUMAN") {
         command = await first(tx, `
           SELECT "state"::text, "leaseToken", "leaseExpiresAt", "expectedControlRevision",
             "kind"::text, "recipientSnapshot", "textBody", "templateName",
-            "recoveryOutreachAttemptId", "providerDispatchKey"
+            "idempotencyKey", "recoveryOutreachAttemptId", "providerDispatchKey"
           FROM "whatsapp"."MerchantConversationSendCommand"
           WHERE "id"=$1 AND "conversationId"=$2 AND "shopId"=$3 FOR UPDATE`,
           input.commandId, context.id, context.shopId);
         if (!command || command.state !== "CLAIMED" || command.leaseToken !== input.leaseToken ||
-            !command.leaseExpiresAt || command.leaseExpiresAt <= input.now || command.providerDispatchKey)
+            !command.leaseExpiresAt || command.leaseExpiresAt <= now || command.providerDispatchKey)
           return { kind: "suppressed", reason: "invalid-lease" } as const;
         if (command.expectedControlRevision !== context.revision)
           return { kind: "suppressed", reason: "stale-control-revision" } as const;
         if (command.recipientSnapshot !== input.recipient)
           return { kind: "suppressed", reason: "recipient-mismatch" } as const;
-        if (command.kind === "HUMAN_TEXT" && !customerWindow(context.lastInboundAt, input.now).open)
-          return { kind: "suppressed", reason: "customer-window-closed" } as const;
+        if (command.kind !== "HUMAN_TEXT" && command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE")
+          return { kind: "suppressed", reason: "unsupported-human-command" } as const;
         if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
-          const attempt = await first<{ initiatedBy: string | null; outboundMessageId: string | null; status: string }>(tx, `
-            SELECT "initiatedBy"::text,"outboundMessageId","status"::text
+          const attempt = await first<{ initiatedBy: string | null; initiationKey: string | null;
+            outboundMessageId: string | null; sentAt: Date | null; status: string }>(tx, `
+            SELECT "initiatedBy"::text,"initiationKey","outboundMessageId","sentAt","status"::text
             FROM "commerce"."RecoveryOutreachAttempt"
             WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2 FOR UPDATE`,
             command.recoveryOutreachAttemptId, context.recoveryId);
-          if (!attempt || attempt.initiatedBy !== "HUMAN" || attempt.outboundMessageId || attempt.status !== "PENDING")
+          if (!attempt || attempt.initiatedBy !== "HUMAN" ||
+              attempt.initiationKey !== command.idempotencyKey ||
+              attempt.outboundMessageId || attempt.sentAt || attempt.status !== "PENDING")
             return { kind: "suppressed", reason: "follow-up-already-used" } as const;
-          if (customerWindow(context.lastInboundAt, input.now).open)
-            return { kind: "suppressed", reason: "customer-window-open" } as const;
         }
       }
       const furtherDenial = await durableEligibility(tx, input, context);
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
+
+      // This is the last reversible policy decision before the irreversible
+      // provider permit. Sample time after all potentially blocking row locks
+      // and eligibility work; the queue's earlier input.now is only a hint.
+      const permitNow = this.clock();
+      if (!Number.isFinite(permitNow.getTime()))
+        return { kind: "suppressed", reason: "invalid-clock" } as const;
+      if (command?.leaseExpiresAt && command.leaseExpiresAt <= permitNow)
+        return { kind: "suppressed", reason: "invalid-lease" } as const;
+      const freeText = input.senderType === "AGENT" ||
+        (input.senderType === "AUTOMATION" && input.deliveryKind !== "TEMPLATE") ||
+        command?.kind === "HUMAN_TEXT";
+      if (freeText || command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+        const evidence = await readRecoveryWindowEvidence(tx, {
+          recoveryId: context.recoveryId, conversationId: context.id, now: permitNow,
+        });
+        if (!evidence?.initialSentAt || evidence.initialSentAt > permitNow)
+          return { kind: "suppressed", reason: "no-initial-outreach" } as const;
+        const open = customerWindow(evidence.verifiedInboundAt, permitNow).open;
+        if (freeText && !open)
+          return { kind: "suppressed", reason: "customer-window-closed" } as const;
+        if (command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+          if (open) return { kind: "suppressed", reason: "customer-window-open" } as const;
+          if (!evidence.followUpDueAt || evidence.followUpDueAt > permitNow)
+            return { kind: "suppressed", reason: "follow-up-not-due" } as const;
+          if (evidence.recipient !== input.recipient)
+            return { kind: "suppressed", reason: "recipient-mismatch" } as const;
+        }
+      }
 
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
