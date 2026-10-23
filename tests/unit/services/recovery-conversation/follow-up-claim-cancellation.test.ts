@@ -11,7 +11,8 @@ import type { RecoveryDatabase } from
  */
 function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
   providerEvidence?: boolean; leased?: boolean; owner?: string;
-  releaseFails?: boolean; inspectionFails?: boolean } = {}) {
+  releaseFails?: boolean; inspectionFails?: boolean;
+  capacity?: "free" | "purchased" } = {}) {
   const ordered: string[] = [];
   let reservation = options.reservation;
   const billing = {
@@ -21,7 +22,7 @@ function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
       if (reservation === "AMBIGUOUS") return { kind: "unsafe" as const };
       return { kind: "reserved" as const, admission: {
         kind: "persisted" as const, shopId: "shop", sourceKey: "recovery-outreach:attempt",
-        capacity: "free" as const, quantity: 1,
+        capacity: options.capacity ?? "free", quantity: 1,
       } };
     }),
     releaseBeforePermit: vi.fn(async () => {
@@ -112,6 +113,28 @@ describe("ARCH-040-BACKGROUND-007 claim cancellation", () => {
     expect(f.cmd.state).toBe("CANCELLED");
     expect(f.attempt.initiationKey).toBeNull();
     expect(f.billing.inspectBeforePermit).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases a purchased lot only after cancellation, and verifies release before reclaim", async () => {
+    const f = fixture({ reservation: "RESERVED", capacity: "purchased" });
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("released");
+    expect(f.billing.releaseBeforePermit).toHaveBeenCalledExactlyOnceWith({
+      kind: "persisted", shopId: "shop", sourceKey: "recovery-outreach:attempt",
+      capacity: "purchased", quantity: 1,
+    });
+    expect(f.billing.inspectBeforePermit).toHaveBeenCalledTimes(2);
+    expect(f.attempt.initiationKey).toBeNull();
+    expect(await f.service.repairCancelledClaims()).toBe(0);
+  });
+
+  it("leaves purchased claim held after failure and repairs it only after durable release", async () => {
+    const f = fixture({ reservation: "RESERVED", capacity: "purchased", releaseFails: true });
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("held");
+    expect(f.attempt.initiationKey).toBe("original");
+    expect(await f.service.repairCancelledClaims()).toBe(0);
+    expect(f.attempt.initiationKey).toBe("original");
   });
 
   it("keeps a denied command cancelled and its claim held when credit release fails", async () => {
