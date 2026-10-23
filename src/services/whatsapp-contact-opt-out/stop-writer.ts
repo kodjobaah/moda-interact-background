@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { MerchantSupportMessageKind, MerchantSupportMessageState, Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { matchesRegisteredPhone } from "./phone.js";
+import { lockWhatsAppStopRecipient } from "./recipient-stop-serialization.js";
 
 type StopDatabase = Pick<PrismaClient, "$transaction" | "merchantSupportThread" | "merchantSupportMessage">;
 type ActivePhone = {
@@ -20,14 +21,18 @@ function matching(rows: ActivePhone[], canonical: string): ActivePhone[] {
 }
 
 /** Transactionally applies STOP across the entire current registered-phone set.
- * Shop locks coordinate with the final recovery provider fence. Cross-shop locks
- * are acquired in stable order. Provider consent fields are never modified.
+ * A recipient advisory lock coordinates shop-less platform guidance, then
+ * Shop locks coordinate with the recovery and general-send fences. Cross-shop
+ * Shop locks are still acquired in stable order. Provider consent fields are never modified.
  */
 export async function writeLocalStop(
   database: StopDatabase,
   input: { canonical: string; shopId: string | null; eventId: string; at: Date },
 ): Promise<StopWriteResult> {
   return database.$transaction(async (tx) => {
+    // Guidance has no merchant Shop row. Share one canonical-number lock so a
+    // STOP that commits first cannot race its final provider-admission read.
+    await lockWhatsAppStopRecipient(tx, input.canonical);
     const where: Prisma.CustomerPhoneWhereInput = {
       endedAt: null,
       OR: [{ whatsappCanonicalPhone: input.canonical }, { whatsappCanonicalPhone: null }],
