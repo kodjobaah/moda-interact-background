@@ -269,6 +269,14 @@ describe("OutboundMessageDeliveryService", () => {
     );
   });
 
+  it("does not fall back to general dispatch when recovery ownership is missing", async () => {
+    const test = harness();
+    await expect(test.service.sendPreparedText({
+      ...admission, executionScope: "recovery", to: "+15551234567", text: "Recovery reply",
+    })).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+  });
+
   it("forces deterministic terminal text for prepared text", async () => {
     const test = harness();
 

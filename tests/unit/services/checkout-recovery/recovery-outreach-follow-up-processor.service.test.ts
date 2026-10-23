@@ -18,7 +18,8 @@ const mocks = vi.hoisted(() => ({
     markWaitingAfterConfirmedSend: vi.fn(),
   },
   policy: { resolve: vi.fn() },
-  claim: { claimSequenceTwo: vi.fn() },
+  claim: { claimSequenceTwo: vi.fn(), releaseScheduledClaim: vi.fn() },
+  consent: { preflight: vi.fn() },
   message: { buildRecoveryTemplateDescriptor: vi.fn() },
   recipientResolver: { resolveForCustomerInShop: vi.fn() },
   followUp: { schedule: vi.fn() },
@@ -84,7 +85,7 @@ function createProcessor(billingOverrides: Partial<RecoveryBillingService> = {})
   // Inject those collaborators; their SQL and locks have separate tests.
   const ownership = { readTurnOwnership: vi.fn(async () => ({ mode: "AI", shopId: "shop-1" })) };
   return {
-    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never),
+    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never),
     billing,
   };
 }
@@ -109,6 +110,8 @@ beforeEach(() => {
     status: "PENDING",
     outboundMessageId: null,
   });
+  mocks.consent.preflight.mockResolvedValue({ kind: "allowed", snapshot: null });
+  mocks.claim.releaseScheduledClaim.mockResolvedValue(true);
   mocks.claim.claimSequenceTwo.mockResolvedValue({
     kind: "claimed",
     attemptId: attempt.id,
@@ -117,7 +120,7 @@ beforeEach(() => {
   mocks.outbound.getProviderAccountId.mockReturnValue("provider-1");
   mocks.outbound.sendTemplate.mockResolvedValue({ kind: "admitted" });
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
-  mocks.selector.select.mockResolvedValue({ outcome: "selected", providerTemplateName: "follow_up", canonicalLanguageTag: "fr-CA", providerLanguageCode: "fr_CA" });
+  mocks.selector.select.mockResolvedValue({ outcome: "selected", providerTemplateName: "follow_up", canonicalLanguageTag: "fr-CA", providerLanguageCode: "fr_CA", verifiedCategory: "MARKETING" });
   mocks.eligibility.evaluate.mockResolvedValue({ allowed: true });
   mocks.attempt.markNoResponseIfWaiting.mockResolvedValue({ count: 1 });
   mocks.attempt.getOrCreate.mockResolvedValue({ id: "attempt-1", status: "NO_RESPONSE" });
@@ -224,6 +227,49 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
+  it("denies revoked stored permission before the one sequence-two claim or billing", async () => {
+    setRecovery();
+    mocks.consent.preflight.mockResolvedValue({ kind: "denied", reason: "stored-consent-denied" });
+    const { processor, billing } = createProcessor();
+
+    await expect(processor.process(recovery.id)).resolves.toEqual({
+      kind: "suppressed", reason: "stored-consent-denied",
+    });
+    expect(mocks.consent.preflight).toHaveBeenCalledWith({
+      shopId: recovery.shopId, recoveryId: recovery.id, recipient: attempt.recipient,
+    });
+    expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each(["UTILITY", "AUTHENTICATION", undefined])(
+    "rejects %s Meta template category before consuming sequence two", async (category) => {
+      setRecovery();
+      mocks.selector.select.mockResolvedValue({
+        outcome: "selected", providerTemplateName: "follow_up", providerLanguageCode: "fr_CA",
+        verifiedCategory: category,
+      });
+      const { processor, billing } = createProcessor();
+      await expect(processor.process(recovery.id)).resolves.toEqual({
+        kind: "suppressed", reason: "marketing-template-unverified",
+      });
+      expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
+      expect(billing.admit).not.toHaveBeenCalled();
+      expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("releases a claimed sequence two after final stored consent revocation without a send", async () => {
+    setRecovery();
+    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "conversation-invalid" });
+    const { processor, billing } = createProcessor();
+    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+    expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledOnce();
+    expect(mocks.attempt.markStatus).not.toHaveBeenCalledWith(attempt.id, "FAILED", expect.anything());
+  });
+
   it("reschedules an actively suppressed follow-up without claiming, billing, or sending", async () => {
     setRecovery();
     const until = new Date("2026-10-12T00:00:00Z");
@@ -319,7 +365,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "SUBSCRIPTION_FROZEN" });
 
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "CANCELLED", { failureCode: "SUBSCRIPTION_FROZEN" });
+    expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.selector.select).not.toHaveBeenCalled();
   });
 
@@ -331,7 +377,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "template-unavailable" });
 
     expect(mocks.selector.select).toHaveBeenCalledWith(expect.objectContaining({ languageTag: "fr-CA", countryCode: "CA" }));
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", { failureCode: "TEMPLATE_UNAVAILABLE" });
+    expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
@@ -341,7 +387,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "capacity-blocked", reason: "capacity-exhausted" });
 
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "CAPACITY_BLOCKED", { failureCode: "capacity-exhausted" });
+    expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledWith({ recoveryId: recovery.id, attemptId: attempt.id, initiationKey: `scheduled-no-response:${recovery.id}` });
     expect(mocks.prisma.checkoutRecovery.updateMany).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
@@ -354,7 +400,8 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "capacity-blocked", reason: "policy-changed" });
 
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "CAPACITY_BLOCKED", { failureCode: "policy-changed" });
+    expect(mocks.claim.releaseScheduledClaim).toHaveBeenCalledOnce();
+    // Billing revalidation has already handled the blocked credit release.
     expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
     expect(mocks.prisma.checkoutRecovery.updateMany).not.toHaveBeenCalled();
   });
@@ -418,6 +465,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
 
     expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
     expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", { failureCode: "duplicate" });
+    expect(mocks.claim.releaseScheduledClaim).not.toHaveBeenCalled();
     expect(billing.handleProviderFailure).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
   });

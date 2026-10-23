@@ -52,6 +52,31 @@ export class RecoveryFollowUpPolicyService {
     return { kind: "allowed" } as const;
   }
 
+  /** Reset only this scheduled claim after a *confirmed pre-provider* denial
+   * and successful credit release. It is not a new attempt and cannot erase
+   * provider-dispatched/accepted evidence. Uses the same Shop -> Conversation
+   * -> Attempt lock order as claim and the final provider fence.
+   */
+  async releaseScheduledClaim(input: { recoveryId: string; attemptId: string; initiationKey: string }): Promise<boolean> {
+    return this.database.$transaction(async (tx) => {
+      const root = await first<{ id: string }>(tx, `
+        SELECT "id" FROM "whatsapp"."Conversation"
+        WHERE "checkoutRecoveryId"=$1 AND "type"='RECOVERY'`, input.recoveryId);
+      if (!root) return false;
+      const context = await lockRecoveryContext(tx, root.id);
+      if (!context || context.recoveryId !== input.recoveryId) return false;
+      const released = await changed(tx, `
+        UPDATE "commerce"."RecoveryOutreachAttempt"
+        SET "initiatedBy"=NULL,"initiationKey"=NULL,"claimedAt"=NULL,
+            "updatedAt"=statement_timestamp()
+        WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2
+          AND "initiatedBy"='AUTOMATION' AND "initiationKey"=$3
+          AND "status"='PENDING' AND "outboundMessageId" IS NULL AND "sentAt" IS NULL`,
+        input.attemptId, input.recoveryId, input.initiationKey);
+      return released === 1;
+    });
+  }
+
   /** Sequence 2 is the *only* recovery follow-up claim. Lock Shop and Conversation,
    * then claim the existing pending attempt or create once from initial snapshot.
    * Merchant claims require an expected HUMAN control revision under the same locks.

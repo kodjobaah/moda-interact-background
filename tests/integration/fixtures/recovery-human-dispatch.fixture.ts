@@ -91,6 +91,9 @@ export async function humanDispatchFixture(label: string) {
       reconciliation, billing, provider, execution,
       followUpCancellations: cancellationService(),
       now: () => new Date(), moderation, incidents, senderPreflight,
+      // Explicit trusted-provider fixture: production uses Meta category reads.
+      storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
+      templateCategories: { verify: vi.fn(async () => "MARKETING") },
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);
   }

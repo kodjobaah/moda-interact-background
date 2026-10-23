@@ -5,6 +5,7 @@
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import { first } from "./recovery-conversation.sql.js";
 import type { DurableEligibility } from "./outbound-send-fence.service.js";
+import { checkFinalStoredRecoveryConsent } from "./recovery-stored-consent.service.js";
 
 export const recoveryRuntimeEligibility: DurableEligibility = async (tx, input, context) => {
   const current = await first<{
@@ -31,6 +32,14 @@ export const recoveryRuntimeEligibility: DurableEligibility = async (tx, input, 
     },
   }, "recovery");
   if (!execution.allowed) return execution.reason.toLowerCase().replaceAll("_", "-");
+  if (current.platform === "SHOPIFY" && input.proactive) {
+    // The Shop lock was acquired by OutboundSendFenceService. A withdrawal,
+    // phone swap or STOP between preflight and this SQL permit invalidates it.
+    const denial = await checkFinalStoredRecoveryConsent(
+      tx, context, input.recipient, input.proactive.consent ?? undefined,
+    );
+    if (denial) return denial;
+  }
   if (input.senderType !== "HUMAN") {
     const recorded = await first<{ id: string }>(tx, `
       SELECT "id" FROM "billing"."UsageEvent"

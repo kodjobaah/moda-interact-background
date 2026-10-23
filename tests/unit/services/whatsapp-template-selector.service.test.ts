@@ -49,6 +49,19 @@ describe("WhatsAppTemplateSelectorService", () => {
     });
   });
 
+  it("only records Marketing when an injected provider metadata verifier confirms it", async () => {
+    const { selector } = createSelector([variant()]);
+    const verifyCategory = vi.fn(async () => "MARKETING" as const);
+    await expect(selector.select(input({ verifyCategory }))).resolves.toMatchObject({
+      outcome: "selected", verifiedCategory: "MARKETING",
+    });
+    expect(verifyCategory).toHaveBeenCalledWith({
+      providerAccountId: "provider_1", providerTemplateName: "recovery_en_us",
+      providerLanguageCode: "en_US", providerTemplateId: "tpl_en_us",
+    });
+    await expect(selector.select(input())).resolves.not.toHaveProperty("verifiedCategory");
+  });
+
   it("falls back to an approved base-language variant before merchant language", async () => {
     const { selector } = createSelector([
       variant({ languageTag: "en", providerLanguageCode: "en" }),

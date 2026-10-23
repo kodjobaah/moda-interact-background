@@ -7,6 +7,7 @@ import { conversationMessageService } from "../conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
+import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
 import {
   recoveryBillingService,
   type RecoveryBillingService,
@@ -224,15 +225,14 @@ export class RecoveryInitiationService {
       languageTag: null,
       countryCode: event.internationalContext?.countryCode ?? null,
       resolveMarketCapability: async () => "unknown" as const,
+      verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
     });
 
     if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
       return recovery;
     }
-    // The current template catalogue records APPROVED but not Meta's Marketing
-    // category. Do not treat approval or purpose as Marketing verification.
-    // BACKGROUND-004 owns the authoritative provider category and final fence;
-    // until it supplies a verified category, first outreach must fail closed.
+    // Approval/purpose alone never prove Marketing: the selector asks Meta for
+    // the exact account, name, language and (when known) template ID.
     if (selection.verifiedCategory !== "MARKETING") {
       return recovery;
     }

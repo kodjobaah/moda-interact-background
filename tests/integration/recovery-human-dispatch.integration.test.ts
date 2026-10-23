@@ -578,6 +578,32 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       await expect(statuses.process(failedEvent)).resolves.toBe("applied");
       await expect(statuses.process(failedEvent)).resolves.toBe("ignored");
 
+      // The dispatcher fixture deliberately mocks billing admission and settlement.
+      // A real provider-status failure must nevertheless have exact, durable
+      // committed reservation lineage; otherwise compensation correctly fails
+      // closed rather than inventing or crediting an unidentified source.
+      const followUpSourceKey = createRecoveryIdempotencyKey(
+        f.shopId, `recovery-outreach:${followUp.attemptId}`,
+      );
+      const counterId = await f.db.$transaction(async (tx) => {
+        const counter = await tx.shopEntitlementCounter.create({ data: {
+          shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
+          grantedQuantity: 1, committedQuantity: 1,
+        } });
+        const reservation = await tx.usageReservation.create({ data: {
+          shopId: f.shopId, counterId: counter.id, sourceKey: followUpSourceKey,
+          quantity: 1, status: "COMMITTED",
+        } });
+        const event = await tx.usageEvent.create({ data: {
+          shopId: f.shopId, metric: "RECOVERY_CONVERSATION", quantity: 1,
+          idempotencyKey: createRecoveryIdempotencyKey(f.shopId, followUpSourceKey),
+          sourceType: "FREE_RECOVERY_RESERVATION", sourceId: reservation.id,
+          shopifyReportState: "NOT_APPLICABLE",
+        } });
+        await tx.usageReservation.update({ where: { id: reservation.id },
+          data: { committedUsageEventId: event.id } });
+        return counter.id;
+      });
       const failedFollowUpEvent = {
         ...failedEvent,
         providerMessageId: followUpMessage.providerMessageId!,
@@ -602,6 +628,14 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
       expect(await f.db.recoveryOutreachAttempt.findUnique({
         where: { id: followUp.attemptId }, select: { status: true, failureCode: true },
       })).toEqual({ status: "FAILED", failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE" });
+      expect(await f.db.usageReservation.findUniqueOrThrow({
+        where: { sourceKey: followUpSourceKey },
+        select: { status: true, compensationReason: true, compensationDisposition: true },
+      })).toEqual({ status: "COMMITTED", compensationReason: "WHATSAPP_RECIPIENT_UNDELIVERABLE",
+        compensationDisposition: "RESTORED_SPENDABLE" });
+      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({
+        where: { id: counterId }, select: { committedQuantity: true },
+      })).committedQuantity).toBe(0);
 
       expect(await f.db.conversationMessage.findUnique({
         where: { id: messages[0]!.id }, select: { status: true, readAt: true },
@@ -859,12 +893,14 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         expect(lease?.expired).toBe(true);
       }, { timeout: 12_000, interval: 100 });
 
-      // Reclaim first, then prove the expired worker cannot cancel that newer
-      // lease. Concurrent reclaim/cancellation can legitimately return no rows:
-      // the reclaimer uses FOR UPDATE SKIP LOCKED while cancellation owns the row.
+      // Reclaim first so cancellation cannot race the SKIP LOCKED claim query.
+      // Use PostgreSQL's clock for its due-time cutoff, matching the expiry CAS.
       const [databaseClock] = await f.db.$queryRawUnsafe<Array<{ now: Date }>>(
         `SELECT statement_timestamp() AS "now"`,
       );
+      // A second worker may reclaim only after expiry; an old worker must
+      // never cancel that new lease or release the HUMAN sequence-two claim.
+      expect(databaseClock).toBeDefined();
       const successors = await f.commands.claimDueHumanCommands({
         limit: 1, now: databaseClock!.now,
       });
@@ -895,6 +931,8 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
           senderType: "HUMAN", conversationId: f.conversationId, shopId: f.shopId,
           recoveryId: f.recoveryId, expectedControlRevision: 1, commandId,
           leaseToken: claim.leaseToken, recipient: f.recipient, now: new Date(),
+          proactive: { consent: null, verifiedCategory: "MARKETING",
+            templateName: "recovery_follow_up", languageCode: "en_US" },
         }),
       ]);
       const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } });
@@ -918,6 +956,11 @@ suite("ARCH-040 BACKGROUND-002 real dispatcher, PostgreSQL/Redis and mock Meta",
         senderType: "HUMAN", conversationId: f.conversationId, shopId: f.shopId,
         recoveryId: f.recoveryId, expectedControlRevision: 1, commandId, leaseToken: lease.leaseToken,
         recipient: f.recipient, now: new Date(),
+        // Provider-verified category is mandatory for a recovery template.
+        // These lock/CAS tests stub durable eligibility; dedicated ARCH-045
+        // coverage exercises authoritative consent and category verification.
+        proactive: { consent: null, verifiedCategory: "MARKETING",
+          templateName: "recovery_follow_up", languageCode: "en_US" },
       });
       expect(permit.kind).toBe("admitted");
       const service = new FollowUpClaimCancellationService(f.db, f.commands);

@@ -16,6 +16,13 @@ import type { OutboundAdmissionResult } from "./outbound-whatsapp-admission.type
 import { OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
 import { suppressionReason } from "./outbound-delivery-errors.js";
 import { GeneralOutboundSendFenceService } from "./general-outbound-send-fence.service.js";
+import {
+  recoveryStoredConsentService, type StoredRecoveryConsentReader,
+} from "../recovery-conversation/recovery-stored-consent.service.js";
+import {
+  metaWhatsAppTemplateCategoryService, type TemplateCategoryVerifier,
+} from "../whatsapp-template-category.service.js";
+import type { RecoveryMarketingPermit } from "../recovery-conversation/outbound-send-fence.service.js";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
@@ -43,6 +50,8 @@ export class OutboundMessageDeliveryService {
     private readonly moderation: ModerationAssessmentService = moderationAssessmentService,
     private readonly providerFailure = new OutboundProviderFailureService(database),
     private readonly generalFence = new GeneralOutboundSendFenceService(database),
+    private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
+    private readonly templateCategories: TemplateCategoryVerifier = metaWhatsAppTemplateCategoryService,
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -89,7 +98,8 @@ export class OutboundMessageDeliveryService {
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
     const fenced = await this.fenceProviderSend({
-      shopId, conversationId, messageId, to, expectedContent: outboundText, deliveryKind: "TEXT",
+      shopId, conversationId, messageId, to, expectedContent: outboundText,
+      executionScope, deliveryKind: "TEXT",
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -154,8 +164,10 @@ export class OutboundMessageDeliveryService {
     const fenced = await this.fenceProviderSend({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to, expectedContent: outboundText,
+      ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
       deliveryKind: prepared ? "TEMPLATE" : "TEXT",
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
+      ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode } } : {}),
     });
     if (fenced) return fenced;
 
@@ -241,10 +253,18 @@ export class OutboundMessageDeliveryService {
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
     expectedContent: string; expectedControlRevision?: number;
+    executionScope?: "general" | "recovery";
+    template?: { name: string; languageCode: string };
     deliveryKind: "TEXT" | "TEMPLATE";
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (!ownership) {
+      // A recovery-scoped reservation may not bypass the recovery consent/STOP
+      // fence merely because ownership resolution returned no row.
+      if (input.executionScope === "recovery") {
+        await this.failPrepared(input.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
       const permit = await this.generalFence.admitFinalSend({
         shopId: input.shopId, conversationId: input.conversationId,
         messageId: input.messageId, recipient: input.to,
@@ -263,12 +283,36 @@ export class OutboundMessageDeliveryService {
       await this.failPrepared(input.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
+    let proactive: RecoveryMarketingPermit | undefined;
+    if (input.template) {
+      // Meta category and stored-consent preflight are performed outside SQL.
+      // A changed consent/STOP revision is independently caught inside the
+      // Shop-locked final permit; this check cannot perform Shopify GraphQL.
+      const [category, permission] = await Promise.all([
+        this.templateCategories.verify({
+          providerTemplateName: input.template.name,
+          providerLanguageCode: input.template.languageCode,
+        }),
+        this.recoveryConsent.preflight({
+          shopId: input.shopId, recoveryId: ownership.recoveryId, recipient: input.to,
+        }),
+      ]);
+      if (category !== "MARKETING" || permission.kind !== "allowed") {
+        await this.failPrepared(input.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
+      proactive = {
+        verifiedCategory: "MARKETING", templateName: input.template.name,
+        languageCode: input.template.languageCode, consent: permission.snapshot,
+      };
+    }
     const permit = await this.recoveryFence.admitFinalSend({
       senderType: message.senderType,
       conversationId: input.conversationId, shopId: input.shopId,
       recoveryId: ownership.recoveryId,
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
       messageId: input.messageId, recipient: input.to, now: new Date(),
+      ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
     });
     if (permit.kind === "admitted") return null;

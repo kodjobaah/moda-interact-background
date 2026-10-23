@@ -169,7 +169,11 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       } });
       const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
       const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
-        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation);
+        new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation,
+        undefined, undefined,
+        // The fixture proves template/moderation delivery, not Shopify/Meta reads.
+        { preflight: async () => ({ kind: "allowed", snapshot: null }) },
+        { verify: async () => "MARKETING" });
       const template = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
         bodyParameters: ["Your basket is ready to recover.", "cart-123"] };
       const expected = prepareAutomatedTemplateInput(template).effectiveText;

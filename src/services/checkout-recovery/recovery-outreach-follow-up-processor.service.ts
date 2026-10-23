@@ -11,6 +11,10 @@ import {
 import { pendingRecoveryCandidateService } from "../pending-recovery-candidate.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
+import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
+import {
+  recoveryStoredConsentService, type StoredRecoveryConsentReader,
+} from "../recovery-conversation/recovery-stored-consent.service.js";
 import { conversationMessageService } from "../conversation.message.service.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
 import { recoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
@@ -25,6 +29,7 @@ export class RecoveryOutreachFollowUpProcessorService {
     private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(billingService),
     private readonly followUpPolicy = new RecoveryFollowUpPolicyService(),
     private readonly ownership = new AiTurnOwnershipService(),
+    private readonly storedConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
   ) {}
 
   async process(recoveryId: string) {
@@ -99,6 +104,32 @@ export class RecoveryOutreachFollowUpProcessorService {
         if (!owner || owner.mode !== "AI" || owner.shopId !== recovery.shopId) {
           return { kind: "suppressed", reason: "human-controlled" } as const;
         }
+        // Stored-only permission, BEFORE sequence-two claim and any recovery
+        // credit reservation. Never re-read Shopify for an existing recovery.
+        const permission = await this.storedConsent.preflight({
+          shopId: recovery.shopId, recoveryId, recipient,
+        });
+        if (permission.kind !== "allowed") return { kind: "suppressed", reason: permission.reason } as const;
+        const execution = await shopExecutionEligibilityService.evaluate(
+          recovery.shopId, undefined, "recovery",
+        );
+        if (!execution.allowed) return { kind: "suppressed", reason: execution.reason } as const;
+        // Read Meta's exact category before occupying the one sequence-two slot.
+        const selection = await whatsappTemplateSelectorService.select({
+          shopId: recovery.shopId,
+          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
+          purpose: "checkout-recovery",
+          languageTag: recovery.conversation?.languageTag ?? null,
+          countryCode: recovery.conversation?.countryCode ?? null,
+          resolveMarketCapability: async () => "unknown" as const,
+          verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
+        });
+        if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
+          return { kind: "suppressed", reason: "template-unavailable" } as const;
+        }
+        if (selection.verifiedCategory !== "MARKETING") {
+          return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
+        }
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
           const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient });
@@ -123,30 +154,9 @@ export class RecoveryOutreachFollowUpProcessorService {
             attempt.initiationKey !== initiationKey || attempt.outboundMessageId ||
             attempt.status !== "PENDING")
           return { kind: "suppressed", reason: "already-claimed" } as const;
-        const execution = await shopExecutionEligibilityService.evaluate(
-          recovery.shopId,
-          undefined,
-          "recovery",
-        );
-        if (!execution.allowed) {
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "CANCELLED", { failureCode: execution.reason });
-          return { kind: "suppressed", reason: execution.reason } as const;
-        }
-        const selection = await whatsappTemplateSelectorService.select({
-          shopId: recovery.shopId,
-          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
-          purpose: "checkout-recovery",
-          languageTag: recovery.conversation?.languageTag ?? null,
-          countryCode: recovery.conversation?.countryCode ?? null,
-          resolveMarketCapability: async () => "unknown" as const,
-        });
-        if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: "TEMPLATE_UNAVAILABLE" });
-          return { kind: "suppressed", reason: "template-unavailable" } as const;
-        }
         let billing = await this.billingService.admit({ shopId: recovery.shopId, recoveryId, outreachAttemptId: attempt.id });
         if (billing.kind === "blocked") {
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", { failureCode: billing.reason });
+          await this.followUpPolicy.releaseScheduledClaim({ recoveryId, attemptId: attempt.id, initiationKey });
           return { kind: "capacity-blocked", reason: billing.reason } as const;
         }
         const revalidated = await this.billingService.revalidateBeforeProvider({
@@ -155,7 +165,9 @@ export class RecoveryOutreachFollowUpProcessorService {
           outreachAttemptId: attempt.id,
         });
         if (revalidated.kind === "blocked") {
-          await recoveryOutreachAttemptService.markStatus(attempt.id, "CAPACITY_BLOCKED", { failureCode: revalidated.reason });
+          // RecoveryBillingService.revalidateBeforeProvider has already
+          // compensated/released the provisional credit on a blocked result.
+          await this.followUpPolicy.releaseScheduledClaim({ recoveryId, attemptId: attempt.id, initiationKey });
           return { kind: "capacity-blocked", reason: revalidated.reason } as const;
         }
         billing = revalidated;
@@ -206,7 +218,15 @@ export class RecoveryOutreachFollowUpProcessorService {
               }
             }
             await this.billingService.releaseBeforeProvider(billing.admission);
-            await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: result.reason });
+            if (result.reason === "duplicate") {
+              // A prior attempt might have committed a provider permit even if
+              // its message later failed. Do not open a second send slot.
+              await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", { failureCode: "duplicate" });
+            } else {
+              // This suppression happened before any provider permit, and its
+              // provisional credit was just released; the slot may be reused.
+              await this.followUpPolicy.releaseScheduledClaim({ recoveryId, attemptId: attempt.id, initiationKey });
+            }
             return result;
           }
           const persistedMessage = await outboundWhatsAppAdmissionService.findExistingAdmission(`recovery-outreach:${attempt.id}`);
