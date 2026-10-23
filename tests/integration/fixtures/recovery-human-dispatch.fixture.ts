@@ -101,10 +101,28 @@ export async function humanDispatchFixture(label: string) {
   async function addCommand(input: {
     kind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
     idempotencyKey?: string; attemptId?: string; textBody?: string;
+    seedVerifiedInbound?: boolean;
   } = {}) {
     const id = randomUUID();
     const key = input.idempotencyKey ?? id;
     const kind = input.kind ?? "HUMAN_TEXT";
+    // A real recovery text reply needs sent sequence 1 and a verified customer
+    // inbound after it. lastInboundAt alone must never open the service window.
+    if (kind === "HUMAN_TEXT") {
+      const initial = await db.recoveryOutreachAttempt.findFirst({
+        where: { checkoutRecoveryId: recoveryId, sequence: 1 }, select: { id: true },
+      });
+      if (!initial) await addInitialOutreach();
+      if (input.seedVerifiedInbound !== false) {
+        const incomingAt = new Date(Date.now() - 5_000);
+        await db.conversationMessage.create({ data: {
+          conversationId, direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED",
+          providerMessageId: `arch040-inbound-${randomUUID()}`, content: "Customer requested a reply",
+          createdAt: incomingAt,
+        } });
+        await db.conversation.update({ where: { id: conversationId }, data: { lastInboundAt: incomingAt } });
+      }
+    }
     const text = kind === "HUMAN_TEXT" ? input.textBody ?? `Hello ${id}` : null;
     const digest = createHash("sha256").update(`${key}:${kind}`).digest("hex");
     await db.$executeRawUnsafe(`INSERT INTO "whatsapp"."MerchantConversationSendCommand"
@@ -118,6 +136,12 @@ export async function humanDispatchFixture(label: string) {
   }
 
   async function addInitialOutreach() {
+    // HUMAN_TEXT fixtures may already have seeded sequence 1; a later
+    // follow-up must reuse that durable initial attempt rather than insert it twice.
+    const existing = await db.recoveryOutreachAttempt.findFirst({
+      where: { checkoutRecoveryId: recoveryId, sequence: 1 }, select: { id: true },
+    });
+    if (existing) return;
     const sentAt = new Date(Date.now() - 48 * 60 * 60_000);
     const messageId = randomUUID();
     await db.conversationMessage.create({ data: {
@@ -126,9 +150,10 @@ export async function humanDispatchFixture(label: string) {
     } });
     await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
       ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
-       "configuredOfferMode","outboundMessageId","sentAt","updatedAt")
-      VALUES ($1,$2,$3,1,'INITIAL','WAITING_FOR_RESPONSE','NONE',$4,$5,statement_timestamp())`,
-      randomUUID(), recoveryId, recipient, messageId, sentAt);
+       "configuredOfferMode","outboundMessageId","sentAt","followUpDueAt","updatedAt")
+      VALUES ($1,$2,$3,1,'INITIAL','WAITING_FOR_RESPONSE','NONE',$4,$5,$6,statement_timestamp())`,
+      randomUUID(), recoveryId, recipient, messageId, sentAt,
+      new Date(sentAt.getTime() + 60 * 60_000));
     await db.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation" SET "lastInboundAt"=$2 WHERE "id"=$1`,
       conversationId, sentAt);
   }

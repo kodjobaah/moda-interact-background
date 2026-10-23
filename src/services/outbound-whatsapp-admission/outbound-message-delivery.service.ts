@@ -99,7 +99,7 @@ export class OutboundMessageDeliveryService {
     }
     const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to, expectedContent: outboundText,
-      executionScope,
+      executionScope, deliveryKind: "TEXT",
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -165,6 +165,7 @@ export class OutboundMessageDeliveryService {
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to, expectedContent: outboundText,
       ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
+      deliveryKind: prepared ? "TEMPLATE" : "TEXT",
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
       ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode } } : {}),
     });
@@ -254,6 +255,7 @@ export class OutboundMessageDeliveryService {
     expectedContent: string; expectedControlRevision?: number;
     executionScope?: "general" | "recovery";
     template?: { name: string; languageCode: string };
+    deliveryKind: "TEXT" | "TEMPLATE";
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (!ownership) {
@@ -311,6 +313,7 @@ export class OutboundMessageDeliveryService {
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
       messageId: input.messageId, recipient: input.to, now: new Date(),
       ...(proactive ? { proactive } : {}),
+      deliveryKind: input.deliveryKind,
     });
     if (permit.kind === "admitted") return null;
     if (permit.reason !== "already-admitted-or-sent") {

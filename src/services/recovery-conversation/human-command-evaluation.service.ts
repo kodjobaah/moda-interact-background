@@ -23,10 +23,11 @@ export class HumanCommandEvaluationService {
     const restriction = await this.policy.checkRestriction(command.shopId);
     if (restriction.kind === "denied") return { kind: "terminal", reason: restriction.reason };
     if (restriction.kind === "retryable") return restriction;
-    const window = await this.followUp.checkServiceWindow(command.conversationId, now);
-    if (window.kind !== "known") return { kind: "terminal", reason: "not-recovery-linked" };
-    if (command.kind === "HUMAN_TEXT" && !window.open)
-      return { kind: "terminal", reason: "customer-window-closed" };
+    if (command.kind === "HUMAN_TEXT") {
+      const window = await this.followUp.checkServiceWindow(command.conversationId, now);
+      if (window.kind !== "known") return { kind: "terminal", reason: "not-recovery-linked" };
+      if (!window.open) return { kind: "terminal", reason: "customer-window-closed" };
+    }
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
       const followUp = await this.followUp.validateHumanFollowUp({
         conversationId: command.conversationId,
