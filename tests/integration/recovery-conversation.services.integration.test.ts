@@ -35,6 +35,17 @@ async function fixture(db: PrismaClient, label: string) {
       VALUES ($1,$2,'AI','HUMAN',0,1)`,randomUUID(),conversationId);
   });
   async function addCommand(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE" = "HUMAN_TEXT", attemptId?: string) {
+    if (kind === "HUMAN_TEXT") {
+      const initial = await db.recoveryOutreachAttempt.findFirst({ where: {
+        checkoutRecoveryId: recoveryId, sequence: 1,
+      } });
+      if (!initial) await initialOutreach(db, conversationId, recoveryId);
+      await db.conversationMessage.create({ data: {
+        conversationId, direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED",
+        providerMessageId: `arch040-inbound-${randomUUID()}`, content: "Customer replied",
+        createdAt: new Date(Date.now() - 5_000),
+      } });
+    }
     const id = randomUUID();
     const sha = createHash("sha256").update(`Hello ${id}`).digest("hex");
     await db.$executeRawUnsafe(`
@@ -64,9 +75,10 @@ async function initialOutreach(db: PrismaClient, conversationId: string, recover
   } });
   await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
     ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
-     "configuredOfferMode","outboundMessageId","sentAt","updatedAt")
-    VALUES ($1,$2,'15551234567',1,'INITIAL','WAITING_FOR_RESPONSE','NONE',$3,$4,statement_timestamp())`,
-  initialId, recoveryId, initialMessageId, initialSentAt);
+     "configuredOfferMode","outboundMessageId","sentAt","followUpDueAt","updatedAt")
+    VALUES ($1,$2,'15551234567',1,'INITIAL','WAITING_FOR_RESPONSE','NONE',$3,$4,$5,statement_timestamp())`,
+  initialId, recoveryId, initialMessageId, initialSentAt,
+  new Date(initialSentAt.getTime() + 60 * 60_000));
   await db.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation" SET "lastInboundAt"=$2 WHERE "id"=$1`,
     conversationId, initialSentAt);
 }
@@ -259,7 +271,7 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
           const stagedTx = {
             $queryRawUnsafe: async (sql: string, ...parameters: unknown[]) => {
               const result = await tx.$queryRawUnsafe(sql, ...parameters);
-              if (!paused && sql.includes('AND "sequence"=1 FOR UPDATE')) {
+              if (!paused && sql.includes('FOR UPDATE OF initial')) {
                 paused = true;
                 scheduledEligible();
                 await release;

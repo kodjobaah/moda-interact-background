@@ -290,7 +290,9 @@ export class HumanCommandDispatcherService {
       commandId, leaseToken, recipient: command.recipientSnapshot, now: this.deps.now(),
     });
     if (permit.kind !== "admitted") {
-      if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);
+      // BG007 first durably cancels the command, then releases its provisional
+      // source and conditionally resets sequence 2. Releasing before cancellation
+      // could race a second dispatcher at the final provider boundary.
       await this.rejectTerminal(commandId, leaseToken, permit.reason);
       return;
     }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ModerationAssessmentService } from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
 import { allowModerationFixture } from "./arch040-allow-moderation.fixture.js";
 import { ConversationTurnProcessor } from "../../../src/services/conversation-turn-processor.service.js";
@@ -70,6 +71,12 @@ export async function runAiTurnThroughBackgroundMocks(
   // retain this original revision even if takeover/resume happens mid-model.
   await f.changeOwner("HUMAN", "AI", 1);
   const pendingAt = new Date(Date.now() - 60_000);
+  await f.addInitialOutreach();
+  await f.db.conversationMessage.create({ data: {
+    conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
+    providerMessageId: `arch040-ai-inbound-${randomUUID()}`,
+    status: "DELIVERED", content: USER_MESSAGE, createdAt: pendingAt,
+  } });
   await f.db.conversation.update({ where: { id: f.conversationId }, data: {
     inboundVersion: 1, lastProcessedVersion: 0,
     lastInboundAt: pendingAt, pendingTurnStartedAt: pendingAt,

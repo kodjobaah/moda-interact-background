@@ -89,7 +89,7 @@ export class OutboundMessageDeliveryService {
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
     const fenced = await this.fenceProviderSend({
-      shopId, conversationId, messageId, to, expectedContent: outboundText,
+      shopId, conversationId, messageId, to, expectedContent: outboundText, deliveryKind: "TEXT",
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -154,6 +154,7 @@ export class OutboundMessageDeliveryService {
     const fenced = await this.fenceProviderSend({
       shopId: admission.shopId, conversationId: admission.conversationId,
       messageId: admission.messageId, to: input.to, expectedContent: outboundText,
+      deliveryKind: prepared ? "TEMPLATE" : "TEXT",
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
     });
     if (fenced) return fenced;
@@ -240,6 +241,7 @@ export class OutboundMessageDeliveryService {
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
     expectedContent: string; expectedControlRevision?: number;
+    deliveryKind: "TEXT" | "TEMPLATE";
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (!ownership) {
@@ -267,6 +269,7 @@ export class OutboundMessageDeliveryService {
       recoveryId: ownership.recoveryId,
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
       messageId: input.messageId, recipient: input.to, now: new Date(),
+      deliveryKind: input.deliveryKind,
     });
     if (permit.kind === "admitted") return null;
     if (permit.reason !== "already-admitted-or-sent") {
