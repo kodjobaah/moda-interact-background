@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
 import prisma from "../../lib/db.js";
-import { customerService } from "../customer.service.js";
+import { recoveryShopifyCustomerService } from "./recovery-shopify-customer.service.js";
 import { conversationService } from "../conversation.service.js";
 import { conversationMessageService } from "../conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
@@ -14,6 +14,10 @@ import {
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { findLatestRecovery } from "./latest-recovery.js";
+import {
+  recoveryConsentAdmissionService,
+  type RecoveryConsentAdmissionPort,
+} from "./recovery-consent-admission.service.js";
 import { RecoveryOutreachFinalizationService } from "./recovery-outreach-finalization.service.js";
 import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
 import {
@@ -37,6 +41,7 @@ export class RecoveryInitiationService {
     private readonly finalizationService: RecoveryOutreachFinalizationService = new RecoveryOutreachFinalizationService(billingService),
     private readonly ports?: RecoveryInitiationPorts,
     private readonly suppressionAdmission: RecoveryRecipientSuppressionAdmissionService = recoveryRecipientSuppressionAdmissionService,
+    private readonly consentAdmission: RecoveryConsentAdmissionPort = recoveryConsentAdmissionService,
   ) {}
 
   async upsertRecovery(event: RecoveryCheckoutSeed, generation = 1) {
@@ -119,12 +124,53 @@ export class RecoveryInitiationService {
     suppressionWakeupTrigger?: string,
     admissionGate?: RecoveryAdmissionGate,
   ) {
+    // Verify native Shopify permission BEFORE the first CheckoutRecovery INSERT.
+    // The candidate worker has already checked the checkout/order lifecycle under
+    // its checkout lock. Direct initiation must also reject completed checkouts.
+    if (event.completedAt) return null;
+    const shop = await prisma.shop.findUniqueOrThrow({
+      where: { domain: event.shop }, select: { id: true },
+    });
+    const previous = await findLatestRecovery(shop.id, event.checkoutToken);
+    const requiresAdmission = !previous || previous.status === "DETECTED" || previous.status === "EXPIRED";
+    let customer: Awaited<ReturnType<typeof recoveryShopifyCustomerService.resolve>> | undefined;
+    let recipient: string | null = null;
+    if (requiresAdmission) {
+      customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
+      let sourceRecipient = resolvedRecipient ?? event.customer?.phone;
+      if (!sourceRecipient) {
+        // Do not fall back to a test-only recipient for real customer consent.
+        sourceRecipient = null;
+      }
+      recipient = canonicalizeRecoveryRecipient(sourceRecipient);
+      const identity = customer?.id ?? previous?.customerId ?? null;
+      const permitted = previous
+        ? await this.consentAdmission.evaluateReentry({
+            shopId: shop.id, checkoutToken: event.checkoutToken,
+            customerId: identity, recipient,
+          })
+        : await this.consentAdmission.evaluateFirst({
+            shopId: shop.id, checkoutToken: event.checkoutToken,
+            customerId: identity,
+            shopifyCustomerId: event.customer?.shopifyCustomerId ?? null,
+            recipient,
+          });
+      if (!permitted) return null;
+
+      if (!previous && recipient) {
+        // Temporary provider reachability is distinct from consent. Do not leave
+        // a DETECTED row waiting for reachability on first admission.
+        const initialSuppression = await this.suppressionAdmission.evaluate(shop.id, recipient);
+        if (initialSuppression.kind === "suppressed") return null;
+      }
+    }
+
     let recovery = await this.ports!.upsertRecovery(event, generation);
     if (!recovery) {
       throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
     }
 
-    const customer = await customerService.resolveCustomer(event);
+    if (customer === undefined) customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
     if (customer && recovery.customerId !== customer.id) {
       recovery = await prisma.checkoutRecovery.update({
         where: { id: recovery.id },
@@ -140,8 +186,21 @@ export class RecoveryInitiationService {
     }
 
     const policy = await recoveryPolicyService.resolve(recovery.shopId);
-    const recipient = canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
-    if (!recipient) throw new Error("Recovery outreach recipient is unavailable");
+    recipient ??= canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
+    if (!recipient) {
+      await this.consentAdmission.notifyMissingRecipient({ shopId: recovery.shopId, checkoutToken: event.checkoutToken });
+      return recovery;
+    }
+    // First-send re-entries (including legacy DETECTED and capacity/suppression
+    // wakeups) use current stored CustomerPhone permission, never Shopify GraphQL.
+    // Also close the gap between a new checkout's remote read and its row insert.
+    const currentlyAllowed = await this.consentAdmission.evaluateReentry({
+      shopId: recovery.shopId,
+      checkoutToken: event.checkoutToken,
+      customerId: customer?.id ?? recovery.customerId,
+      recipient,
+    });
+    if (!currentlyAllowed) return recovery;
     const suppression = await this.suppressionAdmission.evaluate(recovery.shopId, recipient);
     if (suppression.kind === "suppressed") {
       await this.suppressionAdmission.deferDetectedRecovery(
@@ -158,12 +217,6 @@ export class RecoveryInitiationService {
 
     if (admissionGate && !(await admissionGate())) return recovery;
 
-    const attempt = await recoveryOutreachAttemptService.getOrCreate({
-      recoveryId: recovery.id,
-      sequence: 1,
-      policy,
-      recipient,
-    });
     const selection = await whatsappTemplateSelectorService.select({
       shopId: recovery.shopId,
       providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
@@ -176,6 +229,20 @@ export class RecoveryInitiationService {
     if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
       return recovery;
     }
+    // The current template catalogue records APPROVED but not Meta's Marketing
+    // category. Do not treat approval or purpose as Marketing verification.
+    // BACKGROUND-004 owns the authoritative provider category and final fence;
+    // until it supplies a verified category, first outreach must fail closed.
+    if (selection.verifiedCategory !== "MARKETING") {
+      return recovery;
+    }
+
+    const attempt = await recoveryOutreachAttemptService.getOrCreate({
+      recoveryId: recovery.id,
+      sequence: 1,
+      policy,
+      recipient,
+    });
 
     let billing = await this.billingService.admit({
       shopId: recovery.shopId,
@@ -206,6 +273,28 @@ export class RecoveryInitiationService {
     } catch (error) {
       await this.billingService.releaseBeforeProvider(billing.admission);
       throw error;
+    }
+
+    // Narrow the first-send window once more before provider admission. This
+    // stored-only check does not substitute for BACKGROUND-004's final SQL fence.
+    let finalConsentAllowed: boolean;
+    try {
+      finalConsentAllowed = await this.consentAdmission.evaluateReentry({
+        shopId: recovery.shopId,
+        checkoutToken: event.checkoutToken,
+        customerId: customer?.id ?? recovery.customerId,
+        recipient: attempt.recipient,
+      });
+    } catch (error) {
+      await this.billingService.releaseBeforeProvider(billing.admission);
+      throw error;
+    }
+    if (!finalConsentAllowed) {
+      await this.billingService.releaseBeforeProvider(billing.admission);
+      await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
+        failureCode: "CONSENT_BLOCKED",
+      });
+      return recovery;
     }
 
     let result;

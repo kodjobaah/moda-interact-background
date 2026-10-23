@@ -205,6 +205,28 @@ describe("ShopifyWhatsAppConsentService", () => {
       whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 8n });
   });
 
+  it("preserves merchant opt-out after a newer Shopify SUBSCRIBED observation", async () => {
+    const ctx = fakeDatabase();
+    const { instance, readCurrent } = service(ctx.db);
+    expect((await instance.evaluateRecipient(checkout)).status).toBe("ALLOWED");
+    ctx.phones[0]!.whatsappNoContact = true;
+    ctx.phones[0]!.whatsappNoContactReason = "MERCHANT_OPT_OUT";
+    ctx.phones[0]!.whatsappNoContactRevision = 3n;
+    ctx.phones[0]!.whatsappNoContactAt = new Date("2026-10-22T10:00:00Z");
+
+    expect(await instance.evaluateStoredRecipient({
+      shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient,
+    })).toEqual({ status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT" });
+    expect(await instance.evaluateRecipient(checkout)).toEqual({
+      status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT",
+    });
+    expect(readCurrent).toHaveBeenCalledTimes(2);
+    expect(ctx.phones[0]).toMatchObject({
+      whatsappConsentDecision: "GRANTED", whatsappNoContact: true,
+      whatsappNoContactReason: "MERCHANT_OPT_OUT", whatsappNoContactRevision: 3n,
+    });
+  });
+
   it("respects a STOP written concurrently with a native consent projection", async () => {
     const ctx = fakeDatabase();
     ctx.raceWith(() => {

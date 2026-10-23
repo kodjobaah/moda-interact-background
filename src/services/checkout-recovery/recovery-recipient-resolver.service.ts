@@ -1,11 +1,16 @@
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
-import { customerService } from "../customer.service.js";
+import prisma from "../../lib/db.js";
+import { recoveryShopifyCustomerService } from "./recovery-shopify-customer.service.js";
 import { customerPhoneService } from "../customer.phone.service.js";
 import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
 
 export class RecoveryRecipientResolverService {
   async resolve(event: RecoveryCheckoutSeed): Promise<string | null> {
-    const customer = await customerService.resolveCustomer(event);
+    const shop = await prisma.shop.findUnique({
+      where: { domain: event.shop }, select: { id: true },
+    });
+    if (!shop) return null;
+    const customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
     if (!customer) return null;
 
     const currentPhone = await customerPhoneService.getCurrentPhone(customer.id);

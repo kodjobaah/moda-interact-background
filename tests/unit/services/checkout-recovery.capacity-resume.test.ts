@@ -46,9 +46,11 @@ vi.mock("../../../src/lib/db.js", () => ({
         id: "shop-1",
         settings: null,
       })),
+      findUniqueOrThrow: vi.fn(async () => ({ id: "shop-1" })),
     },
     checkoutRecovery: {
       findUnique: hoisted.findUnique,
+      findFirst: vi.fn(async () => hoisted.recovery),
       update: hoisted.update,
       updateMany: hoisted.updateMany,
     },
@@ -99,6 +101,13 @@ vi.mock("../../../src/services/checkout-recovery/recovery-recipient-suppression-
     evaluate: hoisted.suppressionEvaluate,
     deferDetectedRecovery: vi.fn(),
     clearDetectedSuppression: vi.fn(),
+  },
+}));
+vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
+  recoveryConsentAdmissionService: {
+    evaluateFirst: vi.fn(async () => true),
+    evaluateReentry: vi.fn(async () => true),
+    notifyMissingRecipient: vi.fn(async () => undefined),
   },
 }));
 vi.mock("../../../src/services/checkout-recovery/recovery-snapshot-builder.service.js", () => ({

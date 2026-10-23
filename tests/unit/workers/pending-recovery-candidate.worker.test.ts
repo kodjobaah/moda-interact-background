@@ -208,6 +208,13 @@ describe("pending recovery candidate worker", () => {
         markRecoveryCapacityBlocked: vi.fn(),
       },
       admission,
+      // This is a recipient reachability/retry test. Keep verified consent
+      // independent so the STOP/consent tests exercise real denial policy.
+      {
+        evaluateFirst: vi.fn(async () => true),
+        evaluateReentry: vi.fn(async () => true),
+        notifyMissingRecipient: vi.fn(async () => undefined),
+      },
     );
     const freshCheckout = {
       createdAt: "2026-09-01T00:00:00.000Z",
@@ -267,7 +274,16 @@ describe("pending recovery candidate worker", () => {
       attemptsMade: 0,
       failedReason: "",
     };
-    hoisted.redis.get.mockRejectedValueOnce(new Error("Redis lock cleanup unavailable"));
+    // Reachability becomes suppressed only after the first admission gate,
+    // allowing a DETECTED recovery to exist before the resume enqueue fails.
+    hoisted.findSuppression
+      .mockResolvedValueOnce({ suppressUntil: null })
+      .mockResolvedValue({ suppressUntil: hoisted.suppressUntil });
+    // hasOrderProcessed() is stubbed by this materialization fixture, so the
+    // first Redis GET is the checkout-lock cleanup, not an order tombstone read.
+    // Fail that GET; later cleanup during the retry can succeed normally.
+    hoisted.redis.get.mockReset().mockResolvedValue(null)
+      .mockRejectedValueOnce(new Error("Redis lock cleanup unavailable"));
     hoisted.cleanup.mockRejectedValueOnce(new Error("Redis candidate index cleanup unavailable"));
 
     let failedReason: string;
@@ -318,6 +334,13 @@ describe("pending recovery candidate worker", () => {
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     const versionReadError = new Error("database version read unavailable");
+    // A fresh first admission must be allowed before the stored
+    // reachability changes to suppressed. Keep the order tombstone absent.
+    hoisted.findSuppression
+      .mockReset()
+      .mockResolvedValueOnce({ suppressUntil: null })
+      .mockResolvedValue({ suppressUntil: hoisted.suppressUntil });
+    hoisted.redis.get.mockReset().mockResolvedValue(null);
     hoisted.findRecovery
       .mockReset()
       .mockRejectedValueOnce(versionReadError)

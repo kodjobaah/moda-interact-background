@@ -50,6 +50,11 @@ const hoisted = vi.hoisted(() => {
     customerServiceMock: {
       resolveCustomer: vi.fn(async () => null),
     },
+    consentAdmissionMock: {
+      evaluateFirst: vi.fn(async () => true),
+      evaluateReentry: vi.fn(async () => true),
+      notifyMissingRecipient: vi.fn(async () => undefined),
+    },
     customerPhoneServiceMock: {
       getCurrentPhone: vi.fn(async () => ({ phone: "+15551234567" })),
     },
@@ -100,6 +105,7 @@ const hoisted = vi.hoisted(() => {
         providerTemplateId: null,
         selectionSource: "exact",
         marketCapability: "supported",
+        verifiedCategory: "MARKETING",
       })),
     },
     recoveryBillingServiceMock: {
@@ -151,8 +157,11 @@ vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
   abandonedCheckoutLookupService: hoisted.lookupServiceMock,
 }));
 
-vi.mock("../../../src/services/customer.service.js", () => ({
-  customerService: hoisted.customerServiceMock,
+vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
+  recoveryShopifyCustomerService: { resolve: hoisted.customerServiceMock.resolveCustomer },
+}));
+vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
+  recoveryConsentAdmissionService: hoisted.consentAdmissionMock,
 }));
 vi.mock("../../../src/services/customer.phone.service.js", () => ({
   customerPhoneService: hoisted.customerPhoneServiceMock,
@@ -239,6 +248,8 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     vi.clearAllMocks();
     executionEligibilityMock.evaluate.mockResolvedValue({ allowed: true, shopId: "shop_1" });
     customerServiceMock.resolveCustomer.mockResolvedValue({ id: "customer_1" } as never);
+    hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(true);
+    hoisted.consentAdmissionMock.evaluateReentry.mockResolvedValue(true);
     hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
     whatsappTemplateSelectorMock.select.mockResolvedValue({
       outcome: "selected",
@@ -248,6 +259,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       providerTemplateId: null,
       selectionSource: "exact",
       marketCapability: "supported",
+      verifiedCategory: "MARKETING",
     });
     whatsAppServiceMock.sendWhatsAppTemplate.mockResolvedValue({
       providerMessageId: "wamid-1",
@@ -321,6 +333,15 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
       expect.objectContaining({ to: "15551234567" }),
     );
+  });
+
+  it("returns admission-denied and never creates recovery when the current checkout lacks consent", async () => {
+    hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(false);
+    const result = await service.materializeMaturedCandidate(candidate);
+    expect(result).toEqual({ outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken });
+    expect(prismaMock.checkoutRecovery.create).not.toHaveBeenCalled();
+    expect(recoveryBillingServiceMock.admit).not.toHaveBeenCalled();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("defers a matured candidate with no current CustomerPhone before creating recovery or billing state", async () => {
@@ -503,6 +524,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       providerTemplateId: null,
       selectionSource: "exact",
       marketCapability: "provider-check-required",
+      verifiedCategory: "MARKETING",
     });
 
     await service.materializeMaturedCandidate(candidate);
@@ -538,6 +560,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       providerTemplateId: null,
       selectionSource: "exact",
       marketCapability: "supported",
+      verifiedCategory: "MARKETING",
     });
 
     await service.materializeMaturedCandidate(candidate);
@@ -766,27 +789,27 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("allows paid recovery beyond included units and does not repeat a duplicate send", async () => {
-    prismaMock.checkoutRecovery.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "recovery-1",
-        status: "MESSAGE_SENT",
-        outreachAttempts: [
-          {
-            id: "recovery-outreach:recovery-1:1",
-            sequence: 1,
-            status: "WAITING_FOR_RESPONSE",
-            sentAt: new Date("2026-09-16T10:00:00Z"),
-            followUpDueAt: null,
-            customerRespondedAt: null,
-          },
-        ],
-      })
-      .mockResolvedValueOnce({ status: "MESSAGE_SENT" });
+    // The first materialization reads recovery state more than once. Keep it
+    // absent throughout that call, then expose the committed row to the
+    // subsequent duplicate evaluation, just as PostgreSQL would.
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue(null);
 
     const first = await service.materializeMaturedCandidate({
       ...candidate,
       checkoutToken: "checkout-paid-overage",
+    });
+    prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
+      id: "recovery-1",
+      status: "MESSAGE_SENT",
+      generation: 1,
+      outreachAttempts: [{
+        id: "recovery-outreach:recovery-1:1",
+        sequence: 1,
+        status: "WAITING_FOR_RESPONSE",
+        sentAt: new Date("2026-09-16T10:00:00Z"),
+        followUpDueAt: null,
+        customerRespondedAt: null,
+      }],
     });
     const duplicate = await service.materializeMaturedCandidate({
       ...candidate,

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   customer: { resolveCustomer: vi.fn() },
+  shop: { findUnique: vi.fn() },
+  recoveryCustomer: { resolve: vi.fn() },
   phone: {
     getCurrentPhone: vi.fn(),
     getCurrentPhoneForShop: vi.fn(),
@@ -9,15 +11,22 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../src/services/customer.service.js", () => ({ customerService: mocks.customer }));
+vi.mock("../../../../src/lib/db.js", () => ({ default: { shop: mocks.shop } }));
+vi.mock("../../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
+  recoveryShopifyCustomerService: mocks.recoveryCustomer,
+}));
 vi.mock("../../../../src/services/customer.phone.service.js", () => ({ customerPhoneService: mocks.phone }));
 
 import { RecoveryRecipientResolverService } from "../../../../src/services/checkout-recovery/recovery-recipient-resolver.service.js";
 
 describe("RecoveryRecipientResolverService", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.shop.findUnique.mockResolvedValue({ id: "shop-a" });
+    mocks.recoveryCustomer.resolve.mockResolvedValue({ id: "customer-a" });
+  });
 
   it("canonicalizes the current BACKGROUND-007 phone to bounded digits", async () => {
-    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-a" });
     mocks.phone.getCurrentPhone.mockResolvedValue({ phone: "+44 (0)20 7946 0958" });
 
     await expect(new RecoveryRecipientResolverService().resolve({ shop: "shop-a" } as never))

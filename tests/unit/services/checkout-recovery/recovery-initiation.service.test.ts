@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   prisma: {
+    shop: { findUniqueOrThrow: vi.fn() },
     checkoutRecovery: {
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -26,6 +27,7 @@ const mocks = vi.hoisted(() => ({
     markWaitingAfterConfirmedSend: vi.fn(),
   },
   followUp: { schedule: vi.fn() },
+  consent: { evaluateFirst: vi.fn(), evaluateReentry: vi.fn(), notifyMissingRecipient: vi.fn() },
   suppression: {
     evaluate: vi.fn(),
     deferDetectedRecovery: vi.fn(),
@@ -34,8 +36,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
-vi.mock("../../../../src/services/customer.service.js", () => ({
-  customerService: mocks.customer,
+vi.mock("../../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
+  recoveryShopifyCustomerService: { resolve: mocks.customer.resolveCustomer },
 }));
 vi.mock("../../../../src/services/conversation.service.js", () => ({
   conversationService: mocks.conversation,
@@ -60,6 +62,9 @@ vi.mock("../../../../src/services/recovery-outreach-follow-up.service.js", () =>
 }));
 vi.mock("../../../../src/services/checkout-recovery/recovery-recipient-suppression-admission.service.js", () => ({
   recoveryRecipientSuppressionAdmissionService: mocks.suppression,
+}));
+vi.mock("../../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
+  recoveryConsentAdmissionService: mocks.consent,
 }));
 
 import type { RecoveryBillingService } from "../../../../src/services/recovery-billing.service.js";
@@ -118,6 +123,11 @@ function createInitiation(overrides: {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.customer.resolveCustomer.mockResolvedValue(null);
+  mocks.prisma.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop-1" });
+  mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(recovery);
+  mocks.consent.evaluateFirst.mockResolvedValue(true);
+  mocks.consent.evaluateReentry.mockResolvedValue(true);
+  mocks.consent.notifyMissingRecipient.mockResolvedValue(undefined);
   mocks.prisma.checkoutRecovery.update.mockResolvedValue(recovery);
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
   mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(null);
@@ -132,6 +142,7 @@ beforeEach(() => {
     providerTemplateName: "checkout_recovery",
     canonicalLanguageTag: "en-US",
     providerLanguageCode: "en_US",
+    verifiedCategory: "MARKETING",
   });
   mocks.policy.resolve.mockResolvedValue({ followUpEnabled: false, followUpDelayMinutes: null });
   mocks.attempt.getOrCreate.mockResolvedValue(attempt);
@@ -154,6 +165,138 @@ describe("findLatestRecovery", () => {
 });
 
 describe("RecoveryInitiationService", () => {
+  it("rejects a new checkout before recovery, attempt, billing and Meta when native opt-in is missing", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.consent.evaluateFirst.mockResolvedValue(false);
+    const { service, billing, ports } = createInitiation();
+
+    await expect(service.handleCheckoutCreated(event)).resolves.toBeNull();
+
+    expect(mocks.consent.evaluateFirst).toHaveBeenCalledWith(expect.objectContaining({
+      shopId: "shop-1", checkoutToken: "checkout-1", recipient: "15551234567",
+      customerId: "customer-1",
+    }));
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("verifies Shopify once for a new checkout then reads stored consent for first dispatch", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    const { service, ports } = createInitiation();
+    await service.handleCheckoutCreated({
+      ...event,
+      customer: { ...event.customer, shopifyCustomerId: "gid://shopify/Customer/1" },
+    });
+    expect(mocks.consent.evaluateFirst).toHaveBeenCalledOnce();
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledTimes(2);
+    expect(ports.upsertRecovery).toHaveBeenCalledOnce();
+  });
+
+  it("prevents legacy DETECTED first-send retries after STOP even if Shopify previously granted", async () => {
+    mocks.consent.evaluateReentry.mockResolvedValue(false);
+    const { service, billing, ports } = createInitiation();
+    await service.handleCheckoutCreated(event);
+    expect(mocks.consent.evaluateFirst).not.toHaveBeenCalled();
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledOnce();
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("blocks an existing DETECTED first-send if local no-contact arrives after the first stored check", async () => {
+    // The first gate observes a grant; a concurrent STOP / merchant opt-out
+    // reaches CustomerPhone before the post-upsert first-send check.
+    mocks.consent.evaluateReentry.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const { service, billing, ports } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(mocks.consent.evaluateFirst).not.toHaveBeenCalled();
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledTimes(2);
+    expect(ports.upsertRecovery).toHaveBeenCalledOnce();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    expect(mocks.followUp.schedule).not.toHaveBeenCalled();
+  });
+
+  it("never reuses the checkout's old phone grant for a changed current recipient", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.consent.evaluateFirst.mockResolvedValueOnce(false);
+    const { service, ports, billing } = createInitiation();
+
+    await expect(service.handleCheckoutCreated({
+      ...event,
+      customer: { ...event.customer, shopifyCustomerId: "gid://shopify/Customer/123" },
+    }, 1, "+44 7700 900002")).resolves.toBeNull();
+
+    expect(mocks.consent.evaluateFirst).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: "customer-1",
+      shopifyCustomerId: "gid://shopify/Customer/123",
+      recipient: "447700900002",
+    }));
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("releases a reserved initial charge when consent is revoked before provider admission", async () => {
+    // Pre-insert, post-upsert and pre-provider checks are three separate gates.
+    // The revocation occurs only after the credit has been reserved.
+    mocks.consent.evaluateReentry
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const { service, billing } = createInitiation();
+    await service.handleCheckoutCreated(event);
+    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    expect(mocks.attempt.markStatus).toHaveBeenCalledWith("attempt-1", "FAILED", {
+      failureCode: "CONSENT_BLOCKED",
+    });
+  });
+
+  it("does not create a first recovery during active recipient reachability suppression", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.suppression.evaluate.mockResolvedValue({ kind: "suppressed", until: new Date("2026-10-24T00:00:00Z") });
+    const { service, ports, billing } = createInitiation();
+    await expect(service.handleCheckoutCreated(event)).resolves.toBeNull();
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.suppression.deferDetectedRecovery).not.toHaveBeenCalled();
+  });
+
+  it("retries a technical Shopify verification failure without creating a recovery", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.consent.evaluateFirst.mockRejectedValue(new Error("SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED"));
+    const { service, ports, billing } = createInitiation();
+    await expect(service.handleCheckoutCreated(event)).rejects.toThrow("SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED");
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "UTILITY"])("fails closed on unverified or utility template category (%s)", async (category) => {
+    mocks.selector.select.mockResolvedValue({
+      outcome: "selected", providerTemplateName: "checkout_recovery",
+      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
+      ...(category ? { verifiedCategory: category } : {}),
+    });
+    const { service, billing } = createInitiation();
+    await service.handleCheckoutCreated(event);
+    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("does not use the test recipient override in production", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousTestRecipient = process.env.TEST_WHATSAPP_RECIPIENT;

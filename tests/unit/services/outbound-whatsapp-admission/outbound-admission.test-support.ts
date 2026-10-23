@@ -110,6 +110,8 @@ export function admissionHarness({
         conversationId: "conversation-1",
         status: "PENDING",
         sentAt: null,
+        providerDispatchKey: null,
+        providerDispatchAdmittedAt: null,
         content: messages.get(where.id)?.content ?? "",
         senderType: "AGENT",
       })),
@@ -135,13 +137,18 @@ export function admissionHarness({
       ),
     },
   };
-  const queryRawUnsafe = vi.fn(async (statement: string): Promise<Array<Record<string, unknown>>> => {
+  const queryRawUnsafe = vi.fn(async (statement: string, ...parameters: unknown[]): Promise<Array<Record<string, unknown>>> => {
     if (statement.includes('FROM "commerce"."Shop"') && statement.includes('FOR UPDATE'))
       return [{ status: "ACTIVE" }];
     if (statement.includes('FROM "whatsapp"."Conversation"') && statement.includes('FOR UPDATE'))
       return [{ controlRevision: 0 }];
     if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
-      return [{ status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null }];
+      return [{
+        status: "PENDING",
+        content: messages.get(String(parameters[0]))?.content ?? "",
+        providerDispatchKey: null,
+        providerDispatchAdmittedAt: null,
+      }];
     if (statement.includes('UPDATE "whatsapp"."ConversationMessage"'))
       return [{ id: "message-1" }];
     return [];

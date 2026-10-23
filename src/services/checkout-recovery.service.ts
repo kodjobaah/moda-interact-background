@@ -19,6 +19,7 @@ import { shopExecutionEligibilityService } from "./shop-execution-eligibility.se
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
 import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiation.service.js";
+import { recoveryConsentAdmissionService } from "./checkout-recovery/recovery-consent-admission.service.js";
 import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recovery-outreach-finalization.service.js";
 import { RecoveryOutreachFollowUpProcessorService } from "./checkout-recovery/recovery-outreach-follow-up-processor.service.js";
 import { recoverySnapshotBuilderService } from "./checkout-recovery/recovery-snapshot-builder.service.js";
@@ -73,6 +74,8 @@ export class CheckoutRecoveryService {
       snapshotBuilder: this.snapshotBuilderService,
       recipientResolver: recoveryRecipientResolverService,
       initiate: (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
+      noticeMissingRecipient: (shopId, checkoutToken) =>
+        recoveryConsentAdmissionService.notifyMissingRecipient({ shopId, checkoutToken }),
     });
     this.checkoutEventOrchestrator = new CheckoutEventOrchestratorService(
       prisma,

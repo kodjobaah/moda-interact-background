@@ -245,7 +245,7 @@ export class RecoveryCapacityResumeProcessorService {
       ...(wakeupTrigger ? { wakeupTrigger } : {}),
       clock: this.clock,
     });
-    await this.initiate(
+    const initiated = await this.initiate(
       prepared.seed,
       prepared.generation,
       prepared.recipient,
@@ -253,6 +253,7 @@ export class RecoveryCapacityResumeProcessorService {
       admissionGate.check,
     );
     if (admissionGate.state.outcome) return admissionGate.state.outcome;
+    if (initiated === null) return { kind: "suppressed" as const, reason: "consent-unverified" };
 
     const after = await this.database.checkoutRecovery.findUnique({
       where: { id: recovery.id },

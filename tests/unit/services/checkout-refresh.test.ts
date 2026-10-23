@@ -125,6 +125,21 @@ vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
 vi.mock("../../../src/services/customer.service.js", () => ({
   customerService: hoisted.customerServiceMock,
 }));
+// This file's direct initial-outreach case tests language selection, not
+// native Shopify permission. Supply a verified customer and allowed consent.
+vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
+  recoveryShopifyCustomerService: { resolve: vi.fn(async () => ({ id: "customer-1" })) },
+}));
+vi.mock("../../../src/services/checkout-recovery/recovery-consent-admission.service.js", () => ({
+  recoveryConsentAdmissionService: {
+    evaluateFirst: vi.fn(async () => true),
+    evaluateReentry: vi.fn(async () => true),
+    notifyMissingRecipient: vi.fn(async () => undefined),
+  },
+}));
+vi.mock("../../../src/services/recovery-policy.service.js", () => ({
+  recoveryPolicyService: { resolve: vi.fn(async () => ({ followUpEnabled: false, followUpDelayMinutes: null })) },
+}));
 vi.mock("../../../src/services/conversation.service.js", () => ({
   conversationService: hoisted.conversationServiceMock,
 }));
@@ -670,11 +685,19 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
   });
 });
 
-it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout",async()=>{
- const recovery={id:"recovery-initial",shopId:"shop_1",status:"DETECTED",customerId:null};
- vi.spyOn(service as any,"upsertRecovery").mockResolvedValueOnce(recovery);
- hoisted.whatsappTemplateSelectorMock.select.mockClear();
- hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({outcome:"template-unavailable"} as any);
- await service.handleCheckoutCreated({shopId:"shop_1",checkoutToken:"initial",customer:{phone:"+33123456789"},internationalContext:{languageTag:"fr-FR",languageSource:"shopify",countryCode:"FR",currencyCode:"GBP",timeZone:"Europe/London"}} as any);
- expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({shopId:"shop_1",languageTag:null,countryCode:"FR"}));
+it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout", async () => {
+  const recovery = { id: "recovery-initial", shopId: "shop_1", status: "DETECTED", customerId: "customer-1" };
+  prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
+  prismaMock.checkoutRecovery.findFirst.mockResolvedValue(null);
+  vi.spyOn(service, "upsertRecovery").mockResolvedValueOnce(recovery as never);
+  hoisted.whatsappTemplateSelectorMock.select.mockClear();
+  hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({ outcome: "template-unavailable" } as never);
+  await service.handleCheckoutCreated({
+    shop: "shop.myshopify.com", checkoutToken: "initial",
+    customer: { shopifyCustomerId: "gid://shopify/Customer/1", phone: "+33123456789" },
+    internationalContext: { languageTag: "fr-FR", languageSource: "shopify", countryCode: "FR", currencyCode: "GBP", timeZone: "Europe/London" },
+  } as never);
+  expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ shopId: "shop_1", languageTag: null, countryCode: "FR" }),
+  );
 });
