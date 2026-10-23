@@ -23,6 +23,52 @@ export type FollowUpCreditState =
   | { kind: "reserved"; admission: PersistedFollowUpReservation }
   | { kind: "unsafe" };
 
+type ReservationSourceRow = {
+  id: string; shopId: string; sourceKey: string; status: string; quantity: number;
+  counterId: string | null; counterKind: string | null; counterShopId: string | null;
+  billingPeriodEntitlementCounterId: string | null; periodCounterKind: string | null;
+  periodCounterShopId: string | null; billingPeriodId: string | null;
+  purchasedCreditPurchaseId: string | null; purchaseShopId: string | null;
+  promotionalCreditGrantId: string | null; promotionalShopId: string | null;
+  committedUsageEventId: string | null; compensationUsageEventId: string | null;
+  expired: boolean;
+};
+
+/** The purchased source legitimately has two FKs: its Shop aggregate and exact
+ * purchase lot. All other capacities have one source FK, never a purchase lot.
+ * Use the persisted source/tenant, not the merchant's current plan, to decide.
+ */
+function classifySource(
+  reservation: ReservationSourceRow, shopId: string, logicalSource: string,
+): PersistedFollowUpReservation["capacity"] | null {
+  if (reservation.shopId !== shopId || reservation.quantity !== 1) return null;
+  const noPeriod = !reservation.billingPeriodEntitlementCounterId;
+  const noPromotion = !reservation.promotionalCreditGrantId;
+  const noCounter = !reservation.counterId;
+  const noPurchase = !reservation.purchasedCreditPurchaseId;
+  const exactSource = reservation.sourceKey === logicalSource;
+
+  if (reservation.counterId && noPeriod && noPromotion && exactSource &&
+      reservation.counterShopId === shopId) {
+    if (noPurchase && reservation.counterKind === "LIFETIME_FREE_RECOVERY_CREDITS")
+      return "free";
+    if (reservation.purchasedCreditPurchaseId &&
+        reservation.counterKind === "PURCHASED_RECOVERY_CREDITS" &&
+        reservation.purchaseShopId === shopId)
+      return "purchased";
+  }
+  if (noCounter && noPurchase && noPromotion &&
+      reservation.billingPeriodEntitlementCounterId &&
+      reservation.periodCounterKind === "INCLUDED_RECOVERY_CREDITS" &&
+      reservation.periodCounterShopId === shopId && reservation.billingPeriodId &&
+      reservation.sourceKey === `paid-included:${reservation.billingPeriodId}:${logicalSource}`)
+    return "paid";
+  if (noCounter && noPurchase && noPeriod && exactSource &&
+      reservation.promotionalCreditGrantId && reservation.promotionalShopId === shopId)
+    return "promotional";
+  return null;
+}
+
 /** Read the actual durable credit source; a paid included reservation's source
  * key is period-qualified and cannot be found by the unqualified billing key.
  * Never reconstruct an admission from today's billing policy after a crash.
@@ -31,22 +77,23 @@ export async function inspectFollowUpCredit(
   tx: SqlTransaction, input: { shopId: string; attemptId: string },
 ): Promise<FollowUpCreditState> {
   const logicalSource = createRecoveryIdempotencyKey(input.shopId, `recovery-outreach:${input.attemptId}`);
-  const reservations = await rows<{
-    id: string; sourceKey: string; status: string; quantity: number;
-    counterId: string | null; counterKind: string | null;
-    billingPeriodEntitlementCounterId: string | null; periodCounterKind: string | null;
-    purchasedCreditPurchaseId: string | null; promotionalCreditGrantId: string | null;
-    committedUsageEventId: string | null; compensationUsageEventId: string | null;
-  }>(tx, `
-    SELECT r."id",r."sourceKey",r."status"::text,r."quantity",
-      r."counterId",ec."counter"::text AS "counterKind",
+  const reservations = await rows<ReservationSourceRow>(tx, `
+    SELECT r."id",r."shopId",r."sourceKey",r."status"::text,r."quantity",
+      r."counterId",ec."counter"::text AS "counterKind",ec."shopId" AS "counterShopId",
       r."billingPeriodEntitlementCounterId",pc."counter"::text AS "periodCounterKind",
-      r."purchasedCreditPurchaseId",
-      r."promotionalCreditGrantId",r."committedUsageEventId",r."compensationUsageEventId"
+      pc."shopId" AS "periodCounterShopId",pc."billingPeriodId",
+      r."purchasedCreditPurchaseId",purchase."shopId" AS "purchaseShopId",
+      r."promotionalCreditGrantId",promo."shopId" AS "promotionalShopId",
+      r."committedUsageEventId",r."compensationUsageEventId",
+      (r."expiresAt" IS NOT NULL AND r."expiresAt"<=statement_timestamp()) AS "expired"
     FROM "billing"."UsageReservation" r
     LEFT JOIN "billing"."ShopEntitlementCounter" ec ON ec."id"=r."counterId"
     LEFT JOIN "billing"."BillingPeriodEntitlementCounter" pc
-      ON pc."id"=r."billingPeriodEntitlementCounterId" AND pc."shopId"=r."shopId"
+      ON pc."id"=r."billingPeriodEntitlementCounterId"
+    LEFT JOIN "billing"."RecoveryCreditPurchase" purchase
+      ON purchase."id"=r."purchasedCreditPurchaseId"
+    LEFT JOIN "billing"."PromotionalCreditGrant" promo
+      ON promo."id"=r."promotionalCreditGrantId"
     WHERE r."shopId"=$1 AND (
       r."sourceKey"=$2 OR
       (pc."id" IS NOT NULL AND r."sourceKey"=('paid-included:' || pc."billingPeriodId" || ':' || $2))
@@ -61,27 +108,22 @@ export async function inspectFollowUpCredit(
     SELECT "id" FROM "billing"."UsageEvent"
     WHERE "shopId"=$1 AND (
       "idempotencyKey"=$2 OR "idempotencyKey"=$3
-      OR "sourceId"=$4
+      OR "sourceId"=$4 OR "sourceId"=$5
       OR ("sourceId" LIKE 'paid-included:%' AND
           RIGHT("sourceId",LENGTH($4)+1)=(':' || $4))
     ) LIMIT 1`, input.shopId,
     createRecoveryIdempotencyKey(input.shopId, sourceKey),
-    createRecoveryIdempotencyKey(input.shopId, logicalSource), logicalSource);
+    createRecoveryIdempotencyKey(input.shopId, logicalSource), logicalSource,
+    reservation?.id ?? "");
   if (usage.length || reservation?.committedUsageEventId || reservation?.compensationUsageEventId)
     return { kind: "unsafe" };
   if (!reservation) return { kind: "clear" };
-  const capacityColumns = [reservation.counterId, reservation.billingPeriodEntitlementCounterId,
-    reservation.purchasedCreditPurchaseId, reservation.promotionalCreditGrantId].filter(Boolean);
-  if (capacityColumns.length !== 1 || reservation.quantity !== 1) return { kind: "unsafe" };
-  if (reservation.status === "RELEASED") return { kind: "clear" };
-  if (reservation.status !== "RESERVED") return { kind: "unsafe" };
-  const capacity = reservation.counterId
-    ? reservation.counterKind === "LIFETIME_FREE_RECOVERY_CREDITS" ? "free" : null
-    : reservation.billingPeriodEntitlementCounterId &&
-        reservation.periodCounterKind === "INCLUDED_RECOVERY_CREDITS" ? "paid"
-    : reservation.purchasedCreditPurchaseId ? "purchased"
-    : reservation.promotionalCreditGrantId ? "promotional" : null;
+  // Validate the shape even for RELEASED: a foreign-Shop lot or an orphaned
+  // purchased FK is not proof that a follow-up's credit was durably released.
+  const capacity = classifySource(reservation, input.shopId, logicalSource);
   if (!capacity) return { kind: "unsafe" };
+  if (reservation.status === "RELEASED") return { kind: "clear" };
+  if (reservation.status !== "RESERVED" || reservation.expired) return { kind: "unsafe" };
   return { kind: "reserved", admission: {
     kind: "persisted", shopId: input.shopId,
     sourceKey: reservation.sourceKey, capacity, quantity: reservation.quantity,
