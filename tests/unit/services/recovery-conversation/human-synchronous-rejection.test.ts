@@ -41,6 +41,8 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
       assessText: vi.fn(async () => ({ kind: "allow" })),
       requireCurrentAllowance: vi.fn(async () => true) },
     senderPreflight: vi.fn(async () => undefined),
+    storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
+    templateCategories: { verify: vi.fn(async () => "MARKETING") },
     followUps: { claimSequenceTwo: vi.fn(async () => ({ kind: "claimed", attemptId: "attempt-1" })) },
     followUpCancellations: { cancelClaimed: vi.fn(), repairCancelledClaims: vi.fn() },
     fence: { admitFinalSend: vi.fn(async () => ({ kind: "admitted" })) },
@@ -49,7 +51,7 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
     reconciliation, billing, recipientFailure, now: () => new Date("2026-10-22T15:00:00.000Z"),
   } as unknown as HumanDispatcherDependencies;
   return { dispatcher: new HumanCommandDispatcherService(deps), billing, reconciliation,
-    recipientFailure, events, provider: deps.provider };
+    recipientFailure, events, provider: deps.provider, deps };
 }
 
 describe("ARCH-028-BACKGROUND-006 synchronous HUMAN recovery boundary", () => {
@@ -68,6 +70,40 @@ describe("ARCH-028-BACKGROUND-006 synchronous HUMAN recovery boundary", () => {
     expect(x.events).toEqual(["persisted:provider_rejected"]);
     expect(x.recipientFailure.afterPersistedRejection).not.toHaveBeenCalled();
     expect(x.billing.onDefinitiveProviderFailure).not.toHaveBeenCalled();
+    await x.dispatcher.close();
+  });
+});
+
+
+describe("ARCH-045 merchant recovery Marketing admission", () => {
+  it("denies withdrawn consent before claiming sequence two, billing or Meta", async () => {
+    const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+    vi.mocked(x.deps.storedConsent!.preflight).mockResolvedValue({ kind: "denied", reason: "stored-consent-denied" });
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
+    expect(x.billing.admitAndRevalidate).not.toHaveBeenCalled();
+    expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(x.deps.followUpCancellations.cancelClaimed).toHaveBeenCalled();
+    await x.dispatcher.close();
+  });
+  it.each(["UTILITY", "AUTHENTICATION", null])(
+    "denies %s provider template category before billing", async (category) => {
+      const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+      vi.mocked(x.deps.templateCategories!.verify).mockResolvedValue(category as never);
+      await x.dispatcher.processClaim("cmd-1", "lease-1");
+      expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
+      expect(x.billing.admitAndRevalidate).not.toHaveBeenCalled();
+      expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      await x.dispatcher.close();
+    },
+  );
+  it("keeps HUMAN_TEXT a service-window reply; final STOP fence remains mandatory", async () => {
+    const x = fixture("HUMAN_TEXT");
+    vi.mocked(x.deps.storedConsent!.preflight).mockResolvedValue({ kind: "denied", reason: "stored-consent-denied" });
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.deps.storedConsent!.preflight).not.toHaveBeenCalled();
+    expect(x.deps.templateCategories!.verify).not.toHaveBeenCalled();
+    expect(x.deps.fence.admitFinalSend).toHaveBeenCalledOnce();
     await x.dispatcher.close();
   });
 });

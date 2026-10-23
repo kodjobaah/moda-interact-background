@@ -3,16 +3,25 @@ import { first, rows, changed, lockRecoveryContext, recoveryDatabase, terminalRe
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
+import type { StoredRecoveryConsentSnapshot } from "./recovery-stored-consent.service.js";
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
 export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date }
   | { kind: "suppressed"; reason: string };
+export type RecoveryMarketingPermit = {
+  consent: StoredRecoveryConsentSnapshot | null;
+  verifiedCategory: "MARKETING";
+  templateName: string;
+  languageCode: string;
+};
 export type DispatchInput = {
   senderType: DispatchActor;
   conversationId: string; shopId: string; recoveryId: string;
   expectedControlRevision: number;
   commandId?: string; leaseToken?: string; messageId?: string;
   recipient: string; now: Date;
+  /** Provider-verified BEFORE this SQL transaction, never fetched inside it. */
+  proactive?: RecoveryMarketingPermit;
 };
 
 /** BG002 injects synchronous, database-only checks for shop entitlement, recovery
@@ -73,13 +82,13 @@ export class OutboundSendFenceService {
       let command: {
         state: string; leaseToken: string | null; leaseExpiresAt: Date | null;
         expectedControlRevision: number; kind: string; recipientSnapshot: string;
-        textBody: string | null; templateName: string | null;
+        textBody: string | null; templateName: string | null; templateLanguageCode: string | null;
         recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
       } | null = null;
       if (input.senderType === "HUMAN") {
         command = await first(tx, `
           SELECT "state"::text, "leaseToken", "leaseExpiresAt", "expectedControlRevision",
-            "kind"::text, "recipientSnapshot", "textBody", "templateName",
+            "kind"::text, "recipientSnapshot", "textBody", "templateName", "templateLanguageCode",
             "recoveryOutreachAttemptId", "providerDispatchKey"
           FROM "whatsapp"."MerchantConversationSendCommand"
           WHERE "id"=$1 AND "conversationId"=$2 AND "shopId"=$3 FOR UPDATE`,
@@ -94,6 +103,10 @@ export class OutboundSendFenceService {
         if (command.kind === "HUMAN_TEXT" && !customerWindow(context.lastInboundAt, input.now).open)
           return { kind: "suppressed", reason: "customer-window-closed" } as const;
         if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+          if (!input.proactive || input.proactive.verifiedCategory !== "MARKETING" ||
+              input.proactive.templateName !== command.templateName ||
+              input.proactive.languageCode !== command.templateLanguageCode)
+            return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
           const attempt = await first<{ initiatedBy: string | null; outboundMessageId: string | null; status: string }>(tx, `
             SELECT "initiatedBy"::text,"outboundMessageId","status"::text
             FROM "commerce"."RecoveryOutreachAttempt"
@@ -105,6 +118,14 @@ export class OutboundSendFenceService {
             return { kind: "suppressed", reason: "customer-window-open" } as const;
         }
       }
+      // AUTOMATION recovery outreach must carry provider-verified Marketing
+      // metadata; HUMAN_TEXT and customer-initiated AGENT replies are service
+      // messages and need only the common STOP/control checks above.
+      if (input.senderType === "AUTOMATION" && !input.proactive)
+        return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
+      if (input.proactive && (input.proactive.verifiedCategory !== "MARKETING" ||
+          !input.proactive.templateName || !input.proactive.languageCode))
+        return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
       const furtherDenial = await durableEligibility(tx, input, context);
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
 

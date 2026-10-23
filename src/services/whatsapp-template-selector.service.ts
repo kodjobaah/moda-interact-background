@@ -4,6 +4,7 @@ import {
 } from "@modainteract/moda-interact-shared/internationalization";
 import type { PrismaClient } from "@prisma/client";
 import prisma from "../lib/db.js";
+import type { TemplateCategoryQuery, MetaTemplateCategory } from "./whatsapp-template-category.service.js";
 
 export type MarketCapability = "supported" | "unsupported" | "unknown";
 
@@ -22,6 +23,8 @@ export type WhatsAppTemplateSelectionInput = {
   resolveMarketCapability: MarketCapabilityResolver;
   platformFallbackEnabled?: boolean;
   platformFallbackLanguageTag?: string | null;
+  /** Optional Meta API verifier. No verifier means no verified category. */
+  verifyCategory?: (input: TemplateCategoryQuery) => Promise<MetaTemplateCategory | null>;
 };
 
 export type SelectedWhatsAppTemplate = {
@@ -172,12 +175,21 @@ export class WhatsAppTemplateSelectorService {
         return { outcome: "market-unavailable", reason: "unsupported-market" };
       }
 
+      const verifiedCategory = input.verifyCategory
+        ? await input.verifyCategory({
+            providerAccountId: input.providerAccountId,
+            providerTemplateName: variant.providerTemplateName,
+            providerLanguageCode: variant.providerLanguageCode,
+            providerTemplateId: variant.providerTemplateId,
+          })
+        : null;
       return {
         outcome: capability === "unknown" ? "provider-check-required" : "selected",
         canonicalLanguageTag: candidate.languageTag,
         providerLanguageCode: variant.providerLanguageCode,
         providerTemplateName: variant.providerTemplateName,
         providerTemplateId: variant.providerTemplateId,
+        ...(verifiedCategory ? { verifiedCategory } : {}),
         selectionSource: candidate.selectionSource,
         marketCapability: capability === "unknown" ? "provider-check-required" : "supported",
       };

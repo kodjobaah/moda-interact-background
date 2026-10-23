@@ -9,7 +9,13 @@ import { MerchantSendCommandService, type HumanCommand } from "./merchant-send-c
 import { RecoveryFollowUpPolicyService } from "./recovery-follow-up-policy.service.js";
 import { HumanSendPolicyService } from "./human-send-policy.service.js";
 import { HumanCommandEvaluationService } from "./human-command-evaluation.service.js";
-import { OutboundSendFenceService } from "./outbound-send-fence.service.js";
+import { OutboundSendFenceService, type RecoveryMarketingPermit } from "./outbound-send-fence.service.js";
+import {
+  recoveryStoredConsentService, type StoredRecoveryConsentReader,
+} from "./recovery-stored-consent.service.js";
+import {
+  metaWhatsAppTemplateCategoryService, type TemplateCategoryVerifier,
+} from "../whatsapp-template-category.service.js";
 import { HumanSendReconciliationService } from "./human-send-reconciliation.service.js";
 import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.service.js";
 import { FollowUpClaimCancellationService, type FollowUpClaimCancellation } from "./follow-up-claim-cancellation.service.js";
@@ -48,6 +54,9 @@ export type HumanDispatcherDependencies = {
   incidents?: HumanSendIncidentSink;
   /** Recovery-template only: ordinary HUMAN_TEXT must never invoke this. */
   recipientFailure?: Pick<typeof synchronousRecipientFailureService, "afterPersistedRejection">;
+  /** Both are required by production for merchant post-window templates. */
+  storedConsent?: StoredRecoveryConsentReader;
+  templateCategories?: TemplateCategoryVerifier;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -69,6 +78,8 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     senderPreflight: () => whatsAppService.assertOutboundSenderConfigured(),
     incidents: createHumanSendIncidentSink(),
     recipientFailure: synchronousRecipientFailureService,
+    storedConsent: recoveryStoredConsentService,
+    templateCategories: metaWhatsAppTemplateCategoryService,
   };
 }
 
@@ -256,6 +267,37 @@ export class HumanCommandDispatcherService {
       return;
     }
 
+    // Human free-form responses inside a customer-open service window are not
+    // Marketing, but still pass the shared STOP SQL fence. Only the merchant's
+    // post-window recovery template requires stored consent + Meta category.
+    let proactive: RecoveryMarketingPermit | undefined;
+    if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+      if (!this.deps.storedConsent || !this.deps.templateCategories ||
+          !command.templateName || !command.templateLanguageCode) {
+        await this.rejectTerminal(commandId, leaseToken, "marketing-template-unverified");
+        return;
+      }
+      const [permission, category] = await Promise.all([
+        this.deps.storedConsent.preflight({
+          shopId: command.shopId, recoveryId: context.recoveryId,
+          recipient: command.recipientSnapshot,
+        }),
+        this.deps.templateCategories.verify({
+          providerTemplateName: command.templateName,
+          providerLanguageCode: command.templateLanguageCode,
+        }),
+      ]);
+      if (permission.kind !== "allowed" || category !== "MARKETING") {
+        await this.rejectTerminal(commandId, leaseToken,
+          permission.kind === "denied" ? permission.reason : "marketing-template-unverified");
+        return;
+      }
+      proactive = {
+        consent: permission.snapshot, verifiedCategory: "MARKETING",
+        templateName: command.templateName, languageCode: command.templateLanguageCode,
+      };
+    }
+
     let attemptId: string | null = null;
     let credit: Awaited<ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>> | null = null;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
@@ -288,6 +330,7 @@ export class HumanCommandDispatcherService {
       shopId: command.shopId, recoveryId: context.recoveryId,
       expectedControlRevision: command.expectedControlRevision,
       commandId, leaseToken, recipient: command.recipientSnapshot, now: this.deps.now(),
+      ...(proactive ? { proactive } : {}),
     });
     if (permit.kind !== "admitted") {
       if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);

@@ -83,6 +83,22 @@ describe("ARCH-040 recovery conversation policies", () => {
       .toMatchObject({kind:"known",open:false});
   });
 
+  it("releases only the same still-pending automated follow-up claim under the Shop lock", async () => {
+    const { db } = reader((sql) => {
+      if (sql.includes('FROM "whatsapp"."Conversation" c')) return [context];
+      if (/FROM "whatsapp"\."Conversation"\s+WHERE/.test(sql)) return [{ id: "conversation" }];
+      if (sql.includes('FROM "commerce"."Shop" WHERE')) return [{ id: "shop" }];
+      return [];
+    });
+    await expect(new RecoveryFollowUpPolicyService(db).releaseScheduledClaim({
+      recoveryId: "recovery", attemptId: "attempt", initiationKey: "scheduled-key",
+    })).resolves.toBe(true);
+    expect(db.$executeRawUnsafe).toHaveBeenCalledWith(
+      expect.stringMatching(/"outboundMessageId" IS NULL AND "sentAt" IS NULL/),
+      "attempt", "recovery", "scheduled-key",
+    );
+  });
+
   it("fails closed for unavailable Redis, and validates content bounds", async () => {
     const { db } = reader(() => []);
     const service = new HumanSendPolicyService(db);
