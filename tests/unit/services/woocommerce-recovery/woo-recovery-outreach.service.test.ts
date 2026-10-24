@@ -24,7 +24,6 @@ const template = {
   verifiedCategory: "MARKETING" as const,
 };
 
-type Fixture = ReturnType<typeof makeFixture>;
 function makeFixture() {
   let recovery: WooOutreachRecovery = {
     id: "recovery", shopId: "woo-shop", checkoutToken: "exact-checkout-key",
@@ -335,13 +334,18 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
 
   it("surfaces simultaneous provider and compensation faults, retaining original cause", async () => {
     const f = makeFixture();
-    f.send.mockRejectedValueOnce(new Error("provider failed"));
-    f.compensate.mockRejectedValueOnce(new Error("compensation failed"));
-    await expect(f.service.processInitial("recovery")).rejects.toMatchObject({
-      message: "WOO_PROVIDER_COMPENSATION_FAILED",
-      errors: [expect.objectContaining({ message: "provider failed" }),
-        expect.objectContaining({ message: "compensation failed" })],
-    });
+    const providerFailure = new Error("provider failed");
+    const compensationFailure = new Error("compensation failed");
+    f.send.mockRejectedValueOnce(providerFailure);
+    f.compensate.mockRejectedValueOnce(compensationFailure);
+    const failure = await f.service.processInitial("recovery").then(
+      () => { throw new Error("expected provider compensation to fail"); },
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe("WOO_PROVIDER_COMPENSATION_FAILED");
+    expect((failure as AggregateError).cause).toBe(providerFailure);
+    expect((failure as AggregateError).errors).toEqual([providerFailure, compensationFailure]);
     expect(f.finalize).not.toHaveBeenCalled();
   });
 
@@ -357,16 +361,22 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
 
   it("surfaces preflight and release failures together, without sending", async () => {
     const f = makeFixture();
+    const preflightFailure = new Error("revocation reader outage");
+    const releaseFailure = new Error("release outage");
     // The guard runs twice, so the failure must occur after the first grant.
     f.consent.mockResolvedValueOnce({ status: "ALLOWED", snapshot,
       customerPhoneId: snapshot.customerPhoneId, canonicalRecipient: snapshot.canonicalRecipient,
       consentRevision: 3n, noContactRevision: 0n });
-    f.consent.mockRejectedValueOnce(new Error("revocation reader outage"));
-    f.release.mockRejectedValueOnce(new Error("release outage"));
-    await expect(f.service.processInitial("recovery")).rejects.toMatchObject({
-      message: "WOO_PRE_SEND_RELEASE_FAILED",
-      errors: [expect.any(Error), expect.any(Error)],
-    });
+    f.consent.mockRejectedValueOnce(preflightFailure);
+    f.release.mockRejectedValueOnce(releaseFailure);
+    const failure = await f.service.processInitial("recovery").then(
+      () => { throw new Error("expected pre-send release to fail"); },
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe("WOO_PRE_SEND_RELEASE_FAILED");
+    expect((failure as AggregateError).cause).toBe(preflightFailure);
+    expect((failure as AggregateError).errors).toEqual([preflightFailure, releaseFailure]);
     expect(f.send).not.toHaveBeenCalled();
   });
 

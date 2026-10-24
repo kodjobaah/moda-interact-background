@@ -442,16 +442,23 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   }
 
   private async releaseOrThrow(admission: RecoveryBillingAdmission, original: unknown): Promise<void> {
+    let compensationFailure: { error: unknown } | undefined;
     try {
       await this.deps.billing.releaseBeforeProvider(admission);
     } catch (compensation) {
-      throw new AggregateError([original, compensation], "WOO_PRE_SEND_RELEASE_FAILED");
+      compensationFailure = { error: compensation };
+    }
+    if (compensationFailure) {
+      throw new AggregateError(
+        [original, compensationFailure.error], "WOO_PRE_SEND_RELEASE_FAILED", { cause: original },
+      );
     }
   }
 
   private async compensateProviderError(
     attemptId: string, admission: RecoveryBillingAdmission, original: unknown,
   ): Promise<void> {
+    let compensationFailure: { error: unknown } | undefined;
     try {
       const message = await this.deps.sender.findExistingAdmission(this.key(attemptId));
       if (confirmed(message)) return; // message sent; never refund
@@ -460,7 +467,12 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       // Only a definitively FAILED provider message may be terminalised.
       if (message?.status === "FAILED") await this.deps.attempts.markFailed(attemptId, "PROVIDER_FAILED");
     } catch (compensation) {
-      throw new AggregateError([original, compensation], "WOO_PROVIDER_COMPENSATION_FAILED");
+      compensationFailure = { error: compensation };
+    }
+    if (compensationFailure) {
+      throw new AggregateError(
+        [original, compensationFailure.error], "WOO_PROVIDER_COMPENSATION_FAILED", { cause: original },
+      );
     }
   }
 
