@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
+import type { RecoveryConsentCheckoutContext } from "./recovery-consent-merchant-notice.contracts.js";
 import prisma from "../../lib/db.js";
 import { recoveryShopifyCustomerService } from "./recovery-shopify-customer.service.js";
 import { conversationService } from "../conversation.service.js";
@@ -35,6 +36,31 @@ interface RecoveryInitiationPorts {
 }
 
 export type RecoveryAdmissionGate = () => Promise<boolean>;
+
+/** Only the already accepted checkout seed is eligible for merchant notice context. */
+function noticeContextFromCheckout(event: RecoveryCheckoutSeed): RecoveryConsentCheckoutContext {
+  const context: {
+    customerName?: string;
+    customerEmail?: string;
+    checkoutTotal?: { amountDecimal: string; currency: string };
+    lastActivityAt?: string;
+  } = {};
+  const name = [event.customer?.firstName, event.customer?.lastName]
+    .filter((part): part is string => typeof part === "string" && !!part.trim()).join(" ");
+  if (name) context.customerName = name;
+  if (typeof event.customer?.email === "string") context.customerEmail = event.customer.email;
+  if (typeof event.totalPrice === "string" && typeof event.currency === "string") {
+    context.checkoutTotal = { amountDecimal: event.totalPrice, currency: event.currency };
+  }
+  // The current bounded Shopify GraphQL projection carries lineItems.nodes but
+  // no pageInfo or completeness marker. A nonempty list can still be truncated,
+  // so it is not sound to report its summed units as the full checkout count.
+  // The shared formatter supports itemCount for callers with complete evidence.
+  const observedAt = event.lastExternalActivityAt ?? event.detectedAt;
+  if (typeof observedAt === "string") context.lastActivityAt = observedAt;
+  // checkoutUrl, cartToken and checkoutToken are opaque, not merchant-visible references.
+  return context;
+}
 
 export class RecoveryInitiationService {
   constructor(
@@ -133,6 +159,7 @@ export class RecoveryInitiationService {
       where: { domain: event.shop }, select: { id: true },
     });
     const previous = await findLatestRecovery(shop.id, event.checkoutToken);
+    const noticeContext = noticeContextFromCheckout(event);
     const requiresAdmission = !previous || previous.status === "DETECTED" || previous.status === "EXPIRED";
     let customer: Awaited<ReturnType<typeof recoveryShopifyCustomerService.resolve>> | undefined;
     let recipient: string | null = null;
@@ -147,11 +174,11 @@ export class RecoveryInitiationService {
       const identity = customer?.id ?? previous?.customerId ?? null;
       const permitted = previous
         ? await this.consentAdmission.evaluateReentry({
-            shopId: shop.id, checkoutToken: event.checkoutToken,
+            shopId: shop.id, checkoutToken: event.checkoutToken, noticeContext,
             customerId: identity, recipient,
           })
         : await this.consentAdmission.evaluateFirst({
-            shopId: shop.id, checkoutToken: event.checkoutToken,
+            shopId: shop.id, checkoutToken: event.checkoutToken, noticeContext,
             customerId: identity,
             shopifyCustomerId: event.customer?.shopifyCustomerId ?? null,
             recipient,
@@ -189,7 +216,7 @@ export class RecoveryInitiationService {
     const policy = await recoveryPolicyService.resolve(recovery.shopId);
     recipient ??= canonicalizeRecoveryRecipient(resolvedRecipient ?? this.ports!.resolveRecipient(event));
     if (!recipient) {
-      await this.consentAdmission.notifyMissingRecipient({ shopId: recovery.shopId, checkoutToken: event.checkoutToken });
+      await this.consentAdmission.notifyMissingRecipient({ shopId: recovery.shopId, checkoutToken: event.checkoutToken, noticeContext });
       return recovery;
     }
     // First-send re-entries (including legacy DETECTED and capacity/suppression
@@ -198,6 +225,7 @@ export class RecoveryInitiationService {
     const currentlyAllowed = await this.consentAdmission.evaluateReentry({
       shopId: recovery.shopId,
       checkoutToken: event.checkoutToken,
+      noticeContext,
       customerId: customer?.id ?? recovery.customerId,
       recipient,
     });
@@ -282,6 +310,7 @@ export class RecoveryInitiationService {
       finalConsentAllowed = await this.consentAdmission.evaluateReentry({
         shopId: recovery.shopId,
         checkoutToken: event.checkoutToken,
+        noticeContext,
         customerId: customer?.id ?? recovery.customerId,
         recipient: attempt.recipient,
       });

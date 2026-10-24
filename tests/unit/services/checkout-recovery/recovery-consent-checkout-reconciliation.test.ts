@@ -32,7 +32,7 @@ function scenario() {
   let storedRecovery: { id: string; shopId: string; checkoutToken: string; status: string; generation: number } | null = null;
   const candidates: Array<Record<string, unknown>> = [];
   const writes = { recovery: vi.fn(), attempt: vi.fn(), charge: vi.fn(), send: vi.fn() };
-  const notice = { publish: vi.fn(async () => "created" as const) };
+  const notice = { notify: vi.fn(async () => "created" as const) };
   const native = {
     evaluateRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === authorisedRecipient
       ? { status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n }
@@ -130,7 +130,7 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     expect(await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent)).toMatchObject({ kind: "pending" });
     expect((await matureNext(ctx)).outcome).toBe("discarded-admission-denied");
     expect(ctx.native.evaluateRecipient).toHaveBeenCalledTimes(1);
-    expect(ctx.notice.publish).toHaveBeenCalledWith(expect.objectContaining({ reason: "NO_VERIFIED_OPT_IN" }));
+    expect(ctx.notice.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "NO_VERIFIED_OPT_IN" }));
     for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
 
     // Native consent webhook/CustomerPhone projection alone does not invoke the
