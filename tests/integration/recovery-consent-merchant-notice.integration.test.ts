@@ -45,6 +45,7 @@ withDatabase("recovery consent merchant Support notices — real PostgreSQL", ()
       expect(calls.filter((c) => c === "created")).toHaveLength(1);
       expect(calls.filter((c) => c === "duplicate")).toHaveLength(9);
       const threadA = await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } });
+      expect(await a.merchantSupportThread.count({ where: { shopId: shopA } })).toBe(1);
       expect(await a.merchantSupportMessage.count({ where: { threadId: threadA.id,
         systemCode: "RECOVERY_CONSENT_ADMISSION" } })).toBe(1);
       expect(threadA.lastMessageAt).toEqual(new Date("2026-10-24T09:00:00Z"));
@@ -116,7 +117,8 @@ withDatabase("recovery consent merchant Support notices — real PostgreSQL", ()
       const injected = {
         $transaction: (callback: (tx: unknown) => Promise<unknown>) => db.$transaction(async (tx) => callback({
           merchantSupportThread: {
-            upsert: tx.merchantSupportThread.upsert.bind(tx.merchantSupportThread),
+            createMany: tx.merchantSupportThread.createMany.bind(tx.merchantSupportThread),
+            findUniqueOrThrow: tx.merchantSupportThread.findUniqueOrThrow.bind(tx.merchantSupportThread),
             updateMany: async () => { throw new Error("injected metadata update failure"); },
           },
           merchantSupportMessage: tx.merchantSupportMessage,

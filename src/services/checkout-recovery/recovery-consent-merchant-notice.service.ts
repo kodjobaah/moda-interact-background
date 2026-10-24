@@ -39,10 +39,15 @@ export class RecoveryConsentMerchantNoticeService implements RecoveryConsentMerc
       }
       validated = true;
       const result = await this.database.$transaction(async (tx) => {
-        const thread = await tx.merchantSupportThread.upsert({
+        // Avoid Prisma's read-then-insert upsert race when multiple workers
+        // create the first Support thread for a shop concurrently.
+        await tx.merchantSupportThread.createMany({
+          data: [{ shopId: input.shopId }],
+          skipDuplicates: true,
+        });
+        const thread = await tx.merchantSupportThread.findUniqueOrThrow({
           where: { shopId: input.shopId },
-          create: { shopId: input.shopId },
-          update: {},
+          select: { id: true },
         });
         const inserted = await tx.merchantSupportMessage.createMany({
           skipDuplicates: true,

@@ -28,7 +28,8 @@ function context() {
   const rows = new Map<string, Row>();
   let lastMessageAt: Date | null = null;
   const thread = { id: "thread-1", shopId: "shop-1" };
-  const upsert = vi.fn(async () => thread);
+  const createThread = vi.fn(async () => ({ count: 1 }));
+  const findThread = vi.fn(async () => ({ id: thread.id }));
   const createMany = vi.fn(async ({ data }: { data: Row[]; skipDuplicates: boolean }) => {
     const row = data[0]!;
     if (rows.has(row.sourceKey)) return { count: 0 };
@@ -44,15 +45,15 @@ function context() {
     return { count: 1 };
   });
   const tx = {
-    merchantSupportThread: { upsert, updateMany },
+    merchantSupportThread: { createMany: createThread, findUniqueOrThrow: findThread, updateMany },
     merchantSupportMessage: { createMany, findUnique },
   };
   const database = { $transaction: vi.fn(async (callback: (arg: typeof tx) => Promise<unknown>) => callback(tx)) };
   const logger = { info: vi.fn(), error: vi.fn() };
   const now = vi.fn(() => new Date("2026-10-24T10:00:00Z"));
   const service = new RecoveryConsentMerchantNoticeService(database as never, now, logger as never);
-  return { service, database, logger, now, rows, tx, thread, upsert, createMany, findUnique,
-    updateMany, getLastMessageAt: () => lastMessageAt };
+  return { service, database, logger, now, rows, tx, thread, createThread, findThread,
+    createMany, findUnique, updateMany, getLastMessageAt: () => lastMessageAt };
 }
 
 describe("shared recovery consent merchant Support notifier", () => {
@@ -60,6 +61,12 @@ describe("shared recovery consent merchant Support notifier", () => {
     const f = context();
     expect(await f.service.notify(first)).toBe("created");
     expect(f.database.$transaction).toHaveBeenCalledOnce();
+    expect(f.createThread).toHaveBeenCalledWith({
+      data: [{ shopId: first.shopId }], skipDuplicates: true,
+    });
+    expect(f.findThread).toHaveBeenCalledWith({
+      where: { shopId: first.shopId }, select: { id: true },
+    });
     expect(f.createMany).toHaveBeenCalledWith({
       skipDuplicates: true,
       data: [{
@@ -106,6 +113,22 @@ describe("shared recovery consent merchant Support notifier", () => {
       .toContain("Platform: WooCommerce"); // Synthetic Woo caller uses the same notifier.
   });
 
+  it("handles an already-created merchant thread and fails if the thread cannot be resolved", async () => {
+    const existing = context();
+    existing.createThread.mockResolvedValue({ count: 0 });
+    expect(await existing.service.notify(first)).toBe("created");
+    expect(existing.findThread).toHaveBeenCalledOnce();
+
+    const missing = context();
+    missing.createThread.mockResolvedValue({ count: 0 });
+    const dbFailure = new Error("Support thread not found after insert conflict");
+    missing.findThread.mockRejectedValueOnce(dbFailure);
+    await expect(missing.service.notify(first)).rejects.toBe(dbFailure);
+    expect(missing.createMany).not.toHaveBeenCalled();
+    expect(missing.logger.error).toHaveBeenCalledWith("recovery.consent_notice.failed",
+      expect.objectContaining({ errorCategory: "PERSISTENCE_FAILURE" }));
+  });
+
   it("refuses count-zero without an authentic same-thread SYSTEM notice", async () => {
     for (const wrong of [
       null,
@@ -129,10 +152,11 @@ describe("shared recovery consent merchant Support notifier", () => {
   });
 
   it("rejects impossible insert counts and propagates database and transaction errors", async () => {
-    for (const operation of ["upsert", "createMany", "updateMany", "findUnique", "transaction"] as const) {
+    for (const operation of ["createThread", "findThread", "createMany", "updateMany", "findUnique", "transaction"] as const) {
       const f = context();
       const dbFailure = new Error("db error with private-checkout-token-01 in message");
-      if (operation === "upsert") f.upsert.mockRejectedValueOnce(dbFailure);
+      if (operation === "createThread") f.createThread.mockRejectedValueOnce(dbFailure);
+      if (operation === "findThread") f.findThread.mockRejectedValueOnce(dbFailure);
       if (operation === "createMany") f.createMany.mockRejectedValueOnce(dbFailure);
       if (operation === "updateMany") f.updateMany.mockRejectedValueOnce(dbFailure);
       if (operation === "findUnique") {

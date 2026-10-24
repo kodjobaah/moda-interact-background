@@ -24,7 +24,7 @@ describe("canonical recovery consent merchant notice formatter", () => {
       "recovery-consent:v1:67180b364e0e55cce3bea52d4f50774594447b6be4c6ff3cd9146d9b2c19f94c",
     );
     expect(createRecoveryConsentNoticeSourceKey({ ...first, blockedOperation: "SEND_INITIAL_RECOVERY" })).toBe(
-      "recovery-consent:v1:eb189d63ca39d5d678e4b3c4a3a03632770d4738ded501bc1b8b8dc89a",
+      "recovery-consent:v1:eb189d63ca39d5d678e4b3c4a3a03632770d4738ded39cded501bc1b8b8dc89a",
     );
     for (const change of [
       { platform: "WOOCOMMERCE" as const }, { shopId: "shop-2" },
