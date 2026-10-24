@@ -3,9 +3,16 @@ import {
   pendingCandidateCheckoutIndexKey,
   pendingCandidateIndexTtlMs,
   pendingCandidateShopIndexKey,
-  type PendingRecoveryCandidate,
 } from "../../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../../lib/redis.js";
+
+/** Identity-only storage: Woo and Shopify share the index keys but not their
+ * candidate payloads. The Woo source is retained in its BullMQ job data. */
+type CandidateIndexIdentity = {
+  shopId: string;
+  checkoutToken: string;
+  cartToken?: string | null;
+};
 
 export class PendingRecoveryCandidateIndexStore {
   async findByCheckout(input: { shopId: string; checkoutToken: string }) {
@@ -27,13 +34,15 @@ export class PendingRecoveryCandidateIndexStore {
   }
 
   async upsert(input: {
-    candidate: PendingRecoveryCandidate;
+    candidate: CandidateIndexIdentity;
     jobId: string;
     delayMinutes: number;
     dueAtMs: number;
     shouldIndexShop: boolean;
+    /** Woo's outage/replay horizon can exceed the legacy Shopify index TTL. */
+    retentionMs?: number;
   }) {
-    const ttlMs = pendingCandidateIndexTtlMs(input.delayMinutes);
+    const ttlMs = input.retentionMs ?? pendingCandidateIndexTtlMs(input.delayMinutes);
 
     await connectionRedis.set(
       pendingCandidateCheckoutIndexKey({
@@ -69,10 +78,7 @@ export class PendingRecoveryCandidateIndexStore {
   }
 
   async remove(
-    candidate: Pick<
-      PendingRecoveryCandidate,
-      "shopId" | "checkoutToken" | "cartToken"
-    >,
+    candidate: CandidateIndexIdentity,
     jobId?: string,
   ) {
     const keys = [
