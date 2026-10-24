@@ -1,0 +1,160 @@
+import prisma from "../../lib/db.js";
+import { recoveryRecipientResolverService } from "../checkout-recovery/recovery-recipient-resolver.service.js";
+import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
+import { recoveryPolicyService } from "../recovery-policy.service.js";
+import { recoveryBillingService } from "../recovery-billing.service.js";
+import { conversationService } from "../conversation.service.js";
+import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
+import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
+import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
+import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
+import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
+import { WooRecoveryOutreachService, type WooOutreachDependencies, type WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
+import type { WooCheckoutCoordinator, WooObservedOrderStateReader } from "./contracts.js";
+import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+
+/**
+ * BG004's existing-service adapters. No queue, worker or provider is registered.
+ * The caller MUST provide BG002's fenced checkout coordinator/order reader and
+ * a reviewed ARCH-046 Woo final-send implementation. This snapshot's generic
+ * outbound sender is not eligible as a WooGuardedInitialSender: it bypasses
+ * Woo consent in the final SQL permit.
+ */
+export function createWooRecoveryOutreachService(input: {
+  coordinator: WooCheckoutCoordinator;
+  orders: WooObservedOrderStateReader;
+  guardedSender: WooGuardedInitialSender;
+  enqueue: WooOutreachDependencies["enqueue"];
+  logger: StructuredLogger;
+  enableTestOutbound?: () => boolean;
+}): WooRecoveryOutreachService {
+  return new WooRecoveryOutreachService({
+    logger: input.logger,
+    coordinator: input.coordinator,
+    orders: input.orders,
+    sender: input.guardedSender,
+    enqueue: input.enqueue,
+    ...(input.enableTestOutbound ? { enableTestOutbound: input.enableTestOutbound } : {}),
+    recoveries: {
+      async get(recoveryId) {
+        return prisma.checkoutRecovery.findUnique({
+          where: { id: recoveryId },
+          select: {
+            id: true, shopId: true, checkoutToken: true, customerId: true,
+            status: true, completedAt: true,
+            shop: { select: { platform: true, status: true } },
+          },
+        });
+      },
+      currentRecipient: (customerId, shopId) =>
+        recoveryRecipientResolverService.resolveForCustomerInShop(customerId, shopId),
+    },
+    attempts: {
+      async findInitial(recoveryId) {
+        return prisma.recoveryOutreachAttempt.findUnique({
+          where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recoveryId, sequence: 1 } },
+          select: { id: true, sequence: true, recipient: true, status: true,
+            sentAt: true, outboundMessageId: true, followUpDueAt: true },
+        });
+      },
+      getOrCreateInitial: async ({ recoveryId, recipient, policy }) =>
+        recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, recipient, policy }),
+      async markFailed(attemptId, reason) {
+        const updated = await prisma.recoveryOutreachAttempt.updateMany({
+          where: {
+            id: attemptId, sequence: 1, sentAt: null, outboundMessageId: null,
+            status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+          },
+          data: { status: "FAILED", failureCode: reason },
+        });
+        if (updated.count === 0) {
+          const current = await prisma.recoveryOutreachAttempt.findUnique({
+            where: { id: attemptId }, select: { status: true, sentAt: true, outboundMessageId: true },
+          });
+          if (!current || current.sentAt || current.outboundMessageId || current.status !== "FAILED")
+            throw new Error("WOO_ATTEMPT_FAILURE_TRANSITION_CONFLICT");
+        }
+      },
+    },
+    consent: wooRecoveryConsentReader,
+    policies: recoveryPolicyService,
+    templates: {
+      async select(shopId, recoveryId) {
+        const conversation = await prisma.conversation.findUnique({
+          where: { checkoutRecoveryId: recoveryId },
+          select: { languageTag: true, countryCode: true },
+        });
+        const selection = await whatsappTemplateSelectorService.select({
+          shopId,
+          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
+          purpose: "checkout-recovery",
+          languageTag: conversation?.languageTag ?? null,
+          countryCode: conversation?.countryCode ?? null,
+          resolveMarketCapability: async () => "unknown" as const,
+          verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
+        });
+        if ((selection.outcome !== "selected" && selection.outcome !== "provider-check-required") ||
+          selection.verifiedCategory !== "MARKETING")
+          return { kind: "unavailable" as const, reason: "marketing-template-unverified" };
+        return {
+          kind: "selected" as const,
+          template: {
+            name: selection.providerTemplateName,
+            languageCode: selection.providerLanguageCode,
+            canonicalLanguageTag: selection.canonicalLanguageTag,
+            verifiedCategory: "MARKETING" as const,
+          },
+        };
+      },
+    },
+    conversations: {
+      async getOrCreate(recoveryId) {
+        return conversationService.getOrCreateRecoveryConversation(recoveryId);
+      },
+    },
+    billing: recoveryBillingService,
+    providerFailure: {
+      async compensate(admission, error) {
+        // Existing 131026 implementation already records failure evidence,
+        // compensates the exact source and notifies the merchant. Do not
+        // duplicate that correction in another owner.
+        if (!isSynchronousRecipientFailure(error)) {
+          await recoveryBillingService.handleProviderFailure({ admission, error });
+        }
+      },
+    },
+    finalize: {
+      async confirmed({ recovery, attempt, message, admission }) {
+        if (attempt.sequence !== 1 || attempt.followUpDueAt !== null)
+          throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
+        if (message.conversationId !== (await prisma.conversation.findUnique({
+          where: { checkoutRecoveryId: recovery.id }, select: { id: true },
+        }))?.id) throw new Error("WOO_INITIAL_MESSAGE_CONVERSATION_MISMATCH");
+        // Use the canonical credit and attempt transition, deliberately NOT the
+        // Shopify finalizer's ensureScheduledInitialFollowUp method.
+        await recoveryBillingService.commitSuccessfulInitiation({
+          admission, recoveryId: recovery.id, occurredAt: message.sentAt,
+        });
+        const transitioned = await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(
+          attempt.id, { sentAt: message.sentAt, outboundMessageId: message.id, followUpDueAt: null },
+        );
+        if (!transitioned || transitioned.count !== 1) {
+          const persisted = await prisma.recoveryOutreachAttempt.findUnique({
+            where: { id: attempt.id }, select: {
+              outboundMessageId: true, sentAt: true, status: true, followUpDueAt: true,
+            },
+          });
+          if (!persisted || persisted.outboundMessageId !== message.id || !persisted.sentAt ||
+            persisted.followUpDueAt !== null ||
+            !["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(persisted.status))
+            throw new Error("WOO_INITIAL_FINALIZATION_CONFLICT");
+        }
+        await prisma.checkoutRecovery.updateMany({
+          where: { id: recovery.id, shopId: recovery.shopId, status: "DETECTED" },
+          data: { status: "MESSAGE_SENT", messageSentAt: message.sentAt,
+            admissionBlockedAt: null, admissionBlockReason: null },
+        });
+      },
+    },
+  });
+}
