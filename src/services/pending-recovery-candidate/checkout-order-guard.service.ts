@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   checkoutOrderCompletedKey,
   checkoutOrderLockKey,
@@ -93,5 +94,90 @@ export class CheckoutOrderGuardService {
       checkoutOrderCompletedKey({ shopId, checkoutToken }),
     );
     return value != null;
+  }
+}
+
+/**
+ * Woo's four business services share this leased checkout lock. Unlike the
+ * legacy Shopify lock above, this path renews the lease while work is running
+ * and checks/releases ownership with atomic Redis scripts. Never use GET+DEL
+ * for Woo: a lease may expire between those two calls.
+ */
+const WOO_LOCK_RENEW_INTERVAL_MS = 3_000;
+const RENEW_OWNED_LOCK = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+`;
+const RELEASE_OWNED_LOCK = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+`;
+
+export class WooCheckoutLeaseGuard {
+  constructor(private readonly redis: Pick<
+    typeof connectionRedis, "set" | "eval"
+  > = connectionRedis) {}
+
+  async withCheckoutLock<T>(shopId: string, checkoutToken: string, run: () => Promise<T>): Promise<T> {
+    const lockKey = checkoutOrderLockKey({ shopId, checkoutToken });
+    const owner = randomUUID();
+    for (let attempt = 0; attempt < CHECKOUT_LOCK_RETRIES; attempt += 1) {
+      const acquired = await this.redis.set(lockKey, owner, "PX", CHECKOUT_LOCK_TTL_MS, "NX");
+      if (acquired !== "OK") {
+        await sleep(CHECKOUT_LOCK_RETRY_DELAY_MS);
+        continue;
+      }
+
+      let leaseError: unknown;
+      let renewal: Promise<void> | undefined;
+      const renew = () => {
+        if (renewal || leaseError) return;
+        renewal = Promise.resolve().then(() => this.redis.eval(
+          RENEW_OWNED_LOCK, 1, lockKey, owner, String(CHECKOUT_LOCK_TTL_MS),
+        )).then((changed) => {
+          if (changed !== 1) throw new Error("woo-checkout-lock-lease-lost");
+        }).catch((error: unknown) => {
+          leaseError = error;
+        }).finally(() => {
+          renewal = undefined;
+        });
+      };
+      const interval = setInterval(renew, WOO_LOCK_RENEW_INTERVAL_MS);
+      interval.unref();
+
+      let primaryError: unknown;
+      let failed = false;
+      let result!: T;
+      try {
+        result = await run();
+      } catch (error) {
+        failed = true;
+        primaryError = error;
+      } finally {
+        clearInterval(interval);
+      }
+
+      if (renewal) await renewal;
+      let cleanupError: unknown;
+      let cleanupFailed = false;
+      try {
+        // Even on callback failure, release only our own lease. A renewal
+        // failure is never treated as a successful, guarded operation.
+        const released = await this.redis.eval(RELEASE_OWNED_LOCK, 1, lockKey, owner);
+        if (released !== 1) throw new Error("woo-checkout-lock-lease-lost");
+        if (leaseError) throw leaseError;
+      } catch (error) {
+        cleanupFailed = true;
+        cleanupError = error;
+      }
+      if (failed && cleanupFailed) {
+        throw new AggregateError([primaryError, cleanupError],
+          "Woo checkout callback and lease cleanup failed", { cause: primaryError });
+      }
+      if (failed) throw primaryError;
+      if (cleanupFailed) throw cleanupError;
+      return result;
+    }
+    throw new Error("woo-checkout-lock-timeout");
   }
 }
