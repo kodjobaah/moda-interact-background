@@ -1,5 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 import {
   MERCHANT_COMMUNICATIONS_JOB_NAMES,
@@ -22,11 +24,19 @@ import { handleStoreCategoryTranslationBatchResults } from "./store-category-tra
 import { handleMerchantPricingTranslationBatchSubmit } from "./merchant-pricing-translation-batch-submit.worker.js";
 import { handleMerchantPricingTranslationBatchPoll } from "./merchant-pricing-translation-batch-poll.worker.js";
 import { handleMerchantPricingTranslationBatchResults } from "./merchant-pricing-translation-batch-results.worker.js";
+import { TEMPLATE_TRANSLATION_JOB_NAMES } from "../services/template-translation/jobs.js";
+import { handleTemplateTranslationSubmit, handleTemplateTranslationPoll, handleTemplateTranslationResults } from "./template-translation.worker.js";
+
+const logger = createLogger({
+  serviceName: "moda-merchant-communications-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 const jobNames = [
   ...Object.values(MERCHANT_COMMUNICATIONS_JOB_NAMES),
   ...Object.values(STORE_CATEGORY_TRANSLATION_JOB_NAMES),
   ...Object.values(MERCHANT_PRICING_TRANSLATION_JOB_NAMES),
+  ...Object.values(TEMPLATE_TRANSLATION_JOB_NAMES),
 ];
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-merchant-communications-worker",
@@ -67,6 +77,12 @@ export function createMerchantCommunicationsWorker() {
           return handleMerchantPricingTranslationBatchPoll(job.data);
         case MERCHANT_PRICING_TRANSLATION_JOB_NAMES.BATCH_RESULTS:
           return handleMerchantPricingTranslationBatchResults(job.data);
+        case TEMPLATE_TRANSLATION_JOB_NAMES.SUBMIT:
+          return handleTemplateTranslationSubmit(job.data);
+        case TEMPLATE_TRANSLATION_JOB_NAMES.POLL:
+          return handleTemplateTranslationPoll(job.data);
+        case TEMPLATE_TRANSLATION_JOB_NAMES.RESULTS:
+          return handleTemplateTranslationResults(job.data);
         default:
           throw new Error(`Unknown merchant communications job: ${job.name}`);
       }
@@ -80,11 +96,16 @@ export function createMerchantCommunicationsWorker() {
   bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "merchantCommunicationsQueueGlobalConcurrency");
 
   worker.on("failed", (job, error) => {
-  console.error(`Merchant communications job ${job?.id} failed`, error);
+    logger.error("background.merchant_communications.job_failed", {
+      jobId: job?.id ?? null, jobName: job?.name ?? null,
+      error, errorName: error.name.slice(0, 128),
+    });
   });
 
   worker.on("error", (error) => {
-  console.error("Merchant communications worker error", error);
+    logger.error("background.merchant_communications.worker_exception", {
+      error, errorName: error.name.slice(0, 128),
+    });
   });
   return worker;
 }

@@ -1,4 +1,6 @@
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
 import { startQueuePerformanceTelemetry } from "../observability/queue-performance.js";
@@ -11,6 +13,13 @@ import { merchantPricingTranslationReconciliationService } from "../services/mer
 import { merchantPricingTranslationPublicationService } from "../services/merchant-pricing-translation-publication.service.js";
 import { storeCategoryTranslationPublicationService } from "../services/store-category-translation-publication.service.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
+import { templateTranslationCoordinator } from "../services/template-translation/reconciliation.js";
+import { closeTemplateTranslationWorkerResources } from "../workers/template-translation.worker.js";
+
+const logger = createLogger({
+  serviceName: "moda-merchant-communications-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-communications-worker",
@@ -37,6 +46,7 @@ void startReadyWorkerProcess({
           translationReconciliationService.reconcile(undefined, snapshot),
           storeCategoryTranslationReconciliationService.reconcile(snapshot),
           merchantPricingTranslationReconciliationService.reconcile(snapshot),
+          templateTranslationCoordinator.reconcile(snapshot.translationReconciliationPageSize),
         ]);
         const publicationOutcomes = await Promise.allSettled([
           storeCategoryTranslationPublicationService.reconcile(
@@ -56,7 +66,9 @@ void startReadyWorkerProcess({
           );
         }
       },
-      onError: (error) => console.error("translation reconciliation failed", error),
+      onError: (error) => logger.error("background.merchant_communications.reconciliation_failed", {
+        error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+      }),
     });
 
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
@@ -74,6 +86,8 @@ void startReadyWorkerProcess({
         () => translationReconciliationService.close(),
         () => storeCategoryTranslationReconciliationService.close(),
         () => merchantPricingTranslationReconciliationService.close(),
+        () => templateTranslationCoordinator.close(),
+        closeTemplateTranslationWorkerResources,
         closeWorkerObservability,
         closeQueuePerformanceTelemetry,
       ],
@@ -82,7 +96,9 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(error instanceof Error ? error.message : "worker readiness failed");
+  logger.error("background.merchant_communications.readiness_failed", {
+    error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+  });
   await closeWorkerObservability();
   process.exitCode = 1;
 }
