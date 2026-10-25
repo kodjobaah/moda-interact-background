@@ -37,7 +37,6 @@ const defaultLogger = createLogger({
   serviceName: "moda-recovery-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
-type WooFinalPermitTx = Prisma.TransactionClient;
 type LockedShop = { status: string; platform: string };
 type LockedRecovery = {
   shopId: string; checkoutToken: string; customerId: string | null;

@@ -12,16 +12,24 @@ const admission = { kind: "admitted" as const, shopId: "shop-1", conversationId:
   messageId: "message-1", terminal: false, executionScope: "recovery" as const };
 const template = { to: "+447400123456", templateName: "woo_recovery", languageCode: "en_GB" };
 
-function harness() {
+function harness(senderType: "AGENT" | "AUTOMATION" = "AUTOMATION") {
   let content = "[pending]";
   let status = "PENDING";
   const sendWhatsAppTemplate = vi.fn(async () => ({ providerMessageId: "wamid-1" }));
   const verify = vi.fn(async () => "MARKETING" as "MARKETING" | "UTILITY" | null);
   const admitFinalSend = vi.fn(async () => ({ kind: "admitted" as const }));
+  const generalFence = { admitFinalSend: vi.fn(async () => ({
+    kind: "suppressed" as const, reason: "local-no-contact",
+  })) };
+  const recoveryFence = { admitFinalSend: vi.fn(async () => ({
+    kind: "suppressed" as const, reason: "local-no-contact",
+  })) };
+  const ownership = { readTurnOwnership: vi.fn(async () =>
+    null as null | { recoveryId: string; revision: number }) };
   const failPrepared = vi.fn(async () => { status = "FAILED"; });
   const afterProviderError = vi.fn(async () => undefined);
   const findUnique = vi.fn(async () => ({ conversationId: "conversation-1",
-    senderType: "AUTOMATION", status, content,
+    senderType, status, content,
     providerDispatchKey: null, providerDispatchAdmittedAt: null }));
   const update = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     if (typeof data.content === "string") content = data.content;
@@ -43,13 +51,14 @@ function harness() {
     db as never,
     { sendWhatsAppTemplate, sendWhatsAppText: vi.fn(), getProviderAccountId: vi.fn() } as never,
     { evaluate: vi.fn(async () => ({ allowed: true })) } as never,
-    {} as never, {} as never, moderation as never,
+    ownership as never, recoveryFence as never, moderation as never,
     { failPrepared, afterProviderError } as never,
-    {} as never, {} as never, { verify } as never,
+    generalFence as never, {} as never, { verify } as never,
     { admitFinalSend } as never,
   );
   return { service, sendWhatsAppTemplate, verify, admitFinalSend, failPrepared,
-    afterProviderError, moderation, get content() { return content; } };
+    afterProviderError, moderation, generalFence, recoveryFence, ownership,
+    get content() { return content; } };
 }
 
 describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipeline", () => {
@@ -139,4 +148,38 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
       .rejects.toMatchObject({ name: "AggregateError", errors: [original, reconciliation] });
     expect(f.failPrepared).not.toHaveBeenCalled();
   });
+
+  it("keeps ordinary HUMAN text on the general STOP fence, never the Woo permit", async () => {
+    const f = harness("AGENT");
+    const result = await f.service.sendPreparedText({
+      ...admission, executionScope: "general", to: template.to, text: "Merchant reply",
+    });
+    expect(result).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(f.generalFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: admission.messageId, conversationId: admission.conversationId,
+      recipient: template.to, expectedContent: "Merchant reply",
+    }));
+    expect(f.recoveryFence.admitFinalSend).not.toHaveBeenCalled();
+    expect(f.admitFinalSend).not.toHaveBeenCalled();
+    expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(f.failPrepared).toHaveBeenCalledWith(admission.messageId);
+  });
+
+  it("keeps ordinary in-window AI recovery replies on their existing STOP/revision fence", async () => {
+    const f = harness("AGENT");
+    f.ownership.readTurnOwnership.mockResolvedValueOnce({ recoveryId: "recovery-1", revision: 3 });
+    const result = await f.service.sendPreparedText({
+      ...admission, executionScope: "recovery", to: template.to, text: "AI recovery reply",
+      expectedControlRevision: 3,
+    });
+    expect(result).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(f.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
+      senderType: "AGENT", recoveryId: "recovery-1", expectedControlRevision: 3,
+      recipient: template.to, deliveryKind: "TEXT",
+    }));
+    expect(f.generalFence.admitFinalSend).not.toHaveBeenCalled();
+    expect(f.admitFinalSend).not.toHaveBeenCalled();
+    expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  });
+
 });

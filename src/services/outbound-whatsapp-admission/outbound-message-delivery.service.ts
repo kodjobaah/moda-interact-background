@@ -199,7 +199,7 @@ export class OutboundMessageDeliveryService {
       try {
         await this.failPrepared(admission.messageId);
       } catch (cleanupError) {
-        throw new AggregateError([error, cleanupError], "WOO_PRE_PERMIT_MODERATION_CLEANUP_FAILED", { cause: error });
+        throw new AggregateError([error, cleanupError], "WOO_PRE_PERMIT_MODERATION_CLEANUP_FAILED", { cause: cleanupError });
       }
       throw error;
     }
@@ -259,7 +259,7 @@ export class OutboundMessageDeliveryService {
         // failure. The Woo worker must not acknowledge an uncertain outcome.
         if (wooScope) {
           throw new AggregateError([error, reconciliationError],
-            "WOO_PROVIDER_OUTCOME_RECONCILIATION_FAILED", { cause: error });
+            "WOO_PROVIDER_OUTCOME_RECONCILIATION_FAILED", { cause: reconciliationError });
         }
         throw reconciliationError;
       }
