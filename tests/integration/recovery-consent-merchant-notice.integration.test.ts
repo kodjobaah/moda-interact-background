@@ -30,7 +30,7 @@ function request(shopId: string, platform: "SHOPIFY" | "WOOCOMMERCE" = "SHOPIFY"
 }
 
 withDatabase("recovery consent merchant Support notices — real PostgreSQL", () => {
-  it("deduplicates across two independent clients, scopes each shop, separates operation and never regresses timestamps", async () => {
+  it("deduplicates across clients and blocked operations, scopes shops and preserves timestamp ordering", async () => {
     const a = new PrismaClient({ datasourceUrl: url! });
     const b = new PrismaClient({ datasourceUrl: url! });
     const shops: string[] = [];
@@ -41,7 +41,10 @@ withDatabase("recovery consent merchant Support notices — real PostgreSQL", ()
       const writers = [a, b].map((client) => new RecoveryConsentMerchantNoticeService(
         client, () => new Date("2026-10-24T09:00:00Z"), log,
       ));
-      const calls = await Promise.all(Array.from({ length: 10 }, (_, i) => writers[i % 2]!.notify(input)));
+      const calls = await Promise.all(Array.from({ length: 10 }, (_, i) => writers[i % 2]!.notify({
+        ...input,
+        blockedOperation: i % 2 === 0 ? "CREATE_FIRST_RECOVERY" : "SEND_INITIAL_RECOVERY",
+      })));
       expect(calls.filter((c) => c === "created")).toHaveLength(1);
       expect(calls.filter((c) => c === "duplicate")).toHaveLength(9);
       const threadA = await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } });
@@ -54,17 +57,40 @@ withDatabase("recovery consent merchant Support notices — real PostgreSQL", ()
       });
       expect(firstRow.originalBody).toContain("Customer: Ada");
       expect(firstRow.originalBody).not.toContain("private-checkout-token");
+      expect(firstRow.originalBody).toMatch(/Outcome: (No checkout recovery was created|The initial WhatsApp recovery message was not sent)/);
 
       const later = new RecoveryConsentMerchantNoticeService(a, () => new Date("2026-10-24T15:00:00Z"), log);
       const older = new RecoveryConsentMerchantNoticeService(b, () => new Date("2026-10-24T08:00:00Z"), log);
-      expect(await later.notify({ ...input, blockedOperation: "SEND_INITIAL_RECOVERY" })).toBe("created");
-      expect(await older.notify({ ...input, reason: "RECIPIENT_UNVERIFIED" })).toBe("created");
+      // The same checkout/reason from either entrypoint is a duplicate; no new timestamp.
+      expect(await later.notify({ ...input, blockedOperation: "SEND_INITIAL_RECOVERY" })).toBe("duplicate");
+      expect((await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } })).lastMessageAt)
+        .toEqual(new Date("2026-10-24T09:00:00Z"));
+      // A distinct reason is a new notice and can advance the thread timestamp.
+      expect(await later.notify({ ...input, reason: "RECIPIENT_UNVERIFIED" })).toBe("created");
       expect((await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } })).lastMessageAt)
         .toEqual(new Date("2026-10-24T15:00:00Z"));
+      expect(await older.notify({
+        ...input, reason: "RECIPIENT_UNVERIFIED", blockedOperation: "SEND_INITIAL_RECOVERY",
+      })).toBe("duplicate");
       expect(await older.notify({ ...input, context: { customerName: "Changed" } })).toBe("duplicate");
       expect((await a.merchantSupportMessage.findUniqueOrThrow({
         where: { sourceKey: createRecoveryConsentNoticeSourceKey(input) },
       })).originalBody).toBe(firstRow.originalBody);
+      expect((await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } })).lastMessageAt)
+        .toEqual(new Date("2026-10-24T15:00:00Z"));
+
+      // Reverse entrypoint order: send notice wins and a later create entry cannot rewrite it.
+      const sendFirst = {
+        ...input, checkoutToken: "private-checkout-token-2",
+        blockedOperation: "SEND_INITIAL_RECOVERY" as const,
+      };
+      expect(await later.notify(sendFirst)).toBe("created");
+      const sendKey = createRecoveryConsentNoticeSourceKey(sendFirst);
+      const sendRow = await a.merchantSupportMessage.findUniqueOrThrow({ where: { sourceKey: sendKey } });
+      expect(sendRow.originalBody).toContain("Outcome: The initial WhatsApp recovery message was not sent");
+      expect(await older.notify({ ...sendFirst, blockedOperation: "CREATE_FIRST_RECOVERY" })).toBe("duplicate");
+      expect((await a.merchantSupportMessage.findUniqueOrThrow({ where: { sourceKey: sendKey } })).originalBody)
+        .toBe(sendRow.originalBody);
       expect((await a.merchantSupportThread.findUniqueOrThrow({ where: { shopId: shopA } })).lastMessageAt)
         .toEqual(new Date("2026-10-24T15:00:00Z"));
 

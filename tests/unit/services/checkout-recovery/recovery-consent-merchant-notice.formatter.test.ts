@@ -19,13 +19,13 @@ const reasons = {
 } as const;
 
 describe("canonical recovery consent merchant notice formatter", () => {
-  it("matches both fixed source-key vectors, including blocked operation", () => {
-    expect(createRecoveryConsentNoticeSourceKey(first)).toBe(
-      "recovery-consent:v1:67180b364e0e55cce3bea52d4f50774594447b6be4c6ff3cd9146d9b2c19f94c",
-    );
-    expect(createRecoveryConsentNoticeSourceKey({ ...first, blockedOperation: "SEND_INITIAL_RECOVERY" })).toBe(
-      "recovery-consent:v1:eb189d63ca39d5d678e4b3c4a3a03632770d4738ded39cded501bc1b8b8dc89a",
-    );
+  it("matches the canonical six-field key vector, independent of blocked operation", () => {
+    const canonicalKey =
+      "recovery-consent:v1:f3725880d130d1a6c566743b009125f0e187cc4a9e50ac5391484a99b31a0a15";
+    expect(createRecoveryConsentNoticeSourceKey(first)).toBe(canonicalKey);
+    expect(createRecoveryConsentNoticeSourceKey({
+      ...first, blockedOperation: "SEND_INITIAL_RECOVERY",
+    })).toBe(canonicalKey);
     for (const change of [
       { platform: "WOOCOMMERCE" as const }, { shopId: "shop-2" },
       { checkoutToken: "another-secret" }, { reason: "RECIPIENT_AMBIGUOUS" as const },

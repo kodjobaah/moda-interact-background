@@ -79,6 +79,10 @@ describe("shared recovery consent merchant Support notifier", () => {
     });
     const initialBody = [...f.rows.values()][0]!.originalBody;
     expect(await f.service.notify({ ...first, context: { customerName: "Changed on retry" } })).toBe("duplicate");
+    expect(await f.service.notify({
+      ...first, blockedOperation: "SEND_INITIAL_RECOVERY",
+      context: { customerName: "Changed on send re-entry" },
+    })).toBe("duplicate");
     expect(f.findUnique).toHaveBeenCalledWith({ where: { sourceKey: createRecoveryConsentNoticeSourceKey(first) } });
     expect(f.rows.size).toBe(1);
     expect([...f.rows.values()][0]!.originalBody).toBe(initialBody);
@@ -98,7 +102,7 @@ describe("shared recovery consent merchant Support notifier", () => {
     expect(logged).not.toContain(initialBody);
   });
 
-  it("separates first creation and first send, consent reasons, platforms and tenants", async () => {
+  it("deduplicates across blocked operations while separating reasons, platforms, shops and checkouts", async () => {
     const f = context();
     const inputs: RecoveryConsentNoticeInput[] = [
       first, { ...first, blockedOperation: "SEND_INITIAL_RECOVERY" },
@@ -106,11 +110,27 @@ describe("shared recovery consent merchant Support notifier", () => {
       { ...first, shopId: "shop-2" }, { ...first, platform: "WOOCOMMERCE" },
       { ...first, checkoutToken: "private-checkout-token-02" },
     ];
-    for (const input of inputs) expect(await f.service.notify(input)).toBe("created");
-    expect(f.rows.size).toBe(6);
-    expect(new Set([...f.rows.keys()]).size).toBe(6);
+    const results: string[] = [];
+    for (const input of inputs) results.push(await f.service.notify(input));
+    expect(results).toEqual(["created", "duplicate", "created", "created", "created", "created"]);
+    expect(f.rows.size).toBe(5);
+    expect(new Set([...f.rows.keys()]).size).toBe(5);
     expect(f.rows.get(createRecoveryConsentNoticeSourceKey(inputs[4]!))!.originalBody)
       .toContain("Platform: WooCommerce"); // Synthetic Woo caller uses the same notifier.
+  });
+
+  it("retains the initial-send outcome when it is committed before first-recovery re-entry", async () => {
+    const f = context();
+    const sendFirst = { ...first, blockedOperation: "SEND_INITIAL_RECOVERY" as const };
+    expect(await f.service.notify(sendFirst)).toBe("created");
+    const key = createRecoveryConsentNoticeSourceKey(first);
+    const initialBody = f.rows.get(key)!.originalBody;
+    expect(initialBody).toContain("Outcome: The initial WhatsApp recovery message was not sent");
+    expect(initialBody).not.toContain("No checkout recovery was created");
+    expect(await f.service.notify(first)).toBe("duplicate");
+    expect(f.rows.size).toBe(1);
+    expect(f.rows.get(key)!.originalBody).toBe(initialBody);
+    expect(f.updateMany).toHaveBeenCalledOnce();
   });
 
   it("handles an already-created merchant thread and fails if the thread cannot be resolved", async () => {

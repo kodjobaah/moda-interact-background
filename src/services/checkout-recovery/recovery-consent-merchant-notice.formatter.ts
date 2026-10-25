@@ -40,9 +40,11 @@ export function validateRecoveryConsentNoticeInput(input: RecoveryConsentNoticeI
 /** Pre-production canonical identity shared by Shopify and WooCommerce adapters. */
 export function createRecoveryConsentNoticeSourceKey(input: RecoveryConsentNoticeInput): string {
   validateRecoveryConsentNoticeInput(input);
+  // Creation and initial-send re-entry share one notice for the same reason.
+  // blockedOperation affects the first committed body, never the identity.
   const payload = JSON.stringify([
     "recovery-consent", 1, input.platform, input.shopId, input.checkoutToken,
-    input.blockedOperation, input.reason,
+    input.reason,
   ]);
   return `recovery-consent:v1:${createHash("sha256").update(payload, "utf8").digest("hex")}`;
 }
