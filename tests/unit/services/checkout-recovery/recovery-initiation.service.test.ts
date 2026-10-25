@@ -183,6 +183,73 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
+  it("forwards accepted checkout context before a first recovery insert, without leaking opaque references", async () => {
+    mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
+    mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
+    mocks.consent.evaluateFirst.mockResolvedValue(false);
+    const { service, ports } = createInitiation();
+    await service.handleCheckoutCreated({
+      ...event,
+      detectedAt: "2026-10-24T10:00:00Z",
+      lastExternalActivityAt: "2026-10-24T10:30:00Z",
+      currency: "GBP", totalPrice: "58.50",
+      cartToken: "private-cart-token", checkoutUrl: "https://shop.test/secret?token=xxx",
+      customer: {
+        shopifyCustomerId: "gid://shopify/Customer/1", phone: "+15551234567",
+        email: "Ada@Example.test", firstName: "Ada", lastName: "Lovelace",
+      },
+      lineItems: [{ quantity: 2 }, { quantity: 3 }],
+    } as any);
+    expect(mocks.consent.evaluateFirst).toHaveBeenCalledWith(expect.objectContaining({
+      noticeContext: {
+        customerName: "Ada Lovelace", customerEmail: "Ada@Example.test",
+        checkoutTotal: { amountDecimal: "58.50", currency: "GBP" },
+        lastActivityAt: "2026-10-24T10:30:00Z",
+      },
+    }));
+    expect(ports.upsertRecovery).not.toHaveBeenCalled();
+  });
+
+  it("omits partial or unverified Shopify unit counts even when the seed has line items", async () => {
+    mocks.consent.evaluateReentry.mockResolvedValue(false);
+    const { service } = createInitiation();
+    await service.handleCheckoutCreated({
+      ...event, detectedAt: "2026-10-24T10:00:00Z",
+      lineItems: [{ quantity: 2 }, { quantity: 3 }],
+    });
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledWith(expect.objectContaining({
+      noticeContext: { lastActivityAt: "2026-10-24T10:00:00Z" },
+    }));
+  });
+
+  it("omits missing or unverifiable item totals on DETECTED reentry", async () => {
+    mocks.consent.evaluateReentry.mockResolvedValue(false);
+    const { service } = createInitiation();
+    await service.handleCheckoutCreated({
+      ...event, detectedAt: "2026-10-24T10:00:00Z",
+      customer: { ...event.customer, firstName: null, lastName: null },
+      lineItems: [], currency: null, totalPrice: null,
+    });
+    expect(mocks.consent.evaluateReentry).toHaveBeenCalledWith(expect.objectContaining({
+      noticeContext: { lastActivityAt: "2026-10-24T10:00:00Z" },
+    }));
+    expect(mocks.consent.evaluateFirst).not.toHaveBeenCalled();
+  });
+
+  it("forwards optional checkout context to the missing-recipient notice without new lookups", async () => {
+    const { service, ports } = createInitiation();
+    ports.resolveRecipient.mockReturnValue("");
+    await service.handleCheckoutCreated({
+      ...event, detectedAt: "2026-10-24T10:00:00Z",
+      customer: { phone: null, firstName: "No", lastName: "Number", email: null },
+      lineItems: [],
+    });
+    expect(mocks.consent.notifyMissingRecipient).toHaveBeenCalledWith({
+      shopId: "shop-1", checkoutToken: "checkout-1",
+      noticeContext: { customerName: "No Number", lastActivityAt: "2026-10-24T10:00:00Z" },
+    });
+  });
+
   it("verifies Shopify once for a new checkout then reads stored consent for first dispatch", async () => {
     mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(null);
     mocks.customer.resolveCustomer.mockResolvedValue({ id: "customer-1" });
