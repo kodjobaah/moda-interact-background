@@ -8,6 +8,8 @@ import { canonicalWhatsAppSender, matchesRegisteredPhone } from "../whatsapp-con
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { confirmCurrentWooConsent } from "./woo-recovery-admission-evidence.js";
 import prisma from "../../lib/db.js";
+import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
+  type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
 
 export type WooInitialFinalPermitInput = Readonly<{
   shopId: string;
@@ -24,6 +26,7 @@ export type WooInitialFinalPermitInput = Readonly<{
   templateName: string;
   languageCode: string;
   verifiedCategory: "MARKETING";
+  templateRegistration: FinalTemplateIdentity;
   expectedContent: string;
 }>;
 
@@ -71,6 +74,7 @@ export class WooInitialSendFenceService {
     private readonly confirmConsent: typeof confirmCurrentWooConsent = confirmCurrentWooConsent,
     private readonly noContact: typeof hasLocalNoContact = hasLocalNoContact,
     private readonly logger: StructuredLogger = defaultLogger,
+    private readonly checkTemplate: FinalTemplateEligibility = checkFinalTemplateRegistration,
   ) {}
 
   async admitFinalSend(input: WooInitialFinalPermitInput): Promise<WooInitialFinalPermit> {
@@ -80,7 +84,7 @@ export class WooInitialSendFenceService {
     if (!input.shopId || !input.recoveryId || !input.customerId || !input.checkoutToken ||
       !input.conversationId || !input.attemptId || !input.messageId ||
       !input.templateName || !input.languageCode || !input.expectedContent ||
-      input.verifiedCategory !== "MARKETING" ||
+      input.verifiedCategory !== "MARKETING" || !input.templateRegistration ||
       input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
       input.recoveryCreditSourceKey !== createRecoveryIdempotencyKey(
         input.shopId, input.idempotencyKey,
@@ -200,6 +204,15 @@ export class WooInitialSendFenceService {
         return { kind: "suppressed", reason: "already-admitted-or-sent" };
       if (message.content !== input.expectedContent)
         return { kind: "suppressed", reason: "woo-prepared-content-changed" };
+
+      const registration = input.templateRegistration;
+      if (!registration || registration.shopId !== input.shopId ||
+          registration.providerTemplateName !== input.templateName ||
+          registration.providerLanguageCode !== input.languageCode) {
+        return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
+      }
+      const denied = await this.checkTemplate(tx, registration, new Date());
+      if (denied) return { kind: "suppressed", reason: denied };
 
       const key = `arch046-woo-initial-${createHash("sha256")
         .update(input.shopId).update("\0").update(input.attemptId).digest("hex")}`;

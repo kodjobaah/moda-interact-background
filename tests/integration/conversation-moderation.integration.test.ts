@@ -159,7 +159,7 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
     } finally { await close(); }
   }, 120_000);
 
-  it("allows a moderated AUTOMATION template through B002 WhatsApp emulator with the exact parameter digest", async () => {
+  it("rejects a legacy unlinked AUTOMATION template before moderation and WhatsApp delivery", async () => {
     const { f, aimock, close } = await moderatedFixture("moderation-automation-template-allow");
     try {
       await f.changeOwner("HUMAN", "AI", 1);
@@ -171,26 +171,20 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       const delivery = new OutboundMessageDeliveryService(f.db, f.provider, f.execution,
         new AiTurnOwnershipService(f.db), new OutboundSendFenceService(f.db, async () => null), moderation,
         undefined, undefined,
-        // The fixture proves template/moderation delivery, not Shopify/Meta reads.
-        { preflight: async () => ({ kind: "allowed", snapshot: null }) },
-        { verify: async () => "MARKETING" });
+        // The fixture tests absent BG001 registration, not a valid provider
+        // approval. BG006 requires a linked registration before moderation.
+        { preflight: async () => ({ kind: "allowed", snapshot: null }) });
       const template = { to: f.recipient, templateName: "checkout_recovery", languageCode: "en_US",
         bodyParameters: ["Your basket is ready to recover.", "cart-123"] };
-      const expected = prepareAutomatedTemplateInput(template).effectiveText;
       expect(await delivery.sendPreparedTemplate({
         kind: "admitted", shopId: f.shopId, conversationId: f.conversationId,
         messageId: message.id, terminal: false, executionScope: "recovery",
-      }, template)).toMatchObject({ kind: "admitted" });
-      await f.whatsapp.waitForMessageCount(1);
-      expect(f.providerHttpRequests).toHaveLength(1);
-      expect((await f.db.conversationMessage.findUnique({ where: { id: message.id } })))
-        .toMatchObject({ content: expected, status: "SENT" });
+      }, template)).toEqual({ kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" });
+      expect(f.providerHttpRequests).toHaveLength(0);
+      expect(aimock.journal()).toHaveLength(0);
       expect(await f.db.conversationModerationAssessment.findFirst({
-        where: { conversationMessageId: message.id, decision: "ALLOW" },
-      })).toMatchObject({ contentSha256: sha256Text(expected), inputKind: "TEXT" });
-      expect(await moderation.requireCurrentAllowance({ subject: { kind: "AUTOMATION_MESSAGE", messageId: message.id },
-        effectiveText: expected, policyVersion: moderationConfig().policyVersion })).toBe(true);
-      assertModerationHttp(aimock.journal(), [expected]);
+        where: { conversationMessageId: message.id },
+      })).toBeNull();
     } finally { await close(); }
   }, 120_000);
 
@@ -225,13 +219,10 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       await f.whatsapp.assertNoAdditionalMessages({ count: 0, quietMs: 100 });
       expect(await f.db.conversationModerationAssessment.findMany({
         where: { conversationMessageId: message.id }, select: { decision: true, contentSha256: true },
-      })).toEqual(expect.arrayContaining([
-        { decision: "ALLOW", contentSha256: sha256Text(oldContent) },
-        { decision: "BLOCK", contentSha256: sha256Text(blockedContent) },
-      ]));
+      })).toEqual([{ decision: "ALLOW", contentSha256: sha256Text(oldContent) }]);
       expect(await moderation.requireCurrentAllowance({ subject, effectiveText: blockedContent,
         policyVersion: moderationConfig().policyVersion })).toBe(false);
-      assertModerationHttp(aimock.journal(), [oldContent, blockedContent]);
+      assertModerationHttp(aimock.journal(), [oldContent]);
     } finally { await close(); }
   }, 120_000);
 

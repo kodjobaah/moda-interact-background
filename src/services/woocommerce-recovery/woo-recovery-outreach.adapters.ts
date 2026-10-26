@@ -4,9 +4,7 @@ import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.ser
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryBillingService } from "../recovery-billing.service.js";
 import { conversationService } from "../conversation.service.js";
-import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
-import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
+import { automatedRecoveryTemplateService } from "../recovery-template-integration/automated-recovery-template.service.js";
 import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { WooRecoveryOutreachService, type WooOutreachDependencies, type WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
@@ -79,30 +77,27 @@ export function createWooRecoveryOutreachService(input: {
     consent: wooRecoveryConsentReader,
     policies: recoveryPolicyService,
     templates: {
-      async select(shopId, recoveryId) {
+      async select(shopId, recoveryId, policy) {
         const conversation = await prisma.conversation.findUnique({
           where: { checkoutRecoveryId: recoveryId },
-          select: { languageTag: true, countryCode: true },
+          select: { languageTag: true },
         });
-        const selection = await whatsappTemplateSelectorService.select({
-          shopId,
-          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
-          purpose: "checkout-recovery",
-          languageTag: conversation?.languageTag ?? null,
-          countryCode: conversation?.countryCode ?? null,
-          resolveMarketCapability: async () => "unknown" as const,
-          verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
+        const selected = await automatedRecoveryTemplateService.prepare({
+          shopId, recoveryId, stage: "INITIAL",
+          policy: policy ?? await recoveryPolicyService.resolve(shopId),
+          conversationLanguageTag: conversation?.languageTag ?? null,
         });
-        if ((selection.outcome !== "selected" && selection.outcome !== "provider-check-required") ||
-          selection.verifiedCategory !== "MARKETING")
-          return { kind: "unavailable" as const, reason: "marketing-template-unverified" };
+        if (selected.kind !== "prepared") {
+          return { kind: "unavailable" as const, reason: selected.reason };
+        }
         return {
           kind: "selected" as const,
           template: {
-            name: selection.providerTemplateName,
-            languageCode: selection.providerLanguageCode,
-            canonicalLanguageTag: selection.canonicalLanguageTag,
+            name: selected.prepared.providerTemplateName,
+            languageCode: selected.prepared.providerLanguageCode,
+            canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
             verifiedCategory: "MARKETING" as const,
+            sendFields: selected.send,
           },
         };
       },

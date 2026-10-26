@@ -4,6 +4,8 @@ import { first, rows, changed, lockRecoveryContext, readRecoveryWindowEvidence, 
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import type { StoredRecoveryConsentSnapshot } from "./recovery-stored-consent.service.js";
+import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
+  type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
 export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date }
@@ -13,6 +15,7 @@ export type RecoveryMarketingPermit = {
   verifiedCategory: "MARKETING";
   templateName: string;
   languageCode: string;
+  templateRegistration?: FinalTemplateIdentity;
 };
 export type DispatchInput = {
   senderType: DispatchActor;
@@ -38,6 +41,7 @@ export class OutboundSendFenceService {
     private readonly database: RecoveryDatabase = recoveryDatabase,
     private readonly durableEligibility?: DurableEligibility,
     private readonly clock: () => Date = () => new Date(),
+    private readonly checkTemplate: FinalTemplateEligibility = checkFinalTemplateRegistration,
   ) {}
 
   async admitProviderDispatch(input: DispatchInput): Promise<DispatchPermit> {
@@ -134,6 +138,16 @@ export class OutboundSendFenceService {
       if (input.proactive && (input.proactive.verifiedCategory !== "MARKETING" ||
           !input.proactive.templateName || !input.proactive.languageCode))
         return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
+      if (input.proactive?.templateRegistration) {
+        const reg = input.proactive.templateRegistration;
+        if (reg.shopId !== context.shopId ||
+            reg.providerTemplateName !== input.proactive.templateName ||
+            reg.providerLanguageCode !== input.proactive.languageCode) {
+          return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" } as const;
+        }
+        const templateDenial = await this.checkTemplate(tx, reg, now);
+        if (templateDenial) return { kind: "suppressed", reason: templateDenial } as const;
+      }
       const furtherDenial = await durableEligibility(tx, input, context);
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
 

@@ -11,6 +11,13 @@ const scope = {
   recoveryCreditSourceKey: createRecoveryIdempotencyKey("shop-1", key),
   templateName: "woo_recovery", languageCode: "en_GB", verifiedCategory: "MARKETING" as const,
   expectedContent: "[moderated-template]",
+  templateRegistration: {
+    shopId: "shop-1", senderWabaId: "waba-1", purpose: "INITIAL_NO_OFFER" as const,
+    variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
+    providerTemplateId: "provider-1", providerTemplateName: "woo_recovery",
+    providerLanguageCode: "en_GB", submittedContentHash: "a".repeat(64),
+    bindingFingerprint: "a".repeat(64),
+  },
   consent: { shopId: "shop-1", installationId: "install-1", credentialVersion: 1,
     customerId: "customer-1", customerPhoneId: "phone-1", canonicalRecipient: "447400123456",
     consentRevision: 1n, consentDecisionSequence: 1n, noContactRevision: 0n },
@@ -51,9 +58,10 @@ function harness() {
   const confirm = vi.fn(async () => true);
   const noContact = vi.fn(async () => false);
   const logger = { error: vi.fn(), child() { return this; } };
+  const checkTemplate = vi.fn(async () => null as string | null);
   const fence = new WooInitialSendFenceService({ $transaction: transaction } as never,
-    confirm as never, noContact as never, logger as never);
-  return { fence, outcomes, queries, transaction, confirm, noContact, logger };
+    confirm as never, noContact as never, logger as never, checkTemplate as never);
+  return { fence, outcomes, queries, transaction, confirm, noContact, logger, checkTemplate };
 }
 
 describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
@@ -94,6 +102,17 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     const g = harness(); g.noContact.mockResolvedValueOnce(true);
     expect(await g.fence.admitFinalSend(scope)).toEqual({ kind: "suppressed", reason: "woo-local-no-contact" });
   });
+
+  it.each(["TEMPLATE_REGISTRATION_UNAVAILABLE", "TEMPLATE_PROVIDER_STATUS_UNRESOLVED",
+    "TEMPLATE_PROVIDER_STATUS_STALE"])(
+    "denies %s returned by the shared exact-registration SQL fence", async (reason) => {
+      const f = harness();
+      f.checkTemplate.mockResolvedValueOnce(reason);
+      expect(await f.fence.admitFinalSend(scope)).toEqual({ kind: "suppressed", reason });
+      expect(f.checkTemplate).toHaveBeenCalledWith(expect.anything(), scope.templateRegistration, expect.any(Date));
+      expect(f.queries.some((sql) => sql.includes('SET "providerDispatchKey"'))).toBe(false);
+    },
+  );
 
   it("suppresses existing provider permit and cannot overwrite prepared content", async () => {
     const f = harness();

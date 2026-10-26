@@ -7,8 +7,6 @@ import {
   runCommerceAgentAfterAdmission,
 } from "../../../src/services/outbound-whatsapp-admission.service.js";
 import { EffectiveBillingPolicyError } from "../../../src/services/effective-billing-policy.service.js";
-import { recoveryStoredConsentService } from "../../../src/services/recovery-conversation/recovery-stored-consent.service.js";
-import { metaWhatsAppTemplateCategoryService } from "../../../src/services/whatsapp-template-category.service.js";
 import {
   admissionHarness,
   baseAdmissionInput,
@@ -55,59 +53,26 @@ describe("OutboundWhatsAppAdmissionService", () => {
     });
   });
 
-  it("composes post-contract durable recovery admission with recovery-scoped delivery", async () => {
-    // This composition test injects already-verified permission and category;
-    // dedicated tests verify the authoritative Meta/CustomerPhone readers.
-    const consent = vi.spyOn(recoveryStoredConsentService, "preflight").mockResolvedValue({
-      kind: "allowed",
-      snapshot: {
-        customerPhoneId: "phone-1", canonicalRecipient: "14155552671",
-        consentRevision: 5n, noContactRevision: 2n,
-      },
+  it("rejects legacy automated recovery templates without a Moda registration, while retaining reserved credit attribution", async () => {
+    const test = admissionHarness({
+      recoveryLinked: true,
+      durableReservation: { shopId: "shop-1", status: "RESERVED",
+        counter: { counter: "PURCHASED_RECOVERY_CREDITS" } },
     });
-    const category = vi.spyOn(metaWhatsAppTemplateCategoryService, "verify")
-      .mockResolvedValue("MARKETING");
-    try {
-      const test = admissionHarness({
-        recoveryLinked: true,
-        durableReservation: {
-          shopId: "shop-1",
-          status: "RESERVED",
-          counter: { counter: "PURCHASED_RECOVERY_CREDITS" },
-        },
-      });
-      test.resolver.resolve.mockRejectedValueOnce(
-        new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
-      );
-
-      const result = await test.facade.sendTemplate({
-        ...baseAdmissionInput,
-        idempotencyKey: "recovery-outreach:attempt-1",
-        recoveryCreditSourceKey: "recovery:shop-1:attempt-1",
-        senderType: "AUTOMATION",
-        to: "+14155552671",
-        templateName: "recovery",
-        languageCode: "en",
-      });
-
-      expect(result).toMatchObject({ kind: "admitted", executionScope: "recovery" });
-      expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
-      expect(test.executionEligibility.evaluate).toHaveBeenCalledWith(
-        "shop-1",
-        undefined,
-        "recovery",
-      );
-      expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
-      expect(consent).toHaveBeenCalledWith({
-        shopId: "shop-1", recoveryId: "recovery-1", recipient: "+14155552671",
-      });
-      expect(category).toHaveBeenCalledWith({
-        providerTemplateName: "recovery", providerLanguageCode: "en",
-      });
-    } finally {
-      consent.mockRestore();
-      category.mockRestore();
-    }
+    test.resolver.resolve.mockRejectedValueOnce(
+      new EffectiveBillingPolicyError("NO_CONTRACT", "contract ended"),
+    );
+    const result = await test.facade.sendTemplate({
+      ...baseAdmissionInput,
+      idempotencyKey: "recovery-outreach:attempt-1",
+      recoveryCreditSourceKey: "recovery:shop-1:attempt-1",
+      senderType: "AUTOMATION", to: "+14155552671",
+      templateName: "recovery", languageCode: "en",
+    });
+    expect(result).toEqual({ kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" });
+    expect(test.postContractResolver.resolve).toHaveBeenCalledWith("shop-1");
+    expect(test.executionEligibility.evaluate).toHaveBeenCalledWith("shop-1", undefined, "recovery");
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("composes terminal admission with deterministic text instead of template transport", async () => {

@@ -1,4 +1,6 @@
 import { MessageStatus } from "@prisma/client";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { PrismaClient } from "@prisma/client";
 
 import prisma from "../../lib/db.js";
@@ -19,11 +21,14 @@ import { GeneralOutboundSendFenceService } from "./general-outbound-send-fence.s
 import {
   recoveryStoredConsentService, type StoredRecoveryConsentReader,
 } from "../recovery-conversation/recovery-stored-consent.service.js";
-import {
-  metaWhatsAppTemplateCategoryService, type TemplateCategoryVerifier,
-} from "../whatsapp-template-category.service.js";
 import type { RecoveryMarketingPermit } from "../recovery-conversation/outbound-send-fence.service.js";
 import { WooInitialSendFenceService, type WooInitialFinalPermitInput } from "../woocommerce-recovery/woo-initial-send-fence.service.js";
+
+const deliveryLogger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
+const templateSuppression = (reason: string) =>
+  reason === "TEMPLATE_REGISTRATION_UNAVAILABLE" ||
+  reason === "TEMPLATE_PROVIDER_STATUS_UNRESOLVED" ||
+  reason === "TEMPLATE_PROVIDER_STATUS_STALE";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
@@ -52,7 +57,6 @@ export class OutboundMessageDeliveryService {
     private readonly providerFailure = new OutboundProviderFailureService(database),
     private readonly generalFence = new GeneralOutboundSendFenceService(database),
     private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
-    private readonly templateCategories: TemplateCategoryVerifier = metaWhatsAppTemplateCategoryService,
     private readonly wooInitialFence: Pick<WooInitialSendFenceService, "admitFinalSend"> = new WooInitialSendFenceService(database),
   ) {}
 
@@ -145,7 +149,7 @@ export class OutboundMessageDeliveryService {
     admission: AdmittedOutbound,
     input: Omit<SendTemplateInput, "to"> & { to: string },
     scope: Omit<WooInitialFinalPermitInput,
-      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory">,
+      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory" | "templateRegistration">,
   ): Promise<OutboundAdmissionResult> {
     return this.sendPreparedTemplateInternal(admission, input, scope);
   }
@@ -154,7 +158,7 @@ export class OutboundMessageDeliveryService {
     admission: AdmittedOutbound,
     input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
     wooScope?: Omit<WooInitialFinalPermitInput,
-      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory">,
+      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory" | "templateRegistration">,
   ): Promise<OutboundAdmissionResult> {
     if (await this.hasCompletedPreparation(admission.messageId))
       return { kind: "suppressed", reason: "duplicate" };
@@ -166,6 +170,21 @@ export class OutboundMessageDeliveryService {
     }
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
+    // Automated recovery may never silently fall back to the old, unlinked
+    // Meta catalogue, even if another caller forgets the BG001 identity.
+    if ((wooScope || admission.executionScope === "recovery") && !admission.terminal &&
+        !input.templateRegistration) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
+    }
+    if (input.templateRegistration && (
+        input.templateRegistration.shopId !== admission.shopId ||
+        input.templateRegistration.providerTemplateName !== input.templateName ||
+        input.templateRegistration.providerLanguageCode !== input.languageCode ||
+        input.templateRegistration.senderWabaId !== await this.getProviderAccountId())) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
+    }
     // DATABASE-005 has no structured automated-template columns: persist the
     // *exact* deterministic template/parameter input as the prepared message
     // TEXT before assessing it. Only those parameters are classified, not the
@@ -178,10 +197,21 @@ export class OutboundMessageDeliveryService {
         prepared = prepareAutomatedTemplateInput(input);
         outboundText = prepared.effectiveText;
       } catch (error) {
-        // Invalid template input is an expected suppression for general sends;
-        // Woo technical preparation errors must remain visible to the worker.
+        deliveryLogger.error("outbound.template.preparation.failed", {
+          shopId: admission.shopId, conversationId: admission.conversationId,
+          errorType: error instanceof Error ? error.name : "unknown",
+        });
+        // Known local validation failures are refusals, not retryable provider
+        // faults. Unexpected exceptions are always logged and propagated so
+        // the worker can retry rather than acknowledging a false refusal.
         await this.failPrepared(admission.messageId);
-        if (wooScope) throw error;
+        const invalidTemplateInput = error instanceof Error && [
+          "automated_template_unsupported", "automated_template_invalid_parameters",
+          "automated_template_promise_mismatch", "automated_template_invalid_header",
+          "automated_template_invalid_media", "automated_template_invalid_button",
+          "automated_template_input_too_large",
+        ].includes(error.message);
+        if (wooScope || !invalidTemplateInput) throw error;
         return { kind: "suppressed", reason: "conversation-invalid" };
       }
     }
@@ -192,7 +222,7 @@ export class OutboundMessageDeliveryService {
       moderationAllowed = await this.approvePreparedOutbound({
         shopId: admission.shopId, conversationId: admission.conversationId,
         messageId: admission.messageId, outboundText,
-      }, wooScope !== undefined);
+      });
     } catch (error) {
       // Woo has not requested the SQL permit. A failed moderation dependency
       // cannot hold a completed provider admission or count as a refusal.
@@ -208,22 +238,16 @@ export class OutboundMessageDeliveryService {
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
     if (wooScope) {
-      // Meta read is intentionally outside the SQL transaction. A local
-      // APPROVED flag or caller-asserted category is insufficient evidence.
-      const category = await this.templateCategories.verify({
-        providerTemplateName: input.templateName,
-        providerLanguageCode: input.languageCode,
-      });
-      if (category !== "MARKETING") {
-        await this.failPrepared(admission.messageId);
-        return { kind: "suppressed", reason: "conversation-invalid" };
-      }
+      // BG001 compilation already established immutable Marketing purpose.
+      // The *actual* registration approval and latest Meta observation are
+      // re-read under the existing Woo final SQL permit, never over Meta HTTP.
       const permit = await this.wooInitialFence.admitFinalSend({
         ...wooScope,
         shopId: admission.shopId, conversationId: admission.conversationId,
         messageId: admission.messageId, recipient: input.to,
         expectedContent: outboundText, templateName: input.templateName,
         languageCode: input.languageCode, verifiedCategory: "MARKETING",
+        templateRegistration: input.templateRegistration!,
       });
       if (permit.kind === "suppressed") {
         // A previously committed permit can already have reached Meta. Never
@@ -231,7 +255,9 @@ export class OutboundMessageDeliveryService {
         if (permit.reason === "already-admitted-or-sent")
           return { kind: "suppressed", reason: "duplicate" };
         await this.failPrepared(admission.messageId);
-        return { kind: "suppressed", reason: "conversation-invalid" };
+        return { kind: "suppressed", reason: templateSuppression(permit.reason)
+          ? permit.reason as "TEMPLATE_REGISTRATION_UNAVAILABLE" | "TEMPLATE_PROVIDER_STATUS_UNRESOLVED" | "TEMPLATE_PROVIDER_STATUS_STALE"
+          : "conversation-invalid" };
       }
     } else {
       const fenced = await this.fenceProviderSend({
@@ -240,7 +266,8 @@ export class OutboundMessageDeliveryService {
         ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
         deliveryKind: prepared ? "TEMPLATE" : "TEXT",
         ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
-        ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode } } : {}),
+        ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode,
+          ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
       });
       if (fenced) return fenced;
     }
@@ -309,7 +336,7 @@ export class OutboundMessageDeliveryService {
 
   private async approvePreparedOutbound(input: {
     shopId: string; conversationId: string; messageId: string; outboundText: string;
-  }, propagateError = false): Promise<boolean> {
+  }): Promise<boolean> {
     try {
       const message = await this.database.conversationMessage.findUnique({
         where: { id: input.messageId }, select: { senderType: true, content: true },
@@ -329,8 +356,13 @@ export class OutboundMessageDeliveryService {
     } catch (error) {
       // Woo technical dependency failures must retry; only an explicit
       // moderation deny is a known pre-permit suppression.
-      if (propagateError) throw error;
-      return false;
+      deliveryLogger.error("outbound.template.moderation.failed", {
+        shopId: input.shopId, conversationId: input.conversationId,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+      // A moderation dependency exception is not a customer refusal. Propagate
+      // for retry, with the existing pre-permit cleanup in the caller.
+      throw error;
     }
   }
 
@@ -341,7 +373,8 @@ export class OutboundMessageDeliveryService {
     shopId: string; conversationId: string; messageId: string; to: string;
     expectedContent: string; expectedControlRevision?: number;
     executionScope?: "general" | "recovery";
-    template?: { name: string; languageCode: string };
+    template?: { name: string; languageCode: string;
+      registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
     deliveryKind: "TEXT" | "TEMPLATE";
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
@@ -372,25 +405,26 @@ export class OutboundMessageDeliveryService {
     }
     let proactive: RecoveryMarketingPermit | undefined;
     if (input.template) {
-      // Meta category and stored-consent preflight are performed outside SQL.
+      // Stored-consent preflight is performed outside SQL; no Meta GET.
       // A changed consent/STOP revision is independently caught inside the
       // Shop-locked final permit; this check cannot perform Shopify GraphQL.
-      const [category, permission] = await Promise.all([
-        this.templateCategories.verify({
-          providerTemplateName: input.template.name,
-          providerLanguageCode: input.template.languageCode,
-        }),
-        this.recoveryConsent.preflight({
-          shopId: input.shopId, recoveryId: ownership.recoveryId, recipient: input.to,
-        }),
-      ]);
-      if (category !== "MARKETING" || permission.kind !== "allowed") {
+      const permission = await this.recoveryConsent.preflight({
+        shopId: input.shopId, recoveryId: ownership.recoveryId, recipient: input.to,
+      });
+      if (permission.kind !== "allowed") {
         await this.failPrepared(input.messageId);
         return { kind: "suppressed", reason: "conversation-invalid" };
+      }
+      // BG007's legacy HUMAN sender can still use its own provider verifier
+      // until it migrates. Automated recovery *must* carry BG001 registration.
+      if (!input.template.registration) {
+        await this.failPrepared(input.messageId);
+        return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
       }
       proactive = {
         verifiedCategory: "MARKETING", templateName: input.template.name,
         languageCode: input.template.languageCode, consent: permission.snapshot,
+        templateRegistration: input.template.registration,
       };
     }
     const permit = await this.recoveryFence.admitFinalSend({
@@ -406,7 +440,9 @@ export class OutboundMessageDeliveryService {
     if (permit.reason !== "already-admitted-or-sent") {
       await this.failPrepared(input.messageId);
     }
-    return { kind: "suppressed", reason: "conversation-invalid" };
+    return { kind: "suppressed", reason: templateSuppression(permit.reason)
+      ? permit.reason as "TEMPLATE_REGISTRATION_UNAVAILABLE" | "TEMPLATE_PROVIDER_STATUS_UNRESOLVED" | "TEMPLATE_PROVIDER_STATUS_STALE"
+      : "conversation-invalid" };
   }
 
   async failPrepared(messageId: string): Promise<void> {

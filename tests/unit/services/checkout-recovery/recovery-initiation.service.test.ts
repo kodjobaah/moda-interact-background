@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
     sendTemplate: vi.fn(),
     findExistingAdmission: vi.fn(),
   },
-  selector: { select: vi.fn() },
+  automated: { prepare: vi.fn() },
   policy: { resolve: vi.fn() },
   attempt: {
     getOrCreate: vi.fn(),
@@ -48,8 +48,8 @@ vi.mock("../../../../src/services/conversation.message.service.js", () => ({
 vi.mock("../../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: mocks.outbound,
 }));
-vi.mock("../../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: mocks.selector,
+vi.mock("../../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: mocks.automated,
 }));
 vi.mock("../../../../src/services/recovery-policy.service.js", () => ({
   recoveryPolicyService: mocks.policy,
@@ -137,12 +137,13 @@ beforeEach(() => {
   mocks.outbound.getProviderAccountId.mockReturnValue("provider-1");
   mocks.outbound.sendTemplate.mockResolvedValue({ kind: "admitted" });
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
-  mocks.selector.select.mockResolvedValue({
-    outcome: "selected",
-    providerTemplateName: "checkout_recovery",
-    canonicalLanguageTag: "en-US",
-    providerLanguageCode: "en_US",
-    verifiedCategory: "MARKETING",
+  mocks.automated.prepare.mockResolvedValue({
+    kind: "prepared",
+    prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "checkout_recovery",
+      canonicalLanguageTag: "en-US", providerLanguageCode: "en_US" },
+    send: { templateName: "checkout_recovery", languageCode: "en_US",
+      templateRegistration: { shopId: "shop-1", purpose: "INITIAL_NO_OFFER" },
+      recoveryPromise: { kind: "NO_OFFER" } },
   });
   mocks.policy.resolve.mockResolvedValue({ followUpEnabled: false, followUpDelayMinutes: null });
   mocks.attempt.getOrCreate.mockResolvedValue(attempt);
@@ -351,18 +352,20 @@ describe("RecoveryInitiationService", () => {
     expect(billing.admit).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, "UTILITY"])("fails closed on unverified or utility template category (%s)", async (category) => {
-    mocks.selector.select.mockResolvedValue({
-      outcome: "selected", providerTemplateName: "checkout_recovery",
-      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
-      ...(category ? { verifiedCategory: category } : {}),
-    });
-    const { service, billing } = createInitiation();
-    await service.handleCheckoutCreated(event);
-    expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
-    expect(billing.admit).not.toHaveBeenCalled();
-    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
-  });
+  it.each(["PROVIDER_UNAVAILABLE", "PROVIDER_DRIFT", "NO_APPROVED_ASSIGNMENT"])(
+    "refuses %s from the Admin-approved template preparer before billing", async (reason) => {
+      mocks.automated.prepare.mockResolvedValue({ kind: "unavailable", reason });
+      const { service, billing } = createInitiation();
+      await service.handleCheckoutCreated(event);
+      expect(mocks.automated.prepare).toHaveBeenCalledWith(expect.objectContaining({
+        shopId: "shop-1", recoveryId: "recovery-1", stage: "INITIAL",
+        conversationLanguageTag: null,
+      }));
+      expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+      expect(billing.admit).not.toHaveBeenCalled();
+      expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not use the test recipient override in production", () => {
     const previousNodeEnv = process.env.NODE_ENV;

@@ -45,6 +45,10 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
         input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
         input.recoveryCreditSourceKey !== createRecoveryIdempotencyKey(recovery.shopId, input.idempotencyKey) ||
         template.verifiedCategory !== "MARKETING" || !template.name || !template.languageCode ||
+        !template.sendFields?.templateRegistration ||
+        template.sendFields.templateRegistration.shopId !== recovery.shopId ||
+        template.sendFields.templateRegistration.providerTemplateName !== template.name ||
+        template.sendFields.templateRegistration.providerLanguageCode !== template.languageCode ||
         canonicalWhatsAppSender(input.recipient) !== consent.canonicalRecipient) {
         return this.suppress(recovery.shopId, recovery.id, input.attemptId, "invalid-woo-initial-scope");
       }
@@ -86,7 +90,7 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
       }
 
       const result = await this.delivery.sendPreparedWooInitialTemplate(admission, {
-        to: input.recipient, templateName: template.name, languageCode: template.languageCode,
+        ...template.sendFields!, to: input.recipient,
       }, {
         recoveryId: recovery.id,
         checkoutToken: recovery.checkoutToken,

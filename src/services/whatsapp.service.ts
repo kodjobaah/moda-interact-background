@@ -140,6 +140,7 @@ export class WhatsAppService {
     templateName,
     languageCode,
     bodyParameters = [],
+    textHeader,
     imageHeader,
     dynamicUrlButton,
   }: SendTemplateInput): Promise<SendMessageResult> {
@@ -159,6 +160,9 @@ export class WhatsAppService {
     ).replace(/\/+$/, "");
 
     const components = [
+      ...(textHeader
+        ? [{ type: "header", parameters: [{ type: "text", text: textHeader }] }]
+        : []),
       ...(imageHeader
         ? [{
             type: "header",
