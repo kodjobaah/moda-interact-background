@@ -3,6 +3,7 @@ import type { CheckoutRecoveryStatus, RecoveryOutreachStatus } from "@prisma/cli
 import type { WooRecoveryConsentReaderPort, WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import type { RecoveryBillingAdmission, RecoveryBillingService } from "../recovery-billing.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
+import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
 import type {
   WooCheckoutCoordinator,
   WooCheckoutRef,
@@ -53,6 +54,8 @@ export type WooMarketingTemplate = Readonly<{
   languageCode: string;
   canonicalLanguageTag: string;
   verifiedCategory: "MARKETING";
+  /** Exact Admin-frozen transport payload plus BG006 final admission identity. */
+  sendFields?: Omit<SendTemplateInput, "to">;
 }>;
 
 /**
@@ -98,7 +101,7 @@ export interface WooOutreachDependencies {
   consent: Pick<WooRecoveryConsentReaderPort, "evaluateStoredRecipient">;
   policies: { resolve(shopId: string): Promise<RecoveryPolicySnapshot> };
   templates: {
-    select(shopId: string, recoveryId: string): Promise<
+    select(shopId: string, recoveryId: string, policy?: RecoveryPolicySnapshot): Promise<
       { kind: "selected"; template: WooMarketingTemplate } |
       { kind: "unavailable"; reason: string }
     >;
@@ -269,7 +272,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         this.requireInitial(attempt, guard.recipient);
         state.attemptId = attempt.id;
         state.stage = "select-marketing-template";
-        const selected = await this.deps.templates.select(fresh.shopId, recoveryId);
+        const selected = await this.deps.templates.select(fresh.shopId, recoveryId, policy);
         if (selected.kind !== "selected" || selected.template.verifiedCategory !== "MARKETING")
           return this.dispatchOutcome(state, "suppressed", "marketing-template-unavailable");
         state.stage = "resolve-conversation";
@@ -299,7 +302,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         }
         let currentTemplate: Awaited<ReturnType<WooOutreachDependencies["templates"]["select"]>>;
         try {
-          currentTemplate = await this.deps.templates.select(fresh.shopId, recoveryId);
+          currentTemplate = await this.deps.templates.select(fresh.shopId, recoveryId, policy);
         } catch (error) {
           await this.releaseOrThrow(billing.admission, error);
           throw error;
@@ -307,7 +310,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         if (currentTemplate.kind !== "selected" ||
           currentTemplate.template.verifiedCategory !== "MARKETING" ||
           currentTemplate.template.name !== selected.template.name ||
-          currentTemplate.template.languageCode !== selected.template.languageCode) {
+          currentTemplate.template.languageCode !== selected.template.languageCode ||
+          JSON.stringify(currentTemplate.template.sendFields ?? null) !==
+            JSON.stringify(selected.template.sendFields ?? null)) {
           await this.deps.billing.releaseBeforeProvider(billing.admission);
           return this.dispatchOutcome(state, "suppressed", "marketing-template-changed");
         }

@@ -10,8 +10,7 @@ import {
 } from "../recovery-billing.service.js";
 import { pendingRecoveryCandidateService } from "../pending-recovery-candidate.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
-import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
-import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
+import { automatedRecoveryTemplateService } from "../recovery-template-integration/automated-recovery-template.service.js";
 import {
   recoveryStoredConsentService, type StoredRecoveryConsentReader,
 } from "../recovery-conversation/recovery-stored-consent.service.js";
@@ -114,21 +113,14 @@ export class RecoveryOutreachFollowUpProcessorService {
           recovery.shopId, undefined, "recovery",
         );
         if (!execution.allowed) return { kind: "suppressed", reason: execution.reason } as const;
-        // Read Meta's exact category before occupying the one sequence-two slot.
-        const selection = await whatsappTemplateSelectorService.select({
-          shopId: recovery.shopId,
-          providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
-          purpose: "checkout-recovery",
-          languageTag: recovery.conversation?.languageTag ?? null,
-          countryCode: recovery.conversation?.countryCode ?? null,
-          resolveMarketCapability: async () => "unknown" as const,
-          verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
+        const currentPolicy = await recoveryPolicyService.resolve(recovery.shopId);
+        const selected = await automatedRecoveryTemplateService.prepare({
+          shopId: recovery.shopId, recoveryId, stage: "FOLLOW_UP",
+          policy: currentPolicy,
+          conversationLanguageTag: recovery.conversation.languageTag ?? null,
         });
-        if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
+        if (selected.kind !== "prepared") {
           return { kind: "suppressed", reason: "template-unavailable" } as const;
-        }
-        if (selection.verifiedCategory !== "MARKETING") {
-          return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
         }
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
@@ -172,10 +164,10 @@ export class RecoveryOutreachFollowUpProcessorService {
         }
         billing = revalidated;
         const content = conversationMessageService.buildRecoveryTemplateDescriptor({
-          purpose: "checkout-recovery",
-          templateName: selection.providerTemplateName,
-          canonicalLanguageTag: selection.canonicalLanguageTag,
-          providerLanguageCode: selection.providerLanguageCode,
+          purpose: selected.prepared.purpose,
+          templateName: selected.prepared.providerTemplateName,
+          canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
+          providerLanguageCode: selected.prepared.providerLanguageCode,
         });
         let providerSendCompleted = false;
         try {
@@ -188,8 +180,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             expectedControlRevision: owner.revision,
             content,
             to: attempt.recipient,
-            templateName: selection.providerTemplateName,
-            languageCode: selection.providerLanguageCode,
+            ...selected.send,
           });
           providerSendCompleted = true;
           if (result.kind === "suppressed") {

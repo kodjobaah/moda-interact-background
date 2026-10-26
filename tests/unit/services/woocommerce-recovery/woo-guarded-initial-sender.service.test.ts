@@ -16,7 +16,13 @@ const input = {
     customerId: "customer-1", customerPhoneId: "phone-1", canonicalRecipient: "447400123456",
     consentRevision: 1n, consentDecisionSequence: 1n, noContactRevision: 0n },
   template: { name: "woo_recovery", languageCode: "en_GB", canonicalLanguageTag: "en-GB",
-    verifiedCategory: "MARKETING" as const },
+    verifiedCategory: "MARKETING" as const,
+    sendFields: { templateName: "woo_recovery", languageCode: "en_GB", bodyParameters: ["Hello"],
+      templateRegistration: { shopId: "shop-1", purpose: "INITIAL_NO_OFFER",
+        senderWabaId: "waba-1", variantId: "v-1", registrationId: "r-1",
+        definitionId: "d-1", providerTemplateId: "meta-1",
+        providerTemplateName: "woo_recovery", providerLanguageCode: "en_GB",
+        submittedContentHash: "a".repeat(64), bindingFingerprint: "a".repeat(64) } }, },
   idempotencyKey, recoveryCreditSourceKey,
 };
 
@@ -44,7 +50,7 @@ describe("ARCH-046-BACKGROUND-004 Woo initial sender adapter", () => {
     });
     expect(f.sendPreparedWooInitialTemplate).toHaveBeenCalledWith(
       expect.objectContaining({ messageId: "message-1" }),
-      { to: input.recipient, templateName: "woo_recovery", languageCode: "en_GB" },
+      { ...input.template.sendFields, to: input.recipient },
       expect.objectContaining({ recoveryId: "recovery-1", attemptId, consent: input.consent }),
     );
   });
