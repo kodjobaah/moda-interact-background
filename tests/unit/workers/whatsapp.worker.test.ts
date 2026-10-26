@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 
 const mocks = vi.hoisted(() => ({
   guidance: vi.fn(),
+  templateStatus: vi.fn(),
+  dispatch: null as null | ((job: unknown) => Promise<void>),
   optOut: vi.fn(),
   reachability: vi.fn(),
   audio: vi.fn(),
@@ -49,6 +53,10 @@ vi.mock("bullmq", () => ({
     }
   },
   Worker: class {
+    concurrency = 1;
+    constructor(_queue: string, handler: (job: unknown) => Promise<void>) {
+      mocks.dispatch = handler;
+    }
     on() {
       return this;
     }
@@ -62,6 +70,9 @@ vi.mock("@modainteract/moda-interact-shared/observability/genai", () => ({
 }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/lib/db.js", () => ({ default: mocks.database }));
+vi.mock("../../../src/runtime/queue-concurrency-controller.js", () => ({
+  bindWorkerConcurrency: vi.fn(),
+}));
 vi.mock("../../../src/observability/worker-metrics.js", () => ({
   observeWorkerJob: vi.fn((_definition, _job, operation) => operation()),
 }));
@@ -86,6 +97,9 @@ vi.mock("../../../src/services/recovery-routing.service.js", () => ({
 vi.mock("../../../src/services/whatsapp-provider-status.service.js", () => ({
   whatsappProviderStatusService: { process: vi.fn() },
 }));
+vi.mock("../../../src/services/meta-template-management/service.js", () => ({
+  metaTemplateManagementService: { processTemplateStatusObservation: mocks.templateStatus },
+}));
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: mocks.eligibility,
 }));
@@ -100,10 +114,16 @@ vi.mock(
 );
 
 import {
+  createWhatsappWorker,
   loadConversationTurn,
   processInboundJobData,
   processInboundMessage,
 } from "../../../src/workers/whatsapp.worker.js";
+import { processTemplateStatusJob } from "../../../src/services/meta-template-management/status-job.js";
+import {
+  formatMetaTemplateStatusEventIdentity,
+  formatMetaTemplateStatusJobId,
+} from "@modainteract/moda-interact-shared/whatsapp-template-events";
 
 const event = {
   schemaVersion: 1 as const,
@@ -421,5 +441,100 @@ describe("ARCH-028 inbound reachability route gate", () => {
     mocks.conversation.receiveMessage.mockRejectedValueOnce(new Error("database unavailable"));
     await expect(processInboundMessage(event)).rejects.toThrow("database unavailable");
     expect(mocks.reachability).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
+  const uuid = "550e8400-e29b-41d4-a716-446655440000";
+  const event = {
+    schemaVersion: 2,
+    eventIdentity: formatMetaTemplateStatusEventIdentity(uuid),
+    wabaId: "123456789",
+    providerTemplateId: "987654321",
+    providerTemplateName: "checkout_recovery_initial_v2",
+    providerLanguageCode: "en_GB",
+    providerStatus: "PAUSED",
+    reasonCode: "NONE",
+    receivedAt: "2026-10-25T19:00:00.000Z",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.templateStatus.mockResolvedValue("current");
+  });
+
+  it("round-trips the published Shared-v2 golden fixture and BullMQ job identity", async () => {
+    const fixturePath = createRequire(import.meta.url).resolve(
+      "@modainteract/moda-interact-shared/whatsapp-template-events/fixtures",
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      observation: typeof event; expectedJobId: string;
+    };
+    expect(fixture.observation).toEqual({ ...event, providerStatus: "APPROVED" });
+    expect(fixture.expectedJobId).toBe(formatMetaTemplateStatusJobId(uuid));
+    await processTemplateStatusJob("meta-template-status-update", fixture.observation, fixture.expectedJobId);
+    expect(mocks.templateStatus).toHaveBeenCalledOnce();
+  });
+
+  it("maps Shared-v2 receipt time and invokes only the template status port", async () => {
+    await processTemplateStatusJob("meta-template-status-update", event, formatMetaTemplateStatusJobId(uuid));
+    expect(mocks.templateStatus).toHaveBeenCalledExactlyOnceWith({
+      eventIdentity: event.eventIdentity,
+      wabaId: event.wabaId,
+      providerTemplateId: event.providerTemplateId,
+      providerTemplateName: event.providerTemplateName,
+      providerLanguageCode: event.providerLanguageCode,
+      providerStatus: event.providerStatus,
+      reasonCode: event.reasonCode,
+      occurredAt: event.receivedAt,
+    });
+  });
+
+  it("processes distinct occurrence UUIDs even when Meta statuses are identical", async () => {
+    const second = "550e8400-e29b-41d4-a716-446655440001";
+    await processTemplateStatusJob("meta-template-status-update", event, formatMetaTemplateStatusJobId(uuid));
+    await processTemplateStatusJob("meta-template-status-update", {
+      ...event, eventIdentity: formatMetaTemplateStatusEventIdentity(second),
+    }, formatMetaTemplateStatusJobId(second));
+    expect(mocks.templateStatus).toHaveBeenCalledTimes(2);
+    expect(mocks.templateStatus.mock.calls[0]![0].eventIdentity)
+      .not.toEqual(mocks.templateStatus.mock.calls[1]![0].eventIdentity);
+  });
+
+  it.each([
+    ["wrong job", "message-status", event, formatMetaTemplateStatusJobId(uuid)],
+    ["wrong version", "meta-template-status-update", { ...event, schemaVersion: 1 }, formatMetaTemplateStatusJobId(uuid)],
+    ["extra field", "meta-template-status-update", { ...event, extra: "x" }, formatMetaTemplateStatusJobId(uuid)],
+    ["content hash v1", "meta-template-status-update", { ...event, eventIdentity: "meta-template-status:v1:hash" }, formatMetaTemplateStatusJobId(uuid)],
+    ["wrong job ID", "meta-template-status-update", event, "meta-template-status-v1-stale"],
+    ["wrong provider ID", "meta-template-status-update", { ...event, providerTemplateId: "p-99" }, formatMetaTemplateStatusJobId(uuid)],
+    ["noncanonical receipt", "meta-template-status-update", { ...event, receivedAt: "2026-10-25T19:00:00Z" }, formatMetaTemplateStatusJobId(uuid)],
+    ["oversized payload", "meta-template-status-update", { ...event, providerTemplateName: "x".repeat(5000) }, formatMetaTemplateStatusJobId(uuid)],
+  ])("rejects %s before any Meta service work", async (_label, name, data, jobId) => {
+    await expect(processTemplateStatusJob(name as string, data, jobId as string)).rejects.toThrow();
+    expect(mocks.templateStatus).not.toHaveBeenCalled();
+    expect(mocks.logger.error).toHaveBeenCalled();
+  });
+
+  it("the actual WhatsApp worker switch dispatches this job without touching customer messages", async () => {
+    createWhatsappWorker();
+    expect(mocks.dispatch).toBeTypeOf("function");
+    await mocks.dispatch!({
+      id: formatMetaTemplateStatusJobId(uuid),
+      name: "meta-template-status-update", data: event,
+      attemptsMade: 0, opts: { attempts: 5 },
+    });
+    expect(mocks.templateStatus).toHaveBeenCalledTimes(1);
+    expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+  });
+
+  it("logs and rethrows provider reconciliation errors for BullMQ retry", async () => {
+    const error = new Error("provider outage");
+    mocks.templateStatus.mockRejectedValueOnce(error);
+    await expect(processTemplateStatusJob("meta-template-status-update", event,
+      formatMetaTemplateStatusJobId(uuid))).rejects.toBe(error);
+    expect(mocks.logger.error).toHaveBeenCalledWith("whatsapp.template_status.failed", expect.anything());
   });
 });

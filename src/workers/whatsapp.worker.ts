@@ -5,6 +5,10 @@ import { observeConversationTurn } from "@modainteract/moda-interact-shared/obse
 import {
   safeParseNormalizedWhatsAppInboundMessage,
 } from "@modainteract/moda-interact-shared/whatsapp";
+import {
+  META_TEMPLATE_STATUS_JOB,
+  type MetaTemplateStatusObservationV2,
+} from "@modainteract/moda-interact-shared/whatsapp-template-events";
 
 import { connectionRedis } from "../lib/redis.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
@@ -21,6 +25,7 @@ import { AiTurnOwnershipService } from "../services/recovery-conversation/ai-tur
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
+import { processTemplateStatusJob } from "../services/meta-template-management/status-job.js";
 import { shopExecutionEligibilityService } from "../services/shop-execution-eligibility.service.js";
 import {
   ConversationTurnProcessor,
@@ -42,7 +47,7 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "whatsapp",
   queueName: "whatsapp-events",
-  jobNames: ["message-received", "message-status", "process-conversation-turn"],
+  jobNames: ["message-received", "message-status", "process-conversation-turn", META_TEMPLATE_STATUS_JOB],
 } as const;
 const conversationTurnObservation = {
   mapException: () => ({
@@ -73,7 +78,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
 
 export function createWhatsappWorker() {
   const worker = new Worker<
-  WhatsAppInboundEvent | ConversationTurnJob
+  WhatsAppInboundEvent | ConversationTurnJob | MetaTemplateStatusObservationV2
 >(
   "whatsapp-events",
 
@@ -99,6 +104,10 @@ export function createWhatsappWorker() {
 
         case "message-status":
           await whatsappProviderStatusService.process(job.data);
+          return;
+
+        case META_TEMPLATE_STATUS_JOB:
+          await processTemplateStatusJob(job.name, job.data, job.id);
           return;
 
         default:
