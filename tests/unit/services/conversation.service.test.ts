@@ -35,6 +35,63 @@ vi.mock("../../../src/services/conversation-moderation/moderation-operation.js",
 }));
 
 describe("ConversationService language persistence", () => {
+  it("starts the settle window at receipt time when a provider event is delayed", async () => {
+    const receivedAt = new Date("2026-10-26T22:15:00.000Z");
+    const occurredAt = new Date(receivedAt.getTime() - 60_000);
+    vi.useFakeTimers();
+    vi.setSystemTime(receivedAt);
+    try {
+      prismaMock.conversationMessage.findUnique.mockResolvedValue(null);
+      prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
+        inboundVersion: 0,
+        lastProcessedVersion: 0,
+        pendingTurnStartedAt: null,
+        languageTag: null,
+        languageSource: null,
+      });
+      const create = vi.fn();
+      const executeRaw = vi.fn().mockResolvedValue(1);
+      const update = vi.fn().mockResolvedValue({ id: "conversation-1", inboundVersion: 1 });
+      const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+      prismaMock.$transaction.mockImplementation(async (callback) =>
+        callback({
+          conversationMessage: { create },
+          conversation: { updateMany, update },
+          $executeRaw: executeRaw,
+        } as any),
+      );
+
+      await new ConversationService().receiveMessage({
+        conversationId: "conversation-1",
+        providerMessageId: "wamid.delayed",
+        inReplyToProviderId: null,
+        content: "delayed inbound",
+        occurredAt,
+      });
+
+      expect(create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ createdAt: receivedAt }),
+      });
+      expect(updateMany).toHaveBeenCalledWith({
+        where: {
+          id: "conversation-1",
+          inboundVersion: 0,
+          lastProcessedVersion: 0,
+          pendingTurnStartedAt: null,
+        },
+        data: { pendingTurnStartedAt: receivedAt },
+      });
+      expect(executeRaw.mock.calls[0]).toEqual([
+        expect.any(Array),
+        receivedAt,
+        receivedAt,
+        "conversation-1",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("persists initial language during receipt and applies detection after the agent", async () => {
     prismaMock.conversationMessage.findUnique.mockResolvedValue(null);
     prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({

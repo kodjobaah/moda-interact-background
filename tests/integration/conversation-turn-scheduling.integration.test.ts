@@ -208,7 +208,7 @@ describe.sequential("ARCH-007-BACKGROUND-010 live turn scheduling", () => {
         "the black jacket",
         "sorry I mean blue",
       ];
-      const firstOccurredAt = Date.now();
+      const firstOccurredAt = Date.now() - 60_000;
 
       for (const [index, content] of fragments.entries()) {
         const received = await boundary.conversation.receiveMessage({
