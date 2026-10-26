@@ -20,7 +20,9 @@ import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } fro
   "../../../src/services/recovery-conversation/recovery-follow-up-billing.service.js";
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 
-export async function humanDispatchFixture(label: string) {
+export async function humanDispatchFixture(
+  label: string, recipientOverride?: string,
+) {
   const url = process.env.TEST_DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!url || !redisUrl || process.env.MODA_DISPOSABLE_INTEGRATION !== "1") {
@@ -31,7 +33,7 @@ export async function humanDispatchFixture(label: string) {
   const shopId = `arch040-b002-${label}-${randomUUID()}`;
   const recoveryId = randomUUID();
   const conversationId = randomUUID();
-  const recipient = "15551234567";
+  const recipient = recipientOverride ?? "15551234567";
   const administratorIds: string[] = [];
   await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, status: "ACTIVE" } });
   await db.checkoutRecovery.create({ data: {
