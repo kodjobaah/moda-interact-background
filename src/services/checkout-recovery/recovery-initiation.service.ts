@@ -7,8 +7,7 @@ import { conversationService } from "../conversation.service.js";
 import { conversationMessageService } from "../conversation.message.service.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
-import { whatsappTemplateSelectorService } from "../whatsapp-template-selector.service.js";
-import { metaWhatsAppTemplateCategoryService } from "../whatsapp-template-category.service.js";
+import { automatedRecoveryTemplateService } from "../recovery-template-integration/automated-recovery-template.service.js";
 import {
   recoveryBillingService,
   type RecoveryBillingService,
@@ -246,24 +245,15 @@ export class RecoveryInitiationService {
 
     if (admissionGate && !(await admissionGate())) return recovery;
 
-    const selection = await whatsappTemplateSelectorService.select({
-      shopId: recovery.shopId,
-      providerAccountId: await outboundWhatsAppAdmissionService.getProviderAccountId(),
-      purpose: "checkout-recovery",
-      languageTag: null,
-      countryCode: event.internationalContext?.countryCode ?? null,
-      resolveMarketCapability: async () => "unknown" as const,
-      verifyCategory: (query) => metaWhatsAppTemplateCategoryService.verify(query),
+    // Only after the checkout, stored consent, STOP and capacity preflight.
+    // BG004 verifies offer eligibility; BG001 prepares immutable Admin-authored
+    // Meta bindings. Neither executes a provider send or occupies a credit.
+    const selected = await automatedRecoveryTemplateService.prepare({
+      shopId: recovery.shopId, recoveryId: recovery.id, stage: "INITIAL",
+      policy, conversationLanguageTag: null,
+      customerFirstName: event.customer.firstName,
     });
-
-    if (selection.outcome !== "selected" && selection.outcome !== "provider-check-required") {
-      return recovery;
-    }
-    // Approval/purpose alone never prove Marketing: the selector asks Meta for
-    // the exact account, name, language and (when known) template ID.
-    if (selection.verifiedCategory !== "MARKETING") {
-      return recovery;
-    }
+    if (selected.kind !== "prepared") return recovery;
 
     const attempt = await recoveryOutreachAttemptService.getOrCreate({
       recoveryId: recovery.id,
@@ -286,10 +276,10 @@ export class RecoveryInitiationService {
     }
 
     const content = conversationMessageService.buildRecoveryTemplateDescriptor({
-      purpose: "checkout-recovery",
-      templateName: selection.providerTemplateName,
-      canonicalLanguageTag: selection.canonicalLanguageTag,
-      providerLanguageCode: selection.providerLanguageCode,
+      purpose: selected.prepared.purpose,
+      templateName: selected.prepared.providerTemplateName,
+      canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
+      providerLanguageCode: selected.prepared.providerLanguageCode,
     });
 
     let conversation;
@@ -348,8 +338,7 @@ export class RecoveryInitiationService {
         senderType: "AUTOMATION",
         content,
         to: attempt.recipient,
-        templateName: selection.providerTemplateName,
-        languageCode: selection.providerLanguageCode,
+        ...selected.send,
       });
     } catch (error) {
       // The exact 131026 message, attempt and credit were already reconciled

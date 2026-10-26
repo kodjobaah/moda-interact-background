@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   },
   lock: { withCheckoutLock: vi.fn() },
   outbound: { getProviderAccountId: vi.fn(), sendTemplate: vi.fn(), findExistingAdmission: vi.fn() },
-  selector: { select: vi.fn() },
+  automated: { prepare: vi.fn() },
   eligibility: { evaluate: vi.fn() },
   attempt: {
     markNoResponseIfWaiting: vi.fn(),
@@ -33,8 +33,8 @@ vi.mock("../../../../src/services/pending-recovery-candidate.service.js", () => 
 vi.mock("../../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: mocks.outbound,
 }));
-vi.mock("../../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: mocks.selector,
+vi.mock("../../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: mocks.automated,
 }));
 vi.mock("../../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: mocks.eligibility,
@@ -120,7 +120,14 @@ beforeEach(() => {
   mocks.outbound.getProviderAccountId.mockReturnValue("provider-1");
   mocks.outbound.sendTemplate.mockResolvedValue({ kind: "admitted" });
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
-  mocks.selector.select.mockResolvedValue({ outcome: "selected", providerTemplateName: "follow_up", canonicalLanguageTag: "fr-CA", providerLanguageCode: "fr_CA", verifiedCategory: "MARKETING" });
+  mocks.automated.prepare.mockResolvedValue({
+    kind: "prepared",
+    prepared: { purpose: "FOLLOW_UP_NO_OFFER", providerTemplateName: "follow_up",
+      canonicalLanguageTag: "fr-CA", providerLanguageCode: "fr_CA" },
+    send: { templateName: "follow_up", languageCode: "fr_CA",
+      templateRegistration: { shopId: "shop-1", purpose: "FOLLOW_UP_NO_OFFER" },
+      recoveryPromise: { kind: "NO_OFFER" } },
+  });
   mocks.eligibility.evaluate.mockResolvedValue({ allowed: true });
   mocks.attempt.markNoResponseIfWaiting.mockResolvedValue({ count: 1 });
   mocks.attempt.getOrCreate.mockResolvedValue({ id: "attempt-1", status: "NO_RESPONSE" });
@@ -173,7 +180,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.policy.resolve).not.toHaveBeenCalled();
-    expect(mocks.selector.select).not.toHaveBeenCalled();
+    expect(mocks.automated.prepare).not.toHaveBeenCalled();
     expect(billing.admit).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
@@ -243,16 +250,13 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
-  it.each(["UTILITY", "AUTHENTICATION", undefined])(
-    "rejects %s Meta template category before consuming sequence two", async (category) => {
+  it.each(["PROVIDER_UNAVAILABLE", "PROVIDER_DRIFT", "NO_APPROVED_ASSIGNMENT"])(
+    "refuses %s before claiming sequence two or reserving credits", async (reason) => {
       setRecovery();
-      mocks.selector.select.mockResolvedValue({
-        outcome: "selected", providerTemplateName: "follow_up", providerLanguageCode: "fr_CA",
-        verifiedCategory: category,
-      });
+      mocks.automated.prepare.mockResolvedValue({ kind: "unavailable", reason });
       const { processor, billing } = createProcessor();
       await expect(processor.process(recovery.id)).resolves.toEqual({
-        kind: "suppressed", reason: "marketing-template-unverified",
+        kind: "suppressed", reason: "template-unavailable",
       });
       expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
       expect(billing.admit).not.toHaveBeenCalled();
@@ -366,17 +370,17 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "SUBSCRIPTION_FROZEN" });
 
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
-    expect(mocks.selector.select).not.toHaveBeenCalled();
+    expect(mocks.automated.prepare).not.toHaveBeenCalled();
   });
 
   it("uses durable conversation locale and marks unavailable templates failed", async () => {
     setRecovery();
-    mocks.selector.select.mockResolvedValue({ outcome: "template-unavailable" });
+    mocks.automated.prepare.mockResolvedValue({ kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
     const { processor } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "template-unavailable" });
 
-    expect(mocks.selector.select).toHaveBeenCalledWith(expect.objectContaining({ languageTag: "fr-CA", countryCode: "CA" }));
+    expect(mocks.automated.prepare).toHaveBeenCalledWith(expect.objectContaining({ stage: "FOLLOW_UP", conversationLanguageTag: "fr-CA" }));
     expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });

@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+import { prepareAutomatedTemplateInput } from
+  "../../../../src/services/conversation-moderation/automated-template-input.js";
+import { templateSendFields } from
+  "../../../../src/services/recovery-template-integration/prepared-template-send.js";
+import type { PreparedRecoveryTemplate } from
+  "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
+
+const hash = "a".repeat(64);
+const base: PreparedRecoveryTemplate = {
+  outcome: "prepared", shopId: "shop-1", senderWabaId: "waba-1",
+  purpose: "INITIAL_NO_OFFER", canonicalLanguageTag: "en-GB", selectionSource: "exact",
+  variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
+  providerTemplateId: "meta-1", providerTemplateName: "moda_template",
+  providerLanguageCode: "en_GB", submittedContentHash: hash, bindingFingerprint: hash,
+  template: { name: "moda_template", language: { code: "en_GB" }, components: [
+    { type: "header", parameters: [{ type: "text", text: "Store name" }] },
+    { type: "body", parameters: [{ type: "text", text: "Alice" }, { type: "text", text: "Welcome" }] },
+    { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "https%3A%2F%2Fshop.test" }] },
+  ] },
+};
+
+describe("ARCH-047 compiled template component pass-through", () => {
+  it("preserves frozen text-header, body order and checkout CTA parameters exactly", () => {
+    const send = templateSendFields(base, { kind: "NO_OFFER" });
+    expect(send).toMatchObject({
+      templateName: "moda_template", languageCode: "en_GB", textHeader: "Store name",
+      bodyParameters: ["Alice", "Welcome"],
+      dynamicUrlButton: { index: 0, text: "https%3A%2F%2Fshop.test" },
+      templateRegistration: { shopId: "shop-1", variantId: "variant-1",
+        registrationId: "registration-1", submittedContentHash: hash },
+      recoveryPromise: { kind: "NO_OFFER" },
+    });
+    const emitted = prepareAutomatedTemplateInput({ ...send, to: "+447400123456" });
+    expect(emitted.providerInput).toMatchObject({
+      textHeader: "Store name", bodyParameters: ["Alice", "Welcome"],
+      dynamicUrlButton: { index: 0, text: "https%3A%2F%2Fshop.test" },
+    });
+    expect(emitted.providerInput).not.toHaveProperty("templateRegistration");
+    expect(emitted.providerInput).not.toHaveProperty("recoveryPromise");
+    expect(JSON.parse(emitted.effectiveText).recoveryPromise).toEqual({ kind: "NO_OFFER" });
+  });
+
+  it("preserves a READY media header without exporting its link to moderation text", () => {
+    const image = { ...base, template: { ...base.template, components: [
+      { type: "header", parameters: [{ type: "image", image: { link: "https://cdn.test/ready.jpg" } }] },
+      { type: "body", parameters: [{ type: "text", text: "Alice" }] },
+    ] } } as PreparedRecoveryTemplate;
+    const send = templateSendFields(image, { kind: "NO_OFFER" });
+    const emitted = prepareAutomatedTemplateInput({ ...send, to: "+447400123456" });
+    expect(emitted.providerInput.imageHeader).toEqual({ link: "https://cdn.test/ready.jpg" });
+    expect(emitted.effectiveText).not.toContain("https://cdn.test/ready.jpg");
+    expect(JSON.parse(emitted.effectiveText).imageHeader).toBe("READY_DERIVATIVE");
+  });
+
+  it("never accepts reordered compiled components, or a mismatched template promise", () => {
+    const invalid = { ...base, template: { ...base.template,
+      components: [base.template.components[1]!, base.template.components[0]!] } };
+    expect(() => templateSendFields(invalid, { kind: "NO_OFFER" })).toThrow("COMPONENT_ORDER_INVALID");
+    expect(() => prepareAutomatedTemplateInput({ ...templateSendFields(base, { kind: "NO_OFFER" }),
+      to: "+447400123456", recoveryPromise: { kind: "CODE_OFFER", providerDiscountId: "coupon-1" } }))
+      .toThrow("automated_template_promise_mismatch");
+  });
+});

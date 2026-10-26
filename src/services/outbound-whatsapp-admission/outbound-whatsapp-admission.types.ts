@@ -28,4 +28,7 @@ export type OutboundSuppressionReason =
   | "conversation-invalid"
   | "shop-unavailable"
   | "contract-required"
-  | "subscription-frozen";
+  | "subscription-frozen"
+  | "TEMPLATE_REGISTRATION_UNAVAILABLE"
+  | "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"
+  | "TEMPLATE_PROVIDER_STATUS_STALE";
