@@ -22,6 +22,7 @@ import { checkoutRecoveryService } from "../services/checkout-recovery.service.j
 import { conversationService } from "../services/conversation.service.js";
 import { moderationTurnGate } from "../services/conversation-moderation/moderation-turn-gate.js";
 import { AiTurnOwnershipService } from "../services/recovery-conversation/ai-turn-ownership.service.js";
+import { ConversationWrapperService } from "../services/conversation-wrappers/service.js";
 import { inboundWhatsAppAbuseAdmissionService } from "../services/inbound-whatsapp-abuse-admission.service.js";
 import { outboundWhatsAppAdmissionService } from "../services/outbound-whatsapp-admission.service.js";
 import { whatsappProviderStatusService } from "../services/whatsapp-provider-status.service.js";
@@ -72,6 +73,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   abuseAdmission: inboundWhatsAppAbuseAdmissionService,
   loadTurn: loadConversationTurn,
   runAgent: runCommerceAgent,
+  aiWrapper: new ConversationWrapperService({ onMissingSlot: "passthrough", logger }),
   getResult: (result) => result,
   logger,
 });
