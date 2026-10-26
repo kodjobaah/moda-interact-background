@@ -238,6 +238,25 @@ describe("BG003 server-side Meta Graph API adapter", () => {
     await expect(client.create(claim)).rejects.toMatchObject({ code: "META_RATE_LIMIT", disposition: "uncertain" });
   });
 
+  it("classifies Meta HTTP 503 as an uncertain create, without exposing provider response bodies", async () => {
+    const request = vi.fn(async () => new Response("private-provider-503-detail", { status: 503 }));
+    const client = new MetaGraphTemplateAdapter(request as typeof fetch);
+    await expect(client.create(claim)).rejects.toMatchObject({
+      code: "META_HTTP_503", disposition: "uncertain",
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]).toBeDefined();
+  });
+
+  it("classifies Meta HTTP 400 validation rejection as definitive, not uncertain", async () => {
+    const request = vi.fn(async () => new Response("private-validation-details", { status: 400 }));
+    const client = new MetaGraphTemplateAdapter(request as typeof fetch);
+    await expect(client.create(claim)).rejects.toMatchObject({
+      code: "META_HTTP_400", disposition: "definitive",
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it("reads paginated Meta template listings without external paging requests", async () => {
     const request = vi.fn(async (url: URL) => {
       if (!url.searchParams.get("after")) {
