@@ -1,9 +1,12 @@
 import "dotenv/config";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
-import { automatedRecoveryTemplateService } from "../../src/services/recovery-template-integration/automated-recovery-template.service.js";
+import { whatsAppService } from "../../src/services/whatsapp.service.js";
+import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
+import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/services/platform-configuration/contracts.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import {
   createWooOutreachFixture,
   type WooOutreachIntegrationFixture,
@@ -16,15 +19,24 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
   let f: WooOutreachIntegrationFixture | undefined;
 
   beforeEach(async () => {
-    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId").mockResolvedValue("test-meta-account");
-    // Only the external Meta catalogue is simulated. Attempt, consent,
-    // reservation, committed usage and BullMQ persistence remain real.
-    vi.spyOn(automatedRecoveryTemplateService, "prepare").mockResolvedValue({
-      kind: "prepared", prepared: {
-        purpose: "INITIAL_NO_OFFER", providerTemplateName: "woo_checkout_recovery",
-        providerLanguageCode: "en_GB", canonicalLanguageTag: "en-GB",
-      }, send: { templateName: "woo_checkout_recovery", languageCode: "en_GB" },
-    } as never);
+    const readConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
+    vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
+      async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
+        if (key === "messaging.sender") {
+          return {
+            key, version: 1,
+            value: { accessToken: "integration-token", phoneNumberId: "123456789", businessAccountId: "987654321" },
+          } as ConfigurationSnapshot<K>;
+        }
+        return readConfiguration(key);
+      },
+    );
+    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    vi.spyOn(whatsAppService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    // The frozen registration, approval, category and language are persisted
+    // in the disposable DB; the provider transport is still controlled.
     f = await createWooOutreachFixture();
   });
 
@@ -107,7 +119,17 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(a.providerRequests).toBe(0);
       const attempts = await a.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: a.recoveryId } });
       expect(attempts).toHaveLength(1);
-      expect(attempts[0]!.status).toBe("FAILED");
+      // No provider permit was committed. Releasing the credit must not
+      // terminally fail sequence one: only a definitive provider failure does.
+      expect(attempts[0]).toMatchObject({
+        sequence: 1, status: "PENDING", sentAt: null, outboundMessageId: null,
+      });
+      // The retained attempt is not permission to contact an ordered checkout.
+      // Replaying the job must observe the terminal order and remain charge-free.
+      await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({
+        kind: "suppressed", reason: "observed-order-terminal",
+      });
+      expect(a.providerRequests).toBe(0);
       expect(await a.db.conversationMessage.count({ where: {
         conversation: { checkoutRecoveryId: a.recoveryId }, direction: "OUTBOUND",
       } })).toBe(0);

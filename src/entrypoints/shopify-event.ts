@@ -18,10 +18,12 @@ void startReadyWorkerProcess({
         import("../workers/woo-checkout-capture.worker.js"),
         import("../workers/woo-order-capture.worker.js"),
       ]);
+    const { createWooRecoveryRuntime } = await import("../services/woocommerce-recovery/woo-recovery-composition.js");
+    const wooRecovery = createWooRecoveryRuntime("moda-shopify-event-worker");
     const checkoutWorker = createCheckoutWorker();
     const orderWorker = createOrderWorker();
-    const wooCheckoutCaptureWorker = createWooCheckoutCaptureWorker();
-    const wooOrderCaptureWorker = createWooOrderCaptureWorker();
+    const wooCheckoutCaptureWorker = createWooCheckoutCaptureWorker(wooRecovery.orchestrator);
+    const wooOrderCaptureWorker = createWooOrderCaptureWorker(wooRecovery.orchestrator);
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -34,7 +36,7 @@ void startReadyWorkerProcess({
 
     return {
       workers: [checkoutWorker, orderWorker, wooCheckoutCaptureWorker, wooOrderCaptureWorker],
-      closeResources: [stopQueueConcurrencyController, () => backgroundRuntimeConfigService.close(), ...closeWorkerResources, closeWorkerObservability, closeQueuePerformanceTelemetry],
+      closeResources: [stopQueueConcurrencyController, wooRecovery.close, () => backgroundRuntimeConfigService.close(), ...closeWorkerResources, closeWorkerObservability, closeQueuePerformanceTelemetry],
     };
   },
 }).catch(reportReadinessFailure);

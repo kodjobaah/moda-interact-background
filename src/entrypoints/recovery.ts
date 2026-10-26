@@ -41,8 +41,10 @@ void startReadyWorkerProcess({
       import("../services/recovery-capacity-resume.service.js"),
       import("../services/recovery-outreach-follow-up.service.js"),
     ]);
+    const { createWooRecoveryRuntime } = await import("../services/woocommerce-recovery/woo-recovery-composition.js");
+    const wooRecovery = createWooRecoveryRuntime("moda-recovery-worker");
     const pendingRecoveryCandidateWorker =
-      createPendingRecoveryCandidateWorker();
+      createPendingRecoveryCandidateWorker(wooRecovery.orchestrator);
     const recoveryCapacityResumeWorker = createRecoveryCapacityResumeWorker();
     const recoveryOutreachFollowUpWorker =
       createRecoveryOutreachFollowUpWorker();
@@ -127,6 +129,7 @@ void startReadyWorkerProcess({
       closeResources: [async () => {
         const stopFunctions = [
           stopQueueConcurrencyController,
+          wooRecovery.close,
           stopRepairScheduler,
           stopExpiryScheduler,
           stopWooCouponDispatcher,

@@ -46,8 +46,15 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
     const queue = new Queue("woo-order-capture-v1", { connection });
     const checkoutQueue = new Queue("woo-checkout-capture-v1", { connection });
     const shopifyOrderQueue = new Queue("order-events", { connection });
-    const worker = createWooOrderCaptureWorker();
+    const worker = createWooOrderCaptureWorker({ onOrder: async () => ({ kind: "placed-suppressed" }) });
     try {
+      // These shared queues can retain completed or failed jobs from earlier integration
+      // suites. Assert that order capture creates no *new* work in either queue.
+      const states = ["waiting", "active", "completed", "failed"] as const;
+      const [checkoutCountsBefore, shopifyOrderCountsBefore] = await Promise.all([
+        checkoutQueue.getJobCounts(...states),
+        shopifyOrderQueue.getJobCounts(...states),
+      ]);
       await worker.waitUntilReady();
       const shopId = `woo-${randomUUID()}`;
       const otherShop = `woo-${randomUUID()}`;
@@ -77,10 +84,8 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
         expect(await queue.getJob(id).then((job) => job?.getState())).toBe("completed");
       }
       expect(jobId(shopId, crossTenantEvent.eventId)).not.toBe(jobId(otherShop, crossTenantEvent.eventId));
-      expect(await checkoutQueue.getJobCounts("waiting", "active", "completed", "failed"))
-        .toEqual({ waiting: 0, active: 0, completed: 0, failed: 0 });
-      expect(await shopifyOrderQueue.getJobCounts("waiting", "active", "completed", "failed"))
-        .toEqual({ waiting: 0, active: 0, completed: 0, failed: 0 });
+      expect(await checkoutQueue.getJobCounts(...states)).toEqual(checkoutCountsBefore);
+      expect(await shopifyOrderQueue.getJobCounts(...states)).toEqual(shopifyOrderCountsBefore);
     } finally {
       await worker.close();
       await queue.close();
@@ -96,7 +101,7 @@ integration("ARCH-035 Woo order capture with disposable Redis/BullMQ", () => {
     ]);
     const connection = new Redis(redisUrl!, { maxRetriesPerRequest: null });
     const queue = new Queue("woo-order-capture-v1", { connection });
-    const worker = createWooOrderCaptureWorker();
+    const worker = createWooOrderCaptureWorker({ onOrder: async () => ({ kind: "placed-suppressed" }) });
     try {
       await worker.waitUntilReady();
       const shopId = `woo-${randomUUID()}`;

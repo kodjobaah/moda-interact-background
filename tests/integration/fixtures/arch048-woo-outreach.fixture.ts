@@ -8,6 +8,7 @@ import { createWooRecoveryOutreachService } from "../../../src/services/woocomme
 import type {
   WooGuardedInitialSender,
 } from "../../../src/services/woocommerce-recovery/woo-recovery-outreach.service.js";
+import { seedApprovedInitialWooTemplateRegistration } from "./woo-approved-initial-template.fixture.js";
 import type {
   WooCheckoutCoordinator,
   WooObservedOrderStateReader,
@@ -65,6 +66,7 @@ export async function createWooOutreachFixture() {
     await db.shopEntitlementCounter.create({ data: {
       shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1,
     } });
+    await seedApprovedInitialWooTemplateRegistration(db, shopId);
     const customer = await db.customer.create({ data: { shopId, phone: recipient } });
     const phone = await db.customerPhone.create({ data: { customerId: customer.id, phone: recipient } });
     // The real ARCH-046 DB trigger requires immutable Woo consent evidence in
@@ -173,6 +175,7 @@ export async function createWooOutreachFixture() {
     });
     return {
       db, redis, queue, shopId, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
+      guardedSender: sender,
       phoneId: phone.id, service,
       get providerRequests() { return providerRequests; },
       setBeforePermit(run: (() => Promise<void>) | undefined) { beforePermit = run; },
