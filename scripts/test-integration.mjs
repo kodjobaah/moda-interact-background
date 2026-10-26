@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { withDisposableIntegrationInfrastructure } from "@modainteract/moda-interact-shared/testing/node";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { runWithPostgresStartupRetry } from "./integration-startup-retry.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const prismaSchemaPath = path.join(repositoryRoot, "database", "prisma", "schema.prisma");
@@ -55,13 +57,23 @@ function runVitest(environment, tests) {
   });
 }
 
-const result = await withDisposableIntegrationInfrastructure(
-  {
-    prismaSchemaPath,
-    cwd: repositoryRoot,
-    postgres: { image: "pgvector/pgvector:pg17" },
-  },
-  async ({ environment }) => runVitest(environment, selectedTests.length > 0 ? selectedTests : defaultTests),
+const integrationLogger = createLogger({
+  serviceName: "moda-background-integration-test-runner",
+  environment: "test",
+});
+
+const result = await runWithPostgresStartupRetry(
+  () => withDisposableIntegrationInfrastructure(
+    {
+      prismaSchemaPath,
+      cwd: repositoryRoot,
+      postgres: { image: "pgvector/pgvector:pg17" },
+    },
+    async ({ environment }) => runVitest(
+      environment, selectedTests.length > 0 ? selectedTests : defaultTests,
+    ),
+  ),
+  integrationLogger,
 );
 
 if (result.signal) {

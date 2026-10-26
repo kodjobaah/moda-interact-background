@@ -283,13 +283,16 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("releases a rejected pre-permit send and terminalises its attempt", async () => {
+  it("releases a rejected pre-permit send but keeps sequence one retryable", async () => {
     const f = makeFixture();
-    f.send.mockResolvedValue({ kind: "suppressed", reason: "conversation-invalid" } as never);
+    f.send.mockResolvedValueOnce({ kind: "suppressed", reason: "conversation-invalid" } as never);
     expect(await f.service.processInitial("recovery")).toEqual({ kind: "suppressed", reason: "final-send-denied" });
     expect(f.release).toHaveBeenCalledWith(f.admission);
-    expect(f.markFailed).toHaveBeenCalledWith("attempt-1", "FINAL_SEND_DENIED");
+    expect(f.markFailed).not.toHaveBeenCalled();
+    expect(f.attempt?.status).toBe("PENDING");
     expect(f.finalize).not.toHaveBeenCalled();
+    expect(await f.service.enqueueInitial("recovery")).toEqual({ kind: "queued", attemptId: "attempt-1" });
+    expect(f.initialCreates).toBe(1);
   });
 
   it("reconciles duplicate admission with durable SENT evidence instead of another send", async () => {

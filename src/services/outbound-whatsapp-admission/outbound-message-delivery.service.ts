@@ -23,6 +23,7 @@ import {
   metaWhatsAppTemplateCategoryService, type TemplateCategoryVerifier,
 } from "../whatsapp-template-category.service.js";
 import type { RecoveryMarketingPermit } from "../recovery-conversation/outbound-send-fence.service.js";
+import { WooInitialSendFenceService, type WooInitialFinalPermitInput } from "../woocommerce-recovery/woo-initial-send-fence.service.js";
 
 export const TERMINAL_MESSAGE =
   "I am unable to continue this conversation right now. Please try again later.";
@@ -52,6 +53,7 @@ export class OutboundMessageDeliveryService {
     private readonly generalFence = new GeneralOutboundSendFenceService(database),
     private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
     private readonly templateCategories: TemplateCategoryVerifier = metaWhatsAppTemplateCategoryService,
+    private readonly wooInitialFence: Pick<WooInitialSendFenceService, "admitFinalSend"> = new WooInitialSendFenceService(database),
   ) {}
 
   async getProviderAccountId(): Promise<string> {
@@ -132,8 +134,36 @@ export class OutboundMessageDeliveryService {
     admission: AdmittedOutbound,
     input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
+    return this.sendPreparedTemplateInternal(admission, input);
+  }
+
+  /** Explicit Woo-only entrypoint. It shares all moderation/provider/failure
+   * handling with normal sends but CANNOT fall back to the generic recovery
+   * permit, which deliberately does not validate the Woo consent snapshot.
+   */
+  async sendPreparedWooInitialTemplate(
+    admission: AdmittedOutbound,
+    input: Omit<SendTemplateInput, "to"> & { to: string },
+    scope: Omit<WooInitialFinalPermitInput,
+      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory">,
+  ): Promise<OutboundAdmissionResult> {
+    return this.sendPreparedTemplateInternal(admission, input, scope);
+  }
+
+  private async sendPreparedTemplateInternal(
+    admission: AdmittedOutbound,
+    input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
+    wooScope?: Omit<WooInitialFinalPermitInput,
+      "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory">,
+  ): Promise<OutboundAdmissionResult> {
     if (await this.hasCompletedPreparation(admission.messageId))
       return { kind: "suppressed", reason: "duplicate" };
+    // The Woo initial recovery MUST send an approved Marketing template. Never
+    // substitute the hard-limit terminal TEXT message on this path.
+    if (wooScope && admission.terminal) {
+      await this.failPrepared(admission.messageId);
+      return { kind: "suppressed", reason: "normal-cap-reached" };
+    }
     const suppression = await this.revalidateBeforeProvider(admission);
     if (suppression) return suppression;
     // DATABASE-005 has no structured automated-template columns: persist the
@@ -147,29 +177,73 @@ export class OutboundMessageDeliveryService {
       try {
         prepared = prepareAutomatedTemplateInput(input);
         outboundText = prepared.effectiveText;
-      } catch {
+      } catch (error) {
+        // Invalid template input is an expected suppression for general sends;
+        // Woo technical preparation errors must remain visible to the worker.
         await this.failPrepared(admission.messageId);
+        if (wooScope) throw error;
         return { kind: "suppressed", reason: "conversation-invalid" };
       }
     }
     if (!(await this.prepareUnadmittedContent(admission.messageId, outboundText)))
       return { kind: "suppressed", reason: "duplicate" };
-    if (!(await this.approvePreparedOutbound({
-      shopId: admission.shopId, conversationId: admission.conversationId,
-      messageId: admission.messageId, outboundText,
-    }))) {
+    let moderationAllowed: boolean;
+    try {
+      moderationAllowed = await this.approvePreparedOutbound({
+        shopId: admission.shopId, conversationId: admission.conversationId,
+        messageId: admission.messageId, outboundText,
+      }, wooScope !== undefined);
+    } catch (error) {
+      // Woo has not requested the SQL permit. A failed moderation dependency
+      // cannot hold a completed provider admission or count as a refusal.
+      try {
+        await this.failPrepared(admission.messageId);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "WOO_PRE_PERMIT_MODERATION_CLEANUP_FAILED", { cause: cleanupError });
+      }
+      throw error;
+    }
+    if (!moderationAllowed) {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
-    const fenced = await this.fenceProviderSend({
-      shopId: admission.shopId, conversationId: admission.conversationId,
-      messageId: admission.messageId, to: input.to, expectedContent: outboundText,
-      ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
-      deliveryKind: prepared ? "TEMPLATE" : "TEXT",
-      ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
-      ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode } } : {}),
-    });
-    if (fenced) return fenced;
+    if (wooScope) {
+      // Meta read is intentionally outside the SQL transaction. A local
+      // APPROVED flag or caller-asserted category is insufficient evidence.
+      const category = await this.templateCategories.verify({
+        providerTemplateName: input.templateName,
+        providerLanguageCode: input.languageCode,
+      });
+      if (category !== "MARKETING") {
+        await this.failPrepared(admission.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
+      const permit = await this.wooInitialFence.admitFinalSend({
+        ...wooScope,
+        shopId: admission.shopId, conversationId: admission.conversationId,
+        messageId: admission.messageId, recipient: input.to,
+        expectedContent: outboundText, templateName: input.templateName,
+        languageCode: input.languageCode, verifiedCategory: "MARKETING",
+      });
+      if (permit.kind === "suppressed") {
+        // A previously committed permit can already have reached Meta. Never
+        // roll it back or release its usage/credit on a duplicate replay.
+        if (permit.reason === "already-admitted-or-sent")
+          return { kind: "suppressed", reason: "duplicate" };
+        await this.failPrepared(admission.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
+    } else {
+      const fenced = await this.fenceProviderSend({
+        shopId: admission.shopId, conversationId: admission.conversationId,
+        messageId: admission.messageId, to: input.to, expectedContent: outboundText,
+        ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
+        deliveryKind: prepared ? "TEMPLATE" : "TEXT",
+        ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
+        ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode } } : {}),
+      });
+      if (fenced) return fenced;
+    }
 
     try {
       const result = prepared
@@ -178,7 +252,17 @@ export class OutboundMessageDeliveryService {
       await this.markSent(admission.messageId, result.providerMessageId);
       return admission;
     } catch (error) {
-      await this.providerFailure.afterProviderError(admission.messageId, input.to, error);
+      try {
+        await this.providerFailure.afterProviderError(admission.messageId, input.to, error, wooScope !== undefined);
+      } catch (reconciliationError) {
+        // Retain BOTH the provider/local-send error and the reconciliation
+        // failure. The Woo worker must not acknowledge an uncertain outcome.
+        if (wooScope) {
+          throw new AggregateError([error, reconciliationError],
+            "WOO_PROVIDER_OUTCOME_RECONCILIATION_FAILED", { cause: reconciliationError });
+        }
+        throw reconciliationError;
+      }
       throw error;
     }
   }
@@ -225,7 +309,7 @@ export class OutboundMessageDeliveryService {
 
   private async approvePreparedOutbound(input: {
     shopId: string; conversationId: string; messageId: string; outboundText: string;
-  }): Promise<boolean> {
+  }, propagateError = false): Promise<boolean> {
     try {
       const message = await this.database.conversationMessage.findUnique({
         where: { id: input.messageId }, select: { senderType: true, content: true },
@@ -242,7 +326,10 @@ export class OutboundMessageDeliveryService {
       return outcome.kind === "allow" && await this.moderation.requireCurrentAllowance({
         subject, effectiveText: input.outboundText, policyVersion,
       });
-    } catch {
+    } catch (error) {
+      // Woo technical dependency failures must retry; only an explicit
+      // moderation deny is a known pre-permit suppression.
+      if (propagateError) throw error;
       return false;
     }
   }
