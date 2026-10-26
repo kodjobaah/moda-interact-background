@@ -54,4 +54,37 @@ describe("ARCH-028-BACKGROUND-006 provider rejection adapter", () => {
     });
     expect(x.database.usageEvent.deleteMany).toHaveBeenCalledOnce();
   });
+
+  it.each(["2", "131027", undefined])(
+    "keeps durable Woo initial dispatch and exact usage lineage on definitive provider failure %s",
+    async (providerCode) => {
+      const x = fixture();
+      await x.subject.afterProviderError("woo-message", "447700900001",
+        rejection("provider-rejected", providerCode), true);
+      expect(x.database.conversationMessage.update).toHaveBeenCalledWith({
+        where: { id: "woo-message" }, data: {
+          status: "FAILED", failedAt: expect.any(Date),
+          ...(providerCode ? { providerFailureCode: providerCode } : {}),
+        },
+      });
+      expect(x.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+      expect(x.correction.afterAutomatedRejection).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves an uncertain Woo outcome without changing FAILED status or usage", async () => {
+    const x = fixture();
+    await x.subject.afterProviderError("woo-message", "447700900001", new Error("timeout"), true);
+    expect(x.database.conversationMessage.update).not.toHaveBeenCalled();
+    expect(x.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("propagates a Woo provider reconciliation database exception without clearing usage", async () => {
+    const x = fixture(); const databaseFailure = new Error("failed outcome persistence");
+    x.database.conversationMessage.update.mockRejectedValueOnce(databaseFailure);
+    await expect(x.subject.afterProviderError("woo-message", "447700900001",
+      rejection("provider-rejected", "2"), true)).rejects.toBe(databaseFailure);
+    expect(x.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+  });
+
 });

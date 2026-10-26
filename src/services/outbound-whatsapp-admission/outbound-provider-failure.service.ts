@@ -18,12 +18,26 @@ export class OutboundProviderFailureService {
     await this.removeUsage(messageId);
   }
 
-  async afterProviderError(messageId: string, recipient: string, error: unknown): Promise<void> {
+  async afterProviderError(
+    messageId: string, recipient: string, error: unknown,
+    preserveWooInitialAdmission = false,
+  ): Promise<void> {
     if (isSynchronousRecipientFailure(error)) {
       // Keep the exact usage row until compensation derives attempt/source lineage.
       await this.synchronousFailure.afterAutomatedRejection(messageId, recipient);
     } else if (isDefinitiveWhatsAppError(error)) {
-      if (error.code === "provider-rejected" && error.providerCode) {
+      if (preserveWooInitialAdmission) {
+        // A Woo final provider permit is irreversible. Keep both its durable
+        // dispatch key and exact outbound usage lineage for all definitive
+        // failures (including a missing provider code); retry reconciles the
+        // FAILED message instead of reserving another sequence-one send.
+        await this.database.conversationMessage.update({
+          where: { id: messageId },
+          data: { status: MessageStatus.FAILED, failedAt: new Date(),
+            ...(error.providerCode ? { providerFailureCode: error.providerCode } : {}),
+          },
+        });
+      } else if (error.code === "provider-rejected" && error.providerCode) {
         await this.database.conversationMessage.update({
           where: { id: messageId },
           data: { status: MessageStatus.FAILED, failedAt: new Date(),

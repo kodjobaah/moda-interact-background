@@ -11,6 +11,10 @@ export default defineConfig({
     // Vitest so mocks of its @langchain/openrouter constructor are effective.
     // Without this, the real SDK can bypass the test-only loopback baseURL.
     ...(disposableIntegrationEnabled ? {
+      // All integration files share one disposable PostgreSQL/Redis instance.
+      // Global due-command scans must not claim another file's active fixture;
+      // race tests still exercise concurrency explicitly within each file.
+      fileParallelism: false,
       server: { deps: { inline: ['@modainteract/moda-interact-shared'] } },
     } : {}),
     include: ['tests/**/*.{test,spec}.ts', 'src/**/*.{test,spec}.ts'],
