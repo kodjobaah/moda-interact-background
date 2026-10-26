@@ -74,15 +74,11 @@ const hoisted = vi.hoisted(() => {
       })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
     },
-    whatsappTemplateSelectorMock: {
-      select: vi.fn(async () => ({
-        outcome: "selected",
-        canonicalLanguageTag: "en-GB",
-        providerLanguageCode: "en_GB",
-        providerTemplateName: "checkout_recovery",
-        providerTemplateId: null,
-        selectionSource: "exact",
-        marketCapability: "supported",
+    automatedTemplateMock: {
+      prepare: vi.fn(async () => ({
+        kind: "prepared",
+        prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "checkout_recovery", canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB" },
+        send: { templateName: "checkout_recovery", languageCode: "en_GB", templateRegistration: { shopId: "shop_1", purpose: "INITIAL_NO_OFFER" } },
       })),
     },
     pendingCandidateServiceMock: {
@@ -149,8 +145,8 @@ vi.mock("../../../src/services/conversation.message.service.js", () => ({
 vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
-vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: hoisted.whatsappTemplateSelectorMock,
+vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
 }));
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
@@ -685,19 +681,19 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
   });
 });
 
-it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout", async () => {
+it("initial outreach delegates template preparation without forwarding checkout language", async () => {
   const recovery = { id: "recovery-initial", shopId: "shop_1", status: "DETECTED", customerId: "customer-1" };
   prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
   prismaMock.checkoutRecovery.findFirst.mockResolvedValue(null);
   vi.spyOn(service, "upsertRecovery").mockResolvedValueOnce(recovery as never);
-  hoisted.whatsappTemplateSelectorMock.select.mockClear();
-  hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({ outcome: "template-unavailable" } as never);
+  hoisted.automatedTemplateMock.prepare.mockClear();
+  hoisted.automatedTemplateMock.prepare.mockResolvedValueOnce({ kind: "unavailable", reason: "no-approved-template" } as never);
   await service.handleCheckoutCreated({
     shop: "shop.myshopify.com", checkoutToken: "initial",
     customer: { shopifyCustomerId: "gid://shopify/Customer/1", phone: "+33123456789" },
     internationalContext: { languageTag: "fr-FR", languageSource: "shopify", countryCode: "FR", currencyCode: "GBP", timeZone: "Europe/London" },
   } as never);
-  expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(
-    expect.objectContaining({ shopId: "shop_1", languageTag: null, countryCode: "FR" }),
+  expect(hoisted.automatedTemplateMock.prepare).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ shopId: "shop_1", recoveryId: "recovery-initial", stage: "INITIAL", conversationLanguageTag: null }),
   );
 });
