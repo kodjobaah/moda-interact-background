@@ -141,6 +141,9 @@ export async function runAiTurnThroughBackgroundMocks(
       conversationType: "RECOVERY" as const, checkoutRecoveryId: f.recoveryId,
       hasReplyContext: true, context: {}, languageMessage: USER_MESSAGE,
     }),
+    aiWrapper: { renderConversationResponse: async (input) => ({
+      kind: "no-wrapper" as const, body: input.responseBody, reason: "NOT_CONFIGURED" as const,
+    }) },
     runAgent: async () => {
       const answer = await queryAimock(url);
       if (options.takeoverThenResume) {

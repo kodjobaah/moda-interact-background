@@ -24,6 +24,7 @@ export function registerAbuseAdmissionCases(context: ConversationTurnFacadeConte
       },
       loadTurn: vi.fn().mockResolvedValue(test.loaded),
       runAgent: test.runAgent,
+      aiWrapper: test.aiWrapper,
       getResult: (result: any) => result,
       now: () => new Date(first.getTime() + 20_000),
       runtimeConfig: test.runtimeConfig,

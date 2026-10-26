@@ -147,6 +147,9 @@ async function createTurnBoundary({ failFirstSchedule = false } = {}) {
         languageMessage: "settled turn",
       };
     },
+    aiWrapper: { renderConversationResponse: async (input) => ({
+      kind: "no-wrapper" as const, body: input.responseBody, reason: "NOT_CONFIGURED" as const,
+    }) },
     runAgent: vi.fn(async (context: { conversationId: string }) => {
       agentCalls.push(context.conversationId);
       return {
