@@ -1,6 +1,5 @@
 import "dotenv/config";
 import { describe, expect, it, vi } from "vitest";
-import { allowModerationFixture } from "./fixtures/arch040-allow-moderation.fixture.js";
 import { PlatformConfigurationFailure } from "../../src/services/platform-configuration/errors.js";
 import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
 
@@ -15,7 +14,8 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
       const incidents = { record: vi.fn(async () => {}) };
       const preflight = vi.fn(async () => { throw new PlatformConfigurationFailure("MISSING", "messaging.sender"); });
-      const service = f.dispatcher(undefined, allowModerationFixture(), incidents, preflight);
+      // Use durable moderation of the frozen command, not an unrelated synthetic body.
+      const service = f.dispatcher(undefined, undefined, incidents, preflight);
       await service.processClaim(commandId, claim.leaseToken);
       expect(preflight).toHaveBeenCalledOnce();
       expect(await f.commandState(commandId)).toEqual(expect.objectContaining({
@@ -39,7 +39,8 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
       const original = f.provider.sendWhatsAppText;
       f.provider.sendWhatsAppText = vi.fn(async () => { throw new PlatformConfigurationFailure("MISSING", "messaging.sender"); });
       try {
-        const service = f.dispatcher(undefined, allowModerationFixture(), incidents);
+        // A real persisted ALLOW is required by the BG009 final SQL fence.
+        const service = f.dispatcher(undefined, undefined, incidents);
         await service.processClaim(commandId, claim.leaseToken);
         expect((await f.commandState(commandId))?.state).toBe("UNKNOWN");
         expect(incidents.record).toHaveBeenCalledWith(expect.objectContaining({

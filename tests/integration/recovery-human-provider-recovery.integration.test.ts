@@ -2,6 +2,7 @@ import "dotenv/config";
 import { describe, expect, it } from "vitest";
 import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import { WhatsAppServiceError } from "../../src/services/whatsapp.service.js";
+import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
@@ -43,13 +44,36 @@ suite("ARCH-040 HUMAN provider failure and crash reconciliation", () => {
     try {
       const id = await f.addCommand();
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      // Simulate the real pre-permit sequence: lease-fenced preparation and an
+      // ALLOW on the exact frozen body, without making a Meta HTTP request.
+      const loaded = await f.commands.loadClaimedCommand(id, claim.leaseToken, new Date());
+      expect(loaded.kind).toBe("claimed");
+      if (loaded.kind !== "claimed") throw new Error("Expected claimed command");
+      const frozen = await f.preparation.freeze(loaded.command, claim.leaseToken);
+      expect(frozen.kind).toBe("frozen");
+      if (frozen.kind !== "frozen") throw new Error("Expected frozen HUMAN_TEXT body");
+      const moderation = f.persistedAllowModeration();
+      const subject = { kind: "HUMAN_COMMAND" as const, commandId: id };
+      const policyVersion = moderationConfig().policyVersion;
+      expect(await moderation.effectiveText(subject)).toBe(frozen.body);
+      expect((await moderation.assessText({
+        subject, shopId: f.shopId, conversationId: f.conversationId,
+        effectiveText: frozen.body, inputKind: "TEXT", policyVersion, now: new Date(),
+      })).kind).toBe("allow");
+      expect(await moderation.requireCurrentAllowance({
+        subject, effectiveText: frozen.body, policyVersion,
+      })).toBe(true);
+
       // Simulate an abrupt process crash after durable admission but before HTTP.
       const fencing = new OutboundSendFenceService(f.db, async () => null);
-      expect((await fencing.admitFinalSend({
+      const permit = await fencing.admitFinalSend({
         senderType: "HUMAN", shopId: f.shopId, conversationId: f.conversationId,
         recoveryId: f.recoveryId, expectedControlRevision: 1,
         commandId: id, leaseToken: claim.leaseToken, recipient: f.recipient, now: new Date(),
-      })).kind).toBe("admitted");
+      });
+      expect(permit.kind).toBe("admitted");
+      if (permit.kind !== "admitted") throw new Error("Expected durable provider permit");
+      expect(permit.messageContent).toBe(frozen.body);
       await f.db.$executeRawUnsafe(`UPDATE "whatsapp"."MerchantConversationSendCommand"
         SET "leaseExpiresAt"=statement_timestamp()-interval '1 second' WHERE "id"=$1`, id);
       const restarted = f.dispatcher();

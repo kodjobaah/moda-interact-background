@@ -1,4 +1,5 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { createHash } from "node:crypto";
 import { connectionRedis } from "../../lib/redis.js";
 import { whatsAppService } from "../whatsapp.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
@@ -27,6 +28,7 @@ import { moderationConfig } from "../conversation-moderation/moderation-policy.j
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { createHumanSendIncidentSink, type HumanSendIncidentSink } from "./human-send-operational-incident.service.js";
+import { HumanPreparedCommandService } from "./human-prepared-command.service.js";
 
 const deploymentEnvironment = resolveDeploymentEnvironmentName();
 const logger = createLogger({ serviceName: "moda-messaging-worker", environment: deploymentEnvironment });
@@ -48,6 +50,7 @@ export type HumanDispatcherDependencies = {
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
   moderation: ModerationAssessmentService;
+  preparation: Pick<HumanPreparedCommandService, "freeze">;
   /** Optional for existing injected tests; production validates sender before any permit. */
   senderPreflight?: () => Promise<void>;
   /** Optional injected incident reporter; production always supplies it. */
@@ -75,6 +78,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     execution: shopExecutionEligibilityService,
     now: () => new Date(),
     moderation: moderationAssessmentService,
+    preparation: new HumanPreparedCommandService(recoveryDatabase),
     senderPreflight: () => whatsAppService.assertOutboundSenderConfigured(),
     incidents: createHumanSendIncidentSink(),
     recipientFailure: synchronousRecipientFailureService,
@@ -217,6 +221,21 @@ export class HumanCommandDispatcherService {
       return;
     }
 
+    // R0: freeze full customer-visible HUMAN_TEXT under the current SQL lease.
+    // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
+    let frozenBody: string | undefined;
+    if (command.kind === "HUMAN_TEXT") {
+      const frozen = await this.deps.preparation.freeze(command, leaseToken);
+      if (frozen.kind !== "frozen") {
+        logger.warn("arch047.human_dispatcher.preparation_refused", {
+          commandId, reasonCode: frozen.reason,
+        });
+        await this.rejectTerminal(commandId, leaseToken, frozen.reason);
+        return;
+      }
+      frozenBody = frozen.body;
+    }
+
     // The command's persisted content, NOT UI text, is moderated before any
     // sequence-two reservation, billing admission or provider permit.
     const subject = { kind: "HUMAN_COMMAND" as const, commandId };
@@ -225,6 +244,9 @@ export class HumanCommandDispatcherService {
     let decision: ModerationAdmission;
     try {
       effectiveText = await moderation.effectiveText(subject);
+      if (command.kind === "HUMAN_TEXT" && effectiveText !== frozenBody) {
+        throw new Error("moderation_content_identity_mismatch");
+      }
       const cfg = moderationConfig();
       decision = humanModerationAdmission(await moderation.assessText({
         subject, shopId: command.shopId, conversationId: command.conversationId,
@@ -261,6 +283,12 @@ export class HumanCommandDispatcherService {
     try {
       await this.deps.senderPreflight?.();
     } catch (error) {
+      // Record the original exception before attempting durable deferral, so a
+      // secondary persistence failure cannot hide the preflight failure.
+      logger.warn("arch040.human_dispatcher.sender_preflight_failed", {
+        commandId, reasonCode: "sender_configuration_unavailable",
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
       const deferred = await this.deps.commands.deferCommand(commandId, leaseToken,
         "sender_configuration_unavailable", new Date(this.deps.now().getTime() + 120_000));
       if (deferred) await this.reportIncident(commandId, command.shopId, error, "pre_dispatch");
@@ -339,12 +367,23 @@ export class HumanCommandDispatcherService {
       await this.rejectTerminal(commandId, leaseToken, permit.reason);
       return;
     }
+    // The text sent after this irrevocable permit MUST be the content returned
+    // from the committed ConversationMessage INSERT, never command.textBody.
+    // If the permit is corrupt, record UNKNOWN without attempting Meta.
+    if (command.kind === "HUMAN_TEXT" && (!permit.messageContent ||
+        permit.messageContent !== frozenBody ||
+        createHash("sha256").update(permit.messageContent, "utf8").digest("hex") !==
+          createHash("sha256").update(effectiveText, "utf8").digest("hex"))) {
+      logger.error("arch047.human_dispatcher.admitted_content_mismatch", { commandId });
+      await this.deps.reconciliation.recordProviderUnknown({ commandId, leaseToken });
+      return;
+    }
     // From here onwards there is NO safe automatic retry—even if the worker
     // crashes before receiving an HTTP reply. Reconciliation owns UNKNOWN.
     try {
       const response = command.kind === "HUMAN_TEXT"
         ? await this.deps.provider.sendWhatsAppText({
-            to: command.recipientSnapshot, text: command.textBody ?? "",
+            to: command.recipientSnapshot, text: permit.messageContent!,
           })
         : await this.deps.provider.sendWhatsAppTemplate({
             to: command.recipientSnapshot, templateName: command.templateName ?? "",
@@ -367,9 +406,16 @@ export class HumanCommandDispatcherService {
         });
       }
     } catch (error) {
+      // Log the exception before reconciliation/compensation, which may itself
+      // fail. Never log provider payloads, phone numbers or raw error messages.
+      const providerCode = error instanceof Error && error.name === "WhatsAppServiceError"
+        ? (error as Error & { code?: string }).code : undefined;
+      const definitive = providerCode === "provider-rejected" || providerCode === "configuration-missing";
+      logger.warn("arch040.human_dispatcher.provider_exception", {
+        commandId, errorType: error instanceof Error ? error.name : "unknown",
+        providerFailureCode: definitive ? providerCode : "unknown",
+      });
       const terminalRecipient = isSynchronousRecipientFailure(error);
-      const definitive = error instanceof Error && error.name === "WhatsAppServiceError" &&
-        ["provider-rejected", "configuration-missing"].includes((error as Error & { code?: string }).code ?? "");
       let recordedOutcome: "unknown" | "definitive_failure" | null = null;
       if (definitive) {
         const outcome = await this.deps.reconciliation.recordDefinitiveFailure({
@@ -409,8 +455,10 @@ export class HumanCommandDispatcherService {
     if (!this.deps.incidents) return;
     try {
       await this.deps.incidents.record({ commandId, shopId, error, outcome });
-    } catch {
-      logger.error("arch040.human_dispatcher.incident_report_failed", { commandId });
+    } catch (incidentError) {
+      logger.error("arch040.human_dispatcher.incident_report_failed", {
+        commandId, errorType: incidentError instanceof Error ? incidentError.name : "unknown",
+      });
     }
   }
 
