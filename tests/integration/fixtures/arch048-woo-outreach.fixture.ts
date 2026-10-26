@@ -173,6 +173,7 @@ export async function createWooOutreachFixture() {
     });
     return {
       db, redis, queue, shopId, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
+      guardedSender: sender,
       phoneId: phone.id, service,
       get providerRequests() { return providerRequests; },
       setBeforePermit(run: (() => Promise<void>) | undefined) { beforePermit = run; },

@@ -20,8 +20,16 @@ const metric = { workerName: "woo-order-capture", queueName: WOO_ORDER_CAPTURE_Q
   jobNames: [WOO_ORDER_CAPTURE_JOB] } as const;
 
 export function createWooOrderCaptureWorker(
-  orchestrator?: Pick<WooRecoveryOrchestratorService, "onOrder">,
+  orchestrator: Pick<WooRecoveryOrchestratorService, "onOrder">,
 ) {
+  // Retire the pre-composition capture-only entrypoint: no Woo worker may start
+  // without the BG001/BG002 orchestrator that owns its durable business effect.
+  if (!orchestrator || typeof orchestrator.onOrder !== "function") {
+    logger.error("woocommerce.recovery.worker.configuration_failed", {
+      queue: WOO_ORDER_CAPTURE_QUEUE, stage: "bootstrap", reason: "orchestrator-unavailable",
+    });
+    throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+  }
   const worker = new Worker<unknown>(WOO_ORDER_CAPTURE_QUEUE,
     async (job) => observeWorkerJob(metric, job, async () => {
       const fields = {
@@ -38,7 +46,6 @@ export function createWooOrderCaptureWorker(
         eventId = createHash("sha256").update(accepted.eventId).digest("hex");
         logger.info("woocommerce.recovery.job.started", { ...fields, shopId, eventId });
         stage = "orchestrate";
-        if (!orchestrator) throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
         const outcome = await orchestrator.onOrder(accepted);
         const context = { ...fields, shopId, eventId, outcome: outcome.kind,
           ...( "reason" in outcome ? { reason: outcome.reason.slice(0, 64) } : {}),

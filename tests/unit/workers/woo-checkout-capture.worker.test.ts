@@ -50,6 +50,17 @@ describe("ARCH-048 Woo checkout worker orchestration", () => {
     createWooCheckoutCaptureWorker({ onCheckout: mocked.checkout });
   });
 
+  it("rejects the retired capture-only startup without an orchestrator", () => {
+    mocked.worker = null;
+    expect(() => createWooCheckoutCaptureWorker(undefined as never))
+      .toThrow("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+    expect(mocked.worker).toBeNull();
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.worker.configuration_failed", {
+      queue: "woo-checkout-capture-v1", stage: "bootstrap", reason: "orchestrator-unavailable",
+    });
+    expect(mocked.checkout).not.toHaveBeenCalled();
+  });
+
   it("validates then awaits BG001 via the orchestrator on the existing queue", async () => {
     await expect(execute(good())).resolves.toBeUndefined();
     expect(mocked.checkout).toHaveBeenCalledOnce();

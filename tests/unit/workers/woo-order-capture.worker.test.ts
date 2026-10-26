@@ -50,6 +50,17 @@ describe("ARCH-048 Woo order worker reconciliation", () => {
     createWooOrderCaptureWorker({ onOrder: mocked.reconcile });
   });
 
+  it("rejects the retired capture-only startup without an orchestrator", () => {
+    mocked.worker = null;
+    expect(() => createWooOrderCaptureWorker(undefined as never))
+      .toThrow("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+    expect(mocked.worker).toBeNull();
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.worker.configuration_failed", {
+      queue: "woo-order-capture-v1", stage: "bootstrap", reason: "orchestrator-unavailable",
+    });
+    expect(mocked.reconcile).not.toHaveBeenCalled();
+  });
+
   it("delegates a verified order event to BG002 and logs only bounded metadata", async () => {
     await expect(process(good())).resolves.toBeUndefined();
     expect(mocked.reconcile).toHaveBeenCalledOnce();

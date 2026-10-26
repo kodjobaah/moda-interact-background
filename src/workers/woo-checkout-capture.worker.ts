@@ -21,8 +21,16 @@ const metric = { workerName: "woo-checkout-capture", queueName: WOO_CHECKOUT_CAP
 
 /** Must be composed at the production entrypoint; missing wiring fails closed. */
 export function createWooCheckoutCaptureWorker(
-  orchestrator?: Pick<WooRecoveryOrchestratorService, "onCheckout">,
+  orchestrator: Pick<WooRecoveryOrchestratorService, "onCheckout">,
 ) {
+  // Retire the pre-composition capture-only entrypoint: no Woo worker may start
+  // without the BG001/BG002 orchestrator that owns its durable business effect.
+  if (!orchestrator || typeof orchestrator.onCheckout !== "function") {
+    logger.error("woocommerce.recovery.worker.configuration_failed", {
+      queue: WOO_CHECKOUT_CAPTURE_QUEUE, stage: "bootstrap", reason: "orchestrator-unavailable",
+    });
+    throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+  }
   const worker = new Worker<unknown>(WOO_CHECKOUT_CAPTURE_QUEUE,
     async (job) => observeWorkerJob(metric, job, async () => {
       const fields = {
@@ -39,7 +47,6 @@ export function createWooCheckoutCaptureWorker(
         eventId = createHash("sha256").update(accepted.eventId).digest("hex");
         logger.info("woocommerce.recovery.job.started", { ...fields, shopId, eventId });
         stage = "orchestrate";
-        if (!orchestrator) throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
         const outcome = await orchestrator.onCheckout(accepted);
         const context = { ...fields, shopId, eventId, outcome: outcome.kind,
           ...( "reason" in outcome ? { reason: outcome.reason.slice(0, 64) } : {}),
