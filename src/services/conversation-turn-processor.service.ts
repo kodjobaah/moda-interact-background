@@ -4,6 +4,7 @@ import type {
 } from "./conversation.service.js";
 import { DelayedError } from "bullmq";
 import type { AiTurnOwnershipService } from "./recovery-conversation/ai-turn-ownership.service.js";
+import { composeAiOutbound, type AiConversationWrapper } from "./conversation-wrappers/compose-ai-outbound.js";
 import {
   createLogger,
   type StructuredLogger,
@@ -121,6 +122,8 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     pendingTurnStartedAt: Date,
   ) => Promise<LoadedConversationTurn<TContext>>;
   runAgent: (context: TContext) => Promise<TResult>;
+  /** BG005 prepared wrapper; required even when no active slot is configured. */
+  aiWrapper: AiConversationWrapper;
   getResult: (result: TResult) => {
     replyText: string;
     detectedLanguageTag: string | null;
@@ -485,10 +488,54 @@ export class ConversationTurnProcessor<TContext, TResult> {
         detectedLanguageConfidence: agentResult.detectedLanguageConfidence,
       });
 
+      // Compose exactly once for this reserved outbound message. The original
+      // model result is unchanged, and only the composed customer-visible text
+      // enters the existing durable preparation / whole-message moderation /
+      // final provider permit in sendPreparedText.
+      const composed = await composeAiOutbound(this.dependencies.aiWrapper, {
+        conversationId,
+        messageId: reserved.messageId,
+        generatedResponse: agentResult.replyText,
+      });
+      if (composed.kind === "refused") {
+        this.logger.warn("whatsapp.turn.ai_wrapper_refused", {
+          conversationId, observedVersion, messageId: reserved.messageId,
+          reason: composed.reason,
+        });
+        await failPrepared(reserved.messageId);
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
+      if (composed.wrapper) {
+        this.logger.info("whatsapp.turn.ai_wrapper_composed", {
+          conversationId, observedVersion, messageId: reserved.messageId,
+          wrapperDefinitionId: composed.wrapper.wrapperDefinitionId,
+          localeId: composed.wrapper.localeId,
+          slotEditVersion: composed.wrapper.slotEditVersion,
+          applicationKey: composed.wrapper.applicationKey,
+          replayed: composed.wrapper.replayed,
+        });
+      }
+
+      // The BG005 database projection is asynchronous. A customer fragment or
+      // takeover during rendering must not revive this obsolete response.
+      if (!(await checkControl("after-await", loaded.shopId))) {
+        await failPrepared(reserved.messageId);
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
+      if (await this.dependencies.conversation.hasChanged(conversationId, observedVersion)) {
+        await failPrepared(reserved.messageId);
+        await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+        const latest = await this.dependencies.conversation.getTurnState(conversationId);
+        await this.enqueue(conversationId, latest.inboundVersion);
+        return;
+      }
+
       await sendPreparedText({
         ...reserved,
         to: loaded.to,
-        text: agentResult.replyText,
+        text: composed.text,
       });
       await this.dependencies.conversation.completeTurn(
         conversationId,
@@ -506,7 +553,15 @@ export class ConversationTurnProcessor<TContext, TResult> {
         ...boundedError(error),
       });
       if (admission && !providerSendAttempted && !reservationFailed) {
-        await failPrepared(admission.messageId).catch(() => undefined);
+        try {
+          await failPrepared(admission.messageId);
+        } catch (cleanupError) {
+          this.logger.error("whatsapp.turn.cleanup_failed", {
+            conversationId, observedVersion, ...boundedError(cleanupError),
+          });
+          await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+          throw new AggregateError([error, cleanupError], "AI_TURN_CLEANUP_FAILED", { cause: cleanupError });
+        }
       }
       await this.dependencies.conversation.releaseTurn(
         conversationId,
