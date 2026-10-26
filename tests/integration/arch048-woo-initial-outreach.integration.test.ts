@@ -2,6 +2,8 @@ import "dotenv/config";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
 import { whatsappTemplateSelectorService } from "../../src/services/whatsapp-template-selector.service.js";
+import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
+import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/services/platform-configuration/contracts.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import {
@@ -16,6 +18,18 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
   let f: WooOutreachIntegrationFixture | undefined;
 
   beforeEach(async () => {
+    const readConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
+    vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
+      async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
+        if (key === "messaging.sender") {
+          return {
+            key, version: 1,
+            value: { accessToken: "integration-token", phoneNumberId: "123456789", businessAccountId: "987654321" },
+          } as ConfigurationSnapshot<K>;
+        }
+        return readConfiguration(key);
+      },
+    );
     vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId").mockResolvedValue("test-meta-account");
     // Only the external Meta catalogue is simulated. Attempt, consent,
     // reservation, committed usage and BullMQ persistence remain real.
