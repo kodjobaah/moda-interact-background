@@ -55,6 +55,9 @@ withDatabase("ARCH-046 Woo final permit: PostgreSQL lock and fault races", () =>
       const observingSendDatabase = {
         $transaction: (callback: (tx: unknown) => Promise<unknown>, options: never) =>
           sendClient.$transaction(async (tx) => callback({
+            // Forward the tagged-query method used by the real Woo consent
+            // checker, while observing the Shop FOR UPDATE lock below.
+            $queryRaw: tx.$queryRaw.bind(tx),
             $queryRawUnsafe: async (sql: string, ...params: unknown[]) => {
               if (sql.includes('"commerce"."Shop"') && sql.includes("FOR UPDATE"))
                 sendAttemptedShopLock.resolve();
