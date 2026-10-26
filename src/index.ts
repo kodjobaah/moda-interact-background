@@ -55,13 +55,16 @@ async function startDevelopmentWorker(): Promise<void> {
     import("./workers/whatsapp.worker.js"),
     import("./workers/shopify-discount-sync.worker.js"),
   ]);
+  const { createWooRecoveryRuntime } = await import("./services/woocommerce-recovery/woo-recovery-composition.js");
+  const eventWooRecovery = createWooRecoveryRuntime("moda-shopify-event-worker");
+  const recoveryWooRecovery = createWooRecoveryRuntime("moda-recovery-worker");
   const closeHumanDispatcher = await startHumanCommandDispatcher();
   const workers = [
     createCheckoutWorker(),
-    createWooCheckoutCaptureWorker(),
-    createWooOrderCaptureWorker(),
+    createWooCheckoutCaptureWorker(eventWooRecovery.orchestrator),
+    createWooOrderCaptureWorker(eventWooRecovery.orchestrator),
     createOrderWorker(),
-    createPendingRecoveryCandidateWorker(),
+    createPendingRecoveryCandidateWorker(recoveryWooRecovery.orchestrator),
     createWhatsappWorker(),
     createShopifyDiscountSyncWorker(),
   ];
@@ -74,6 +77,8 @@ async function startDevelopmentWorker(): Promise<void> {
     workers,
     closeResources: [
       closeHumanDispatcher,
+      eventWooRecovery.close,
+      recoveryWooRecovery.close,
       stopQueueConcurrencyController,
       () => backgroundRuntimeConfigService.close(),
       () =>

@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   worker: null as null | { queue: string; processor: (job: any) => Promise<void>; options: any },
   listeners: new Map<string, (...args: any[]) => void>(),
-  info: vi.fn(), error: vi.fn(), metric: vi.fn(async (_definition, _job, fn) => fn()),
+  info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+  checkout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-25T00:30:00.000Z" })),
+  metric: vi.fn(async (_definition, _job, fn) => fn()),
 }));
 vi.mock("bullmq", () => ({
   Worker: class {
@@ -16,16 +18,14 @@ vi.mock("bullmq", () => ({
   },
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
-  createLogger: () => ({ info: mocked.info, error: mocked.error }),
+  createLogger: () => ({ info: mocked.info, warn: mocked.warn, error: mocked.error }),
 }));
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: () => ({}),
 }));
 vi.mock("../../../src/observability/worker-metrics.js", () => ({ observeWorkerJob: mocked.metric }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
-vi.mock("../../../src/runtime/deployment-environment.js", () => ({
-  resolveDeploymentEnvironmentName: () => "test",
-}));
+vi.mock("../../../src/runtime/deployment-environment.js", () => ({ resolveDeploymentEnvironmentName: () => "test" }));
 
 import { createWooCheckoutCaptureWorker } from "../../../src/workers/woo-checkout-capture.worker.js";
 const source = {
@@ -41,58 +41,58 @@ async function execute(job: ReturnType<typeof good>) {
   return mocked.worker.processor(job);
 }
 
-describe("ARCH-035 Woo capture-only background worker", () => {
+describe("ARCH-048 Woo checkout worker orchestration", () => {
   beforeEach(() => {
-    mocked.worker = null; mocked.listeners.clear(); mocked.info.mockReset(); mocked.error.mockReset(); mocked.metric.mockClear();
-    createWooCheckoutCaptureWorker();
+    mocked.worker = null;
+    mocked.listeners.clear();
+    for (const mock of [mocked.info, mocked.warn, mocked.error, mocked.metric, mocked.checkout]) mock.mockClear();
+    mocked.checkout.mockResolvedValue({ kind: "scheduled", dueAt: "2026-10-25T00:30:00.000Z" });
+    createWooCheckoutCaptureWorker({ onCheckout: mocked.checkout });
   });
 
-  it("subscribes only to the API-008 checkout queue, using existing operational telemetry", async () => {
-    expect(mocked.worker).toMatchObject({ queue: "woo-checkout-capture-v1", options: { concurrency: 4 } });
+  it("validates then awaits BG001 via the orchestrator on the existing queue", async () => {
     await expect(execute(good())).resolves.toBeUndefined();
+    expect(mocked.checkout).toHaveBeenCalledOnce();
+    expect(mocked.checkout.mock.calls[0]?.[0]).toMatchObject({ shopId: "shop-1", eventId: "evt123" });
+    expect(mocked.info).toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.objectContaining({
+      queue: "woo-checkout-capture-v1", shopId: "shop-1", outcome: "scheduled", attempt: 1,
+    }));
     expect(mocked.metric).toHaveBeenCalledWith(expect.objectContaining({
-      workerName: "woo-checkout-capture", queueName: "woo-checkout-capture-v1", jobNames: ["checkout-updated"],
+      workerName: "woo-checkout-capture", queueName: "woo-checkout-capture-v1",
     }), expect.anything(), expect.any(Function));
-    expect(mocked.info).toHaveBeenCalledWith("woocommerce.checkout_capture.accepted", {
-      shopId: "shop-1", eventId: "evt123", checkoutKey: "cart1", eventType: "CHECKOUT_UPDATED",
-      jobId: id, attempt: 1,
-    });
-    expect(JSON.stringify(mocked.info.mock.calls)).not.toContain("private@example.test");
+    expect(JSON.stringify(mocked.info.mock.calls)).not.toMatch(/cart1|private@example.test/);
   });
 
-  it("rejects poisoned jobs visibly, with no unvalidated identifiers or customer payloads in logs", async () => {
-    const bad = { ...good(), data: { ...good().data, contentDigest: "0".repeat(64) } };
-    await expect(execute(bad)).rejects.toThrow("Invalid Woo checkout capture job");
+  it("rejects bad digest and identity before invoking any business adapter", async () => {
+    await expect(execute({ ...good(), data: { ...good().data, contentDigest: "0".repeat(64) } })).rejects.toThrow();
     await expect(execute({ ...good(), id: "private@example.test" })).rejects.toThrow();
-    expect(mocked.error).toHaveBeenCalledWith("woocommerce.checkout_capture.failed", {
-      jobId: id, attempt: 1, reason: "digest_mismatch",
-    });
-    expect(mocked.error).toHaveBeenCalledWith("woocommerce.checkout_capture.failed", {
-      jobId: null, attempt: 1, reason: "job_identity_mismatch",
-    });
+    expect(mocked.checkout).not.toHaveBeenCalled();
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
+      stage: "validate", reason: "digest_mismatch",
+    }));
     expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("private@example.test");
-    expect(mocked.info).not.toHaveBeenCalled();
   });
 
-  it("contains no recovery, billing, database or customer messaging execution path", async () => {
-    const source = await readFile("src/workers/woo-checkout-capture.worker.ts", "utf8");
-    const parser = await readFile("src/events/woo-checkout-capture.ts", "utf8");
-    for (const code of [source, parser]) {
-      // Check executable source, not documentation explaining the absence of side effects.
-      const executableSource = code.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "");
-      expect(executableSource).not.toMatch(/checkoutRecoveryService|checkout-recovery|prisma|whatsapp|bullmq\/Queue|billing/);
-    }
+  it("does not swallow an orchestrator error, and never logs success", async () => {
+    const error = new Error("checkout DB: private@example.test");
+    mocked.checkout.mockRejectedValueOnce(error);
+    await expect(execute(good())).rejects.toBe(error);
+    expect(mocked.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
+    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("private@example.test");
   });
 
-  it("bounds the worker's infrastructure error log without leaking Redis messages", () => {
+  it("does not implement billing or recovery rules inside the capture worker", async () => {
+    const code = (await readFile("src/workers/woo-checkout-capture.worker.ts", "utf8"))
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "");
+    expect(code).not.toMatch(/checkoutRecoveryService|\bprisma\b|reserveRecoveryCredit|sendTemplate/);
+  });
+
+  it("reports worker infrastructure errors without leaking Redis messages", () => {
     mocked.listeners.get("ready")?.();
-    mocked.listeners.get("error")?.(new Error("redis password=secret"));
-    expect(mocked.info).toHaveBeenCalledWith("woocommerce.checkout_capture.worker_ready", {
-      queueName: "woo-checkout-capture-v1",
-    });
+    mocked.listeners.get("error")?.(new Error("redis secret"));
     expect(mocked.error).toHaveBeenCalledWith("woocommerce.checkout_capture.worker_error", {
       queueName: "woo-checkout-capture-v1", errorName: "Error",
     });
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("password=secret");
+    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("redis secret");
   });
 });

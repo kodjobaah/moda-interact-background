@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -11,6 +12,13 @@ import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { pendingRecoveryCandidateService } from "../services/pending-recovery-candidate.service.js";
 import { checkoutRecoveryService } from "../services/checkout-recovery.service.js";
+import type { WooPendingCandidate } from "../services/woocommerce-recovery/contracts.js";
+import type { WooRecoveryOrchestratorService } from "../services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
+import { wooCandidateJobId } from "../services/woocommerce-recovery/woo-candidate-queue.service.js";
+import {
+  WOO_INITIAL_DISPATCH_JOB, parseWooInitialDispatchJob,
+  type WooInitialDispatchJob,
+} from "../services/woocommerce-recovery/woo-initial-dispatch.queue.js";
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
@@ -26,27 +34,105 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "pending-recovery-candidate",
   queueName: PENDING_RECOVERY_CANDIDATE_QUEUE,
-  jobNames: [EVALUATE_PENDING_RECOVERY_JOB],
+  jobNames: [EVALUATE_PENDING_RECOVERY_JOB, WOO_INITIAL_DISPATCH_JOB],
 } as const;
 const logger = createLogger({
   serviceName: "moda-recovery-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
 
-export function createPendingRecoveryCandidateWorker() {
-  const worker = new Worker<PendingRecoveryCandidate>(
+type PendingRecoveryJob = PendingRecoveryCandidate | WooPendingCandidate | WooInitialDispatchJob;
+
+function wooJobFields(job: { id?: string; attemptsMade: number }, stage: string) {
+  return { queue: PENDING_RECOVERY_CANDIDATE_QUEUE, source: "woocommerce", stage,
+    jobId: typeof job.id === "string" && /^woo-(?:candidate|initial)-[0-9a-f]{64}$/.test(job.id)
+      ? job.id : null,
+    attempt: job.attemptsMade + 1,
+  };
+}
+
+/** Woo jobs never enter Shopify materialization or Shopify index cleanup. */
+async function processWooJob(
+  job: { name: string; id?: string; data: unknown; attemptsMade: number },
+  orchestrator: Pick<WooRecoveryOrchestratorService, "onCandidateMatured" | "onInitialDispatch"> | undefined,
+): Promise<void> {
+  const stage = job.name === WOO_INITIAL_DISPATCH_JOB ? "initial-dispatch" : "candidate-maturity";
+  const fields = wooJobFields(job, stage);
+  let shopId: string | undefined;
+  let eventId: string | undefined;
+  try {
+    if (!orchestrator) throw new Error("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+    if (job.name === WOO_INITIAL_DISPATCH_JOB) {
+      const initial = parseWooInitialDispatchJob(job);
+      logger.info("woocommerce.recovery.job.started", fields);
+      const outcome = await orchestrator.onInitialDispatch(initial.recoveryId, initial.attemptId);
+      logger.info("woocommerce.recovery.job.completed", { ...fields, outcome: outcome.kind });
+      return;
+    }
+    if (job.name !== EVALUATE_PENDING_RECOVERY_JOB || !job.id ||
+      !job.data || typeof job.data !== "object" ||
+      (job.data as { source?: unknown }).source !== "woocommerce") {
+      throw new Error("WOO_CANDIDATE_SOURCE_INVALID");
+    }
+    const candidate = job.data as WooPendingCandidate;
+    shopId = candidate.shopId;
+    if (wooCandidateJobId(candidate) !== job.id) throw new Error("WOO_CANDIDATE_JOB_IDENTITY_INVALID");
+    eventId = typeof candidate.lastEventId === "string"
+      ? createHash("sha256").update(candidate.lastEventId).digest("hex") : undefined;
+    logger.info("woocommerce.recovery.job.started", { ...fields, shopId, ...(eventId ? { eventId } : {}) });
+    const outcome = await orchestrator.onCandidateMatured(candidate, { jobId: job.id });
+    logger.info("woocommerce.recovery.job.completed", {
+      ...fields, shopId, ...(eventId ? { eventId } : {}), outcome: outcome.kind,
+    });
+  } catch (error) {
+    logger.error("woocommerce.recovery.job.failed", {
+      ...fields,
+      ...(typeof shopId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? { shopId } : {}),
+      ...(eventId ? { eventId } : {}),
+      reason: "processing_failure",
+      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+    });
+    throw error;
+  }
+}
+
+export function createPendingRecoveryCandidateWorker(
+  woo?: Pick<WooRecoveryOrchestratorService, "onCandidateMatured" | "onInitialDispatch">,
+) {
+  const worker = new Worker<PendingRecoveryJob>(
   PENDING_RECOVERY_CANDIDATE_QUEUE,
   async (job) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
+      // An explicit Woo source marker is the *only* maturity discriminator.
+      // The missing marker is legacy Shopify; an unknown marker is an error.
+      if (job.name === WOO_INITIAL_DISPATCH_JOB) {
+        await processWooJob(job, woo);
+        return;
+      }
+      if (job.name === EVALUATE_PENDING_RECOVERY_JOB) {
+        const source = job.data && typeof job.data === "object"
+          ? (job.data as { source?: unknown }).source : undefined;
+        if (source === "woocommerce") {
+          await processWooJob(job, woo);
+          return;
+        }
+        if (source !== undefined) {
+          logger.error("woocommerce.recovery.job.failed", {
+            ...wooJobFields(job, "candidate-routing"), reason: "unknown-source",
+          });
+          throw new Error("UNKNOWN_RECOVERY_CANDIDATE_SOURCE");
+        }
+      }
       switch (job.name) {
         case EVALUATE_PENDING_RECOVERY_JOB: {
+          const shopifyCandidate = job.data as PendingRecoveryCandidate;
           let materializationFailed = false;
           let materializationError: unknown;
           try {
             // Materialize the matured candidate into durable recovery state using
             // current Shopify data (ARCH-001-BACKGROUND-004), never the webhook
             // payload embedded in the job.
-            const result = await checkoutRecoveryService.materializeMaturedCandidate(job.data, {
+            const result = await checkoutRecoveryService.materializeMaturedCandidate(shopifyCandidate, {
               ...(typeof job.id === "string" ? { jobId: job.id } : {}),
               retrySuppressionAdmission:
                 job.attemptsMade > 0 &&
@@ -70,7 +156,7 @@ export function createPendingRecoveryCandidateWorker() {
             // O(1) candidate lookup indexes regardless of the materialization
             // outcome (created, discarded, or provider error).
             await pendingRecoveryCandidateService.handleCandidateMatured(
-              job.data,
+              shopifyCandidate,
               job.id,
             );
           } catch (error) {
@@ -105,17 +191,20 @@ export function createPendingRecoveryCandidateWorker() {
 );
   bindWorkerConcurrency(worker, backgroundRuntimeConfigService, "pendingRecoveryQueueGlobalConcurrency");
 
-  worker.on("completed", (job) => {
-  console.log(`Pending recovery candidate job ${job.id} completed`);
-});
-
   worker.on("failed", (job, error) => {
-  console.error(`Pending recovery candidate job ${job?.id} failed`, error);
-});
-
-  worker.on("error", (error) => {
-  console.error("Pending recovery candidate worker error", error);
+    // Job-level failures were already logged inside the Woo processor; this
+    // event covers the pre-existing Shopify path without printing job payloads.
+    if (job?.name !== EVALUATE_PENDING_RECOVERY_JOB ||
+      (job.data as { source?: unknown } | undefined)?.source !== "woocommerce") {
+      logger.error("recovery.pending_candidate.job_failed", {
+        jobId: job?.id ? createHash("sha256").update(job.id).digest("hex") : null,
+        errorName: error.name.slice(0, 64),
+      });
+    }
   });
+  worker.on("error", (error) => logger.error("recovery.pending_candidate.worker_error", {
+    errorName: error.name.slice(0, 64),
+  }));
   return worker;
 }
 

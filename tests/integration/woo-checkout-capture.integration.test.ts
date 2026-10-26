@@ -38,7 +38,9 @@ integration("ARCH-035 Woo checkout capture with real Redis/BullMQ", () => {
     const queueConnection = new Redis(redisUrl!, { maxRetriesPerRequest: null });
     const queue = new Queue("woo-checkout-capture-v1", { connection: queueConnection });
     const shopifyQueue = new Queue("checkout-events", { connection: queueConnection });
-    const worker = createWooCheckoutCaptureWorker();
+    const worker = createWooCheckoutCaptureWorker({ onCheckout: async () => ({
+      kind: "scheduled", dueAt: "2026-10-26T00:00:00.000Z",
+    }) });
     try {
       await worker.waitUntilReady();
       const shopId = `woo-${randomUUID()}`;
@@ -64,8 +66,8 @@ integration("ARCH-035 Woo checkout capture with real Redis/BullMQ", () => {
       expect(failedJob?.attemptsMade).toBe(2);
       expect(await shopifyQueue.getJobCounts("waiting", "active", "completed", "failed"))
         .toEqual({ waiting: 0, active: 0, completed: 0, failed: 0 });
-      // This consumer has no Prisma/database import and no recovery, credit or
-      // WhatsApp dependency: its only side effects are bounded logs/telemetry.
+      // The capture worker now awaits the injected business boundary. This test
+      // isolates ingress; orchestration and durable admission have separate suites.
     } finally {
       await worker.close();
       await queue.close();

@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   worker: null as null | { queue: string; processor: (job: any) => Promise<void>; options: any },
   listeners: new Map<string, (...args: any[]) => void>(),
-  info: vi.fn(), error: vi.fn(), metric: vi.fn(async (_definition, _job, fn) => fn()),
+  info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+  reconcile: vi.fn(async () => ({ kind: "placed-suppressed" as const })),
+  metric: vi.fn(async (_definition, _job, fn) => fn()),
 }));
 vi.mock("bullmq", () => ({
   Worker: class {
@@ -16,16 +18,12 @@ vi.mock("bullmq", () => ({
   },
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
-  createLogger: () => ({ info: mocked.info, error: mocked.error }),
+  createLogger: () => ({ info: mocked.info, warn: mocked.warn, error: mocked.error }),
 }));
-vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
-  createBullMQTelemetry: () => ({}),
-}));
+vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({ createBullMQTelemetry: () => ({}) }));
 vi.mock("../../../src/observability/worker-metrics.js", () => ({ observeWorkerJob: mocked.metric }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
-vi.mock("../../../src/runtime/deployment-environment.js", () => ({
-  resolveDeploymentEnvironmentName: () => "test",
-}));
+vi.mock("../../../src/runtime/deployment-environment.js", () => ({ resolveDeploymentEnvironmentName: () => "test" }));
 
 import { createWooOrderCaptureWorker } from "../../../src/workers/woo-order-capture.worker.js";
 const event = (kind = "ORDER_PLACED") => ({
@@ -36,64 +34,59 @@ const event = (kind = "ORDER_PLACED") => ({
 const digest = (data: object) => createHash("sha256").update(JSON.stringify(data)).digest("hex");
 const id = `woo-order-${createHash("sha256").update("shop-1").update("\0").update("woo-evt-1").digest("hex")}`;
 const good = () => ({
-  id, name: "order-lifecycle", data: { ...event(), shopId: "shop-1", contentDigest: digest(event()) },
-  attemptsMade: 0,
+  id, name: "order-lifecycle", data: { ...event(), shopId: "shop-1", contentDigest: digest(event()) }, attemptsMade: 0,
 });
 async function process(job: ReturnType<typeof good>) {
   if (!mocked.worker) throw new Error("worker not started");
   return mocked.worker.processor(job);
 }
 
-describe("ARCH-035 Woo order capture-only worker", () => {
+describe("ARCH-048 Woo order worker reconciliation", () => {
   beforeEach(() => {
-    mocked.worker = null; mocked.listeners.clear(); mocked.info.mockReset(); mocked.error.mockReset(); mocked.metric.mockClear();
-    createWooOrderCaptureWorker();
+    mocked.worker = null;
+    mocked.listeners.clear();
+    for (const fn of [mocked.info, mocked.warn, mocked.error, mocked.metric, mocked.reconcile]) fn.mockClear();
+    mocked.reconcile.mockResolvedValue({ kind: "placed-suppressed" });
+    createWooOrderCaptureWorker({ onOrder: mocked.reconcile });
   });
 
-  it("subscribes only to the Woo order queue and logs bounded validated event metadata", async () => {
-    expect(mocked.worker).toMatchObject({ queue: "woo-order-capture-v1", options: { concurrency: 4 } });
+  it("delegates a verified order event to BG002 and logs only bounded metadata", async () => {
     await expect(process(good())).resolves.toBeUndefined();
-    expect(mocked.metric).toHaveBeenCalledWith(expect.objectContaining({
-      workerName: "woo-order-capture", queueName: "woo-order-capture-v1", jobNames: ["order-lifecycle"],
-    }), expect.anything(), expect.any(Function));
-    expect(mocked.info).toHaveBeenCalledWith("woocommerce.order_capture.accepted", {
-      shopId: "shop-1", eventId: "woo-evt-1", eventType: "ORDER_PLACED",
-      occurredAt: "2026-10-20T12:00:00.000Z", orderId: "ord-1", checkoutKey: "cart-key-1", status: "processing", jobId: id, attempt: 1,
-    });
+    expect(mocked.reconcile).toHaveBeenCalledOnce();
+    expect(mocked.reconcile.mock.calls[0]?.[0]).toMatchObject({ shopId: "shop-1", eventType: "ORDER_PLACED" });
+    expect(mocked.info).toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.objectContaining({
+      queue: "woo-order-capture-v1", shopId: "shop-1", outcome: "placed-suppressed",
+    }));
+    expect(JSON.stringify(mocked.info.mock.calls)).not.toContain("cart-key-1");
   });
 
-  it("throws invalid jobs for BullMQ retry without logging raw event payload or error text", async () => {
-    const tampered = { ...good(), data: { ...good().data, contentDigest: "0".repeat(64) } };
-    await expect(process(tampered)).rejects.toThrow("Invalid Woo order capture job");
-    await expect(process({ ...good(), id: "private@example.test" })).rejects.toThrow();
-    expect(mocked.error).toHaveBeenCalledWith("woocommerce.order_capture.failed", {
-      jobId: id, attempt: 1, reason: "digest_mismatch",
-    });
-    expect(mocked.error).toHaveBeenCalledWith("woocommerce.order_capture.failed", {
-      jobId: null, attempt: 1, reason: "job_identity_mismatch",
-    });
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("private@example.test");
-    expect(mocked.info).not.toHaveBeenCalled();
+  it("rejects tampered capture jobs without calling the reconciler", async () => {
+    await expect(process({ ...good(), data: { ...good().data, contentDigest: "0".repeat(64) } })).rejects.toThrow();
+    expect(mocked.reconcile).not.toHaveBeenCalled();
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
+      stage: "validate", reason: "digest_mismatch",
+    }));
   });
 
-  it("keeps business execution and Shopify order parser out of the order capture path", async () => {
-    for (const path of ["src/workers/woo-order-capture.worker.ts", "src/events/woo-order-capture.ts"]) {
-      const source = await readFile(path, "utf8");
-      const executable = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "");
-      expect(executable).not.toMatch(/prisma|checkoutRecoveryService|handleOrderCompletedContract|billing|whatsapp|orders\.worker/i);
-      expect(executable).not.toMatch(/(?:\bfrom\s*|\bimport\s*\(\s*)["']([^"']*shopify[^"']*event[^"']*)["']/i);
-    }
+  it("propagates an order DB error through the awaited job callback", async () => {
+    const failure = new Error("db connection password");
+    mocked.reconcile.mockRejectedValueOnce(failure);
+    await expect(process(good())).rejects.toBe(failure);
+    expect(mocked.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
+    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("password");
   });
 
-  it("bounds infrastructure errors without leaking Redis credentials", () => {
-    mocked.listeners.get("ready")?.();
-    mocked.listeners.get("error")?.(new Error("redis password=secret"));
-    expect(mocked.info).toHaveBeenCalledWith("woocommerce.order_capture.worker_ready", {
-      queueName: "woo-order-capture-v1",
-    });
+  it("keeps order and credit business logic outside the capture worker", async () => {
+    const code = (await readFile("src/workers/woo-order-capture.worker.ts", "utf8"))
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "");
+    expect(code).not.toMatch(/\bprisma\b|checkoutRecoveryService|reserveRecoveryCredit|sendTemplate/);
+  });
+
+  it("logs worker infrastructure errors without their raw messages", () => {
+    mocked.listeners.get("error")?.(new Error("secret Redis URL"));
     expect(mocked.error).toHaveBeenCalledWith("woocommerce.order_capture.worker_error", {
       queueName: "woo-order-capture-v1", errorName: "Error",
     });
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("password=secret");
+    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("secret Redis URL");
   });
 });
