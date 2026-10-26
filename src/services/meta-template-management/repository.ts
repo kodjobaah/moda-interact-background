@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import prisma from "../../lib/db.js";
-import { fingerprint, MetaManagementError, type AuthenticatedTemplateObservation,
-  type PreparedRegistration, type ProviderStatus } from "./contracts.js";
+import { fingerprint, MetaManagementError, type PreparedRegistration } from "./contracts.js";
+import { MetaTemplateStatusRepository } from "./status-repository.js";
 
 /** The schema owns technical uniqueness; BG003 owns lifecycle and CAS. */
 export type MetaRegistrationDatabase = Pick<PrismaClient,
   "$transaction" | "whatsAppTemplateMetaRegistration" | "whatsAppTemplateMetaEvent">;
 export type RegistrationWithLocale = NonNullable<Awaited<ReturnType<MetaTemplateRepository["load"]>>>;
 
-export class MetaTemplateRepository {
-  constructor(private readonly db: MetaRegistrationDatabase = prisma, private readonly clock: () => Date = () => new Date()) {}
+export class MetaTemplateRepository extends MetaTemplateStatusRepository {
+  constructor(db: MetaRegistrationDatabase = prisma, clock: () => Date = () => new Date()) { super(db, clock); }
 
   async load(id: string) {
     return this.db.whatsAppTemplateMetaRegistration.findUnique({
@@ -18,7 +18,8 @@ export class MetaTemplateRepository {
     });
   }
 
-  /** Bounded, indexed discovery; the caller owns the worker scheduling cadence. */
+  /** Bounded discovery; active shop templates refresh within 30 minutes even
+   * when older producer releases scheduled a later retry. */
   async listDue(limit = 25): Promise<Array<{ id: string; submissionState: string }>> {
     const now = this.clock();
     return this.db.whatsAppTemplateMetaRegistration.findMany({
@@ -26,6 +27,11 @@ export class MetaTemplateRepository {
         OR: [
           { submissionState: "READY_TO_SUBMIT", OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }] },
           { submissionState: { in: ["SUBMITTING", "SUBMISSION_UNKNOWN", "SUBMITTED"] }, nextRetryAt: { lte: now } },
+          { submissionState: "SUBMITTED", variants: { some: { enabled: true } },
+            OR: [{ lastReconciledAt: null },
+              { lastReconciledAt: { lte: new Date(now.getTime() - 30 * 60_000) } }],
+            failureCode: null,
+          },
         ],
       },
       orderBy: [{ nextRetryAt: "asc" }, { createdAt: "asc" }],
@@ -141,14 +147,22 @@ export class MetaTemplateRepository {
       const state = outcome.kind === "submitted" ? "SUBMITTED" :
         outcome.kind === "unknown" ? "SUBMISSION_UNKNOWN" :
         outcome.kind === "blocked" ? "BLOCKED" : "FAILED";
+      // A signed Meta status may arrive while the provider POST is in flight.
+      // Its pending receipt must win over a later create acknowledgement.
+      const pendingStatus = (await tx.whatsAppTemplateMetaEvent.count({
+        where: { registrationId: claim.registrationId, source: "META_WEBHOOK", processedAt: null },
+      })) > 0;
       const changed = await tx.whatsAppTemplateMetaRegistration.updateMany({
         where: { id: claim.registrationId, submissionState: "SUBMITTING", lastSubmittedAt: claim.submittedAt },
         data: {
           submissionState: state,
-          ...(outcome.kind === "submitted" ? { providerTemplateId: outcome.providerId, providerStatus: "PENDING" } : {}),
-          failureCode: outcome.kind !== "submitted" ? outcome.code : null,
+          ...(outcome.kind === "submitted" ? { providerTemplateId: outcome.providerId,
+            providerStatus: pendingStatus ? "UNKNOWN" : "PENDING" } : {}),
+          failureCode: pendingStatus ? "STATUS_RECONCILIATION_PENDING"
+            : outcome.kind !== "submitted" ? outcome.code : null,
           // Unknown creates are polled/reconciled, NEVER blindly re-POSTed.
-          nextRetryAt: outcome.kind === "unknown" ? new Date(this.clock().getTime() + 2 * 60_000)
+          nextRetryAt: pendingStatus ? this.clock()
+            : outcome.kind === "unknown" ? new Date(this.clock().getTime() + 2 * 60_000)
             : outcome.kind === "submitted" ? new Date(this.clock().getTime() + 6 * 60 * 60_000) : null,
         },
       });
@@ -168,110 +182,40 @@ export class MetaTemplateRepository {
     });
   }
 
-  /** Durable append-only evidence, including unmatched external notifications. */
-  async recordObservation(observation: AuthenticatedTemplateObservation): Promise<{
-    duplicate: boolean; registrationId: string | null;
-  }> {
-    return this.db.$transaction(async (tx) => {
-      const linked = await tx.whatsAppTemplateMetaRegistration.findUnique({
-        where: { wabaId_providerTemplateName_providerLanguageCode: {
-          wabaId: observation.wabaId, providerTemplateName: observation.providerTemplateName,
-          providerLanguageCode: observation.providerLanguageCode,
-        } },
-        select: { id: true, providerTemplateId: true },
+  /** An unverifiable GET immediately fences approval; durable retry receipts
+   * bound provider retry pressure across replicas, crashes and restarts. */
+  async deferFailedReconciliation(registration: RegistrationWithLocale): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const now = this.clock();
+      const recentFailures = await tx.whatsAppTemplateMetaEvent.count({
+        where: { registrationId: registration.id, eventType: "RECONCILE_RETRY",
+          receivedAt: { gte: new Date(now.getTime() - 30 * 60_000) } },
       });
-      const registrationId = linked && (!linked.providerTemplateId || !observation.providerTemplateId ||
-        linked.providerTemplateId === observation.providerTemplateId) ? linked.id : null;
-      const event = await tx.whatsAppTemplateMetaEvent.createMany({ data: [{
-        eventIdentity: observation.eventIdentity, registrationId, source: "META_WEBHOOK",
-        eventType: "message_template_status_update", outcome: "OBSERVED",
-        wabaId: observation.wabaId, providerTemplateId: observation.providerTemplateId || null,
-        providerTemplateName: observation.providerTemplateName,
-        providerLanguageCode: observation.providerLanguageCode,
-        providerStatus: observation.providerStatus,
-        reasonCode: observation.reasonCode?.slice(0, 128) || null,
-        evidence: { occurredAt: observation.occurredAt },
-        processedAt: this.clock(),
-      }], skipDuplicates: true });
-      if (event.count === 0) {
-        const existing = await tx.whatsAppTemplateMetaEvent.findUnique({
-          where: { eventIdentity: observation.eventIdentity },
-          select: { registrationId: true, wabaId: true, providerTemplateName: true,
-            providerLanguageCode: true, providerTemplateId: true },
-        });
-        if (!existing || existing.wabaId !== observation.wabaId ||
-            existing.providerTemplateName !== observation.providerTemplateName ||
-            existing.providerLanguageCode !== observation.providerLanguageCode ||
-            existing.providerTemplateId !== (observation.providerTemplateId || null)) {
-          throw new MetaManagementError("EVENT_IDENTITY_COLLISION", "blocked");
-        }
-        return { duplicate: true, registrationId: existing.registrationId };
-      }
-      return { duplicate: false, registrationId };
+      const nextRetryMs = Math.min(30 * 60_000, (2 ** Math.min(recentFailures, 5)) * 60_000);
+      const updated = await tx.whatsAppTemplateMetaRegistration.updateMany({
+        where: { id: registration.id, updatedAt: registration.updatedAt },
+        data: { providerStatus: "UNKNOWN", failureCode: "PROVIDER_RECONCILIATION_FAILED",
+          nextRetryAt: new Date(now.getTime() + nextRetryMs),
+          updatedAt: new Date(Math.max(now.getTime(), registration.updatedAt.getTime() + 1)) },
+      });
+      // A newer webhook may have refenced this row. Do not overwrite its state.
+      if (!updated.count) return;
+      await tx.whatsAppTemplateMetaEvent.create({ data: {
+        eventIdentity: `bg003:read-retry:${registration.id}:${randomUUID()}`,
+        registrationId: registration.id, source: "BACKGROUND", eventType: "RECONCILE_RETRY",
+        outcome: "UNCONFIRMED", failureCode: "PROVIDER_RECONCILIATION_FAILED",
+        wabaId: registration.wabaId, providerTemplateId: registration.providerTemplateId,
+        providerTemplateName: registration.providerTemplateName,
+        providerLanguageCode: registration.providerLanguageCode,
+        attemptNumber: recentFailures + 1, processedAt: now,
+      } });
     });
   }
 
-  /** Updates current projection and event atomically; a later competing update
-   * prevents stale network reads overwriting a newer observation. */
-  async recordReconciliation(
-    registration: RegistrationWithLocale,
-    outcome: { kind: "absent" } | { kind: "found"; providerId: string;
-      status: ProviderStatus; category: string; observedHash: string; drift: boolean },
-  ): Promise<boolean | "drift"> {
-    return this.db.$transaction(async (tx) => {
-      const current = await tx.whatsAppTemplateMetaRegistration.findUnique({
-        where: { id: registration.id }, select: { updatedAt: true },
-      });
-      if (!current || current.updatedAt.getTime() !== registration.updatedAt.getTime()) return false;
-      // A preflight failure can leave CREATE_INTENT without any provider POST.
-      // Never adopt a same-name external template without POST_INTENT evidence.
-      const postIntentCount = await tx.whatsAppTemplateMetaEvent.count({
-        where: { registrationId: registration.id, eventType: "POST_INTENT" },
-      });
-      const canAdopt = postIntentCount > 0 &&
-        ["SUBMITTING", "SUBMISSION_UNKNOWN", "SUBMITTED"].includes(registration.submissionState);
-      const unlinkedProvider = outcome.kind === "found" && !canAdopt;
-      const drift = outcome.kind === "found" && (
-        outcome.drift || unlinkedProvider ||
-        !!(registration.providerTemplateId && registration.providerTemplateId !== outcome.providerId));
-      const providerId = outcome.kind === "found" && canAdopt && !drift && !registration.providerTemplateId
-        ? outcome.providerId : registration.providerTemplateId;
-      const nextState = outcome.kind === "found" && canAdopt && !drift ? "SUBMITTED" : registration.submissionState;
-      const previousReconciliations = outcome.kind === "absent"
-        ? await tx.whatsAppTemplateMetaEvent.count({ where: {
-          registrationId: registration.id, eventType: "RECONCILE",
-        } }) : 0;
-      const boundedRetryMs = Math.min(30 * 60_000, (2 ** Math.min(previousReconciliations, 5)) * 60_000);
-      const changed = await tx.whatsAppTemplateMetaRegistration.updateMany({
-        where: { id: registration.id, updatedAt: current.updatedAt },
-        data: {
-          ...(providerId ? { providerTemplateId: providerId } : {}),
-          submissionState: nextState,
-          providerStatus: outcome.kind === "found" && !unlinkedProvider ? outcome.status : "UNKNOWN",
-          lastObservedCategory: outcome.kind === "found" ? outcome.category : null,
-          lastObservedContentHash: outcome.kind === "found" ? outcome.observedHash : null,
-          lastReconciledAt: this.clock(),
-          nextRetryAt: drift ? null : outcome.kind === "absent" ? new Date(this.clock().getTime() + boundedRetryMs)
-            : new Date(this.clock().getTime() + 6 * 60 * 60_000),
-          driftDetectedAt: drift ? registration.driftDetectedAt ?? this.clock() : null,
-          failureCode: unlinkedProvider ? "UNLINKED_PROVIDER_ID" : drift ? "PROVIDER_DRIFT" : outcome.kind === "absent" ? "PROVIDER_NOT_FOUND" : null,
-        },
-      });
-      if (changed.count !== 1) return false;
-      await tx.whatsAppTemplateMetaEvent.create({ data: {
-        eventIdentity: `bg003:reconcile:${registration.id}:${randomUUID()}`,
-        registrationId: registration.id, source: "BACKGROUND", eventType: "RECONCILE",
-        outcome: drift ? "DRIFT" : outcome.kind === "absent" ? "ABSENT" : "CURRENT",
-        wabaId: registration.wabaId,
-        providerTemplateId: outcome.kind === "found" ? outcome.providerId : registration.providerTemplateId,
-        providerTemplateName: registration.providerTemplateName,
-        providerLanguageCode: registration.providerLanguageCode,
-        providerStatus: outcome.kind === "found" ? outcome.status : "UNKNOWN",
-        failureCode: drift ? "PROVIDER_DRIFT" : null,
-        requestDigest: registration.submittedContentHash,
-        processedAt: this.clock(),
-      } });
-      return unlinkedProvider ? "drift" : true;
-    });
+  async hasPendingObservation(registrationId: string): Promise<boolean> {
+    return (await this.db.whatsAppTemplateMetaEvent.count({
+      where: { registrationId, source: "META_WEBHOOK", processedAt: null },
+    })) > 0;
   }
+
 }

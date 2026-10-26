@@ -97,7 +97,8 @@ export class MetaTemplateManagementService {
         : { kind: "unknown" as const, code: details.code };
       let compensationError: unknown;
       try {
-        await this.repository.finishSubmission(claim, outcome);
+        const persisted = await this.repository.finishSubmission(claim, outcome);
+        if (!persisted) throw new MetaManagementError("CREATE_FAILURE_CAS_LOST", "uncertain");
       } catch (persistenceError) {
         compensationError = persistenceError;
         this.reporting.error("meta.template.create.compensation_failed", {
@@ -115,8 +116,9 @@ export class MetaTemplateManagementService {
   }
 
   async reconcileRegistration(registrationId: string): Promise<ReconcileOutcome> {
+    let row: Awaited<ReturnType<MetaTemplateRepository["load"]>> | null = null;
     try {
-      const row = await this.repository.load(registrationId);
+      row = await this.repository.load(registrationId);
       if (!row) throw new MetaManagementError("REGISTRATION_NOT_FOUND", "blocked");
       await this.provider.verifyWaba(row.wabaId);
       if (!row.providerTemplateId && row.submissionState === "READY_TO_SUBMIT") {
@@ -141,19 +143,39 @@ export class MetaTemplateManagementService {
         kind: "found", providerId: template.id, status,
         category: template.category, observedHash, drift,
       });
-      if (drift) this.reporting.warn("meta.template.reconcile.drift", { registrationId, providerTemplateId: template.id });
-      else this.reporting.info("meta.template.reconcile.current", { registrationId, status });
-      return !updated ? { kind: "stale" } : { kind: drift || updated === "drift" ? "drift" : "current", status };
+      if (!updated) {
+        this.reporting.warn("meta.template.reconcile.stale", { registrationId });
+        return { kind: "stale" };
+      }
+      if (drift || updated === "drift") {
+        this.reporting.warn("meta.template.reconcile.drift", { registrationId, providerTemplateId: template.id });
+        return { kind: "drift", status };
+      }
+      this.reporting.info("meta.template.reconcile.current", { registrationId, status });
+      return { kind: "current", status };
     } catch (error) {
       this.reporting.error("meta.template.reconcile.error", { registrationId, ...safeMetaError(error) });
+      if (row) {
+        let retryPersistenceError: unknown;
+        try { await this.repository.deferFailedReconciliation(row); }
+        catch (persistenceError) {
+          retryPersistenceError = persistenceError;
+          this.reporting.error("meta.template.reconcile.defer_failed", {
+            registrationId, ...safeMetaError(persistenceError),
+          });
+        }
+        if (retryPersistenceError !== undefined) {
+          throw new AggregateError([error, retryPersistenceError],
+            "Meta reconciliation and retry persistence failed", { cause: error });
+        }
+      }
       throw error;
     }
   }
 
 
-  /** Existing orchestrators may call this bounded port on an approved cadence.
-   * There is no new queue or self-starting scheduler in BG003. All unexpected
-   * exceptions are logged and rethrown, never silently acknowledged. */
+  /** Called by the bounded messaging-worker timer. Failures are reported
+   * through shared logging and propagated to the timer's failure boundary. */
   async processDueRegistrations(limit = 25): Promise<{ inspected: number; processed: number }> {
     const due = await this.repository.listDue(limit);
     let processed = 0;
@@ -161,7 +183,9 @@ export class MetaTemplateManagementService {
     for (const item of due) {
       try {
         if (item.submissionState === "READY_TO_SUBMIT") {
-          await this.submitPreparedRegistration(item.id);
+          const pendingStatus = await this.repository.hasPendingObservation(item.id);
+          if (pendingStatus) await this.reconcileRegistration(item.id);
+          else await this.submitPreparedRegistration(item.id);
         } else {
           await this.reconcileRegistration(item.id);
         }
@@ -177,8 +201,8 @@ export class MetaTemplateManagementService {
     return { inspected: due.length, processed };
   }
 
-  /** This port receives only an authenticated, validated observation from the
-   * owning Messaging adapter. There is intentionally no guessed BullMQ decoder. */
+  /** Receives a strict Shared-v2-decoded, authenticated Messaging observation.
+   * Receipt and UNKNOWN fence commit before Meta GET. */
   async processTemplateStatusObservation(input: AuthenticatedTemplateObservation): Promise<
     "duplicate" | "unmatched" | ReconcileOutcome["kind"]
   > {

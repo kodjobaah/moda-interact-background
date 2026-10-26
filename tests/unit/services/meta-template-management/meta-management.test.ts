@@ -117,6 +117,18 @@ describe("BG003 Meta template management", () => {
     expect(f.reporting.error).toHaveBeenCalledWith("meta.template.create.compensation_failed", expect.anything());
   });
 
+  it("surfaces lost compensation CAS instead of silently acknowledging an unknown submission", async () => {
+    const f = fixture();
+    const original = new Error("provider outcome unknown");
+    f.provider.create.mockRejectedValueOnce(original);
+    f.repository.finishSubmission.mockResolvedValueOnce(false);
+    const result = await f.service.submitPreparedRegistration("reg-1").catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(AggregateError);
+    expect((result as AggregateError).cause).toBe(original);
+    expect((result as AggregateError).errors).toEqual([original, expect.objectContaining({ code: "CREATE_FAILURE_CAS_LOST" })]);
+    expect(f.reporting.error).toHaveBeenCalledWith("meta.template.create.compensation_failed", expect.anything());
+  });
+
   it("persists blocked image-header submission without calling Meta", async () => {
     const f = fixture();
     f.repository.load.mockResolvedValueOnce({ ...record, componentsSnapshot: [{ type: "HEADER",
@@ -225,4 +237,40 @@ describe("BG003 server-side Meta Graph API adapter", () => {
     const client = new MetaGraphTemplateAdapter(vi.fn(async () => new Response("secret", { status: 429 })) as typeof fetch);
     await expect(client.create(claim)).rejects.toMatchObject({ code: "META_RATE_LIMIT", disposition: "uncertain" });
   });
+
+  it("reads paginated Meta template listings without external paging requests", async () => {
+    const request = vi.fn(async (url: URL) => {
+      if (!url.searchParams.get("after")) {
+        const next = new URL(url.toString());
+        next.searchParams.set("after", "opaque-cursor-2");
+        return new Response(JSON.stringify({ data: [], paging: { next: next.toString() } }));
+      }
+      return new Response(JSON.stringify({ data: [{
+        id: "987654321", name: claim.name, language: claim.language,
+        status: "APPROVED", category: "MARKETING", components: compiled,
+      }] }));
+    });
+    const client = new MetaGraphTemplateAdapter(request as unknown as typeof fetch);
+    await expect(client.find(claim)).resolves.toMatchObject({ kind: "found", template: { id: "987654321" } });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1]![0].origin).toBe(request.mock.calls[0]![0].origin);
+  });
+
+  it("rejects cross-origin provider pagination rather than following arbitrary URLs", async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      data: [], paging: { next: "https://untrusted.example/steal?after=token" },
+    })));
+    const client = new MetaGraphTemplateAdapter(request as typeof fetch);
+    await expect(client.find(claim)).rejects.toMatchObject({ code: "META_LIST_INCOMPLETE" });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a full unpaginated result page as proof of provider absence", async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      data: Array.from({ length: 100 }, (_, index) => ({ name: `other_${index}` })),
+    })));
+    const client = new MetaGraphTemplateAdapter(request as typeof fetch);
+    await expect(client.find(claim)).rejects.toMatchObject({ code: "META_LIST_INCOMPLETE" });
+  });
+
 });
