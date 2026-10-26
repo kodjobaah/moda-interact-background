@@ -28,13 +28,22 @@ export class MerchantFollowUpTemplateService {
   ) {}
 
   async resolve(command: HumanCommand, recoveryId: string): Promise<MerchantFollowUpResolution> {
+    const unavailable = (reason: "template_not_allowed" | "follow_up_unavailable"): MerchantFollowUpResolution => {
+      // A refusal is a normal typed outcome, but still needs durable operational
+      // visibility. Never log customer, checkout or provider parameter values.
+      this.log.warn("arch047.merchant_follow_up.refused", {
+        commandId: command.id, shopId: command.shopId, reason,
+      });
+      return { kind: "unavailable", reason };
+    };
     if (command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE" || !command.templateName ||
-        !command.templateLanguageCode ||
+        !command.templateLanguageCode || !command.recoveryOutreachAttemptId ||
+        command.textBody !== null ||
         // The legacy merchant API can still persist raw parameters. Never
         // accept them as a source of truth or silently ignore injected values.
         (command.templateParameters !== null && command.templateParameters !== undefined &&
          !(Array.isArray(command.templateParameters) && command.templateParameters.length === 0))) {
-      return { kind: "unavailable", reason: "template_not_allowed" };
+      return unavailable("template_not_allowed");
     }
     try {
       const conversation = await this.database.conversation.findUnique({
@@ -43,7 +52,7 @@ export class MerchantFollowUpTemplateService {
       });
       if (!conversation || (conversation.shopId !== null && conversation.shopId !== command.shopId) ||
           conversation.checkoutRecoveryId !== recoveryId) {
-        return { kind: "unavailable", reason: "template_not_allowed" };
+        return unavailable("template_not_allowed");
       }
       const policy = await this.policy.resolve(command.shopId);
       const selection = await this.templates.prepare({
@@ -51,19 +60,35 @@ export class MerchantFollowUpTemplateService {
         conversationLanguageTag: conversation.languageTag ?? null,
       });
       if (selection.kind !== "prepared") {
-        this.log.warn("arch047.merchant_follow_up.unavailable", {
+        this.log.warn("arch047.merchant_follow_up.preparation_unavailable", {
           commandId: command.id, shopId: command.shopId, reason: selection.reason,
         });
-        return { kind: "unavailable", reason: "follow_up_unavailable" };
+        return unavailable("follow_up_unavailable");
       }
       const { prepared, send } = selection;
       const registration = send.templateRegistration;
+      // Every merchant post-window recovery follow-up must use the checkout
+      // CTA that BG001 bound to the authenticated recovery. A static/no-button
+      // template must not silently turn into a message with no recovery link.
+      // The provider parameters are forwarded unchanged after this check.
+      if (!send.dynamicUrlButton || send.dynamicUrlButton.index !== 0 ||
+          typeof send.dynamicUrlButton.text !== "string" || !send.dynamicUrlButton.text ||
+          (send.imageHeader !== undefined && send.textHeader !== undefined) ||
+          (send.textHeader !== undefined &&
+           (typeof send.textHeader !== "string" || !send.textHeader.trim())) ||
+          (send.imageHeader !== undefined &&
+           (!send.imageHeader || typeof send.imageHeader.link !== "string" ||
+            !send.imageHeader.link))) {
+        return unavailable("follow_up_unavailable");
+      }
       if (!registration || !send.recoveryPromise ||
           prepared.purpose !== `FOLLOW_UP_${send.recoveryPromise.kind}` ||
           prepared.shopId !== command.shopId ||
           registration.shopId !== command.shopId ||
           registration.purpose !== prepared.purpose ||
           registration.senderWabaId !== prepared.senderWabaId ||
+          registration.providerTemplateName !== prepared.providerTemplateName ||
+          registration.providerLanguageCode !== prepared.providerLanguageCode ||
           registration.variantId !== prepared.variantId ||
           registration.registrationId !== prepared.registrationId ||
           registration.definitionId !== prepared.definitionId ||
@@ -74,12 +99,12 @@ export class MerchantFollowUpTemplateService {
           command.templateLanguageCode !== prepared.providerLanguageCode ||
           send.templateName !== prepared.providerTemplateName ||
           send.languageCode !== prepared.providerLanguageCode) {
-        return { kind: "unavailable", reason: "template_not_allowed" };
+        return unavailable("template_not_allowed");
       }
       // A configured discount cannot quietly become a customer-facing
       // NO_OFFER when the independent checkout eligibility reader is absent.
       if (policy.recoveryOfferMode !== "NONE" && send.recoveryPromise?.kind === "NO_OFFER") {
-        return { kind: "unavailable", reason: "follow_up_unavailable" };
+        return unavailable("follow_up_unavailable");
       }
       return selection;
     } catch (error) {

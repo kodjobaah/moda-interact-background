@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { Redis } from "ioredis";
 import { first, recoveryDatabase, type RecoveryDatabase } from "./recovery-conversation.sql.js";
 
@@ -15,6 +17,9 @@ export const DEFAULT_HUMAN_POLICY: HumanPolicyConfig = {
   recipientPerHour: 12,
   repeatedIdenticalPerTenMinutes: 3,
 };
+const logger = createLogger({
+  serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName(),
+});
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export function normalizeHumanContent(text: string) {
   return text.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
@@ -101,7 +106,13 @@ export class HumanSendPolicyService {
       if (result === 3) return { kind: "denied", reason: "human_repeated_spam" };
       if (result === 1 || result === 2) return { kind: "denied", reason: "human_rate_limited" };
       return { kind: "retryable", reason: "human_screening_unavailable" };
-    } catch {
+    } catch (error) {
+      // Fail closed without hiding infrastructure errors. Redis screening is
+      // retryable and must not become a silent ALLOW or permanent refusal.
+      logger.warn("arch040.human_screening.unavailable", {
+        commandId: input.commandId, shopId: input.shopId,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
       return { kind: "retryable", reason: "human_screening_unavailable" };
     }
   }

@@ -112,6 +112,45 @@ describe("ARCH-045 merchant recovery Marketing admission", () => {
       await x.dispatcher.close();
     },
   );
+  it("rejects an unlinked template before claiming sequence two or charging", async () => {
+    const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+    vi.mocked(x.deps.followUpTemplates!.resolve).mockResolvedValue({
+      kind: "prepared", prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
+      send: { templateName: "follow_up", languageCode: "en",
+        dynamicUrlButton: { index: 0, text: "checkout-token" } },
+    } as never);
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
+    expect(x.billing.admitAndRevalidate).not.toHaveBeenCalled();
+    expect(x.deps.fence.admitFinalSend).not.toHaveBeenCalled();
+    expect(x.deps.followUpCancellations.cancelClaimed)
+      .toHaveBeenCalledWith("cmd-1", "lease-1", "template_not_allowed");
+    expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    await x.dispatcher.close();
+  });
+
+  it.each([
+    "TEMPLATE_REGISTRATION_UNAVAILABLE",
+    "TEMPLATE_PROVIDER_STATUS_UNRESOLVED",
+    "TEMPLATE_PROVIDER_STATUS_STALE",
+    "local-no-contact",
+    "customer-window-open",
+    "terminal-recovery",
+  ])("cancels an unadmitted follow-up after late BG006 fence refusal: %s", async (reason) => {
+    const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+    vi.mocked(x.deps.fence.admitFinalSend).mockResolvedValue({ kind: "suppressed", reason });
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.billing.admitAndRevalidate).toHaveBeenCalledOnce();
+    // Claim release/credit compensation is the application-owned cancellation
+    // transaction; calling the generic billing release here would race it.
+    expect(x.deps.followUpCancellations.cancelClaimed)
+      .toHaveBeenCalledWith("cmd-1", "lease-1", reason.toLowerCase().replaceAll(/[^a-z0-9_-]/g, "_"));
+    expect(x.billing.releaseBeforePermit).not.toHaveBeenCalled();
+    expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(x.reconciliation.recordDefinitiveFailure).not.toHaveBeenCalled();
+    await x.dispatcher.close();
+  });
+
   it("forwards the prepared header, body, image and CTA without merchant parameter injection", async () => {
     const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
     await x.dispatcher.processClaim("cmd-1", "lease-1");

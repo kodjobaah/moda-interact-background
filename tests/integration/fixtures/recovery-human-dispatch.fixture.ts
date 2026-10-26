@@ -80,7 +80,7 @@ export async function humanDispatchFixture(label: string) {
       new RecoveryFollowUpBillingService(undefined, release));
   }
 
-  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
+  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"], overrides: Partial<HumanDispatcherDependencies> = {}) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
@@ -106,7 +106,10 @@ export async function humanDispatchFixture(label: string) {
         },
       })) },
     } as unknown as HumanDispatcherDependencies;
-    return new HumanCommandDispatcherService(deps);
+    // An integration scenario may supply the production SQL registration fence
+    // and a deterministic BG001 preparation result, while keeping the normal
+    // dispatcher, Redis lease, PostgreSQL claim and transport real.
+    return new HumanCommandDispatcherService({ ...deps, ...overrides });
   }
 
   async function addCommand(input: {

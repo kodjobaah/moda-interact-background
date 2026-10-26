@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OutboundSendFenceService } from
   "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import type { FinalTemplateIdentity } from
@@ -20,6 +20,9 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
     const templateName = `arch047_human_${token}`;
     const hash = "a".repeat(64);
     const providerTemplateId = BigInt(`0x${token}`).toString(10);
+    // Match the actual transport fixture's configured sender account; a
+    // registration for some other WABA cannot authorise a merchant send.
+    const senderWabaId = f.provider.getProviderAccountId();
     const admin = await f.db.platformAdmin.create({ data: {
       email: `arch047-human-${token}@example.invalid`,
     } });
@@ -35,7 +38,7 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
       reviewedByAdminId: admin.id,
     } });
     const registration = await f.db.whatsAppTemplateMetaRegistration.create({ data: {
-      localeId: locale.id, wabaId: "123456789", providerTemplateName: templateName,
+      localeId: locale.id, wabaId: senderWabaId, providerTemplateName: templateName,
       providerLanguageCode: "en_US", category: "MARKETING", componentsSnapshot: [],
       parameterBindingsSnapshot: { header: [], body: [], buttons: [] },
       submittedContentHash: hash, providerTemplateId,
@@ -44,13 +47,13 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
       lastReconciledAt: new Date(Date.now() - 60_000),
     } });
     const variant = await f.db.whatsAppTemplateVariant.create({ data: {
-      shopId: f.shopId, providerAccountId: "123456789", purpose: "FOLLOW_UP_NO_OFFER",
+      shopId: f.shopId, providerAccountId: senderWabaId, purpose: "FOLLOW_UP_NO_OFFER",
       languageTag: "en", providerLanguageCode: "en_US", providerTemplateName: templateName,
       providerTemplateId, metaRegistrationId: registration.id,
       status: "APPROVED", enabled: true,
     } });
     const identity: FinalTemplateIdentity = {
-      shopId: f.shopId, senderWabaId: "123456789", purpose: "FOLLOW_UP_NO_OFFER",
+      shopId: f.shopId, senderWabaId, purpose: "FOLLOW_UP_NO_OFFER",
       variantId: variant.id, registrationId: registration.id, definitionId: definition.id,
       providerTemplateId, providerTemplateName: templateName, providerLanguageCode: "en_US",
       submittedContentHash: hash, bindingFingerprint: hash,
@@ -65,6 +68,100 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
     }
     return { f, identity, registrationId: registration.id, cleanup };
   }
+
+  /** Run the real command, sequence-two claim, and BG006 SQL fence together.
+   * BG001 preparation itself is tested separately; this adapter supplies its
+   * completed immutable payload without allowing merchant-authored parameters.
+   */
+  function preparedFollowUp(identity: FinalTemplateIdentity) {
+    return { kind: "prepared" as const,
+      prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
+      send: {
+        templateName: identity.providerTemplateName, languageCode: identity.providerLanguageCode,
+        textHeader: "Hello from the store", bodyParameters: ["Trusted customer"],
+        dynamicUrlButton: { index: 0, text: "https%3A%2F%2Fstore.example.test%2Fcheckout" },
+        recoveryPromise: { kind: "NO_OFFER" as const },
+        templateRegistration: identity,
+      },
+    };
+  }
+
+  it("sends the BG001-prepared merchant follow-up once through the BG006 final SQL fence", async () => {
+    const seeded = await fixture("dispatcher-approved-template");
+    try {
+      const { f, identity } = seeded;
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand(identity.providerTemplateName);
+      const [claim] = await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() });
+      const resolved = preparedFollowUp(identity);
+      const resolver = vi.fn(async () => resolved);
+      const dispatcher = f.dispatcher(undefined, undefined, undefined, undefined, {
+        fence: new OutboundSendFenceService(f.db, async () => null),
+        followUpTemplates: { resolve: resolver } as never,
+      });
+      await dispatcher.processClaim(commandId, claim!.leaseToken);
+      await dispatcher.processClaim(commandId, claim!.leaseToken); // replay cannot send again
+      await dispatcher.close();
+      await f.whatsapp.waitForMessageCount(1);
+
+      expect(resolver).toHaveBeenCalledTimes(1);
+      expect(f.providerHttpRequests).toEqual([{ type: "template" }]);
+      expect(f.provider.sendWhatsAppTemplate).toHaveBeenCalledTimes(1);
+      expect(f.provider.sendWhatsAppTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        templateName: identity.providerTemplateName, languageCode: "en_US",
+        textHeader: "Hello from the store", bodyParameters: ["Trusted customer"],
+        dynamicUrlButton: { index: 0, text: "https%3A%2F%2Fstore.example.test%2Fcheckout" },
+        templateRegistration: identity,
+      }));
+      expect(await f.commandState(commandId)).toMatchObject({
+        state: "SENT", providerDispatchKey: expect.any(String), dispatchAttemptCount: 1,
+      });
+      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
+        where: { id: attemptId },
+      })).outboundMessageId).toBeTruthy();
+      expect(await f.db.recoveryOutreachAttempt.count({
+        where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
+      })).toBe(1);
+      expect(f.billing.admitAndRevalidate).toHaveBeenCalledOnce();
+      expect(f.billing.onConfirmedProviderSend).toHaveBeenCalledOnce();
+    } finally { await seeded.cleanup(); }
+  }, 60_000);
+
+  it("cancels and releases the unconsumed merchant claim if Meta approval changes after preparation", async () => {
+    const seeded = await fixture("dispatcher-revoked-template");
+    try {
+      const { f, identity, registrationId } = seeded;
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand(identity.providerTemplateName);
+      const [claim] = await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() });
+      const resolver = vi.fn(async () => {
+        // Simulate the observation worker revoking status between BG001 and
+        // the merchant command's short provider-permit transaction.
+        await f.db.whatsAppTemplateMetaRegistration.update({
+          where: { id: registrationId }, data: {
+            providerStatus: "UNKNOWN", failureCode: "STATUS_RECONCILIATION_PENDING",
+          },
+        });
+        return preparedFollowUp(identity);
+      });
+      const dispatcher = f.dispatcher(undefined, undefined, undefined, undefined, {
+        fence: new OutboundSendFenceService(f.db, async () => null),
+        followUpTemplates: { resolve: resolver } as never,
+      });
+      await dispatcher.processClaim(commandId, claim!.leaseToken);
+      await dispatcher.close();
+
+      expect(resolver).toHaveBeenCalledOnce();
+      expect(await f.commandState(commandId)).toMatchObject({
+        state: "CANCELLED", outboundMessageId: null, providerDispatchKey: null,
+      });
+      expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
+        where: { id: attemptId }, select: { initiatedBy: true, initiationKey: true, sentAt: true },
+      })).toEqual({ initiatedBy: null, initiationKey: null, sentAt: null });
+      expect(f.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+      expect(f.providerHttpRequests).toEqual([]);
+      expect(f.billing.onConfirmedProviderSend).not.toHaveBeenCalled();
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+    } finally { await seeded.cleanup(); }
+  }, 60_000);
 
   it("rejects missing BG001 identity without admitting a human provider permit", async () => {
     const seeded = await fixture("missing-template-identity");
