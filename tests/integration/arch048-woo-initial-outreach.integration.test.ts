@@ -107,7 +107,17 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(a.providerRequests).toBe(0);
       const attempts = await a.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: a.recoveryId } });
       expect(attempts).toHaveLength(1);
-      expect(attempts[0]!.status).toBe("FAILED");
+      // No provider permit was committed. Releasing the credit must not
+      // terminally fail sequence one: only a definitive provider failure does.
+      expect(attempts[0]).toMatchObject({
+        sequence: 1, status: "PENDING", sentAt: null, outboundMessageId: null,
+      });
+      // The retained attempt is not permission to contact an ordered checkout.
+      // Replaying the job must observe the terminal order and remain charge-free.
+      await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({
+        kind: "suppressed", reason: "observed-order-terminal",
+      });
+      expect(a.providerRequests).toBe(0);
       expect(await a.db.conversationMessage.count({ where: {
         conversation: { checkoutRecoveryId: a.recoveryId }, direction: "OUTBOUND",
       } })).toBe(0);
