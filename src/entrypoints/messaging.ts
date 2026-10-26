@@ -6,6 +6,7 @@ import { backgroundRuntimeConfigService } from "../runtime/background-runtime-co
 import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lease.js";
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { startHumanCommandDispatcher } from "../services/recovery-conversation/start-human-command-dispatcher.js";
+import { startProductionMetaTemplateDuePoller } from "../services/meta-template-management/due-poller.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-messaging-worker",
@@ -17,6 +18,7 @@ void startReadyWorkerProcess({
     ]);
     const whatsappWorker = createWhatsappWorker();
     const closeHumanDispatcher = await startHumanCommandDispatcher();
+    const closeTemplateDuePoller = startProductionMetaTemplateDuePoller();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -31,6 +33,7 @@ void startReadyWorkerProcess({
       workers: [whatsappWorker],
       closeResources: [
         closeHumanDispatcher,
+        closeTemplateDuePoller,
         ...closeWorkerResources,
         stopQueueConcurrencyController,
         () => backgroundRuntimeConfigService.close(),

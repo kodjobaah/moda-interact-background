@@ -359,7 +359,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
           // The guarded sender contract allows nonduplicate suppression only
           // BEFORE the irreversible provider permit. Credit may be released.
           await this.deps.billing.releaseBeforeProvider(source);
-          await this.deps.attempts.markFailed(attempt.id, "FINAL_SEND_DENIED");
+          // A definitive denial BEFORE provider dispatch is reversible. Keep
+          // sequence one eligible for a later newly-consented checkout event;
+          // only confirmed provider failures can permanently close an attempt.
           return this.dispatchOutcome(state, "suppressed", "final-send-denied");
         }
         if (!confirmed(message) || message.conversationId !== conversation.id)
