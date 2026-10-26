@@ -2,8 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
 import { vi } from "vitest";
-import { allowModerationFixture } from "./arch040-allow-moderation.fixture.js";
-import type { ModerationAssessmentService } from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
+import {
+  PostgresModerationAssessmentService, type ModerationAssessmentService,
+} from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
+import type { ModerationOperation } from "../../../src/services/conversation-moderation/moderation-operation.js";
+import { HumanPreparedCommandService } from "../../../src/services/recovery-conversation/human-prepared-command.service.js";
+import { HumanWrapperPreparationService } from "../../../src/services/recovery-conversation/human-wrapper-preparation.service.js";
+import { ConversationWrapperService } from "../../../src/services/conversation-wrappers/service.js";
+import { PrismaConversationWrapperReadRepository } from "../../../src/services/conversation-wrappers/repository.js";
 import { startArch040BackgroundMocks } from "./arch040-background-mocks.fixture.js";
 import { RecoveryOutreachAttemptService } from "../../../src/services/recovery-outreach-attempt.service.js";
 import {
@@ -80,7 +86,25 @@ export async function humanDispatchFixture(label: string) {
       new RecoveryFollowUpBillingService(undefined, release));
   }
 
-  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
+  function persistedAllowModeration(): ModerationAssessmentService {
+    const operation: ModerationOperation = {
+      moderation: { key: "omini.moderation", version: 1,
+        value: { baseUrl: "http://127.0.0.1:1/v1/moderations", modelId: "omni-moderation-latest" } },
+      providerVersion: 1, openAiApiKey: "arch040-disposable-test-only",
+    };
+    return new PostgresModerationAssessmentService(db, async () => ({
+      flagged: false, categories: { harassment: false },
+      categoryScores: { harassment: 0.01 }, returnedModel: "omni-moderation-latest",
+    }), undefined, async () => operation);
+  }
+
+  const preparation = new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
+    new ConversationWrapperService({
+      repository: new PrismaConversationWrapperReadRepository(db), onMissingSlot: "passthrough",
+    }),
+  ));
+
+  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = persistedAllowModeration(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
@@ -91,6 +115,7 @@ export async function humanDispatchFixture(label: string) {
       reconciliation, billing, provider, execution,
       followUpCancellations: cancellationService(),
       now: () => new Date(), moderation, incidents, senderPreflight,
+      preparation,
       // Explicit trusted-provider fixture: production uses Meta category reads.
       storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
       templateCategories: { verify: vi.fn(async () => "MARKETING") },
@@ -218,7 +243,8 @@ export async function humanDispatchFixture(label: string) {
     whatsapp: mocks.whatsapp, providerHttpRequests: mocks.requests,
     failNextProviderHttp: mocks.failNextHttp, holdNextProviderHttp: mocks.holdNextHttp,
     startAimock: mocks.startAimock,
-    durableEligibility, dispatcher, addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
+    durableEligibility, preparation, persistedAllowModeration, dispatcher,
+    addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
     async close() {
       await db.shop.delete({ where: { id: shopId } });
       for (const id of administratorIds) await db.platformAdmin.delete({ where: { id } });

@@ -52,7 +52,7 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
       const command = await this.database.merchantConversationSendCommand.findUnique({
         where: { id: subject.commandId },
         select: {
-          shopId: true, conversationId: true, kind: true, textBody: true,
+          shopId: true, conversationId: true, kind: true, preparedTextBody: true,
           templateName: true, templateLanguageCode: true, templateParameters: true,
           conversation: { select: { shopId: true, checkoutRecovery: { select: { shopId: true } } } },
         },
@@ -63,8 +63,9 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
         throw new Error("moderation_subject_invalid");
       }
       if (command.kind === "HUMAN_TEXT") {
+        if (!command.preparedTextBody?.trim()) throw new Error("moderation_prepared_body_missing");
         return { shopId: command.shopId, conversationId: command.conversationId,
-          content: command.textBody ?? "", inputKind: "TEXT" };
+          content: command.preparedTextBody ?? "", inputKind: "TEXT" };
       }
       const rendered = await this.database.$queryRaw<Array<{ text: string }>>(Prisma.sql`
         SELECT "whatsapp".arch040_moderation_template_input_v1(
@@ -128,7 +129,12 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
       const operation = await this.readOperation();
       return assessment?.decision === "ALLOW" &&
         assessment.requestedModel === operation.moderation.value.modelId;
-    } catch { return false; }
+    } catch (error) {
+      logger.warn("conversation.moderation.allowance_recheck_failed", {
+        actor: input.subject.kind, errorType: error instanceof Error ? error.name : "unknown",
+      });
+      return false;
+    }
   }
 
   async assessText(input: { subject: ModerationSubject; shopId: string; conversationId: string;

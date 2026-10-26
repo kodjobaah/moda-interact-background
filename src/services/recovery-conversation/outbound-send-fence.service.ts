@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { first, rows, changed, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
+import { first, rows, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import type { StoredRecoveryConsentSnapshot } from "./recovery-stored-consent.service.js";
 import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
   type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
+import { currentHumanWrapperMatches, parsePreparedEvidence } from "./human-prepared-command.service.js";
+import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
-export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date }
+export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string }
   | { kind: "suppressed"; reason: string };
 export type RecoveryMarketingPermit = {
   consent: StoredRecoveryConsentSnapshot | null;
@@ -93,13 +95,15 @@ export class OutboundSendFenceService {
       let command: {
         state: string; leaseToken: string | null; leaseExpiresAt: Date | null;
         expectedControlRevision: number; kind: string; recipientSnapshot: string;
-        textBody: string | null; templateName: string | null; templateLanguageCode: string | null;
+        textBody: string | null; preparedTextBody: string | null; preparedWrapperEvidence: unknown;
+        preparedAt: Date | null; templateName: string | null; templateLanguageCode: string | null;
         idempotencyKey: string; recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
       } | null = null;
       if (input.senderType === "HUMAN") {
         command = await first(tx, `
           SELECT "state"::text, "leaseToken", "leaseExpiresAt", "expectedControlRevision",
-            "kind"::text, "recipientSnapshot", "textBody", "templateName", "templateLanguageCode",
+            "kind"::text, "recipientSnapshot", "textBody", "preparedTextBody",
+            "preparedWrapperEvidence", "preparedAt", "templateName", "templateLanguageCode",
             "idempotencyKey", "recoveryOutreachAttemptId", "providerDispatchKey"
           FROM "whatsapp"."MerchantConversationSendCommand"
           WHERE "id"=$1 AND "conversationId"=$2 AND "shopId"=$3 FOR UPDATE`,
@@ -180,6 +184,27 @@ export class OutboundSendFenceService {
         }
       }
 
+      // BG009: the immutable complete body is the sole moderation/send identity.
+      // Read the current wrapper slot and ALLOW record while inside this same
+      // permit transaction; a stale/retired wrapper must never reach Meta.
+      if (command?.kind === "HUMAN_TEXT") {
+        if (!parsePreparedEvidence(command.preparedTextBody, command.preparedWrapperEvidence,
+            command.preparedAt) || !(await currentHumanWrapperMatches(tx, command.preparedTextBody,
+              command.preparedWrapperEvidence, command.preparedAt, {
+                conversationId: context.id, commandId: input.commandId!, textBody: command.textBody,
+              }))) {
+          return { kind: "suppressed", reason: "human_wrapper_stale" } as const;
+        }
+        const hash = createHash("sha256").update(command.preparedTextBody!, "utf8").digest("hex");
+        const assessment = await first<{ id: string }>(tx, `
+          SELECT "id" FROM "whatsapp"."ConversationModerationAssessment"
+          WHERE "merchantSendCommandId"=$1 AND "subject"='HUMAN_COMMAND'
+            AND "inputKind"='TEXT' AND "decision"='ALLOW'
+            AND "contentSha256"=$2 AND "policyVersion"=$3
+          LIMIT 1`, input.commandId, hash, moderationConfig().policyVersion);
+        if (!assessment) return { kind: "suppressed", reason: "moderation_content_stale" } as const;
+      }
+
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
         : `arch040-auto-${createHash("sha256").update(input.messageId!).digest("hex")}`;
@@ -188,13 +213,17 @@ export class OutboundSendFenceService {
         // Exactly one canonical HUMAN message, at the durable admission point.
         // Provider HTTP MUST occur after commit and never inside this callback.
         const content = command!.kind === "HUMAN_TEXT"
-          ? command!.textBody! : `[Recovery template: ${command!.templateName ?? "unknown"}]`;
-        await changed(tx, `
+          ? command!.preparedTextBody! : `[Recovery template: ${command!.templateName ?? "unknown"}]`;
+        const admittedMessage = await rows<{ content: string }>(tx, `
           INSERT INTO "whatsapp"."ConversationMessage"
             ("id","conversationId","direction","senderType","status","content",
               "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision")
-          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5)`,
+          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5)
+          RETURNING "content"`,
           messageId, context.id, content, dispatchKey, context.revision);
+        if (admittedMessage.length !== 1 || admittedMessage[0]?.content !== content) {
+          throw new Error("ARCH047 admitted content mismatch");
+        }
         const cmd = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
           UPDATE "whatsapp"."MerchantConversationSendCommand"
           SET "state"='DISPATCH_ADMITTED',"outboundMessageId"=$3,
@@ -213,7 +242,10 @@ export class OutboundSendFenceService {
             WHERE "id"=$1 AND "outboundMessageId" IS NULL`,
             command!.recoveryOutreachAttemptId, messageId);
         }
-        return { kind: "admitted", messageId, dispatchKey, admittedAt: cmd[0]!.providerDispatchAdmittedAt } as const;
+        return { kind: "admitted", messageId, dispatchKey,
+          admittedAt: cmd[0]!.providerDispatchAdmittedAt,
+          ...(command!.kind === "HUMAN_TEXT" ? { messageContent: admittedMessage[0]!.content } : {}),
+        } as const;
       }
       const message = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
         UPDATE "whatsapp"."ConversationMessage"
