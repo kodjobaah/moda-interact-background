@@ -4,7 +4,7 @@ import { Queue } from "bullmq";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from "../../src/services/whatsapp-template-selector.service.js";
+import { whatsAppService } from "../../src/services/whatsapp.service.js";
 import { connectionRedis } from "../../src/lib/redis.js";
 import { WooCheckoutLeaseGuard } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 import { PendingRecoveryCandidateIndexStore } from "../../src/services/pending-recovery-candidate/candidate-index.store.js";
@@ -18,6 +18,7 @@ import { WooInitialDispatchQueue } from "../../src/services/woocommerce-recovery
 import { WooRecoveryOrchestratorService } from "../../src/services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
 import { createPendingRecoveryCandidateWorker } from "../../src/workers/pending-recovery-candidate.worker.js";
 import { createWooOutreachFixture, type WooOutreachIntegrationFixture } from "./fixtures/arch048-woo-outreach.fixture.js";
+import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 
 vi.mock("../../src/runtime/background-runtime-config.js", () => ({
   backgroundRuntimeConfigService: {
@@ -45,13 +46,12 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
   });
 
   it("composes BG001 checkout → BG003 consent/admission → BG004 attempt and credit → BG002 terminal order", async () => {
-    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId").mockResolvedValue("test-meta-account");
-    vi.spyOn(whatsappTemplateSelectorService, "select").mockResolvedValue({
-      outcome: "selected", verifiedCategory: "MARKETING", selectionSource: "merchant-fallback",
-      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
-      providerTemplateName: "woo_checkout_recovery", providerTemplateId: "test-template-id",
-      marketCapability: "supported",
-    });
+    // Both sides of the approved-template boundary use the same test WABA;
+    // the real repository must select the persisted Moda-authored registration.
+    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    vi.spyOn(whatsAppService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
     fixture = await createWooOutreachFixture();
     const f = fixture;
     await f.db.shop.update({ where: { id: f.shopId }, data: { onboardingCompleted: true } });

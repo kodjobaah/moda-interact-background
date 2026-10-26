@@ -1,11 +1,12 @@
 import "dotenv/config";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from "../../src/services/whatsapp-template-selector.service.js";
+import { whatsAppService } from "../../src/services/whatsapp.service.js";
 import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
 import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/services/platform-configuration/contracts.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import {
   createWooOutreachFixture,
   type WooOutreachIntegrationFixture,
@@ -30,15 +31,13 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
         return readConfiguration(key);
       },
     );
-    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId").mockResolvedValue("test-meta-account");
-    // Only the external Meta catalogue is simulated. Attempt, consent,
-    // reservation, committed usage and BullMQ persistence remain real.
-    vi.spyOn(whatsappTemplateSelectorService, "select").mockResolvedValue({
-      outcome: "selected", verifiedCategory: "MARKETING", selectionSource: "merchant-fallback",
-      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
-      providerTemplateName: "woo_checkout_recovery", providerTemplateId: "test-template-id",
-      marketCapability: "supported",
-    });
+    vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    vi.spyOn(whatsAppService, "getProviderAccountId")
+      .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    // The frozen registration, approval, category and language are persisted
+    // in the disposable DB; the provider transport is still controlled.
+
     f = await createWooOutreachFixture();
   });
 
