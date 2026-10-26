@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { RenderConversationResponseInput, WrapperRenderResult } from "../../../src/services/conversation-wrappers/contracts.js";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
 vi.mock(
@@ -30,6 +31,7 @@ import { registerContextCases } from "./conversation-turn-processor/facade-conte
 import { registerAbuseAdmissionCases } from "./conversation-turn-processor/facade-abuse-admission.cases.js";
 import { registerOutboundCases } from "./conversation-turn-processor/facade-outbound.cases.js";
 import { registerAgentRaceCases } from "./conversation-turn-processor/facade-agent-races.cases.js";
+import { registerAiWrapperCases } from "./conversation-turn-processor/ai-wrapper.cases.js";
 
 const first = new Date("2026-09-08T12:00:00.000Z");
 
@@ -81,6 +83,11 @@ function harness(overrides: Partial<any> = {}) {
   const abuseAdmission = {
     admitSettledTurn: vi.fn().mockResolvedValue({ kind: "allowed" }),
   };
+  const aiWrapper = {
+    renderConversationResponse: vi.fn(async (input: RenderConversationResponseInput): Promise<WrapperRenderResult> => ({
+      kind: "no-wrapper" as const, body: input.responseBody, reason: "NOT_CONFIGURED" as const,
+    })),
+  };
   const runAgent = vi.fn().mockResolvedValue({
     replyText: "reply",
     detectedLanguageTag: null,
@@ -110,6 +117,7 @@ function harness(overrides: Partial<any> = {}) {
     abuseAdmission,
     loadTurn: vi.fn().mockResolvedValue(loaded),
     runAgent,
+    aiWrapper,
     getResult: (result: any) => result,
     now,
     runtimeConfig,
@@ -123,6 +131,7 @@ function harness(overrides: Partial<any> = {}) {
     admission,
     abuseAdmission,
     runAgent,
+    aiWrapper,
     loaded,
     runtimeConfig,
     logger,
@@ -142,6 +151,7 @@ describe("ConversationTurnProcessor", () => {
   registerAbuseAdmissionCases(facadeContext);
   registerOutboundCases(facadeContext);
   registerAgentRaceCases(facadeContext);
+  registerAiWrapperCases(facadeContext);
 });
 
 // Preserve the original standalone regression outside the describe block.
@@ -162,7 +172,7 @@ it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress"
     admission: test.admission, abuseAdmission: test.abuseAdmission,
     ownership,
     loadTurn: vi.fn().mockResolvedValue(test.loaded),
-    runAgent: test.runAgent, getResult: (result: any) => result,
+    runAgent: test.runAgent, aiWrapper: test.aiWrapper, getResult: (result: any) => result,
     now: () => new Date(first.getTime() + 20_000),
     runtimeConfig: test.runtimeConfig, logger: test.logger,
   });
@@ -187,7 +197,7 @@ it("does not send a model result after HUMAN takeover and subsequent AI resume",
     queue: test.queue, conversation: test.conversation,
     admission: test.admission, abuseAdmission: test.abuseAdmission,
     ownership, loadTurn: vi.fn().mockResolvedValue(test.loaded),
-    runAgent: test.runAgent, getResult: (result: any) => result,
+    runAgent: test.runAgent, aiWrapper: test.aiWrapper, getResult: (result: any) => result,
     now: () => new Date(first.getTime() + 20_000),
     runtimeConfig: test.runtimeConfig, logger: test.logger,
   });

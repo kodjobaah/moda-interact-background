@@ -102,6 +102,37 @@ const admission = {
 };
 
 describe("OutboundMessageDeliveryService", () => {
+  it("moderates all BG008 rendered text before admitting a provider send", async () => {
+    const test = harness({ moderationOutcome: "block" });
+    const composed = "Forbidden content from a published wrapper. Harmless AI answer.";
+    const decision = await test.service.sendPreparedText({
+      ...admission, to: "+14155552671", text: composed,
+    });
+    expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({
+      effectiveText: composed, inputKind: "TEXT",
+      subject: { kind: "AGENT_MESSAGE", messageId: "message-1" },
+    }));
+    expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+    expect(decision).toEqual({ kind: "suppressed", reason: "conversation-invalid" });
+    expect(test.database.conversationMessage.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { content: composed },
+    }));
+  });
+
+  it("sends exactly the approved full BG008 message, not only the model fragment", async () => {
+    const test = harness();
+    const composed = "Welcome. Harmless AI answer. Thank you.";
+    await test.service.sendPreparedText({ ...admission, to: "+14155552671", text: composed });
+    expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({
+      effectiveText: composed,
+    }));
+    expect(test.moderationMock.requireCurrentAllowance).toHaveBeenCalledWith(expect.objectContaining({
+      effectiveText: composed,
+    }));
+    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledExactlyOnceWith({
+      to: "+14155552671", text: composed,
+    });
+  });
   it("blocks prepared AI/automation messages when the recipient has locally stopped", async () => {
     const test = harness();
     test.database.$queryRawUnsafe.mockImplementation(async (statement: string) => {
