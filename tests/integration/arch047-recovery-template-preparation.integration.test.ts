@@ -38,8 +38,10 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
       await db.platformAdmin.create({ data: { id: adminId, email: `${suffix}@arch047.example.test`,
         role: "SUPER_ADMIN" } });
       await db.shop.createMany({ data: [
-        { id: shopId, domain: `${suffix}.arch047.example.test`, status: "ACTIVE" },
-        { id: otherShopId, domain: `other-${suffix}.arch047.example.test`, status: "ACTIVE" },
+        { id: shopId, domain: `${suffix}.arch047.example.test`, status: "ACTIVE",
+          defaultLanguageTag: "en" },
+        { id: otherShopId, domain: `other-${suffix}.arch047.example.test`, status: "ACTIVE",
+          defaultLanguageTag: "en" },
       ] });
       await db.shopBrand.createMany({ data: [
         { shopId, brandName: "Tenant Brand" },
@@ -82,6 +84,10 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
         canonicalLanguageTag: "en", template: { components: [{
           type: "body", parameters: [{ text: "Alex" }, { text: "Tenant Brand" }],
         }] },
+      });
+      expect(await service.prepare({ ...request, conversationLanguageTag: "fr",
+        merchantLanguageTag: "en" })).toMatchObject({
+        outcome: "prepared", selectionSource: "merchant-fallback", canonicalLanguageTag: "en",
       });
       expect(readBrand).toHaveBeenCalledWith({ where: { shopId },
         select: { brandName: true, logoUrl: true, logoAltText: true,
