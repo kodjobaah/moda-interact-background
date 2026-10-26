@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { seedApprovedInitialWooTemplateRegistration } from "./woo-approved-initial-template.fixture.js";
 import type { WooInitialFinalPermitInput } from
   "../../../src/services/woocommerce-recovery/woo-initial-send-fence.service.js";
 
@@ -61,6 +62,7 @@ export async function seedWooInitialPermit(db: PrismaClient): Promise<{ shopId: 
   const installation = await db.wooCommerceInstallation.create({ data: {
     shopId, canonicalSiteUrl: site, credentialDigest: Uint8Array.from(randomBytes(32)),
   } });
+  const template = await seedApprovedInitialWooTemplateRegistration(db, shopId);
   const customer = await db.customer.create({ data: { shopId, email: "customer@example.test" } });
   const phone = await db.customerPhone.create({ data: {
     customerId: customer.id, phone: PHONE,
@@ -106,7 +108,8 @@ export async function seedWooInitialPermit(db: PrismaClient): Promise<{ shopId: 
     conversationId: conversation.id, attemptId: attempt.id, messageId: message.id,
     recipient: DIGITS, idempotencyKey,
     recoveryCreditSourceKey: createRecoveryIdempotencyKey(shopId, idempotencyKey),
-    templateName: "woo_recovery", languageCode: "en_GB", verifiedCategory: "MARKETING",
+    templateName: template.providerTemplateName, languageCode: template.providerLanguageCode,
+    verifiedCategory: "MARKETING", templateRegistration: template,
     expectedContent: "[moderated-template]",
     consent: { shopId, customerId: customer.id, customerPhoneId: phone.id,
       installationId: installation.id, credentialVersion: installation.credentialVersion,
