@@ -23,7 +23,7 @@ const hoisted = vi.hoisted(() => ({
   attemptGetOrCreate: vi.fn(),
   suppressionEvaluate: vi.fn(),
   policyResolve: vi.fn(),
-  selectorSelect: vi.fn(),
+  approvedTemplateSelect: vi.fn(),
   outboundGetProviderAccountId: vi.fn(),
   outboundSendTemplate: vi.fn(),
   resumeSchedule: vi.fn(),
@@ -87,8 +87,19 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
     sendTemplate: hoisted.outboundSendTemplate,
   },
 }));
-vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: { select: hoisted.selectorSelect },
+vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: { prepare: vi.fn(async (input: unknown) => {
+    const selected = await hoisted.approvedTemplateSelect(input);
+    return selected.outcome === "selected" ? {
+      kind: "prepared", prepared: {
+        purpose: "INITIAL_NO_OFFER", canonicalLanguageTag: selected.canonicalLanguageTag,
+        providerTemplateName: selected.providerTemplateName,
+        providerLanguageCode: selected.providerLanguageCode,
+      }, send: {
+        templateName: selected.providerTemplateName, languageCode: selected.providerLanguageCode,
+      },
+    } : { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+  }) },
 }));
 vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({
   recoveryOutreachAttemptService: { getOrCreate: hoisted.attemptGetOrCreate },
@@ -169,7 +180,7 @@ beforeEach(() => {
   hoisted.attemptGetOrCreate.mockReset().mockResolvedValue({ id: "attempt-1" });
   hoisted.suppressionEvaluate.mockReset().mockResolvedValue({ kind: "allowed" });
   hoisted.policyResolve.mockReset().mockResolvedValue({ recoveryDelayMinutes: 30 });
-  hoisted.selectorSelect.mockReset().mockResolvedValue({
+  hoisted.approvedTemplateSelect.mockReset().mockResolvedValue({
     outcome: "selected",
     providerTemplateName: "recovery",
     canonicalLanguageTag: "en",

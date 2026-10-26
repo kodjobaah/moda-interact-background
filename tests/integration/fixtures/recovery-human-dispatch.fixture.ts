@@ -87,13 +87,24 @@ export async function humanDispatchFixture(label: string) {
       database: db,
       outreach: new RecoveryOutreachAttemptService(db),
       commands, followUps, evaluator,
-      fence: new OutboundSendFenceService(db, durableEligibility),
+      fence: new OutboundSendFenceService(db, durableEligibility, () => new Date(),
+        async () => null), // Existing ARCH040 suites test policy; BG007 SQL tests cover registration independently.
       reconciliation, billing, provider, execution,
       followUpCancellations: cancellationService(),
       now: () => new Date(), moderation, incidents, senderPreflight,
-      // Explicit trusted-provider fixture: production uses Meta category reads.
       storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
-      templateCategories: { verify: vi.fn(async () => "MARKETING") },
+      followUpTemplates: { resolve: vi.fn(async () => ({
+        kind: "prepared", prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
+        send: { templateName: "recovery_follow_up", languageCode: "en_US",
+          bodyParameters: [], templateRegistration: {
+            shopId, senderWabaId: "123456789", purpose: "FOLLOW_UP_NO_OFFER",
+            variantId: "arch040-variant", registrationId: "arch040-reg",
+            definitionId: "arch040-definition", providerTemplateId: "arch040-provider",
+            providerTemplateName: "recovery_follow_up", providerLanguageCode: "en_US",
+            submittedContentHash: "a".repeat(64), bindingFingerprint: "a".repeat(64),
+          },
+        },
+      })) },
     } as unknown as HumanDispatcherDependencies;
     return new HumanCommandDispatcherService(deps);
   }
@@ -102,6 +113,8 @@ export async function humanDispatchFixture(label: string) {
     kind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
     idempotencyKey?: string; attemptId?: string; textBody?: string;
     seedVerifiedInbound?: boolean;
+    /** The accepted command payload is immutable; select the template at creation. */
+    templateName?: string;
   } = {}) {
     const id = randomUUID();
     const key = input.idempotencyKey ?? id;
@@ -130,7 +143,7 @@ export async function humanDispatchFixture(label: string) {
        "kind","recipientSnapshot","textBody","templateName","templateLanguageCode","recoveryOutreachAttemptId")
       VALUES ($1,$2,$3,$4,$5,1,$6::"whatsapp"."MerchantConversationSendKind",$7,$8,$9,$10,$11)`,
       id, shopId, conversationId, key, digest, kind, recipient, text,
-      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "recovery_follow_up" : null,
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? (input.templateName ?? "recovery_follow_up") : null,
       kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "en_US" : null, input.attemptId ?? null);
     return id;
   }
@@ -158,7 +171,7 @@ export async function humanDispatchFixture(label: string) {
       conversationId, sentAt);
   }
 
-  async function addMerchantFollowUpCommand() {
+  async function addMerchantFollowUpCommand(templateName = "recovery_follow_up") {
     await addInitialOutreach();
     const idempotencyKey = `merchant-${recoveryId}`;
     const claim = await followUps.claimSequenceTwo({
@@ -167,7 +180,7 @@ export async function humanDispatchFixture(label: string) {
     });
     if (claim.kind !== "claimed") throw new Error(`Expected an eligible HUMAN follow-up: ${claim.reason}`);
     const commandId = await addCommand({ kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
-      idempotencyKey, attemptId: claim.attemptId });
+      idempotencyKey, attemptId: claim.attemptId, templateName });
     return { commandId, attemptId: claim.attemptId };
   }
 

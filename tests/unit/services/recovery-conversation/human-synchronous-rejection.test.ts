@@ -42,7 +42,20 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
       requireCurrentAllowance: vi.fn(async () => true) },
     senderPreflight: vi.fn(async () => undefined),
     storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
-    templateCategories: { verify: vi.fn(async () => "MARKETING") },
+    followUpTemplates: { resolve: vi.fn(async () => ({
+      kind: "prepared", prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
+      send: { templateName: "follow_up", languageCode: "en",
+        bodyParameters: ["trusted"], imageHeader: { link: "https://media.example.test/ready.jpg" },
+        dynamicUrlButton: { index: 0, text: "checkout-token" },
+        templateRegistration: {
+          shopId: "shop-1", senderWabaId: "123456789", purpose: "FOLLOW_UP_NO_OFFER",
+          variantId: "variant-1", registrationId: "reg-1", definitionId: "definition-1",
+          providerTemplateId: "555", providerTemplateName: "follow_up",
+          providerLanguageCode: "en", submittedContentHash: "a".repeat(64),
+          bindingFingerprint: "a".repeat(64),
+        },
+      },
+    })) },
     followUps: { claimSequenceTwo: vi.fn(async () => ({ kind: "claimed", attemptId: "attempt-1" })) },
     followUpCancellations: { cancelClaimed: vi.fn(), repairCancelledClaims: vi.fn() },
     fence: { admitFinalSend: vi.fn(async () => ({ kind: "admitted" })) },
@@ -86,10 +99,12 @@ describe("ARCH-045 merchant recovery Marketing admission", () => {
     expect(x.deps.followUpCancellations.cancelClaimed).toHaveBeenCalled();
     await x.dispatcher.close();
   });
-  it.each(["UTILITY", "AUTHENTICATION", null])(
-    "denies %s provider template category before billing", async (category) => {
+  it.each(["template_not_allowed", "follow_up_unavailable"])(
+    "denies %s from the approved template resolver before billing", async (reason) => {
       const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
-      vi.mocked(x.deps.templateCategories!.verify).mockResolvedValue(category as never);
+      vi.mocked(x.deps.followUpTemplates!.resolve).mockResolvedValue({
+        kind: "unavailable", reason,
+      } as never);
       await x.dispatcher.processClaim("cmd-1", "lease-1");
       expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
       expect(x.billing.admitAndRevalidate).not.toHaveBeenCalled();
@@ -97,12 +112,28 @@ describe("ARCH-045 merchant recovery Marketing admission", () => {
       await x.dispatcher.close();
     },
   );
+  it("forwards the prepared header, body, image and CTA without merchant parameter injection", async () => {
+    const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.provider.sendWhatsAppTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateName: "follow_up", languageCode: "en",
+      bodyParameters: ["trusted"],
+      imageHeader: { link: "https://media.example.test/ready.jpg" },
+      dynamicUrlButton: { index: 0, text: "checkout-token" },
+    }));
+    expect(x.deps.fence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
+      proactive: expect.objectContaining({
+        templateRegistration: expect.objectContaining({ variantId: "variant-1" }),
+      }),
+    }));
+    await x.dispatcher.close();
+  });
   it("keeps HUMAN_TEXT a service-window reply; final STOP fence remains mandatory", async () => {
     const x = fixture("HUMAN_TEXT");
     vi.mocked(x.deps.storedConsent!.preflight).mockResolvedValue({ kind: "denied", reason: "stored-consent-denied" });
     await x.dispatcher.processClaim("cmd-1", "lease-1");
     expect(x.deps.storedConsent!.preflight).not.toHaveBeenCalled();
-    expect(x.deps.templateCategories!.verify).not.toHaveBeenCalled();
+    expect(x.deps.followUpTemplates!.resolve).not.toHaveBeenCalled();
     expect(x.deps.fence.admitFinalSend).toHaveBeenCalledOnce();
     await x.dispatcher.close();
   });

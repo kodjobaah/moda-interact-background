@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from "../../src/services/whatsapp-template-selector.service.js";
+import { automatedRecoveryTemplateService } from "../../src/services/recovery-template-integration/automated-recovery-template.service.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import {
@@ -19,12 +19,12 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId").mockResolvedValue("test-meta-account");
     // Only the external Meta catalogue is simulated. Attempt, consent,
     // reservation, committed usage and BullMQ persistence remain real.
-    vi.spyOn(whatsappTemplateSelectorService, "select").mockResolvedValue({
-      outcome: "selected", verifiedCategory: "MARKETING", selectionSource: "merchant-fallback",
-      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
-      providerTemplateName: "woo_checkout_recovery", providerTemplateId: "test-template-id",
-      marketCapability: "supported",
-    });
+    vi.spyOn(automatedRecoveryTemplateService, "prepare").mockResolvedValue({
+      kind: "prepared", prepared: {
+        purpose: "INITIAL_NO_OFFER", providerTemplateName: "woo_checkout_recovery",
+        providerLanguageCode: "en_GB", canonicalLanguageTag: "en-GB",
+      }, send: { templateName: "woo_checkout_recovery", languageCode: "en_GB" },
+    } as never);
     f = await createWooOutreachFixture();
   });
 

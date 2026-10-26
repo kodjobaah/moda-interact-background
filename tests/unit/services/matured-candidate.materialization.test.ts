@@ -96,7 +96,7 @@ const hoisted = vi.hoisted(() => {
         };
       }),
     },
-    whatsappTemplateSelectorMock: {
+    approvedTemplateFixture: {
       select: vi.fn(async () => ({
         outcome: "selected",
         canonicalLanguageTag: "en-GB",
@@ -139,7 +139,7 @@ const { conversationServiceMock } = hoisted;
 const { conversationMessageServiceMock } = hoisted;
 const { whatsAppServiceMock } = hoisted;
 const { outboundWhatsAppAdmissionServiceMock } = hoisted;
-const { whatsappTemplateSelectorMock } = hoisted;
+const { approvedTemplateFixture } = hoisted;
 const { recoveryBillingServiceMock } = hoisted;
 const { executionEligibilityMock } = hoisted;
 
@@ -178,8 +178,19 @@ vi.mock("../../../src/services/whatsapp.service.js", () => ({
 vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: hoisted.outboundWhatsAppAdmissionServiceMock,
 }));
-vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: hoisted.whatsappTemplateSelectorMock,
+vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: { prepare: vi.fn(async (input: unknown) => {
+    const selected = await hoisted.approvedTemplateFixture.select(input);
+    if (selected.outcome !== "selected") return { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+    return { kind: "prepared", prepared: {
+      purpose: "INITIAL_NO_OFFER", providerTemplateName: selected.providerTemplateName,
+      providerLanguageCode: selected.providerLanguageCode,
+      canonicalLanguageTag: selected.canonicalLanguageTag,
+    }, send: {
+      templateName: selected.providerTemplateName, languageCode: selected.providerLanguageCode,
+      recoveryPromise: { kind: "NO_OFFER" },
+    } };
+  }) },
 }));
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
@@ -251,7 +262,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(true);
     hoisted.consentAdmissionMock.evaluateReentry.mockResolvedValue(true);
     hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
-    whatsappTemplateSelectorMock.select.mockResolvedValue({
+    approvedTemplateFixture.select.mockResolvedValue({
       outcome: "selected",
       canonicalLanguageTag: "en-GB",
       providerLanguageCode: "en_GB",
@@ -515,8 +526,8 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
-  it("allows provider-check-required templates to reach the provider", async () => {
-    whatsappTemplateSelectorMock.select.mockResolvedValue({
+  it("refuses legacy provider-check-required selections without approved registration", async () => {
+    approvedTemplateFixture.select.mockResolvedValue({
       outcome: "provider-check-required",
       canonicalLanguageTag: "fr-CA",
       providerLanguageCode: "fr_CA_CUSTOM",
@@ -529,12 +540,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        templateName: "checkout_recovery_fr_ca",
-        languageCode: "fr_CA_CUSTOM",
-      }),
-    );
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("blocks an exhausted billing admission before creating a conversation or sending", async () => {
@@ -552,7 +558,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("persists a truthful descriptor for a selected non-English template", async () => {
-    whatsappTemplateSelectorMock.select.mockResolvedValue({
+    approvedTemplateFixture.select.mockResolvedValue({
       outcome: "selected",
       canonicalLanguageTag: "fr-CA",
       providerLanguageCode: "fr_CA_CUSTOM",
@@ -590,7 +596,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     { outcome: "template-unavailable", reason: "no-approved-variant" },
     { outcome: "market-unavailable", reason: "unsupported-market" },
   ] as const)("does not send when selection is bounded as $outcome", async (selection) => {
-    whatsappTemplateSelectorMock.select.mockResolvedValue(selection);
+    approvedTemplateFixture.select.mockResolvedValue(selection);
 
     await service.materializeMaturedCandidate(candidate);
 

@@ -74,7 +74,7 @@ const hoisted = vi.hoisted(() => {
       })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
     },
-    whatsappTemplateSelectorMock: {
+    approvedTemplateFixture: {
       select: vi.fn(async () => ({
         outcome: "selected",
         canonicalLanguageTag: "en-GB",
@@ -149,8 +149,19 @@ vi.mock("../../../src/services/conversation.message.service.js", () => ({
 vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
-vi.mock("../../../src/services/whatsapp-template-selector.service.js", () => ({
-  whatsappTemplateSelectorService: hoisted.whatsappTemplateSelectorMock,
+vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
+  automatedRecoveryTemplateService: { prepare: vi.fn(async (input: unknown) => {
+    const selected = await hoisted.approvedTemplateFixture.select(input);
+    if (selected.outcome !== "selected") return { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+    return { kind: "prepared", prepared: {
+      purpose: "INITIAL_NO_OFFER", providerTemplateName: selected.providerTemplateName,
+      providerLanguageCode: selected.providerLanguageCode,
+      canonicalLanguageTag: selected.canonicalLanguageTag,
+    }, send: {
+      templateName: selected.providerTemplateName, languageCode: selected.providerLanguageCode,
+      recoveryPromise: { kind: "NO_OFFER" },
+    } };
+  }) },
 }));
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
@@ -685,19 +696,17 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
   });
 });
 
-it("A1-L01 initial outreach requests shop fallback for a French-number/customer-locale checkout", async () => {
+it("does not perform template selection synchronously while ingesting a checkout", async () => {
   const recovery = { id: "recovery-initial", shopId: "shop_1", status: "DETECTED", customerId: "customer-1" };
   prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
   prismaMock.checkoutRecovery.findFirst.mockResolvedValue(null);
   vi.spyOn(service, "upsertRecovery").mockResolvedValueOnce(recovery as never);
-  hoisted.whatsappTemplateSelectorMock.select.mockClear();
-  hoisted.whatsappTemplateSelectorMock.select.mockResolvedValueOnce({ outcome: "template-unavailable" } as never);
+  hoisted.approvedTemplateFixture.select.mockClear();
+  hoisted.approvedTemplateFixture.select.mockResolvedValueOnce({ outcome: "template-unavailable" } as never);
   await service.handleCheckoutCreated({
     shop: "shop.myshopify.com", checkoutToken: "initial",
     customer: { shopifyCustomerId: "gid://shopify/Customer/1", phone: "+33123456789" },
     internationalContext: { languageTag: "fr-FR", languageSource: "shopify", countryCode: "FR", currencyCode: "GBP", timeZone: "Europe/London" },
   } as never);
-  expect(hoisted.whatsappTemplateSelectorMock.select).toHaveBeenCalledExactlyOnceWith(
-    expect.objectContaining({ shopId: "shop_1", languageTag: null, countryCode: "FR" }),
-  );
+  expect(hoisted.approvedTemplateFixture.select).not.toHaveBeenCalled();
 });
