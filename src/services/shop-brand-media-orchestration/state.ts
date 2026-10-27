@@ -28,6 +28,18 @@ function checkedDocument(input: unknown): BrandDocument {
   const raw = record(input);
   if (!raw || Object.keys(raw).length === 0) return { schemaVersion: 1, roles: {} };
   if (raw.schemaVersion !== 1 || !record(raw.roles)) throw new BrandStateError("UNSUPPORTED_SCHEMA");
+  if (raw.shopifySourceSync !== undefined) {
+    const sync = record(raw.shopifySourceSync);
+    if (!sync || !Number.isSafeInteger(sync.attempts) || (sync.attempts as number) < 0 ||
+        (sync.attempts as number) > 5 ||
+        !["lastSuccessfulAt", "nextDueAt", "lastAttemptAt", "leaseUntil"].every((key) =>
+          sync[key] === null || (typeof sync[key] === "string" &&
+            Number.isFinite(Date.parse(sync[key] as string)))) ||
+        !(sync.failureCode === null || (typeof sync.failureCode === "string" &&
+          /^[A-Z_]{1,64}$/.test(sync.failureCode))) ||
+        !(sync.leaseOwner === null || (typeof sync.leaseOwner === "string" &&
+          OWNERS.test(sync.leaseOwner)))) throw new BrandStateError("INVALID_STORED_STATE");
+  }
   for (const [key, value] of Object.entries(raw.roles as Record<string, unknown>)) {
     const slot = record(value);
     const source = record(slot?.source);
@@ -103,7 +115,7 @@ export function updateObservedSource(document: BrandDocument, observed: SourceOb
   const slot: BrandSlot = changed ? {
     source, work: newWork(source.url ? "PENDING" : "MISSING"), ready: previous?.ready ?? null,
   } : { ...previous!, source };
-  return { document: { schemaVersion: 1, roles: { ...document.roles, [observed.role]: slot } }, changed };
+  return { document: { ...document, roles: { ...document.roles, [observed.role]: slot } }, changed };
 }
 
 function due(value: string | null, now: number): boolean {
@@ -198,7 +210,7 @@ export function claimRole(document: BrandDocument, shopId: string, role: BrandRo
 }
 
 function putRole(doc: BrandDocument, role: BrandRole, slot: BrandSlot): BrandDocument {
-  return { schemaVersion: 1, roles: { ...doc.roles, [role]: slot } };
+  return { ...doc, roles: { ...doc.roles, [role]: slot } };
 }
 
 export function claimStillCurrent(slot: BrandSlot | undefined, claim: BrandClaim, at: Date): slot is BrandSlot {

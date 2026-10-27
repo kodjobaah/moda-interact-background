@@ -66,7 +66,19 @@ export interface BrandSlot {
   ready: BrandReady | null;
 }
 
+/** Durable Shopify source-sync lease and cadence; not a media role or new table. */
+export interface ShopifySourceSync {
+  lastSuccessfulAt: string | null;
+  nextDueAt: string | null;
+  lastAttemptAt: string | null;
+  attempts: number;
+  failureCode: string | null;
+  leaseOwner: string | null;
+  leaseUntil: string | null;
+}
+
 export interface BrandDocument {
+  shopifySourceSync?: ShopifySourceSync;
   schemaVersion: 1;
   roles: Partial<Record<BrandRole, BrandSlot>>;
 }

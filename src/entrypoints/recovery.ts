@@ -60,6 +60,10 @@ void startReadyWorkerProcess({
     // ARCH-049: independent durable ShopBrand JSONB sweep; no BullMQ wake required.
     const { startShopBrandMediaReconciler } = await import("../services/shop-brand-media-orchestration/runner.js");
     const stopShopBrandMediaReconciler = await startShopBrandMediaReconciler();
+    // ARCH-049 BG003: source discovery is independent from media processing; its own
+    // bounded scan handles new Shopify shops that have no ShopBrand row yet.
+    const { startShopifyBrandSourceSync } = await import("../services/shop-brand-media-shopify/runner.js");
+    const stopShopifyBrandSourceSync = await startShopifyBrandSourceSync();
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -138,6 +142,7 @@ void startReadyWorkerProcess({
           stopExpiryScheduler,
           stopWooCouponDispatcher,
           stopShopBrandMediaReconciler,
+          stopShopifyBrandSourceSync,
           closeWorkerObservability,
           () => backgroundRuntimeConfigService.close(),
           () => recoveryCapacityResumeService.close(),
