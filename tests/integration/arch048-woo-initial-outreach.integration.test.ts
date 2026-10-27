@@ -37,7 +37,6 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       .mockResolvedValue(WOO_TEST_SENDER_WABA);
     // The frozen registration, approval, category and language are persisted
     // in the disposable DB; the provider transport is still controlled.
-
     f = await createWooOutreachFixture();
   });
 

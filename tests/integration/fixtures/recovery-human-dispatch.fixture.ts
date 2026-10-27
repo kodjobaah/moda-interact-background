@@ -26,7 +26,9 @@ import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } fro
   "../../../src/services/recovery-conversation/recovery-follow-up-billing.service.js";
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 
-export async function humanDispatchFixture(label: string, options: { recipient?: string } = {}) {
+export async function humanDispatchFixture(
+  label: string, recipientOrOptions?: string | { recipient?: string },
+) {
   const url = process.env.TEST_DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!url || !redisUrl || process.env.MODA_DISPOSABLE_INTEGRATION !== "1") {
@@ -37,7 +39,9 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
   const shopId = `arch040-b002-${label}-${randomUUID()}`;
   const recoveryId = randomUUID();
   const conversationId = randomUUID();
-  const recipient = options.recipient ?? "15551234567";
+  const recipient = typeof recipientOrOptions === "string"
+    ? recipientOrOptions
+    : recipientOrOptions?.recipient ?? "15551234567";
   const administratorIds: string[] = [];
   await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, status: "ACTIVE" } });
   await db.checkoutRecovery.create({ data: {
@@ -98,35 +102,60 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
     }), undefined, async () => operation);
   }
 
-  const preparation = new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
-    new ConversationWrapperService({
-      repository: new PrismaConversationWrapperReadRepository(db), onMissingSlot: "passthrough",
-    }),
-  ));
+  function createPreparation() {
+    return new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
+      new ConversationWrapperService({
+        repository: new PrismaConversationWrapperReadRepository(db), onMissingSlot: "passthrough",
+      }),
+    ));
+  }
 
-  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = persistedAllowModeration(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"]) {
+  function dispatcher(
+    limits?: HumanPolicyConfig,
+    moderation: ModerationAssessmentService = persistedAllowModeration(),
+    incidents?: HumanDispatcherDependencies["incidents"],
+    senderPreflight?: HumanDispatcherDependencies["senderPreflight"],
+    overrides: Partial<HumanDispatcherDependencies> = {},
+  ) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
       database: db,
       outreach: new RecoveryOutreachAttemptService(db),
       commands, followUps, evaluator,
-      fence: new OutboundSendFenceService(db, durableEligibility),
+      fence: new OutboundSendFenceService(db, durableEligibility, () => new Date(),
+        async () => null), // Existing ARCH040 suites test policy; BG007 SQL tests cover registration independently.
       reconciliation, billing, provider, execution,
       followUpCancellations: cancellationService(),
-      now: () => new Date(), moderation, incidents, senderPreflight,
-      preparation,
+      now: () => new Date(),
+      moderation, incidents, senderPreflight, preparation: createPreparation(),
       // Explicit trusted-provider fixture: production uses Meta category reads.
       storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
-      templateCategories: { verify: vi.fn(async () => "MARKETING") },
+      followUpTemplates: { resolve: vi.fn(async () => ({
+        kind: "prepared", prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
+        send: { templateName: "recovery_follow_up", languageCode: "en_US",
+          bodyParameters: [], templateRegistration: {
+            shopId, senderWabaId: "123456789", purpose: "FOLLOW_UP_NO_OFFER",
+            variantId: "arch040-variant", registrationId: "arch040-reg",
+            definitionId: "arch040-definition", providerTemplateId: "arch040-provider",
+            providerTemplateName: "recovery_follow_up", providerLanguageCode: "en_US",
+            submittedContentHash: "a".repeat(64), bindingFingerprint: "a".repeat(64),
+          },
+        },
+      })) },
     } as unknown as HumanDispatcherDependencies;
-    return new HumanCommandDispatcherService(deps);
+    // An integration scenario may supply the production SQL registration fence
+    // and a deterministic BG001 preparation result, while keeping the normal
+    // dispatcher, Redis lease, PostgreSQL claim and transport real.
+    return new HumanCommandDispatcherService({ ...deps, ...overrides });
   }
 
   async function addCommand(input: {
     kind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
     idempotencyKey?: string; attemptId?: string; textBody?: string;
     seedVerifiedInbound?: boolean;
+    /** The accepted command payload is immutable; select the template at creation. */
+    templateName?: string;
   } = {}) {
     const id = randomUUID();
     const key = input.idempotencyKey ?? id;
@@ -155,7 +184,7 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
        "kind","recipientSnapshot","textBody","templateName","templateLanguageCode","recoveryOutreachAttemptId")
       VALUES ($1,$2,$3,$4,$5,1,$6::"whatsapp"."MerchantConversationSendKind",$7,$8,$9,$10,$11)`,
       id, shopId, conversationId, key, digest, kind, recipient, text,
-      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "recovery_follow_up" : null,
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? (input.templateName ?? "recovery_follow_up") : null,
       kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "en_US" : null, input.attemptId ?? null);
     return id;
   }
@@ -183,7 +212,7 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
       conversationId, sentAt);
   }
 
-  async function addMerchantFollowUpCommand() {
+  async function addMerchantFollowUpCommand(templateName = "recovery_follow_up") {
     await addInitialOutreach();
     const idempotencyKey = `merchant-${recoveryId}`;
     const claim = await followUps.claimSequenceTwo({
@@ -192,7 +221,7 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
     });
     if (claim.kind !== "claimed") throw new Error(`Expected an eligible HUMAN follow-up: ${claim.reason}`);
     const commandId = await addCommand({ kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
-      idempotencyKey, attemptId: claim.attemptId });
+      idempotencyKey, attemptId: claim.attemptId, templateName });
     return { commandId, attemptId: claim.attemptId };
   }
 
@@ -243,7 +272,8 @@ export async function humanDispatchFixture(label: string, options: { recipient?:
     whatsapp: mocks.whatsapp, providerHttpRequests: mocks.requests,
     failNextProviderHttp: mocks.failNextHttp, holdNextProviderHttp: mocks.holdNextHttp,
     startAimock: mocks.startAimock,
-    durableEligibility, preparation, persistedAllowModeration, dispatcher,
+    durableEligibility, preparation: createPreparation(),
+    persistedAllowModeration: persistedAllowModeration, dispatcher,
     addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
     async close() {
       await db.shop.delete({ where: { id: shopId } });

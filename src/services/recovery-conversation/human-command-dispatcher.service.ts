@@ -14,9 +14,7 @@ import { OutboundSendFenceService, type RecoveryMarketingPermit } from "./outbou
 import {
   recoveryStoredConsentService, type StoredRecoveryConsentReader,
 } from "./recovery-stored-consent.service.js";
-import {
-  metaWhatsAppTemplateCategoryService, type TemplateCategoryVerifier,
-} from "../whatsapp-template-category.service.js";
+import { merchantFollowUpTemplateService, type MerchantFollowUpTemplateService } from "./merchant-follow-up-template.service.js";
 import { HumanSendReconciliationService } from "./human-send-reconciliation.service.js";
 import { RecoveryFollowUpBillingService } from "./recovery-follow-up-billing.service.js";
 import { FollowUpClaimCancellationService, type FollowUpClaimCancellation } from "./follow-up-claim-cancellation.service.js";
@@ -59,7 +57,7 @@ export type HumanDispatcherDependencies = {
   recipientFailure?: Pick<typeof synchronousRecipientFailureService, "afterPersistedRejection">;
   /** Both are required by production for merchant post-window templates. */
   storedConsent?: StoredRecoveryConsentReader;
-  templateCategories?: TemplateCategoryVerifier;
+  followUpTemplates?: Pick<MerchantFollowUpTemplateService, "resolve">;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -83,7 +81,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     incidents: createHumanSendIncidentSink(),
     recipientFailure: synchronousRecipientFailureService,
     storedConsent: recoveryStoredConsentService,
-    templateCategories: metaWhatsAppTemplateCategoryService,
+    followUpTemplates: merchantFollowUpTemplateService,
   };
 }
 
@@ -283,9 +281,7 @@ export class HumanCommandDispatcherService {
     try {
       await this.deps.senderPreflight?.();
     } catch (error) {
-      // Record the original exception before attempting durable deferral, so a
-      // secondary persistence failure cannot hide the preflight failure.
-      logger.warn("arch040.human_dispatcher.sender_preflight_failed", {
+      logger.error("arch040.human_dispatcher.sender_preflight_failed", {
         commandId, reasonCode: "sender_configuration_unavailable",
         errorType: error instanceof Error ? error.name : "unknown",
       });
@@ -295,34 +291,41 @@ export class HumanCommandDispatcherService {
       return;
     }
 
-    // Human free-form responses inside a customer-open service window are not
-    // Marketing, but still pass the shared STOP SQL fence. Only the merchant's
-    // post-window recovery template requires stored consent + Meta category.
+    // Only post-window recovery templates require proactive consent. Their
+    // frozen header/body/button values and registration are re-resolved from
+    // BG001/BG004, not the merchant request or Meta's category GET API.
     let proactive: RecoveryMarketingPermit | undefined;
+    let preparedSend: Extract<Awaited<ReturnType<MerchantFollowUpTemplateService["resolve"]>>,
+      { kind: "prepared" }>["send"] | undefined;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
-      if (!this.deps.storedConsent || !this.deps.templateCategories ||
-          !command.templateName || !command.templateLanguageCode) {
-        await this.rejectTerminal(commandId, leaseToken, "marketing-template-unverified");
+      if (!this.deps.storedConsent || !this.deps.followUpTemplates) {
+        await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
         return;
       }
-      const [permission, category] = await Promise.all([
-        this.deps.storedConsent.preflight({
-          shopId: command.shopId, recoveryId: context.recoveryId,
-          recipient: command.recipientSnapshot,
-        }),
-        this.deps.templateCategories.verify({
-          providerTemplateName: command.templateName,
-          providerLanguageCode: command.templateLanguageCode,
-        }),
-      ]);
-      if (permission.kind !== "allowed" || category !== "MARKETING") {
-        await this.rejectTerminal(commandId, leaseToken,
-          permission.kind === "denied" ? permission.reason : "marketing-template-unverified");
+      const permission = await this.deps.storedConsent.preflight({
+        shopId: command.shopId, recoveryId: context.recoveryId,
+        recipient: command.recipientSnapshot,
+      });
+      if (permission.kind !== "allowed") {
+        await this.rejectTerminal(commandId, leaseToken, permission.reason);
         return;
       }
+      const selected = await this.deps.followUpTemplates.resolve(command, context.recoveryId);
+      if (selected.kind !== "prepared") {
+        await this.rejectTerminal(commandId, leaseToken, selected.reason);
+        return;
+      }
+      const registration = selected.send.templateRegistration;
+      if (!registration) {
+        await this.rejectTerminal(commandId, leaseToken, "template_not_allowed");
+        return;
+      }
+      preparedSend = selected.send;
       proactive = {
         consent: permission.snapshot, verifiedCategory: "MARKETING",
-        templateName: command.templateName, languageCode: command.templateLanguageCode,
+        templateName: selected.send.templateName,
+        languageCode: selected.send.languageCode,
+        templateRegistration: registration,
       };
     }
 
@@ -386,10 +389,8 @@ export class HumanCommandDispatcherService {
             to: command.recipientSnapshot, text: permit.messageContent!,
           })
         : await this.deps.provider.sendWhatsAppTemplate({
-            to: command.recipientSnapshot, templateName: command.templateName ?? "",
-            languageCode: command.templateLanguageCode ?? "en",
-            ...(bodyParameters(command.templateParameters).length
-              ? { bodyParameters: bodyParameters(command.templateParameters) } : {}),
+            to: command.recipientSnapshot,
+            ...preparedSend!,
           });
       const recorded = await this.deps.reconciliation.recordProviderAccepted({
         commandId, leaseToken, providerMessageId: response.providerMessageId, providerVerified: true,
@@ -439,6 +440,7 @@ export class HumanCommandDispatcherService {
       }
       logger.warn("arch040.human_dispatcher.provider_outcome", {
         commandId, outcome: definitive ? "definitive_failure" : "unknown",
+        errorType: error instanceof Error ? error.name : "unknown",
       });
       // Incidents are reported only after the durable command disposition is recorded.
       // Failure of the support pipeline cannot change that disposition or re-send to Meta.
@@ -505,8 +507,4 @@ export class HumanCommandDispatcherService {
 function safeCode(value: string): string {
   const bounded = value.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 64);
   return /^[a-z]/.test(bounded) ? bounded : "policy_denied";
-}
-function bodyParameters(value: unknown): string[] {
-  return Array.isArray(value) && value.length <= 16 && value.every((x) => typeof x === "string")
-    ? value : [];
 }

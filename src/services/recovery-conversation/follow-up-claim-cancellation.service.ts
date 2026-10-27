@@ -160,7 +160,16 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
     // still cancel denied content but keep the claim for bounded repair.
     const credit = providerSafe && attempt
       ? await this.billing.inspectBeforePermit(tx, { shopId: context.shopId, attemptId: attempt.id })
-          .catch(() => ({ kind: "unsafe" as const }))
+          .catch((error: unknown) => {
+            // The command is still cancelled, but a failed credit inspection
+            // MUST hold the sequence-two claim for durable repair, not silently
+            // declare it safe to release or hide the infrastructure failure.
+            logger.error("arch040.follow_up_credit_inspection_failed", {
+              commandId, reasonCode: "credit_inspection_unavailable",
+              errorType: error instanceof Error ? error.name : "unknown",
+            });
+            return { kind: "unsafe" as const };
+          })
       : { kind: "unsafe" as const };
     const safeToRelease = providerSafe && credit.kind === "clear";
 
