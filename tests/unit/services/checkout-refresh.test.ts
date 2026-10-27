@@ -74,15 +74,11 @@ const hoisted = vi.hoisted(() => {
       })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
     },
-    approvedTemplateFixture: {
-      select: vi.fn(async () => ({
-        outcome: "selected",
-        canonicalLanguageTag: "en-GB",
-        providerLanguageCode: "en_GB",
-        providerTemplateName: "checkout_recovery",
-        providerTemplateId: null,
-        selectionSource: "exact",
-        marketCapability: "supported",
+    automatedTemplateMock: {
+      prepare: vi.fn(async () => ({
+        kind: "prepared",
+        prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "checkout_recovery", canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB" },
+        send: { templateName: "checkout_recovery", languageCode: "en_GB", templateRegistration: { shopId: "shop_1", purpose: "INITIAL_NO_OFFER" } },
       })),
     },
     pendingCandidateServiceMock: {
@@ -150,18 +146,7 @@ vi.mock("../../../src/services/whatsapp.service.js", () => ({
   whatsAppService: hoisted.whatsAppServiceMock,
 }));
 vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
-  automatedRecoveryTemplateService: { prepare: vi.fn(async (input: unknown) => {
-    const selected = await hoisted.approvedTemplateFixture.select(input);
-    if (selected.outcome !== "selected") return { kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
-    return { kind: "prepared", prepared: {
-      purpose: "INITIAL_NO_OFFER", providerTemplateName: selected.providerTemplateName,
-      providerLanguageCode: selected.providerLanguageCode,
-      canonicalLanguageTag: selected.canonicalLanguageTag,
-    }, send: {
-      templateName: selected.providerTemplateName, languageCode: selected.providerLanguageCode,
-      recoveryPromise: { kind: "NO_OFFER" },
-    } };
-  }) },
+  automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
 }));
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: hoisted.pendingCandidateServiceMock,
@@ -696,17 +681,19 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
   });
 });
 
-it("does not perform template selection synchronously while ingesting a checkout", async () => {
+it("initial outreach delegates template preparation without forwarding checkout language", async () => {
   const recovery = { id: "recovery-initial", shopId: "shop_1", status: "DETECTED", customerId: "customer-1" };
   prismaMock.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop_1" });
   prismaMock.checkoutRecovery.findFirst.mockResolvedValue(null);
   vi.spyOn(service, "upsertRecovery").mockResolvedValueOnce(recovery as never);
-  hoisted.approvedTemplateFixture.select.mockClear();
-  hoisted.approvedTemplateFixture.select.mockResolvedValueOnce({ outcome: "template-unavailable" } as never);
+  hoisted.automatedTemplateMock.prepare.mockClear();
+  hoisted.automatedTemplateMock.prepare.mockResolvedValueOnce({ kind: "unavailable", reason: "no-approved-template" } as never);
   await service.handleCheckoutCreated({
     shop: "shop.myshopify.com", checkoutToken: "initial",
     customer: { shopifyCustomerId: "gid://shopify/Customer/1", phone: "+33123456789" },
     internationalContext: { languageTag: "fr-FR", languageSource: "shopify", countryCode: "FR", currencyCode: "GBP", timeZone: "Europe/London" },
   } as never);
-  expect(hoisted.approvedTemplateFixture.select).not.toHaveBeenCalled();
+  expect(hoisted.automatedTemplateMock.prepare).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ shopId: "shop_1", recoveryId: "recovery-initial", stage: "INITIAL", conversationLanguageTag: null }),
+  );
 });
