@@ -10,6 +10,10 @@ export const platformConsumerConfiguration = configuration;
 export async function readWooCouponPolicy(): Promise<Readonly<WooCouponSyncConfig & { workerConcurrency: number }>> {
   return (await configuration.read("woo.couponSync")).value;
 }
+/** Public-brand media uses a separate non-secret policy and dedicated worker-only R2 credentials. */
+export async function readShopBrandPublicMediaConfiguration() {
+  return (await configuration.read("shopBrand.publicMedia")).value;
+}
 export async function readR2Configuration() {
   return (await configuration.read("merchant.knowledge.r2")).value;
 }
