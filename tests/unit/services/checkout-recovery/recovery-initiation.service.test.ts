@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     markStatus: vi.fn(),
     markWaitingAfterConfirmedSend: vi.fn(),
   },
+  initialOutreachFinalizer: { finalizeConfirmedInitial: vi.fn() },
   followUp: { schedule: vi.fn() },
   consent: { evaluateFirst: vi.fn(), evaluateReentry: vi.fn(), notifyMissingRecipient: vi.fn() },
   suppression: {
@@ -106,7 +107,7 @@ function createInitiation(overrides: {
     commitSuccessfulInitiation: vi.fn(async () => undefined),
     ...overrides.billing,
   } as unknown as RecoveryBillingService;
-  const finalizer = new RecoveryOutreachFinalizationService(billing);
+  const finalizer = new RecoveryOutreachFinalizationService(billing, mocks.initialOutreachFinalizer as never);
   const ports = {
     upsertRecovery: vi.fn(async () => overrides.recovery ?? recovery),
     resolveRecipient: vi.fn(() => "+15551234567"),
@@ -149,6 +150,9 @@ beforeEach(() => {
   mocks.attempt.getOrCreate.mockResolvedValue(attempt);
   mocks.attempt.markStatus.mockResolvedValue(undefined);
   mocks.attempt.markWaitingAfterConfirmedSend.mockResolvedValue({ count: 1 });
+  mocks.initialOutreachFinalizer.finalizeConfirmedInitial.mockResolvedValue({
+    outcome: "created", outreachAttemptId: attempt.id,
+  });
   mocks.suppression.evaluate.mockResolvedValue({ kind: "allowed" });
   mocks.suppression.deferDetectedRecovery.mockResolvedValue(true);
   mocks.suppression.clearDetectedSuppression.mockResolvedValue(undefined);
@@ -535,10 +539,47 @@ describe("RecoveryInitiationService", () => {
       recoveryId: recovery.id,
       occurredAt: sentAt,
     });
-    expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith(attempt.id, {
-      sentAt,
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledWith({
+      shopId: recovery.shopId,
+      checkoutRecoveryId: recovery.id,
+      outreachAttemptId: attempt.id,
       outboundMessageId: confirmedMessage.id,
+      sentAt,
       followUpDueAt: null,
+    });
+  });
+
+  it("retries a failed notice from the same confirmed idempotent admission without another provider send", async () => {
+    const persistenceError = new Error("Support notice unavailable");
+    mocks.initialOutreachFinalizer.finalizeConfirmedInitial
+      .mockRejectedValueOnce(persistenceError)
+      .mockResolvedValueOnce({ outcome: "replayed", outreachAttemptId: attempt.id });
+    const { service, billing } = createInitiation();
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(persistenceError);
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(mocks.outbound.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      idempotencyKey: `recovery-outreach:${attempt.id}`,
+    }));
+
+    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    await expect(service.handleCheckoutCreated(event)).resolves.toEqual(recovery);
+
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(mocks.outbound.sendTemplate.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      idempotencyKey: `recovery-outreach:${attempt.id}`,
+    }));
+    expect(mocks.outbound.findExistingAdmission).toHaveBeenCalledTimes(2);
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledTimes(2);
+    expect(billing.commitSuccessfulInitiation).toHaveBeenNthCalledWith(1, {
+      admission,
+      recoveryId: recovery.id,
+      occurredAt: sentAt,
+    });
+    expect(billing.commitSuccessfulInitiation).toHaveBeenNthCalledWith(2, {
+      admission,
+      recoveryId: recovery.id,
+      occurredAt: sentAt,
     });
   });
 
@@ -573,6 +614,14 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       to: attempt.recipient,
     }));
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledWith({
+      shopId: recovery.shopId,
+      checkoutRecoveryId: recovery.id,
+      outreachAttemptId: attempt.id,
+      outboundMessageId: confirmedMessage.id,
+      sentAt,
+      followUpDueAt: null,
+    });
     expect(mocks.prisma.checkoutRecovery.updateMany).toHaveBeenCalledWith({
       where: { id: recovery.id, status: "DETECTED" },
       data: {
