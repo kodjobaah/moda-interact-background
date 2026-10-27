@@ -2,8 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
 import { vi } from "vitest";
-import { allowModerationFixture } from "./arch040-allow-moderation.fixture.js";
-import type { ModerationAssessmentService } from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
+import {
+  PostgresModerationAssessmentService, type ModerationAssessmentService,
+} from "../../../src/services/conversation-moderation/moderation-assessment.service.js";
+import type { ModerationOperation } from "../../../src/services/conversation-moderation/moderation-operation.js";
+import { HumanPreparedCommandService } from "../../../src/services/recovery-conversation/human-prepared-command.service.js";
+import { HumanWrapperPreparationService } from "../../../src/services/recovery-conversation/human-wrapper-preparation.service.js";
+import { ConversationWrapperService } from "../../../src/services/conversation-wrappers/service.js";
+import { PrismaConversationWrapperReadRepository } from "../../../src/services/conversation-wrappers/repository.js";
 import { startArch040BackgroundMocks } from "./arch040-background-mocks.fixture.js";
 import { RecoveryOutreachAttemptService } from "../../../src/services/recovery-outreach-attempt.service.js";
 import {
@@ -21,7 +27,7 @@ import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } fro
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 
 export async function humanDispatchFixture(
-  label: string, recipientOverride?: string,
+  label: string, recipientOrOptions?: string | { recipient?: string },
 ) {
   const url = process.env.TEST_DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
@@ -33,7 +39,9 @@ export async function humanDispatchFixture(
   const shopId = `arch040-b002-${label}-${randomUUID()}`;
   const recoveryId = randomUUID();
   const conversationId = randomUUID();
-  const recipient = recipientOverride ?? "15551234567";
+  const recipient = typeof recipientOrOptions === "string"
+    ? recipientOrOptions
+    : recipientOrOptions?.recipient ?? "15551234567";
   const administratorIds: string[] = [];
   await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, status: "ACTIVE" } });
   await db.checkoutRecovery.create({ data: {
@@ -82,7 +90,33 @@ export async function humanDispatchFixture(
       new RecoveryFollowUpBillingService(undefined, release));
   }
 
-  function dispatcher(limits?: HumanPolicyConfig, moderation: ModerationAssessmentService = allowModerationFixture(), incidents?: HumanDispatcherDependencies["incidents"], senderPreflight?: HumanDispatcherDependencies["senderPreflight"], overrides: Partial<HumanDispatcherDependencies> = {}) {
+  function persistedAllowModeration(): ModerationAssessmentService {
+    const operation: ModerationOperation = {
+      moderation: { key: "omini.moderation", version: 1,
+        value: { baseUrl: "http://127.0.0.1:1/v1/moderations", modelId: "omni-moderation-latest" } },
+      providerVersion: 1, openAiApiKey: "arch040-disposable-test-only",
+    };
+    return new PostgresModerationAssessmentService(db, async () => ({
+      flagged: false, categories: { harassment: false },
+      categoryScores: { harassment: 0.01 }, returnedModel: "omni-moderation-latest",
+    }), undefined, async () => operation);
+  }
+
+  function createPreparation() {
+    return new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
+      new ConversationWrapperService({
+        repository: new PrismaConversationWrapperReadRepository(db), onMissingSlot: "passthrough",
+      }),
+    ));
+  }
+
+  function dispatcher(
+    limits?: HumanPolicyConfig,
+    moderation: ModerationAssessmentService = persistedAllowModeration(),
+    incidents?: HumanDispatcherDependencies["incidents"],
+    senderPreflight?: HumanDispatcherDependencies["senderPreflight"],
+    overrides: Partial<HumanDispatcherDependencies> = {},
+  ) {
     const screening = new HumanSendPolicyService(db, redis, limits);
     const evaluator = new HumanCommandEvaluationService(commands, followUps, screening);
     const deps = {
@@ -93,7 +127,9 @@ export async function humanDispatchFixture(
         async () => null), // Existing ARCH040 suites test policy; BG007 SQL tests cover registration independently.
       reconciliation, billing, provider, execution,
       followUpCancellations: cancellationService(),
-      now: () => new Date(), moderation, incidents, senderPreflight,
+      now: () => new Date(),
+      moderation, incidents, senderPreflight, preparation: createPreparation(),
+      // Explicit trusted-provider fixture: production uses Meta category reads.
       storedConsent: { preflight: vi.fn(async () => ({ kind: "allowed", snapshot: null })) },
       followUpTemplates: { resolve: vi.fn(async () => ({
         kind: "prepared", prepared: { purpose: "FOLLOW_UP_NO_OFFER" },
@@ -236,7 +272,9 @@ export async function humanDispatchFixture(
     whatsapp: mocks.whatsapp, providerHttpRequests: mocks.requests,
     failNextProviderHttp: mocks.failNextHttp, holdNextProviderHttp: mocks.holdNextHttp,
     startAimock: mocks.startAimock,
-    durableEligibility, dispatcher, addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
+    durableEligibility, preparation: createPreparation(),
+    persistedAllowModeration: persistedAllowModeration, dispatcher,
+    addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
     async close() {
       await db.shop.delete({ where: { id: shopId } });
       for (const id of administratorIds) await db.platformAdmin.delete({ where: { id } });

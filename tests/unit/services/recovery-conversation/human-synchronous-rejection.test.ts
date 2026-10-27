@@ -58,7 +58,10 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
     })) },
     followUps: { claimSequenceTwo: vi.fn(async () => ({ kind: "claimed", attemptId: "attempt-1" })) },
     followUpCancellations: { cancelClaimed: vi.fn(), repairCancelledClaims: vi.fn() },
-    fence: { admitFinalSend: vi.fn(async () => ({ kind: "admitted" })) },
+    fence: { admitFinalSend: vi.fn(async () => ({ kind: "admitted", messageContent: "Hello" })) },
+    preparation: { freeze: vi.fn(async () => ({ kind: "frozen", body: "Hello", evidence: {
+      schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: "unused",
+    } })) },
     provider: { sendWhatsAppTemplate: vi.fn(async () => { throw error; }),
       sendWhatsAppText: vi.fn(async () => { throw error; }) },
     reconciliation, billing, recipientFailure, now: () => new Date("2026-10-22T15:00:00.000Z"),

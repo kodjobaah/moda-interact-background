@@ -69,7 +69,8 @@ export class ConversationService {
     version: number;
     duplicate: boolean;
   }> {
-    const occurredAt = message.occurredAt ?? new Date();
+    const receivedAt = new Date();
+    const occurredAt = message.occurredAt ?? receivedAt;
     /*
      * First protect against Meta delivering the
      * same message more than once.
@@ -150,7 +151,7 @@ export class ConversationService {
           status: "DELIVERED",
 
           content: message.content,
-          createdAt: occurredAt,
+          createdAt: receivedAt,
         },
       });
 
@@ -166,7 +167,7 @@ export class ConversationService {
             lastProcessedVersion: currentConversation.lastProcessedVersion,
             pendingTurnStartedAt: null,
           },
-          data: { pendingTurnStartedAt: occurredAt },
+          data: { pendingTurnStartedAt: receivedAt },
         });
       }
 
@@ -187,8 +188,8 @@ export class ConversationService {
       // This runs in the same transaction as the inbound-version increment.
       await tx.$executeRaw`
         UPDATE "whatsapp"."Conversation"
-        SET "lastInboundAt" = GREATEST("lastInboundAt", ${occurredAt}),
-            "lastMessageAt" = GREATEST("lastMessageAt", ${occurredAt})
+        SET "lastInboundAt" = GREATEST("lastInboundAt", ${receivedAt}),
+          "lastMessageAt" = GREATEST("lastMessageAt", ${receivedAt})
         WHERE "id" = ${message.conversationId}`;
       return conversation;
     });

@@ -147,5 +147,13 @@ export function registerClaimAndStateCases(context: ConversationTurnFacadeContex
     });
 
     expect(test.runAgent).toHaveBeenCalledTimes(1);
+    expect(test.queue.add).toHaveBeenCalledWith(
+      "process-conversation-turn",
+      { conversationId: "conversation-1", observedVersion: 3 },
+      expect.objectContaining({
+        jobId: "conversation-turn__conversation-1__3",
+        delay: 250,
+      }),
+    );
   });
 }
