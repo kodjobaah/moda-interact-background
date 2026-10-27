@@ -55,6 +55,11 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
     fixture = await createWooOutreachFixture();
     const f = fixture;
     await f.db.shop.update({ where: { id: f.shopId }, data: { onboardingCompleted: true } });
+    await f.db.shopSettings.upsert({
+      where: { shopId: f.shopId },
+      create: { shopId: f.shopId, notifyOnInitialRecoveryOutreach: true },
+      update: { notifyOnInitialRecoveryOutreach: true },
+    });
     const sourceQueue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
     const initialQueue = new WooInitialDispatchQueue();
     const index = new PendingRecoveryCandidateIndexStore();
@@ -104,6 +109,13 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       const attempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: recovered.id } });
       expect(attempts).toHaveLength(1);
       expect(attempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
+      expect(await f.db.merchantSupportMessage.count({
+        where: {
+          checkoutRecoveryId: recovered.id,
+          systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
+          sourceKey: `recovery-initial-outreach:v1:${attempts[0]!.id}`,
+        },
+      })).toBe(1);
       expect(f.providerRequests).toBe(1);
       expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: recovered.id, sequence: 2 } })).toBe(0);
       expect(await f.db.usageEvent.count({ where: {
@@ -112,6 +124,9 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       expect((await orchestrator.onCheckout({ ...event, eventId: `evt-${randomUUID()}` })).kind)
         .toBe("existing-recovery");
       expect(f.providerRequests).toBe(1);
+      expect(await f.db.merchantSupportMessage.count({
+        where: { checkoutRecoveryId: recovered.id, systemCode: "RECOVERY_INITIAL_OUTREACH_SENT" },
+      })).toBe(1);
       // A local STOP received after the first send may not create a second send.
       await f.stop();
       await expect(orchestrator.onInitialDispatch(recovered.id, attempts[0]!.id))

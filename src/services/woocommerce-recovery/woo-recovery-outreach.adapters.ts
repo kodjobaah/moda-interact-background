@@ -3,6 +3,7 @@ import { recoveryRecipientResolverService } from "../checkout-recovery/recovery-
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryBillingService } from "../recovery-billing.service.js";
+import { recoveryInitialOutreachSupportNoticeService } from "../checkout-recovery/recovery-initial-outreach-support-notice.service.js";
 import { conversationService } from "../conversation.service.js";
 import { automatedRecoveryTemplateService } from "../recovery-template-integration/automated-recovery-template.service.js";
 import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
@@ -125,30 +126,41 @@ export function createWooRecoveryOutreachService(input: {
         if (message.conversationId !== (await prisma.conversation.findUnique({
           where: { checkoutRecoveryId: recovery.id }, select: { id: true },
         }))?.id) throw new Error("WOO_INITIAL_MESSAGE_CONVERSATION_MISMATCH");
-        // Use the canonical credit and attempt transition, deliberately NOT the
-        // Shopify finalizer's ensureScheduledInitialFollowUp method.
-        await recoveryBillingService.commitSuccessfulInitiation({
-          admission, recoveryId: recovery.id, occurredAt: message.sentAt,
-        });
-        const transitioned = await recoveryOutreachAttemptService.markWaitingAfterConfirmedSend(
-          attempt.id, { sentAt: message.sentAt, outboundMessageId: message.id, followUpDueAt: null },
-        );
-        if (!transitioned || transitioned.count !== 1) {
-          const persisted = await prisma.recoveryOutreachAttempt.findUnique({
-            where: { id: attempt.id }, select: {
-              outboundMessageId: true, sentAt: true, status: true, followUpDueAt: true,
-            },
+        let stage: "billing" | "support_notice" | "recovery_status" = "billing";
+        try {
+          await recoveryBillingService.commitSuccessfulInitiation({
+            admission, recoveryId: recovery.id, occurredAt: message.sentAt,
           });
-          if (!persisted || persisted.outboundMessageId !== message.id || !persisted.sentAt ||
-            persisted.followUpDueAt !== null ||
-            !["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(persisted.status))
-            throw new Error("WOO_INITIAL_FINALIZATION_CONFLICT");
+          stage = "support_notice";
+          await recoveryInitialOutreachSupportNoticeService.finalizeConfirmedInitial({
+            shopId: recovery.shopId,
+            checkoutRecoveryId: recovery.id,
+            outreachAttemptId: attempt.id,
+            outboundMessageId: message.id,
+            sentAt: message.sentAt,
+            followUpDueAt: null,
+          });
+          stage = "recovery_status";
+          await prisma.checkoutRecovery.updateMany({
+            where: { id: recovery.id, shopId: recovery.shopId, status: "DETECTED" },
+            data: { status: "MESSAGE_SENT", messageSentAt: message.sentAt,
+              admissionBlockedAt: null, admissionBlockReason: null },
+          });
+        } catch (error) {
+          try {
+            input.logger.error("recovery.initial_outreach_support_notice.woocommerce_finalization_failed", {
+              shopId: recovery.shopId,
+              checkoutRecoveryId: recovery.id,
+              outreachAttemptId: attempt.id,
+              outboundMessageId: message.id,
+              stage,
+              error,
+            });
+          } catch {
+            // Preserve the original finalization failure if the logging sink fails.
+          }
+          throw error;
         }
-        await prisma.checkoutRecovery.updateMany({
-          where: { id: recovery.id, shopId: recovery.shopId, status: "DETECTED" },
-          data: { status: "MESSAGE_SENT", messageSentAt: message.sentAt,
-            admissionBlockedAt: null, admissionBlockReason: null },
-        });
       },
     },
   });
