@@ -57,6 +57,10 @@ void startReadyWorkerProcess({
         lease: backgroundRuntimeLeaseService,
       });
 
+    // ARCH-049: independent durable ShopBrand JSONB sweep; no BullMQ wake required.
+    const { startShopBrandMediaReconciler } = await import("../services/shop-brand-media-orchestration/runner.js");
+    const stopShopBrandMediaReconciler = await startShopBrandMediaReconciler();
+
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
       lease: backgroundRuntimeLeaseService,
@@ -133,6 +137,7 @@ void startReadyWorkerProcess({
           stopRepairScheduler,
           stopExpiryScheduler,
           stopWooCouponDispatcher,
+          stopShopBrandMediaReconciler,
           closeWorkerObservability,
           () => backgroundRuntimeConfigService.close(),
           () => recoveryCapacityResumeService.close(),
