@@ -12,6 +12,8 @@ describe("ARCH-040 automated template moderation input", () => {
       contract: "moda.whatsapp.automated-template-parameters.v1",
       templateName: "checkout_recovery", languageCode: "en_US",
       bodyParameters: ["Your saved cart", "Order 123"],
+      textHeader: null,
+      imageHeader: null,
       dynamicUrlButton: { index: 0, text: "order-123" },
     });
     expect(result.effectiveText).not.toContain(input.to);
