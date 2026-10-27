@@ -1,5 +1,5 @@
 import type {
-  BrandMediaResolver, BrandMediaRole, RecoveryTemplatePreparationInput,
+  BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
   ShopBrandRow, TemplateUnavailableReason,
 } from "./recovery-template.types.js";
 
@@ -69,7 +69,7 @@ export class RecoveryVariableResolver {
     private readonly input: RecoveryTemplatePreparationInput,
     private readonly readBrand: (shopId: string) => Promise<ShopBrandRow | null>,
     private readonly resolveMedia: BrandMediaResolver,
-    private readonly mediaApprovedHosts: readonly string[],
+    private readonly mediaApprovedHosts: MediaApprovedHosts,
     private readonly clock: () => Date,
     private readonly maxCheckoutAgeMs: number = 5 * 60_000,
   ) {}
@@ -131,9 +131,11 @@ export class RecoveryVariableResolver {
     if (!promise) {
       promise = (async () => {
         const media = await this.resolveMedia(this.input.shopId, role);
+        const approvedHosts = typeof this.mediaApprovedHosts === "function"
+          ? await this.mediaApprovedHosts() : this.mediaApprovedHosts;
         if (!media || media.status !== "READY" || media.kind !== "R2_DERIVATIVE" ||
             media.shopId !== this.input.shopId || media.role !== role ||
-            !validHttps(media.httpsUrl, this.mediaApprovedHosts)) {
+            !validHttps(media.httpsUrl, approvedHosts)) {
           throw new BindingUnavailable("MEDIA_NOT_READY");
         }
         return media.httpsUrl;
@@ -143,10 +145,10 @@ export class RecoveryVariableResolver {
     return promise;
   }
 
-  async imageHeader(): Promise<string> {
-    // This separate typed media component can never be satisfied by logoUrl,
-    // squareLogoUrl or coverImageUrl source strings.
-    return this.readyMedia("headerImage");
+  async imageHeader(role: BrandMediaRole): Promise<string> {
+    // The role is frozen by Admin in parameterBindingsSnapshot, not guessed
+    // from an original merchant URL, another field or caller preference.
+    return this.readyMedia(role);
   }
 
   async resolve(key: SemanticKey): Promise<string> {
@@ -178,20 +180,16 @@ export class RecoveryVariableResolver {
         return boundedText(key === "offer.code" ? offer.code : offer.description, 200);
       }
       default: {
+        if (BRAND_URL_KEYS.some((candidate) => candidate === key)) {
+          // A text binding requesting a logo URL receives the verified derivative,
+          // never the original ShopBrand URL. This is not an IMAGE header.
+          const role: BrandMediaRole = key === "shopBrand.logoUrl" ? "LOGO" :
+            key === "shopBrand.squareLogoUrl" ? "SQUARE_LOGO" : "COVER_IMAGE";
+          return this.readyMedia(role);
+        }
         const brand = await this.brand();
         if (!brand) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         const brandField = key.slice("shopBrand.".length) as keyof ShopBrandRow;
-        if (BRAND_URL_KEYS.some((candidate) => candidate === key)) {
-          // Brand URLs stored by Shopify are merchant-controlled ORIGINALS,
-          // not send-ready Meta image URLs or even safe text links.
-          const source = brand[brandField];
-          if (typeof source !== "string" || !source.trim()) {
-            throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
-          }
-          const ready = await this.readyMedia(brandField as BrandMediaRole);
-          if (ready === source) throw new BindingUnavailable("MEDIA_NOT_READY");
-          return ready;
-        }
         const value = brand[brandField];
         if (key === "shopBrand.logoWidth" || key === "shopBrand.logoHeight") {
           if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > 10000) {

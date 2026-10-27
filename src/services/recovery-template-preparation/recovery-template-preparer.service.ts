@@ -2,11 +2,12 @@ import { createLogger, type StructuredLogger } from "@modainteract/moda-interact
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { whatsAppService } from "../whatsapp.service.js";
 import { BindingUnavailable, RecoveryVariableResolver } from "./recovery-template-brand.js";
+import { createProductionShopBrandMediaAdapter } from "../shop-brand-media-runtime/resolver.js";
 import { prepareFrozenComponents } from "./recovery-template-bindings.js";
 import { PrismaRecoveryTemplateRepository } from "./recovery-template-repository.js";
 import { purposeFor, selectRecoveryAssignment } from "./recovery-template-selection.js";
 import type {
-  BrandMediaResolver,
+  BrandMediaResolver, MediaApprovedHosts,
   PreparedRecoveryTemplate,
   PreparationResult,
   RecoveryTemplatePreparationInput,
@@ -27,8 +28,6 @@ const defaultLogger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
-const noReadyMedia: BrandMediaResolver = async () => null;
-
 /**
  * Purely read-only template preparation facade. An approved provider template
  * is NOT permission to send: consent/STOP, moderation, credits and the final
@@ -39,9 +38,9 @@ export class RecoveryTemplatePreparer {
     private readonly repository: RecoveryTemplateRepository = new PrismaRecoveryTemplateRepository(),
     private readonly resolveConfiguredSenderWaba: () => Promise<string | null> =
       () => whatsAppService.getProviderAccountId(),
-    private readonly resolveReadyShopBrandMedia: BrandMediaResolver = noReadyMedia,
-    /** Architecture-approved R2 derivative hosts. Empty means fail closed. */
-    private readonly approvedMediaHosts: readonly string[] = [],
+    private readonly resolveReadyShopBrandMedia?: BrandMediaResolver,
+    /** Test-injectable allowlist; production derives hosts from Admin publicMedia. */
+    private readonly approvedMediaHosts?: MediaApprovedHosts,
     private readonly clock: () => Date = () => new Date(),
     private readonly logger: Pick<StructuredLogger, "warn" | "error"> = defaultLogger,
   ) {}
@@ -89,9 +88,14 @@ export class RecoveryTemplatePreparer {
       if (selected.outcome === "unavailable") return unavailable(selected.reason);
       const { variant, canonicalLanguageTag, selectionSource } = selected.value;
       const registration = variant.metaRegistration!;
+      // Lazy operation-scoped adapter: TEXT-only messages never read publicMedia,
+      // and no platform config is cached across separate preparations.
+      const productionMedia = !this.resolveReadyShopBrandMedia || !this.approvedMediaHosts
+        ? createProductionShopBrandMediaAdapter() : null;
       const variables = new RecoveryVariableResolver(
         input, (shopId) => this.repository.readShopBrand(shopId),
-        this.resolveReadyShopBrandMedia, this.approvedMediaHosts, this.clock,
+        this.resolveReadyShopBrandMedia ?? productionMedia!.resolve,
+        this.approvedMediaHosts ?? productionMedia!.approvedHosts, this.clock,
       );
       const prepared = await prepareFrozenComponents({ registration, variables });
       return {

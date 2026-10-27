@@ -1,0 +1,71 @@
+{
+  "description": "ARCH-049 Admin -> Background v1 role-aware IMAGE registration projection. No source URLs or sample handles.",
+  "ast": {
+    "schemaVersion": 1,
+    "family": "META_RECOVERY",
+    "sourceLanguageTag": "en",
+    "stage": "INITIAL",
+    "offerType": "NO_OFFER",
+    "header": [],
+    "body": [
+      {
+        "type": "text",
+        "value": "Hello "
+      },
+      {
+        "type": "variable",
+        "name": "customer.firstName"
+      },
+      {
+        "type": "text",
+        "value": ", your checkout at "
+      },
+      {
+        "type": "variable",
+        "name": "shop.name"
+      },
+      {
+        "type": "text",
+        "value": " is waiting for you."
+      }
+    ],
+    "footer": [],
+    "buttons": [],
+    "shopBrandMediaRole": "LOGO"
+  },
+  "componentsSnapshot": [
+    {
+      "type": "HEADER",
+      "format": "IMAGE"
+    },
+    {
+      "type": "BODY",
+      "text": "Hello {{1}}, your checkout at {{2}} is waiting for you.",
+      "example": {
+        "body_text": [
+          [
+            "Alex",
+            "Example Shop"
+          ]
+        ]
+      }
+    }
+  ],
+  "parameterBindingsSnapshot": {
+    "schemaVersion": 1,
+    "headerMediaRole": "LOGO",
+    "header": [],
+    "body": [
+      {
+        "position": 1,
+        "variable": "customer.firstName"
+      },
+      {
+        "position": 2,
+        "variable": "shop.name"
+      }
+    ],
+    "buttons": []
+  },
+  "submittedContentHash": "cea834dda354d2b4d83d32e1c7a685796a88c5cdb74af24e1077fe5b7246ffd2"
+}

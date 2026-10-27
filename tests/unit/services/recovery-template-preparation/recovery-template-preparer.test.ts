@@ -246,9 +246,9 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(await service.prepare(input())).toMatchObject({ outcome: "prepared", template: {
       components: [{ parameters: [
         { text: "Moda Brand" }, { text: "Original Logo" }, { text: "300" }, { text: "120" },
-        { text: "Square" }, { text: "https://assets.moda-cdn.test/logoUrl.png" },
-        { text: "https://assets.moda-cdn.test/squareLogoUrl.png" },
-        { text: "https://assets.moda-cdn.test/coverImageUrl.png" },
+        { text: "Square" }, { text: "https://assets.moda-cdn.test/LOGO.png" },
+        { text: "https://assets.moda-cdn.test/SQUARE_LOGO.png" },
+        { text: "https://assets.moda-cdn.test/COVER_IMAGE.png" },
       ] }],
     } });
     expect(success.readShopBrand).toHaveBeenCalledTimes(1);
@@ -256,16 +256,22 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     await unavailable(setup([row]).service, "BINDING_VALUE_UNAVAILABLE");
   });
 
-  it("refuses image header without separate ready R2 derivative and never uses merchant original", async () => {
-    const row = fixture({ components: [{ type: "HEADER", format: "IMAGE" },
-      { type: "BODY", text: "Hello" }], bindings: { header: [], body: [], buttons: [] } });
-    await unavailable(setup([row]).service, "MEDIA_NOT_READY");
-    const media: ReadyBrandMedia = { shopId: "shop-1", role: "headerImage", kind: "R2_DERIVATIVE",
+  it("rejects legacy unbound IMAGE headers and binds only a frozen canonical READY role", async () => {
+    const components = [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "Hello" }];
+    const legacy = fixture({ components, bindings: { header: [], body: [], buttons: [] } });
+    await unavailable(setup([legacy]).service, "BINDINGS_INVALID");
+    const bound = fixture({ components, bindings: {
+      schemaVersion: 1, headerMediaRole: "LOGO", header: [], body: [], buttons: [],
+    } });
+    await unavailable(setup([bound]).service, "MEDIA_NOT_READY");
+    const media: ReadyBrandMedia = { shopId: "shop-1", role: "LOGO", kind: "R2_DERIVATIVE",
       status: "READY", httpsUrl: "https://assets.moda-cdn.test/ready.jpeg" };
-    expect(await setup([row], { media, mediaHosts: ["assets.moda-cdn.test"] }).service.prepare(input()))
+    const injected = setup([bound], { media, mediaHosts: ["assets.moda-cdn.test"] });
+    expect(await injected.service.prepare(input()))
       .toMatchObject({ outcome: "prepared", template: { components: [{
         type: "header", parameters: [{ type: "image", image: { link: media.httpsUrl } }],
       }] } });
+    expect(injected.resolveMedia).toHaveBeenCalledWith("shop-1", "LOGO");
   });
 
   it("fails closed on wrongly scoped, disabled or revoked variants, even with a misbehaving repository adapter", async () => {
@@ -317,7 +323,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       squareLogoAltText: null, coverImageUrl: null };
     const { service, warn } = setup([row], { brand,
       mediaHosts: ["assets.moda-cdn.test"], media: {
-        shopId: "other-shop", role: "logoUrl", status: "READY", kind: "R2_DERIVATIVE",
+        shopId: "other-shop", role: "LOGO", status: "READY", kind: "R2_DERIVATIVE",
         httpsUrl: "https://assets.moda-cdn.test/file.png",
       } });
     await unavailable(service, "MEDIA_NOT_READY", input({ customerFirstName: "PRIVATE-CUSTOMER-TEXT" }));
