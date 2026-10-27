@@ -522,12 +522,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        templateName: "checkout_recovery_fr_ca",
-        languageCode: "fr_CA_CUSTOM",
-      }),
-    );
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
   it("blocks an exhausted billing admission before creating a conversation or sending", async () => {

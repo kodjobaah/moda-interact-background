@@ -2,8 +2,8 @@ import "dotenv/config";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from
   "../../src/services/outbound-whatsapp-admission.service.js";
-import { whatsappTemplateSelectorService } from
-  "../../src/services/whatsapp-template-selector.service.js";
+import { automatedRecoveryTemplateService } from
+  "../../src/services/recovery-template-integration/automated-recovery-template.service.js";
 import { createWooOutreachFixture, type WooOutreachIntegrationFixture } from
   "./fixtures/arch048-woo-outreach.fixture.js";
 
@@ -21,12 +21,12 @@ integration("ARCH-046 Woo initial outreach: late Redis fault compensation", () =
   beforeEach(async () => {
     vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
       .mockResolvedValue("test-meta-account");
-    vi.spyOn(whatsappTemplateSelectorService, "select").mockResolvedValue({
-      outcome: "selected", verifiedCategory: "MARKETING", selectionSource: "merchant-fallback",
-      canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB",
-      providerTemplateName: "woo_checkout_recovery", providerTemplateId: "test-template-id",
-      marketCapability: "supported",
-    });
+    vi.spyOn(automatedRecoveryTemplateService, "prepare").mockResolvedValue({
+      kind: "prepared", prepared: {
+        purpose: "INITIAL_NO_OFFER", providerTemplateName: "woo_checkout_recovery",
+        providerLanguageCode: "en_GB", canonicalLanguageTag: "en-GB",
+      }, send: { templateName: "woo_checkout_recovery", languageCode: "en_GB" },
+    } as never);
     fixture = await createWooOutreachFixture();
   });
 
