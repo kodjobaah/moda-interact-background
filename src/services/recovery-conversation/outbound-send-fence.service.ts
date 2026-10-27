@@ -120,7 +120,11 @@ export class OutboundSendFenceService {
         if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
           if (!input.proactive || input.proactive.verifiedCategory !== "MARKETING" ||
               input.proactive.templateName !== command.templateName ||
-              input.proactive.languageCode !== command.templateLanguageCode)
+              input.proactive.languageCode !== command.templateLanguageCode ||
+              // BG007 makes the locked BG006 registration recheck mandatory for
+              // HUMAN follow-ups, rather than optional metadata.
+              !input.proactive.templateRegistration ||
+              !input.proactive.templateRegistration.purpose.startsWith("FOLLOW_UP_"))
             return { kind: "suppressed", reason: "marketing-template-unverified" } as const;
           const attempt = await first<{ initiatedBy: string | null; initiationKey: string | null;
             outboundMessageId: string | null; sentAt: Date | null; status: string }>(tx, `

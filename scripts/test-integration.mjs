@@ -5,6 +5,7 @@ import path from "node:path";
 import { withDisposableIntegrationInfrastructure } from "@modainteract/moda-interact-shared/testing/node";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { runWithPostgresStartupRetry } from "./integration-startup-retry.mjs";
+import { localPrismaCliPath } from "./integration-prisma-path.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const prismaSchemaPath = path.join(repositoryRoot, "database", "prisma", "schema.prisma");
@@ -61,6 +62,19 @@ const integrationLogger = createLogger({
   serviceName: "moda-background-integration-test-runner",
   environment: "test",
 });
+
+// Shared's disposable runner spawns the Prisma CLI directly. Ensure direct
+// `node scripts/test-integration.mjs` has the same local CLI resolution as npm
+// scripts; a missing dependency is logged and rethrown, never swallowed.
+try {
+  process.env.PATH = localPrismaCliPath(repositoryRoot);
+} catch (error) {
+  integrationLogger.error("background.integration.prisma_cli_unavailable", {
+    errorName: error instanceof Error ? error.name : "UnknownError",
+    action: "install_local_dev_dependencies",
+  });
+  throw error;
+}
 
 const result = await runWithPostgresStartupRetry(
   () => withDisposableIntegrationInfrastructure(
