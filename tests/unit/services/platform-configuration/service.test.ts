@@ -33,9 +33,9 @@ function setup(initial: ConfigurationRow[]) {
 
 
 describe("ARCH-043 Background typed configuration read boundary", () => {
-  it("recognises 18 exact registry identities, reads ten purposes, and denies the other eight", async () => {
-    expect(new Set(REGISTERED_KEYS).size).toBe(18);
-    expect(new Set(BACKGROUND_READABLE_KEYS).size).toBe(10);
+  it("recognises 19 exact registry identities, reads eleven purposes, and denies the other eight", async () => {
+    expect(new Set(REGISTERED_KEYS).size).toBe(19);
+    expect(new Set(BACKGROUND_READABLE_KEYS).size).toBe(11);
     const { service, readRows } = setup([]);
     for (const key of REGISTERED_KEYS.filter((key) => !BACKGROUND_READABLE_KEYS.includes(key as never))) {
       await expect(service.read(key as never)).rejects.toMatchObject({ code: "DENIED" });
@@ -94,16 +94,53 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
       "shopify.appEvents": { clientId: "client-12", clientSecret: "app-private" },
       "messaging.sender": { accessToken: "meta-private", phoneNumberId: "12345", businessAccountId: "98765" },
       "merchant.knowledge.r2": r2,
+      "shopBrand.publicMedia": { publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands" },
       "ai.providers": { openAiApiKey: "openai-generic-secret", groqApiKey: "groq-generic-secret" },
       "omini.moderation": moderation,
     };
     const rows = Object.entries(values).map(([key, value]) => row(key,
-      ["woo.couponSync", "speech.transcription", "omini.moderation"].includes(key) ? value : seal(key, 1, value)));
+      ["woo.couponSync", "speech.transcription", "omini.moderation", "shopBrand.publicMedia"].includes(key) ? value : seal(key, 1, value)));
     const context = setup(rows);
     for (const key of BACKGROUND_READABLE_KEYS) {
       expect((await context.service.read(key)).value).toEqual(values[key]);
     }
-    expect(context.readRows).toHaveBeenCalledTimes(10);
+    expect(context.readRows).toHaveBeenCalledTimes(11);
+  });
+
+  it("uses the approved public ShopBrand media defaults on read without creating a row", async () => {
+    const context = setup([]);
+    expect(await context.service.read("shopBrand.publicMedia")).toEqual({
+      key: "shopBrand.publicMedia", version: 0, value: {
+        publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands",
+      },
+    });
+    expect(context.readRows).toHaveBeenCalledExactlyOnceWith("test", ["shopBrand.publicMedia"]);
+    context.update([row("shopBrand.publicMedia", {
+      publicOrigin: "https://brand.example.shop", bucketName: "brand-images",
+    }, 7)]);
+    expect(await context.service.read("shopBrand.publicMedia")).toMatchObject({ version: 7,
+      value: { publicOrigin: "https://brand.example.shop", bucketName: "brand-images" } });
+    expect(context.readRows).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects invalid stored ShopBrand public-media policies and does not borrow Merchant Knowledge credentials", async () => {
+    const context = setup([]);
+    const valid = { publicOrigin: "https://brand.example.shop", bucketName: "brand-images" };
+    for (const value of [
+      { ...valid, publicOrigin: "http://brand.example.shop" },
+      { ...valid, publicOrigin: "https://127.0.0.1" },
+      { ...valid, publicOrigin: "https://brand.example.shop/private" },
+      { ...valid, publicOrigin: "https://brand.example.shop?token=secret" },
+      { ...valid, publicOrigin: "https://example.com" },
+      { ...valid, bucketName: "example-bucket" },
+      { ...valid, unexpectedKey: "leak" },
+      { kind: "sealed", schemaVersion: 1 },
+    ]) {
+      context.update([row("shopBrand.publicMedia", value)]);
+      await expect(context.service.read("shopBrand.publicMedia")).rejects.toMatchObject({ code: "INVALID" });
+    }
+    context.update([row("shopBrand.publicMedia", { kind: "disabled", schemaVersion: 1 })]);
+    await expect(context.service.read("shopBrand.publicMedia")).rejects.toMatchObject({ code: "DISABLED" });
   });
 
   it("denies wrong environment, legacy names, tampering and incorrect root key without leaking secrets", async () => {
@@ -240,6 +277,7 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
     const purposes = ["merchant.knowledge.r2", "commerce.connectionKeys", "shopify.partner", "messaging.sender"] as const;
     const expected = {
       "merchant.knowledge.r2": r2,
+      "shopBrand.publicMedia": { publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands" },
       "commerce.connectionKeys": {
         connectionKeysJson: JSON.stringify({ "previous": Buffer.alloc(32, 2).toString("base64"),
           "active": Buffer.alloc(32, 3).toString("base64") }),
