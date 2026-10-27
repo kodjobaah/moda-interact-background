@@ -8,14 +8,14 @@ export const REGISTERED_KEYS = [
   "shopify.oauth", "shopify.partner", "shopify.appEvents", "merchant.knowledge.r2",
   "woocommerce.auth", "woocommerce.billing", "messaging.meta", "messaging.sender",
   "ai.providers", "speech.transcription", "woo.couponSync", "admin.grafana",
-  "commerce.preview", "omini.moderation",
+  "commerce.preview", "omini.moderation", "shopBrand.publicMedia",
 ] as const;
 export type RegisteredKey = typeof REGISTERED_KEYS[number];
 
 export const BACKGROUND_READABLE_KEYS = [
   "commerce.connectionKeys", "shopify.oauth", "shopify.partner", "shopify.appEvents",
   "merchant.knowledge.r2", "messaging.sender", "ai.providers", "speech.transcription",
-  "woo.couponSync", "omini.moderation",
+  "woo.couponSync", "omini.moderation", "shopBrand.publicMedia",
 ] as const;
 export type BackgroundReadableKey = typeof BACKGROUND_READABLE_KEYS[number];
 const allowed = new Set<string>(BACKGROUND_READABLE_KEYS);
@@ -23,6 +23,10 @@ export function assertReadable(key: string): asserts key is BackgroundReadableKe
   if (!allowed.has(key)) throw new PlatformConfigurationFailure("DENIED", "unauthorised-key");
 }
 
+export type ShopBrandPublicMediaSettings = Readonly<{ publicOrigin: string; bucketName: string }>;
+export const SHOP_BRAND_PUBLIC_MEDIA_DEFAULTS: ShopBrandPublicMediaSettings = Object.freeze({
+  publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands",
+});
 export type ModerationPolicy = Readonly<{ baseUrl: string | null; modelId: string }>;
 export type WooCouponSyncPolicy = Readonly<{
   dispatchBatchSize: number; refreshIntervalMinutes: number; dispatchCooldownMinutes: number;
@@ -51,6 +55,7 @@ export type KeyValues = {
   "shopify.partner": ShopifyPartnerCredentials;
   "shopify.appEvents": ShopifyAppEventsCredentials;
   "merchant.knowledge.r2": MerchantKnowledgeR2Settings;
+  "shopBrand.publicMedia": ShopBrandPublicMediaSettings;
   "messaging.sender": WhatsAppSenderCredentials;
   "ai.providers": ProviderApiKeys;
   "speech.transcription": SpeechPolicy;
@@ -132,6 +137,14 @@ const wooFields = {
 
 export function decodeConfiguration<K extends BackgroundReadableKey>(key: K, raw: unknown): KeyValues[K] {
   switch (key) {
+    case "shopBrand.publicMedia": {
+      const row = objectFor(key, raw, ["publicOrigin", "bucketName"]);
+      const origin = safeHttps(key, row.publicOrigin, true);
+      if (/(?:^|\.)example\.(?:com|net|org)$/.test(new URL(origin).hostname)) {
+        throw new PlatformConfigurationFailure("INVALID", key);
+      }
+      return { publicOrigin: origin, bucketName: bucketName(key, row.bucketName) } as KeyValues[K];
+    }
     case "omini.moderation": {
       const row = objectFor(key, raw, ["baseUrl", "modelId"]);
       return { baseUrl: row.baseUrl === null ? null : safeHttps(key, row.baseUrl), modelId: model(key, row.modelId) } as KeyValues[K];
