@@ -191,6 +191,14 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
     f.logger.error.mockImplementation(() => { throw new Error("sink failure"); });
     await expect(f.service.finalizeConfirmedInitial(input)).rejects.toBe(original);
     expect(f.logger.error).toHaveBeenCalledOnce();
+    expect(f.logger.error).toHaveBeenCalledWith(
+      "recovery.initial_outreach_support_notice.failed",
+      expect.objectContaining({
+        outcome: "failed",
+        errorCategory: "PERSISTENCE_FAILURE",
+        error: original,
+      }),
+    );
   });
 
   it("does not turn a committed success into failure when the logger throws", async () => {

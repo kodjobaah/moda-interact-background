@@ -270,9 +270,8 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
         outcome: "failed",
         errorCategory: category,
       };
-      // Internal finalization errors have fixed, non-sensitive messages; provider/Prisma errors are omitted
-      // because their messages may include SQL, database values, or caller-controlled data.
-      if (error instanceof FinalizationError) fields.error = error;
+      // Shared logging applies its bounded Error serialization to both domain and persistence failures.
+      fields.error = error;
       if (inputValidated) {
         fields.shopId = input.shopId;
         fields.checkoutRecoveryId = input.checkoutRecoveryId;
