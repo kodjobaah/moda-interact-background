@@ -44,7 +44,8 @@ describe("ARCH-049 media processor / public readiness", () => {
       image: expect.objectContaining({ contentSha256: result.contentSha256 }),
     });
     expect(logger.info).toHaveBeenCalledWith("shop_brand.media.verified",
-      expect.objectContaining({ shopId: source.shopId, role: "LOGO" }));
+      expect.objectContaining({ shopId: source.shopId, role: "LOGO",
+        configurationPurpose: "merchant.knowledge.r2" }));
   });
 
   it("withholds READY when the public HTTPS domain does not deliver matching image bytes/content type", async () => {
@@ -79,6 +80,24 @@ describe("ARCH-049 media processor / public readiness", () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain("token=");
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.failed",
       expect.objectContaining({ reasonCode: "UNEXPECTED_FAILURE", retryable: true }));
+  });
+
+  it("logs the R2 configuration purpose and bounded provider diagnostic", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const processor = createShopBrandMediaProcessor({
+      readConfiguration: async () => configuration,
+      fetcher: { fetch: async () => ({ bytes: await fixture(), declaredContentType: "image/png" }) },
+      transformer: createShopBrandImageTransformer(),
+      writer: { putVerified: async () => {
+        throw new ShopBrandMediaError("R2_UNAVAILABLE", false, "Access denied for [REDACTED]");
+      } },
+      probe: { verify: vi.fn() }, logger,
+    });
+    await expect(processor.process(source)).rejects.toMatchObject({ code: "R2_UNAVAILABLE" });
+    expect(logger.error).toHaveBeenCalledWith("shop_brand.media.failed", expect.objectContaining({
+      configurationPurpose: "merchant.knowledge.r2",
+      providerMessage: "Access denied for [REDACTED]",
+    }));
   });
 
   it("refuses mismatched transform metadata and does not upload or probe", async () => {

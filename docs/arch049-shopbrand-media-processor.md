@@ -22,13 +22,16 @@ leases, or the private Merchant Knowledge bucket. BG002 will own those operation
   configured custom domain delivers the same media MIME, byte length and digest.
   R2 HEAD is not a substitute for live delivery verification.
 - The Admin-owned **non-secret** `shopBrand.publicMedia` policy supplies public
-  origin and bucket name; missing rows produce the approved default at revision
-  zero **without database writes**. This is independent of `merchant.knowledge.r2`.
-- Worker credentials are provided **only** through
-  `SHOPBRAND_R2_ENDPOINT`, `SHOPBRAND_R2_ACCESS_KEY_ID`, and
-  `SHOPBRAND_R2_SECRET_ACCESS_KEY`. Invalid values fail the protected operation
-  and generate a safe shared-logger reason code. Never include these values,
-  untrusted source URLs or original image bytes in diagnostics.
+  origin and write bucket; missing rows produce the approved default at revision
+  zero **without database writes**.
+- For the authorized local-main feature test, the processor reads endpoint and
+  credentials from validated `merchant.knowledge.r2`. Its `bucket` is never used
+  for ShopBrand writes. This is not production credential approval; production
+  enablement requires dedicated bucket-scoped ShopBrand credentials.
+- Log `merchant.knowledge.r2` as the configuration purpose used for ShopBrand
+  access. Preserve useful provider messages only after bounded redaction of
+  configured credentials, authorization values and control characters. Never log
+  untrusted source URLs or original image bytes.
 
 ## Operational prerequisite — external preflight not established in snapshot
 
@@ -38,9 +41,10 @@ Before enabling BG002 or claiming live media delivery readiness:
    Initializing, and that the zone's minimum TLS version is **at least 1.2**.
    Enforcing TLS ≥1.2 on the fetch client does not prove the Cloudflare zone has
    disabled TLS 1.0/1.1.
-2. Configure the three dedicated worker-only R2 environment variables in the
-   worker secret store, never source control. Confirm the credentials have
-   bucket-scoped `PutObject` and `HeadObject` permissions.
+2. Confirm the database-backed R2 credentials used by this local test have
+  `PutObject` and `HeadObject` permission on the configured ShopBrand target
+  bucket. Do not treat the private Merchant Knowledge bucket name as the public
+  ShopBrand bucket.
 3. Run an isolated image processor invocation with a permitted brand source.
    The processor must verify the current public HTTPS domain returns HTTP 200,
    correct JPEG/PNG Content-Type, and the exact uploaded bytes/hash. A previous

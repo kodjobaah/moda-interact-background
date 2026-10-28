@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { createShopBrandR2Writer, SHOP_BRAND_CACHE_CONTROL,
-  type BrandR2Transport } from "../../../../src/services/shop-brand-media/r2-writer.js";
+  sanitizeR2ProviderMessage, type BrandR2Transport } from "../../../../src/services/shop-brand-media/r2-writer.js";
 import { loadShopBrandR2Credentials } from "../../../../src/services/shop-brand-media/r2-config.js";
 import type { VerifiedBrandImage } from "../../../../src/services/shop-brand-media/contracts.js";
 
@@ -96,24 +96,55 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
     }
   });
 
-  it("requires dedicated credentials and a strict Cloudflare R2 HTTPS origin, not Merchant Knowledge secrets", () => {
+  it("requires validated database credentials and a strict Cloudflare R2 HTTPS origin", () => {
     expect(() => loadShopBrandR2Credentials({})).toThrowError(/R2_CONFIGURATION_INVALID/);
-    const safe = { SHOPBRAND_R2_ENDPOINT: "https://account123.r2.cloudflarestorage.com",
-      SHOPBRAND_R2_ACCESS_KEY_ID: "brand-worker", SHOPBRAND_R2_SECRET_ACCESS_KEY: "brand-secret" };
-    expect(loadShopBrandR2Credentials({ ...safe })).toEqual({ endpoint: safe.SHOPBRAND_R2_ENDPOINT,
-      accessKeyId: "brand-worker", secretAccessKey: "brand-secret" });
+    const safe = { endpoint: "https://account123.r2.cloudflarestorage.com", bucket: "private-knowledge",
+      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
+    expect(loadShopBrandR2Credentials(safe)).toEqual({ endpoint: safe.endpoint,
+      accessKeyId: safe.accessKeyId, secretAccessKey: safe.secretAccessKey });
     for (const endpoint of ["http://account123.r2.cloudflarestorage.com", "https://localhost",
       "https://user:pass@account123.r2.cloudflarestorage.com",
       "https://account123.r2.cloudflarestorage.com/private",
       "https://account123.r2.cloudflarestorage.com?secret=yes"]) {
-      expect(() => loadShopBrandR2Credentials({ ...safe, SHOPBRAND_R2_ENDPOINT: endpoint }))
+      expect(() => loadShopBrandR2Credentials({ ...safe, endpoint }))
         .toThrowError(/R2_CONFIGURATION_INVALID/);
     }
+    expect(() => loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }))
+      .toThrowError(/R2_CONFIGURATION_INVALID/);
     expect(() => loadShopBrandR2Credentials({
-      ...safe, SHOPBRAND_R2_ACCESS_KEY_ID: undefined, MERCHANT_KNOWLEDGE_R2_ACCESS_KEY_ID: "other-secret",
+      ...safe, secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
     })).toThrowError(/R2_CONFIGURATION_INVALID/);
+  });
+
+  it("loads validated database credentials while leaving the public bucket policy independent", () => {
+    expect(() => loadShopBrandR2Credentials({})).toThrowError(/R2_CONFIGURATION_INVALID/);
+    const safe = { endpoint: "https://account123.r2.cloudflarestorage.com", bucket: "private-knowledge",
+      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
+    expect(loadShopBrandR2Credentials(safe)).toEqual({ endpoint: safe.endpoint,
+      accessKeyId: safe.accessKeyId, secretAccessKey: safe.secretAccessKey });
+    for (const endpoint of ["http://account123.r2.cloudflarestorage.com", "https://localhost",
+      "https://user:pass@account123.r2.cloudflarestorage.com",
+      "https://account123.r2.cloudflarestorage.com/private",
+      "https://account123.r2.cloudflarestorage.com?secret=yes"]) {
+      expect(() => loadShopBrandR2Credentials({ ...safe, endpoint }))
+        .toThrowError(/R2_CONFIGURATION_INVALID/);
+    }
+    expect(() => loadShopBrandR2Credentials({ ...safe, accessKeyId: undefined }))
+      .toThrowError(/R2_CONFIGURATION_INVALID/);
     expect(() => loadShopBrandR2Credentials({
-      ...safe, SHOPBRAND_R2_SECRET_ACCESS_KEY: `secret${String.fromCharCode(1)}suffix`,
+      ...safe, secretAccessKey: `secret${String.fromCharCode(1)}suffix`,
     })).toThrowError(/R2_CONFIGURATION_INVALID/);
+  });
+
+  it("redacts R2 credentials and authorization values from bounded provider messages", () => {
+    const credentials = { endpoint: "https://account123.r2.cloudflarestorage.com",
+      accessKeyId: "platform-key", secretAccessKey: "platform-secret" };
+    const message = new Error("Access denied for platform-key; secret=platform-secret Authorization: Bearer top-secret");
+    expect(sanitizeR2ProviderMessage(message, credentials))
+      .toBe("Access denied for [REDACTED]; secret=[REDACTED] Authorization: [REDACTED]");
+    expect(sanitizeR2ProviderMessage(new Error("request ?X-Amz-Signature=signed-value&token=query-secret"), credentials))
+      .toBe("request ?X-Amz-Signature=[REDACTED]&token=[REDACTED]");
+    expect(sanitizeR2ProviderMessage(new Error("x".repeat(500)), credentials)).toHaveLength(300);
+    expect(sanitizeR2ProviderMessage({ name: "AccessDenied" }, credentials)).toBeUndefined();
   });
 });

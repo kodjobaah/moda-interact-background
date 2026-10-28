@@ -56,6 +56,7 @@ export function createShopBrandMediaProcessor(input: ShopBrandMediaDependencies)
         await input.writer.putVerified({ bucket: settings.bucketName, objectKey, image });
         await input.probe.verify({ url: publicUrl, image });
         input.logger?.info("shop_brand.media.verified", {
+          configurationPurpose: "merchant.knowledge.r2",
           shopId: source.shopId, role: source.role, sourceGeneration: source.sourceGeneration,
           sourceFingerprint: source.sourceFingerprint,
           contentType: image.contentType, sizeBytes: image.sizeBytes,
@@ -71,12 +72,14 @@ export function createShopBrandMediaProcessor(input: ShopBrandMediaDependencies)
           ? error : new ShopBrandMediaError("UNEXPECTED_FAILURE", true);
         // Deliberately never log provider Error.message, untrusted source URL or credentials.
         input.logger?.error("shop_brand.media.failed", {
+          configurationPurpose: "merchant.knowledge.r2",
           ...(typeof source?.shopId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(source.shopId)
             ? { shopId: source.shopId } : {}),
           ...(["LOGO", "SQUARE_LOGO", "COVER_IMAGE"].includes(source?.role)
             ? { role: source.role } : {}),
           ...(Number.isSafeInteger(source?.sourceGeneration) ? { sourceGeneration: source.sourceGeneration } : {}),
           reasonCode: failure.code, retryable: failure.retryable,
+          ...(failure.providerMessage ? { providerMessage: failure.providerMessage } : {}),
           durationMs: Date.now() - startedAt,
         });
         throw failure;
@@ -86,19 +89,9 @@ export function createShopBrandMediaProcessor(input: ShopBrandMediaDependencies)
 }
 
 /** Server-side composition only; no database reads or R2 calls during import. */
-export function createProductionShopBrandMediaProcessor(environment: Readonly<NodeJS.ProcessEnv> = process.env): ShopBrandMediaProcessor {
+export function createProductionShopBrandMediaProcessor(): ShopBrandMediaProcessor {
   const logger = createLogger({ serviceName: "moda-background-runtime",
     environment: resolveDeploymentEnvironmentName() });
-  let credentials;
-  try { credentials = loadShopBrandR2Credentials(environment); }
-  catch (error) {
-    logger.error("shop_brand.media.configuration_failed", {
-      reasonCode: "R2_CONFIGURATION_INVALID",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error,
-    });
-    throw error;
-  }
   const fetcher = createSafeImageFetcher();
   return createShopBrandMediaProcessor({
     // The injectable processor must not instantiate Prisma merely by being imported.
@@ -109,7 +102,12 @@ export function createProductionShopBrandMediaProcessor(environment: Readonly<No
     },
     fetcher,
     transformer: createShopBrandImageTransformer(),
-    writer: createShopBrandR2Writer(createBrandR2S3Transport(credentials)),
+    writer: createShopBrandR2Writer(async () => {
+      const { readR2Configuration } = await import("../platform-configuration/consumers.js");
+      const configuration = await readR2Configuration();
+      const credentials = loadShopBrandR2Credentials(configuration);
+      return createBrandR2S3Transport(credentials);
+    }),
     probe: createShopBrandPublicMediaProbe(fetcher),
     logger,
   });

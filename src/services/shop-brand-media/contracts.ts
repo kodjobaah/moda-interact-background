@@ -19,7 +19,8 @@ export type ShopBrandMediaErrorCode =
 
 /** The message is a bounded code, not a provider exception or a URL containing credentials. */
 export class ShopBrandMediaError extends Error {
-  constructor(readonly code: ShopBrandMediaErrorCode, readonly retryable = false) {
+  constructor(readonly code: ShopBrandMediaErrorCode, readonly retryable = false,
+    readonly providerMessage?: string) {
     super(code);
     this.name = "ShopBrandMediaError";
   }
