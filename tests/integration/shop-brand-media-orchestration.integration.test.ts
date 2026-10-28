@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import { ShopBrandMediaRepository } from "../../src/services/shop-brand-media-orchestration/repository.js";
 import { parseBrandDocument, currentReady } from "../../src/services/shop-brand-media-orchestration/state.js";
+import { encodeShopBrandDomain } from "../../src/services/shop-brand-media/contracts.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
@@ -20,7 +21,7 @@ const source = (shopId: string, role: "LOGO" | "COVER_IMAGE", url: string | null
 const outcome = (domain: string, role: "LOGO" | "COVER_IMAGE", generation: number, digest = HASH, verifiedAt = at(0.001)) => ({
   result: { sourceGeneration: generation, sourceFingerprint: fingerprint,
     contentType: "image/jpeg" as const, width: 1125, height: 600, sizeBytes: 1000,
-    contentSha256: digest, objectKey: `shop-brands/${domain}/${role.toLowerCase()}/sha256-${digest}.jpg` },
+    contentSha256: digest, objectKey: `shop-brands/${encodeShopBrandDomain(domain)}/${role.toLowerCase()}/sha256-${digest}.jpg` },
   verifiedAt: verifiedAt.toISOString(),
 });
 

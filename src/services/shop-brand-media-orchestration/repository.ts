@@ -33,26 +33,24 @@ export class ShopBrandMediaRepository {
   }
 
   async claim(shopId: string, role: BrandRole, at: Date = new Date()): Promise<BrandClaim | null> {
-    const shop = await this.database.shop.findUnique({ where: { id: shopId }, select: { domain: true } });
-    if (!shop) return null;
     const owner = randomUUID();
-    return this.editLocked(shopId, false, (current) => {
-      const { document, claim } = claimRole(current, shopId, shop.domain, role, owner, at);
+    return this.editLocked(shopId, false, (current, currentDomain) => {
+      const { document, claim } = claimRole(current, shopId, currentDomain, role, owner, at);
       return { document, value: claim };
     });
   }
 
   async complete(claim: BrandClaim, result: BrandOutcome, at: Date = new Date()): Promise<boolean> {
-    const outcome = await this.editLocked(claim.shopId, false, (current) => {
-      const { document, applied } = completeClaim(current, claim, result, at);
+    const outcome = await this.editLocked(claim.shopId, false, (current, currentDomain) => {
+      const { document, applied } = completeClaim(current, claim, result, at, currentDomain);
       return { document, value: applied };
     });
     return outcome ?? false;
   }
 
   async fail(claim: BrandClaim, failureCode: string, retryable: boolean, at: Date = new Date()): Promise<boolean> {
-    const outcome = await this.editLocked(claim.shopId, false, (current) => {
-      const { document, applied } = failClaim(current, claim, failureCode, retryable, at);
+    const outcome = await this.editLocked(claim.shopId, false, (current, currentDomain) => {
+      const { document, applied } = failClaim(current, claim, failureCode, retryable, at, currentDomain);
       return { document, value: applied };
     });
     return outcome ?? false;
@@ -71,7 +69,7 @@ export class ShopBrandMediaRepository {
 
   private async editLocked<T>(
     shopId: string, create: boolean,
-    edit: (current: BrandDocument) => { document: BrandDocument; value: T },
+    edit: (current: BrandDocument, currentDomain: string) => { document: BrandDocument; value: T },
   ): Promise<T | null> {
     // A competing first observation may race INSERT. Retry aborted SERIALIZABLE/deadlock/unique
     // transactions, never swallowing other DB errors or synthesising a row for a missing shop.
@@ -81,15 +79,17 @@ export class ShopBrandMediaRepository {
           if (create) {
             await tx.shopBrand.upsert({ where: { shopId }, create: { shopId }, update: {} });
           }
-          const locked = await tx.$queryRaw<Array<{ whatsAppMedia: Prisma.JsonValue }>>(Prisma.sql`
-            SELECT "whatsAppMedia" FROM "commerce"."ShopBrand"
-            WHERE "shopId" = ${shopId}
-            FOR UPDATE
+          const locked = await tx.$queryRaw<Array<{ whatsAppMedia: Prisma.JsonValue; domain: string }>>(Prisma.sql`
+            SELECT brand."whatsAppMedia", shop."domain"
+            FROM "commerce"."ShopBrand" AS brand
+            JOIN "commerce"."Shop" AS shop ON shop."id" = brand."shopId"
+            WHERE brand."shopId" = ${shopId}
+            FOR UPDATE OF brand, shop
           `);
           const row = locked[0];
           if (!row) return null;
           const current = parseBrandDocument(row.whatsAppMedia);
-          const outcome = edit(current);
+          const outcome = edit(current, row.domain);
           if (outcome.document !== current) {
             await tx.shopBrand.update({ where: { shopId },
               data: { whatsAppMedia: outcome.document as unknown as Prisma.InputJsonValue } });

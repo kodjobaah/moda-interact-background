@@ -6,13 +6,14 @@ import {
 import { claimRole, completeClaim, parseBrandDocument, updateObservedSource } from "../../../../src/services/shop-brand-media-orchestration/state.js";
 import type { BrandDocument, BrandClaim, BrandRole } from "../../../../src/services/shop-brand-media-orchestration/contracts.js";
 import { ShopBrandMediaError } from "../../../../src/services/shop-brand-media/contracts.js";
+import { encodeShopBrandDomain } from "../../../../src/services/shop-brand-media/contracts.js";
 
 const NOW = new Date("2026-10-20T00:00:00.000Z");
 const F = `sha256:${"a".repeat(64)}`;
 const D = "b".repeat(64);
 const domainFor = (shopId: string) => `${shopId.replace(/[^a-z0-9-]/g, "-")}.myshopify.com`;
 const media = (domain: string) => ({ sourceGeneration: 1, sourceFingerprint: F,
-  objectKey: `shop-brands/${domain}/logo/sha256-${D}.jpg`, contentType: "image/jpeg" as const,
+  objectKey: `shop-brands/${encodeShopBrandDomain(domain)}/logo/sha256-${D}.jpg`, contentType: "image/jpeg" as const,
   contentSha256: D, width: 1125, height: 600, sizeBytes: 1000 });
 
 function fixture(count: number) {

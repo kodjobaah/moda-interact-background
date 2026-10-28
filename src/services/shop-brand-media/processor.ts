@@ -3,7 +3,7 @@ import { createLogger, type StructuredLogger } from "@modainteract/moda-interact
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
   assertMediaInput, ShopBrandMediaError,
-  isCanonicalShopBrandDomain,
+  decodeShopBrandDomain, encodeShopBrandDomain,
   type ImageTransformer, type PublicMediaProbe, type R2ObjectWriter, type SafeFetcher,
   type ShopBrandMediaInput, type ShopBrandMediaProcessor, type ShopBrandPublicMediaSettings,
 } from "./contracts.js";
@@ -31,7 +31,7 @@ export function publicBrandImageUrl(origin: string, objectKey: string): string {
       url.pathname !== "/" || (url.port && url.port !== "443") ||
       !url.hostname.includes(".") || url.hostname.startsWith("[") ||
       isIP(url.hostname) !== 0 || /\.(?:local|localhost|test|invalid|example|internal)$/.test(url.hostname) ||
-      prefix !== "shop-brands" || !isCanonicalShopBrandDomain(domain) ||
+      prefix !== "shop-brands" || decodeShopBrandDomain(domain) === null ||
       !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
       !/^sha256-[a-f0-9]{64}\.(jpg|png)$/.test(filename ?? "") || objectKey.split("/").length !== 4) {
     throw new ShopBrandMediaError("R2_CONFIGURATION_INVALID");
@@ -55,7 +55,7 @@ export function createShopBrandMediaProcessor(input: ShopBrandMediaDependencies)
           throw new ShopBrandMediaError("OUTPUT_VERIFICATION_FAILED");
         }
         const extension = image.contentType === "image/png" ? "png" : "jpg";
-        const objectKey = `shop-brands/${source.domain}/${source.role.toLowerCase()}/sha256-${image.contentSha256}.${extension}`;
+        const objectKey = `shop-brands/${encodeShopBrandDomain(source.domain)}/${source.role.toLowerCase()}/sha256-${image.contentSha256}.${extension}`;
         const publicUrl = publicBrandImageUrl(settings.publicOrigin, objectKey);
         await input.writer.putVerified({ bucket: settings.bucketName, objectKey, image });
         await input.probe.verify({ url: publicUrl, image });
