@@ -27,7 +27,7 @@ function claim(doc: BrandDocument, at = after(10), owner = randomUUID()) {
 function output(c: BrandClaim, digest = DIGEST) {
   return { verifiedAt: after(20).toISOString(), result: {
     sourceGeneration: c.generation, sourceFingerprint: c.fingerprint,
-    contentSha256: digest, objectKey: `shop-brands/${SHOP}/logo/sha256-${digest}.jpg`,
+    contentSha256: digest, objectKey: `shop-brands/${c.domain}/logo/sha256-${digest}.jpg`,
     contentType: "image/jpeg" as const, width: 1125, height: 600, sizeBytes: 1024,
   } };
 }
@@ -97,6 +97,19 @@ describe("ARCH-049 ShopBrand source/update/claim state machine", () => {
     const newest = updateObservedSource(first.document, observation("LOGO", "https://merchant.test/new.png", after(30)));
     expect(completeClaim(newest.document, first.claim!, output(first.claim!), after(40)).applied).toBe(false);
     expect(newest.document.roles.LOGO!.source.generation).toBe(2);
+  });
+
+  it("reprocesses legacy shopId-based READY keys and replaces them after verified output", () => {
+    const legacy = ready();
+    legacy.roles.LOGO!.ready!.objectKey = `shop-brands/${SHOP}/logo/sha256-${DIGEST}.jpg`;
+    const repair = claim(legacy, after(30));
+    expect(repair.claim?.kind).toBe("initial");
+    expect(repair.document.roles.LOGO!.work.status).toBe("PROCESSING");
+    const repaired = completeClaim(repair.document, repair.claim!, output(repair.claim!), after(40));
+    expect(repaired.applied).toBe(true);
+    expect(repaired.document.roles.LOGO!.ready!.objectKey)
+      .toBe(`shop-brands/${DOMAIN}/logo/sha256-${DIGEST}.jpg`);
+    expect(currentReady(repaired.document.roles.LOGO!, DOMAIN, "LOGO")).not.toBeNull();
   });
 
   it("recovers crashed leases and stops claiming after five attempts", () => {

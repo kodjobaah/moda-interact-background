@@ -78,7 +78,7 @@ export class ShopBrandMediaReconciliationService {
         try {
           const document = parseBrandDocument(row.whatsAppMedia);
           // One role per shop per sweep to avoid a single shop dominating external I/O.
-          const selected = BRAND_ROLES.find((role) => claimable(document.roles[role], this.now().getTime()));
+          const selected = BRAND_ROLES.find((role) => claimable(document.roles[role], this.now().getTime(), row.domain, role));
           if (selected) {
             const claim = await this.deps.repository.claim(row.shopId, selected, this.now());
             if (claim) claims.push(claim);

@@ -19,7 +19,7 @@ const conflict = () => Object.assign(new Error("collision"), { $metadata: { http
 describe("ARCH-049 dedicated immutable R2 writer", () => {
   it("puts with conditional immutability, verifies HEAD metadata and idempotently reuses", async () => {
     const fixture = await image();
-    const objectKey = `shop-brands/shop-1/logo/sha256-${fixture.contentSha256}.jpg`;
+    const objectKey = `shop-brands/store.example.org/logo/sha256-${fixture.contentSha256}.jpg`;
     let persisted = false;
     const head = vi.fn(async () => {
       if (!persisted) throw notFound();
@@ -42,7 +42,7 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
 
   it("verifies after a simultaneous writer wins the conditional PUT race", async () => {
     const fixture = await image();
-    const objectKey = `shop-brands/shop-1/logo/sha256-${fixture.contentSha256}.jpg`;
+    const objectKey = `shop-brands/store.example.org/logo/sha256-${fixture.contentSha256}.jpg`;
     let exists = false;
     const transport: BrandR2Transport = {
       head: vi.fn(async () => {
@@ -58,7 +58,7 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
 
   it("fails closed for an existing object with different metadata", async () => {
     const fixture = await image();
-    const objectKey = `shop-brands/shop-1/logo/sha256-${fixture.contentSha256}.jpg`;
+    const objectKey = `shop-brands/store.example.org/logo/sha256-${fixture.contentSha256}.jpg`;
     const transport: BrandR2Transport = { head: async () => ({
       ContentType: "image/jpeg", ContentLength: fixture.sizeBytes, Metadata: { sha256: "wrong" },
       CacheControl: SHOP_BRAND_CACHE_CONTROL,
@@ -78,7 +78,7 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
         .rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
     }
     await expect(writer.putVerified({ bucket,
-      objectKey: `shop-brands/shop-1/logo/sha256-${fixture.contentSha256}.jpg`,
+      objectKey: `shop-brands/store.example.org/logo/sha256-${fixture.contentSha256}.jpg`,
       image: { ...fixture, contentSha256: "0".repeat(64) } }))
       .rejects.toMatchObject({ code: "OUTPUT_VERIFICATION_FAILED" });
     expect(transport.head).not.toHaveBeenCalled();
@@ -86,7 +86,7 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
 
   it("distinguishes R2 transient availability from permanent write denial", async () => {
     const fixture = await image();
-    const objectKey = `shop-brands/shop-1/logo/sha256-${fixture.contentSha256}.jpg`;
+    const objectKey = `shop-brands/store.example.org/logo/sha256-${fixture.contentSha256}.jpg`;
     for (const [httpStatusCode, retryable] of [[503, true], [409, true], [403, false]] as const) {
       const writer = createShopBrandR2Writer({
         head: async () => { throw { $metadata: { httpStatusCode } }; }, put: vi.fn(),

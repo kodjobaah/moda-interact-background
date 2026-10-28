@@ -3,6 +3,7 @@ import { createLogger, type StructuredLogger } from "@modainteract/moda-interact
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
   assertMediaInput, ShopBrandMediaError,
+  isCanonicalShopBrandDomain,
   type ImageTransformer, type PublicMediaProbe, type R2ObjectWriter, type SafeFetcher,
   type ShopBrandMediaInput, type ShopBrandMediaProcessor, type ShopBrandPublicMediaSettings,
 } from "./contracts.js";
@@ -25,11 +26,14 @@ export interface ShopBrandMediaDependencies {
 /** Public URL is derived only from the validated Admin origin plus a server-generated key. */
 export function publicBrandImageUrl(origin: string, objectKey: string): string {
   const url = new URL(origin);
+  const [prefix, domain, role, filename] = objectKey.split("/");
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
       url.pathname !== "/" || (url.port && url.port !== "443") ||
       !url.hostname.includes(".") || url.hostname.startsWith("[") ||
       isIP(url.hostname) !== 0 || /\.(?:local|localhost|test|invalid|example|internal)$/.test(url.hostname) ||
-      !/^shop-brands\/[A-Za-z0-9_-]{1,128}\/(logo|square_logo|cover_image)\/sha256-[a-f0-9]{64}\.(jpg|png)$/.test(objectKey)) {
+      prefix !== "shop-brands" || !isCanonicalShopBrandDomain(domain) ||
+      !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
+      !/^sha256-[a-f0-9]{64}\.(jpg|png)$/.test(filename ?? "") || objectKey.split("/").length !== 4) {
     throw new ShopBrandMediaError("R2_CONFIGURATION_INVALID");
   }
   return `${url.origin}/${objectKey.split("/").map(encodeURIComponent).join("/")}`;
@@ -51,7 +55,7 @@ export function createShopBrandMediaProcessor(input: ShopBrandMediaDependencies)
           throw new ShopBrandMediaError("OUTPUT_VERIFICATION_FAILED");
         }
         const extension = image.contentType === "image/png" ? "png" : "jpg";
-        const objectKey = `shop-brands/${source.shopId}/${source.role.toLowerCase()}/sha256-${image.contentSha256}.${extension}`;
+        const objectKey = `shop-brands/${source.domain}/${source.role.toLowerCase()}/sha256-${image.contentSha256}.${extension}`;
         const publicUrl = publicBrandImageUrl(settings.publicOrigin, objectKey);
         await input.writer.putVerified({ bucket: settings.bucketName, objectKey, image });
         await input.probe.verify({ url: publicUrl, image });

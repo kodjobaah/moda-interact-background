@@ -2,8 +2,9 @@
 
 This processor is a reusable internal Background service, **not** an HTTP route or
 BullMQ worker. `createProductionShopBrandMediaProcessor().process(...)` accepts a
-trusted BG002 source observation `(shopId, role, sourceUrl, sourceFingerprint,
-sourceGeneration)`; it does not read or mutate `ShopBrand`, source generations,
+trusted BG002 source observation `(shopId, domain, role, sourceUrl,
+sourceFingerprint, sourceGeneration)`; `domain` is the current trusted
+`Shop.domain`. It does not read or mutate `ShopBrand`, source generations,
 leases, or the private Merchant Knowledge bucket. BG002 will own those operations.
 
 ## Invariants
@@ -15,9 +16,9 @@ leases, or the private Merchant Knowledge bucket. BG002 will own those operation
   40-million-pixel input limit. Output is a 1125×600 JPEG or transparent PNG,
   with logo fit/pad and cover centre-crop, stripped of source metadata, re-decoded
   and independently SHA-256 checked. Encoded output must be **below** 5 MiB.
-- Each object key is `shop-brands/<shopId>/<role-lowercase>/sha256-<digest>.jpg|png`.
-  Conditional writes prevent mutation; existing objects can be reused only after
-  a matching R2 HEAD. `Cache-Control: public, max-age=31536000, immutable`.
+- Each object key is `shop-brands/<canonical-shop-domain>/<role-lowercase>/sha256-<digest>.jpg|png`.
+  The domain must be lowercase and pass strict DNS-label validation; URL syntax,
+  credentials, ports, paths, controls, IP literals and traversal-like values are rejected.
 - No READY metadata is returned until a pinned **public HTTPS GET** from the
   configured custom domain delivers the same media MIME, byte length and digest.
   R2 HEAD is not a substitute for live delivery verification.

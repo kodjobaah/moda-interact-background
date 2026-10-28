@@ -10,7 +10,7 @@ import { ShopBrandMediaError, type ShopBrandMediaInput } from "../../../../src/s
 
 const configuration = { publicOrigin: "https://shop-brands.modainteract.com",
   bucketName: "moda-interact-shop-brands" };
-const source: ShopBrandMediaInput = { shopId: "shop-123", role: "LOGO",
+const source: ShopBrandMediaInput = { shopId: "shop-123", domain: "merchant.example.org", role: "LOGO",
   sourceUrl: "https://merchant.example.org/logo.png?token=should-not-log",
   sourceFingerprint: `sha256:${"a".repeat(64)}`, sourceGeneration: 3 };
 const fixture = async () => sharp({ create: { width: 60, height: 30, channels: 3,
@@ -29,7 +29,7 @@ describe("ARCH-049 media processor / public readiness", () => {
     });
     const result = await process.process(source);
     expect(result).toMatchObject({
-      objectKey: expect.stringMatching(/^shop-brands\/shop-123\/logo\/sha256-[a-f0-9]{64}\.jpg$/),
+      objectKey: expect.stringMatching(/^shop-brands\/merchant\.example\.org\/logo\/sha256-[a-f0-9]{64}\.jpg$/),
       contentType: "image/jpeg", width: 1125, height: 600,
       sourceGeneration: 3, sourceFingerprint: source.sourceFingerprint,
     });
@@ -51,7 +51,7 @@ describe("ARCH-049 media processor / public readiness", () => {
   it("withholds READY when the public HTTPS domain does not deliver matching image bytes/content type", async () => {
     const bytes = await fixture();
     const image = await createShopBrandImageTransformer().transform(bytes, "LOGO");
-    const url = `https://shop-brands.modainteract.com/shop-brands/shop-123/logo/sha256-${image.contentSha256}.jpg`;
+    const url = `https://shop-brands.modainteract.com/shop-brands/${source.domain}/logo/sha256-${image.contentSha256}.jpg`;
     await expect(createShopBrandPublicMediaProbe({ fetch: async () => ({
       bytes: image.bytes, declaredContentType: "image/png",
     }) }).verify({ url, image })).rejects.toMatchObject({ code: "PUBLIC_MEDIA_MISMATCH", retryable: true });
@@ -118,12 +118,29 @@ describe("ARCH-049 media processor / public readiness", () => {
   });
 
   it("only builds public origin URLs with validated path keys, never arbitrary external URLs", () => {
-    const key = `shop-brands/shop-1/logo/sha256-${"b".repeat(64)}.png`;
+    const key = `shop-brands/store.example.org/logo/sha256-${"b".repeat(64)}.png`;
     expect(publicBrandImageUrl("https://shop-brands.modainteract.com", key))
       .toBe(`https://shop-brands.modainteract.com/${key}`);
     expect(() => publicBrandImageUrl("http://shop-brands.modainteract.com", key)).toThrow();
     expect(() => publicBrandImageUrl("https://shop-brands.modainteract.com/untrusted", key)).toThrow();
     expect(() => publicBrandImageUrl("https://shop-brands.modainteract.com", "shop-brands/../evil"))
       .toThrow();
+    for (const domain of ["Store.example.org", "store.example.org/path", "user@store.example.org",
+      "store.example.org:443", "store..example.org", "store.example.org.", "store.example.org\n"]) {
+      expect(() => publicBrandImageUrl("https://shop-brands.modainteract.com",
+        `shop-brands/${domain}/logo/sha256-${"b".repeat(64)}.jpg`)).toThrow();
+    }
+  });
+
+  it("rejects unsafe Shop.domain values before fetching or writing", async () => {
+    const fetch = vi.fn();
+    const processor = createShopBrandMediaProcessor({ readConfiguration: async () => configuration,
+      fetcher: { fetch }, transformer: createShopBrandImageTransformer(),
+      writer: { putVerified: vi.fn() }, probe: { verify: vi.fn() } });
+    for (const domain of ["Store.example.org", "store.example.org/path", "user@store.example.org",
+      "store.example.org:443", "store..example.org", "store.example.org.", "store.example.org\n"]) {
+      await expect(processor.process({ ...source, domain })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    }
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

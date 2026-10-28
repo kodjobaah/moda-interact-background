@@ -7,7 +7,7 @@ import type {
 import { BrandStateError } from "./contracts.js";
 import { claimRole, completeClaim, failClaim, parseBrandDocument, updateObservedSource } from "./state.js";
 
-export type ScannedBrandRow = { shopId: string; whatsAppMedia: unknown };
+export type ScannedBrandRow = { shopId: string; domain: string; whatsAppMedia: unknown };
 export type ShopBrandMediaDatabase = Pick<PrismaClient, "$transaction" | "shop" | "shopBrand">;
 
 /**
@@ -64,9 +64,9 @@ export class ShopBrandMediaRepository {
     const rows = await this.database.shopBrand.findMany({
       where: afterShopId ? { shopId: { gt: afterShopId } } : {},
       orderBy: { shopId: "asc" }, take: limit,
-      select: { shopId: true, whatsAppMedia: true },
+      select: { shopId: true, whatsAppMedia: true, shop: { select: { domain: true } } },
     });
-    return rows;
+    return rows.map(({ shopId, whatsAppMedia, shop }) => ({ shopId, domain: shop.domain, whatsAppMedia }));
   }
 
   private async editLocked<T>(

@@ -1,4 +1,6 @@
 /** ARCH-049-BACKGROUND-001: one untrusted source in, one verified immutable image out. */
+import { isIP } from "node:net";
+
 export const SHOP_BRAND_CANVAS = Object.freeze({ width: 1125, height: 600 });
 export const SHOP_BRAND_MAX_SOURCE_BYTES = 10 * 1024 * 1024;
 export const SHOP_BRAND_MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
@@ -85,9 +87,18 @@ export type ShopBrandPublicMediaSettings = Readonly<{
   bucketName: string;
 }>;
 
+/** Shop.domain is a single lowercase DNS hostname, never a URL or arbitrary path segment. */
+export function isCanonicalShopBrandDomain(domain: unknown): domain is string {
+  if (typeof domain !== "string" || domain.length > 253 || domain !== domain.toLowerCase() ||
+      !domain.includes(".") || domain.endsWith(".") || isIP(domain) !== 0) return false;
+  return domain.split(".").every((label) => label.length >= 1 && label.length <= 63 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label));
+}
+
 export function assertMediaInput(input: ShopBrandMediaInput): void {
   // Shop IDs originate from the trusted database. Still refuse path segments, separators and controls.
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.shopId) ||
+      !isCanonicalShopBrandDomain(input.domain) ||
       !(["LOGO", "SQUARE_LOGO", "COVER_IMAGE"] as const).includes(input.role) ||
       !/^sha256:[a-f0-9]{64}$/.test(input.sourceFingerprint) ||
       !Number.isSafeInteger(input.sourceGeneration) || input.sourceGeneration < 1 ||
