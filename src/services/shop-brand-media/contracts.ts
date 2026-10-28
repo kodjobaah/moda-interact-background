@@ -85,21 +85,36 @@ export type ShopBrandPublicMediaSettings = Readonly<{
   bucketName: string;
 }>;
 
-/** Versioned base64url keeps the raw database domain in one reversible path segment. */
-export function encodeShopBrandDomain(domain: string): string {
-  return `v1-${Buffer.from(domain, "utf8").toString("base64url")}`;
+const SHOP_BRAND_DOMAIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const ABSOLUTE_URL = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+
+/** Use URL.hostname for absolute URLs; preserve safe bare host-like values verbatim. */
+export function normalizeShopBrandDomain(domain: string): string | null {
+  if (typeof domain !== "string" || !domain || [...domain].some((character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0x1f || code === 0x7f;
+  })) return null;
+  let segment = domain;
+  if (ABSOLUTE_URL.test(domain)) {
+    try {
+      segment = new URL(domain).hostname;
+    } catch {
+      return null;
+    }
+  }
+  if (!segment || segment.length > 253 || segment === "." || segment === ".." ||
+      !SHOP_BRAND_DOMAIN_SEGMENT.test(segment)) return null;
+  return segment;
 }
 
-export function decodeShopBrandDomain(segment: string | undefined): string | null {
-  if (!segment || !/^v1-[A-Za-z0-9_-]*$/.test(segment)) return null;
-  const domain = Buffer.from(segment.slice(3), "base64url").toString("utf8");
-  return encodeShopBrandDomain(domain) === segment ? domain : null;
+export function isShopBrandDomainSegment(segment: string | undefined): segment is string {
+  return typeof segment === "string" && normalizeShopBrandDomain(segment) === segment;
 }
 
 export function assertMediaInput(input: ShopBrandMediaInput): void {
   // Shop IDs originate from the trusted database. Still refuse path segments, separators and controls.
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.shopId) ||
-      typeof input.domain !== "string" ||
+      normalizeShopBrandDomain(input.domain) === null ||
       !(["LOGO", "SQUARE_LOGO", "COVER_IMAGE"] as const).includes(input.role) ||
       !/^sha256:[a-f0-9]{64}$/.test(input.sourceFingerprint) ||
       !Number.isSafeInteger(input.sourceGeneration) || input.sourceGeneration < 1 ||

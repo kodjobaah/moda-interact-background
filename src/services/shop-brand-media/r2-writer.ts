@@ -3,7 +3,7 @@ import {
   HeadObjectCommand, PutObjectCommand, S3Client,
   type HeadObjectCommandInput, type HeadObjectCommandOutput, type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
-import { decodeShopBrandDomain, ShopBrandMediaError, type R2ObjectWriter } from "./contracts.js";
+import { isShopBrandDomainSegment, ShopBrandMediaError, type R2ObjectWriter } from "./contracts.js";
 import type { ShopBrandR2Credentials } from "./r2-config.js";
 
 export const SHOP_BRAND_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -68,7 +68,7 @@ export function createShopBrandR2Writer(transportOrFactory: BrandR2Transport | (
       const [prefix, domain, role, filename] = objectKey.split("/");
       if (!/^(?!.*\.\.)(?!.*\.-|.*-\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
           /^\d+\.\d+\.\d+\.\d+$/.test(bucket) ||
-          prefix !== "shop-brands" || decodeShopBrandDomain(domain) === null ||
+          prefix !== "shop-brands" || !isShopBrandDomainSegment(domain) ||
           !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
           !/^sha256-[a-f0-9]{64}\.(jpg|png)$/.test(filename ?? "") || objectKey.split("/").length !== 4 ||
           !/^[a-f0-9]{64}$/.test(image.contentSha256) ||

@@ -6,7 +6,7 @@ import {
 } from "../../../../src/services/shop-brand-media-orchestration/state.js";
 import { MEDIA_RECHECK_MS, MEDIA_LEASE_MS, type BrandDocument, type BrandClaim,
 } from "../../../../src/services/shop-brand-media-orchestration/contracts.js";
-import { encodeShopBrandDomain } from "../../../../src/services/shop-brand-media/contracts.js";
+import { normalizeShopBrandDomain } from "../../../../src/services/shop-brand-media/contracts.js";
 
 const SHOP = "shop_123";
 const DOMAIN = "merchant.myshopify.com";
@@ -28,7 +28,7 @@ function claim(doc: BrandDocument, at = after(10), owner = randomUUID()) {
 function output(c: BrandClaim, digest = DIGEST) {
   return { verifiedAt: after(20).toISOString(), result: {
     sourceGeneration: c.generation, sourceFingerprint: c.fingerprint,
-    contentSha256: digest, objectKey: `shop-brands/${encodeShopBrandDomain(c.domain)}/logo/sha256-${digest}.jpg`,
+    contentSha256: digest, objectKey: `shop-brands/${normalizeShopBrandDomain(c.domain)}/logo/sha256-${digest}.jpg`,
     contentType: "image/jpeg" as const, width: 1125, height: 600, sizeBytes: 1024,
   } };
 }
@@ -109,19 +109,26 @@ describe("ARCH-049 ShopBrand source/update/claim state machine", () => {
     const repaired = completeClaim(repair.document, repair.claim!, output(repair.claim!), after(40));
     expect(repaired.applied).toBe(true);
     expect(repaired.document.roles.LOGO!.ready!.objectKey)
-      .toBe(`shop-brands/${encodeShopBrandDomain(DOMAIN)}/logo/sha256-${DIGEST}.jpg`);
+      .toBe(`shop-brands/${normalizeShopBrandDomain(DOMAIN)}/logo/sha256-${DIGEST}.jpg`);
     expect(currentReady(repaired.document.roles.LOGO!, DOMAIN, "LOGO")).not.toBeNull();
   });
 
-  it("reprocesses legacy raw-domain keys and rejects completion after Shop.domain changes", () => {
+  it("accepts readable raw-domain keys and rejects completion after Shop.domain changes", () => {
     const legacy = ready();
     legacy.roles.LOGO!.ready!.objectKey = `shop-brands/${DOMAIN}/logo/sha256-${DIGEST}.jpg`;
-    expect(currentReady(legacy.roles.LOGO!, DOMAIN, "LOGO")).toBeNull();
-    const repair = claim(legacy, after(30));
-    expect(repair.claim?.kind).toBe("initial");
-    const completed = completeClaim(repair.document, repair.claim!, output(repair.claim!), after(40), "renamed/path");
+    expect(currentReady(legacy.roles.LOGO!, DOMAIN, "LOGO")).not.toBeNull();
+    const active = claim(initial());
+    const completed = completeClaim(active.document, active.claim!, output(active.claim!), after(40), "renamed/path");
     expect(completed.applied).toBe(false);
     expect(completed.document.roles.LOGO!.work.status).toBe("PROCESSING");
+  });
+
+  it("retains the raw URL domain on a claim and rejects a normalized-equivalent raw change", () => {
+    const rawDomain = "https://EXAMPLE.com/brand?source=shop#logo";
+    const claimed = claimRole(initial(), SHOP, rawDomain, "LOGO", randomUUID(), after(10));
+    expect(claimed.claim?.domain).toBe(rawDomain);
+    const completed = completeClaim(claimed.document, claimed.claim!, output(claimed.claim!), after(20), "example.com");
+    expect(completed.applied).toBe(false);
   });
 
   it("recovers crashed leases and stops claiming after five attempts", () => {

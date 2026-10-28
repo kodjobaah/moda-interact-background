@@ -7,7 +7,7 @@ import {
   BrandStateError, BRAND_ROLES, MEDIA_LEASE_MS, MEDIA_MAX_ATTEMPTS,
   MEDIA_RECHECK_MS, MEDIA_RETRY_DELAYS_MS,
 } from "./contracts.js";
-import { decodeShopBrandDomain, encodeShopBrandDomain } from "../shop-brand-media/contracts.js";
+import { normalizeShopBrandDomain } from "../shop-brand-media/contracts.js";
 
 const FINGERPRINT = /^sha256:[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -119,7 +119,7 @@ function expired(value: string | null, now: number): boolean {
 export function currentReady(slot: BrandSlot, expectedDomain?: string, expectedRole?: BrandRole): BrandReady | null {
   const { source, work, ready } = slot;
   const [prefix, domainSegment, role, filename] = ready?.objectKey.split("/") ?? [];
-  const domain = decodeShopBrandDomain(domainSegment);
+  const domain = domainSegment === undefined ? null : normalizeShopBrandDomain(domainSegment);
   if (work.status !== "READY" || !source.url || !source.fingerprint ||
       !ready || ready.sourceGeneration !== source.generation ||
       ready.sourceFingerprint !== source.fingerprint ||
@@ -129,7 +129,7 @@ export function currentReady(slot: BrandSlot, expectedDomain?: string, expectedR
       !DIGEST.test(ready.contentSha256) ||
         prefix !== "shop-brands" || domain === null ||
         !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
-        (expectedDomain !== undefined && domain !== expectedDomain) ||
+        (expectedDomain !== undefined && domain !== normalizeShopBrandDomain(expectedDomain)) ||
         (expectedRole !== undefined && role !== expectedRole.toLowerCase()) ||
         !/^sha256-[a-f0-9]{64}\.(?:jpg|png)$/.test(filename ?? "") ||
         ready.objectKey.split("/").length !== 4) return null;
@@ -161,7 +161,7 @@ export function claimable(slot: BrandSlot | undefined, now: number, domain?: str
 export function claimRole(document: BrandDocument, shopId: string, domain: string, role: BrandRole, owner: string, at: Date): {
   document: BrandDocument; claim: BrandClaim | null;
 } {
-  if (!OWNERS.test(owner) || typeof domain !== "string") throw new BrandStateError("INVALID_OBSERVATION");
+  if (!OWNERS.test(owner) || normalizeShopBrandDomain(domain) === null) throw new BrandStateError("INVALID_OBSERVATION");
   const slot = document.roles[role];
   if (!slot || !claimable(slot, at.getTime(), domain, role) || !slot.source.url || !slot.source.fingerprint) {
     return { document, claim: null };
@@ -234,7 +234,7 @@ export function completeClaim(doc: BrandDocument, claim: BrandClaim, result: Bra
       !["image/jpeg", "image/png"].includes(result.result.contentType) ||
       result.result.width !== 1125 || result.result.height !== 600 ||
       result.result.sizeBytes <= 0 || result.result.sizeBytes >= 5 * 1024 * 1024 ||
-      result.result.objectKey !== `shop-brands/${encodeShopBrandDomain(claim.domain)}/${claim.role.toLowerCase()}/sha256-${result.result.contentSha256}.${result.result.contentType === "image/png" ? "png" : "jpg"}`) {
+      result.result.objectKey !== `shop-brands/${normalizeShopBrandDomain(claim.domain)}/${claim.role.toLowerCase()}/sha256-${result.result.contentSha256}.${result.result.contentType === "image/png" ? "png" : "jpg"}`) {
     return { document: doc, applied: false };
   }
   const ready: BrandReady = {

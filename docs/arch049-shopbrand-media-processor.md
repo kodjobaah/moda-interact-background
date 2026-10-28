@@ -16,9 +16,14 @@ leases, or the private Merchant Knowledge bucket. BG002 will own those operation
   40-million-pixel input limit. Output is a 1125×600 JPEG or transparent PNG,
   with logo fit/pad and cover centre-crop, stripped of source metadata, re-decoded
   and independently SHA-256 checked. Encoded output must be **below** 5 MiB.
-- Each object key is `shop-brands/<canonical-shop-domain>/<role-lowercase>/sha256-<digest>.jpg|png`.
-  The domain must be lowercase and pass strict DNS-label validation; URL syntax,
-  credentials, ports, paths, controls, IP literals and traversal-like values are rejected.
+- Each object key is `shop-brands/<normalized-Shop.domain>/<role-lowercase>/sha256-<digest>.jpg|png`.
+  An absolute URL contributes only its parsed, lowercase `hostname`; a bare
+  host-like value is preserved verbatim, including a single label such as
+  `example`. The resulting segment must contain only ASCII letters, digits,
+  dots, underscores or hyphens, must not be `.` or `..`, and is limited to 253
+  characters. Bare credentials, ports, paths, queries, fragments, separators
+  and controls are rejected; URL paths, credentials, queries and fragments are
+  never copied into the object key.
 - No READY metadata is returned until a pinned **public HTTPS GET** from the
   configured custom domain delivers the same media MIME, byte length and digest.
   R2 HEAD is not a substitute for live delivery verification.
