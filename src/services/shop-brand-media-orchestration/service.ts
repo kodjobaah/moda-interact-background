@@ -64,6 +64,8 @@ export class ShopBrandMediaReconciliationService {
           reasonCode: "PAGE_READ_FAILURE",
           exceptionType: error instanceof Error ? "Error" : "NonErrorThrownValue",
           pageSize: take,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         throw error;
       }
@@ -87,6 +89,8 @@ export class ShopBrandMediaReconciliationService {
             reasonCode: error instanceof BrandStateError ? error.code : "SCAN_ROW_FAILURE",
             exceptionType: error instanceof BrandStateError ? "BrandStateError" :
               error instanceof Error ? "Error" : "NonErrorThrownValue",
+            errorMessage: error instanceof Error ? error.message : String(error),
+            error: error,
           });
         }
         if (claims.length >= this.maxClaims) break;
@@ -112,6 +116,8 @@ export class ShopBrandMediaReconciliationService {
             reasonCode: error instanceof BrandStateError ? error.code : "CLAIM_OPERATION_FAILED",
             exceptionType: error instanceof BrandStateError ? "BrandStateError" :
               error instanceof Error ? "Error" : "NonErrorThrownValue",
+            errorMessage: error instanceof Error ? error.message : String(error),
+            error: error,
           });
           failures.push(error);
         }
@@ -137,6 +143,8 @@ export class ShopBrandMediaReconciliationService {
           reasonCode: error instanceof BrandStateError ? error.code : "LOCAL_WAKE_FAILURE",
           exceptionType: error instanceof BrandStateError ? "BrandStateError" :
             error instanceof Error ? "Error" : "NonErrorThrownValue",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         throw error;
       }
@@ -160,6 +168,8 @@ export class ShopBrandMediaReconciliationService {
         exceptionType: error instanceof ShopBrandMediaError ? "ShopBrandMediaError" :
           error instanceof Error ? "Error" : "NonErrorThrownValue",
         durationMs: this.now().getTime() - startedAt,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       // If the DB update fails, surface it to the scheduler. The expired lease will be
       // reclaimed without claiming a false success or swallowing the persistence failure.

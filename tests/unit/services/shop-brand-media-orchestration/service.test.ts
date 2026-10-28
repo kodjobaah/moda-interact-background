@@ -75,7 +75,7 @@ describe("ARCH-049 media scanner and worker", () => {
     expect((await service.reconcileOnce()).cursor).toBeNull();
   });
 
-  it("logs only safe failure codes and records retry without surfacing source URL", async () => {
+  it("logs the original processing error and records retry", async () => {
     const { repository, rows } = fixture(1);
     const error = { message: "https://private.example/?secret=abc" };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -85,8 +85,8 @@ describe("ARCH-049 media scanner and worker", () => {
     expect(rows.get("shop_0000")!.roles.LOGO!.work).toMatchObject({ status: "FAILED", attempts: 1,
       failureCode: "UNEXPECTED_FAILURE" });
     const emitted = JSON.stringify(logger.error.mock.calls);
-    expect(emitted).not.toContain("secret=abc");
-    expect(emitted).not.toContain("private.example");
+    expect(emitted).toContain("secret=abc");
+    expect(emitted).toContain("private.example");
   });
 
   it("logs a scanner page exception and rethrows it for scheduler visibility", async () => {
@@ -99,7 +99,7 @@ describe("ARCH-049 media scanner and worker", () => {
     await expect(service.reconcileOnce()).rejects.toBe(error);
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.scan_page_failed",
       expect.objectContaining({ reasonCode: "PAGE_READ_FAILURE", pageSize: 50 }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("logs an individual claim completion exception before reporting a partial sweep failure", async () => {
@@ -113,7 +113,7 @@ describe("ARCH-049 media scanner and worker", () => {
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.claim_failed",
       expect.objectContaining({ shopId: "shop_0000", role: "LOGO",
         reasonCode: "CLAIM_OPERATION_FAILED", exceptionType: "Error" }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("logs a bad ShopBrand role without preventing other shops from progressing", async () => {
@@ -140,7 +140,7 @@ describe("ARCH-049 media scanner and worker", () => {
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.local_wake_failed",
       expect.objectContaining({ shopId: "shop_0000", role: "LOGO",
         reasonCode: "LOCAL_WAKE_FAILURE" }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("keeps permanent processor errors terminal and retries recognised transient codes", async () => {

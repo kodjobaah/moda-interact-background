@@ -43,6 +43,8 @@ export function createShopifyDiscountSyncWorker() {
         logger.error("shopify.discount_sync.failed", {
           ...fields,
           ...boundedError(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         throw error;
       }
@@ -61,6 +63,8 @@ export function createShopifyDiscountSyncWorker() {
     logger.error("shopify.discount_sync.worker_error", {
       queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
       ...boundedError(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
   });
 
@@ -71,12 +75,12 @@ function boundedError(error: unknown): { errorName: string; errorMessage: string
   if (error instanceof Error) {
     return {
       errorName: error.name.slice(0, 64),
-      errorMessage: error.message.slice(0, 256),
+      errorMessage: error.message,
     };
   }
 
   return {
     errorName: "UnknownError",
-    errorMessage: String(error).slice(0, 256),
+    errorMessage: String(error),
   };
 }

@@ -92,7 +92,11 @@ export function createProductionShopBrandMediaProcessor(environment: Readonly<No
   let credentials;
   try { credentials = loadShopBrandR2Credentials(environment); }
   catch (error) {
-    logger.error("shop_brand.media.configuration_failed", { reasonCode: "R2_CONFIGURATION_INVALID" });
+    logger.error("shop_brand.media.configuration_failed", {
+      reasonCode: "R2_CONFIGURATION_INVALID",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
+    });
     throw error;
   }
   const fetcher = createSafeImageFetcher();

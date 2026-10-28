@@ -77,6 +77,8 @@ export class MerchantPricingTranslationPublicationService {
         logger.error("background.merchant_pricing_translation.finalization_retryable_failure", {
           runId: row.id,
           failureCode: error instanceof Error ? error.name : "finalization-failed",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
       }
     }

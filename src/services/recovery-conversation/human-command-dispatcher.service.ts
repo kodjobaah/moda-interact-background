@@ -108,7 +108,10 @@ export class HumanCommandDispatcherService {
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.pollPromise = this.poll().catch((error: unknown) => {
-        logger.error("arch040.human_dispatcher.poll_failed", { reason: "poll_failed", errorType: error instanceof Error ? error.name : "unknown" });
+        logger.error("arch040.human_dispatcher.poll_failed", { reason: "poll_failed", errorType: error instanceof Error ? error.name : "unknown",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
+        });
       }).finally(() => {
         this.pollPromise = undefined;
         this.queuePoll(POLL_MS);
@@ -129,6 +132,8 @@ export class HumanCommandDispatcherService {
       const active: Promise<void> = this.processClaim(claim.id, claim.leaseToken).catch((error: unknown) => {
         logger.error("arch040.human_dispatcher.command_failed", {
           commandId: claim.id, errorType: error instanceof Error ? error.name : "unknown",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
       }).finally(() => { this.inFlight.delete(active); });
       this.inFlight.add(active);
@@ -257,6 +262,7 @@ export class HumanCommandDispatcherService {
       logger.warn("arch040.human_dispatcher.moderation_pipeline_retry", {
         commandId, reasonCode: "moderation_pipeline_exception", retryDelayMs: 30_000,
         ...moderationExceptionLogFields(error, deploymentEnvironment),
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
       await this.defer(commandId, leaseToken, "moderation_unavailable");
       return;
@@ -284,6 +290,8 @@ export class HumanCommandDispatcherService {
       logger.error("arch040.human_dispatcher.sender_preflight_failed", {
         commandId, reasonCode: "sender_configuration_unavailable",
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       const deferred = await this.deps.commands.deferCommand(commandId, leaseToken,
         "sender_configuration_unavailable", new Date(this.deps.now().getTime() + 120_000));
@@ -415,6 +423,8 @@ export class HumanCommandDispatcherService {
       logger.warn("arch040.human_dispatcher.provider_exception", {
         commandId, errorType: error instanceof Error ? error.name : "unknown",
         providerFailureCode: definitive ? providerCode : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       const terminalRecipient = isSynchronousRecipientFailure(error);
       let recordedOutcome: "unknown" | "definitive_failure" | null = null;
@@ -441,6 +451,8 @@ export class HumanCommandDispatcherService {
       logger.warn("arch040.human_dispatcher.provider_outcome", {
         commandId, outcome: definitive ? "definitive_failure" : "unknown",
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       // Incidents are reported only after the durable command disposition is recorded.
       // Failure of the support pipeline cannot change that disposition or re-send to Meta.
@@ -460,6 +472,8 @@ export class HumanCommandDispatcherService {
     } catch (incidentError) {
       logger.error("arch040.human_dispatcher.incident_report_failed", {
         commandId, errorType: incidentError instanceof Error ? incidentError.name : "unknown",
+        errorMessage: incidentError instanceof Error ? incidentError.message : String(incidentError),
+        error: incidentError,
       });
     }
   }

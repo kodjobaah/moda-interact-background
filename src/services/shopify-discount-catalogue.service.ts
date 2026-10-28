@@ -77,6 +77,8 @@ export class ShopifyDiscountCatalogueService {
         shopId,
         generation: claimed.generation,
         ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       await prisma.$transaction(async (transaction) => {
         const catalogue = await this.lockCatalogue(transaction, shopId);
@@ -138,13 +140,13 @@ function boundedError(error: unknown): { errorName: string; errorMessage: string
   if (error instanceof Error) {
     return {
       errorName: error.name.slice(0, 64),
-      errorMessage: error.message.slice(0, 256),
+      errorMessage: error.message,
     };
   }
 
   return {
     errorName: "UnknownError",
-    errorMessage: String(error).slice(0, 256),
+    errorMessage: String(error),
   };
 }
 

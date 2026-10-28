@@ -141,6 +141,7 @@ export class RecoveryOutreachFinalizationService {
         outboundMessageId: input.message.id,
         stage,
         error,
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
     } catch {
       // A failing logger sink must not mask the original Shopify finalisation error.

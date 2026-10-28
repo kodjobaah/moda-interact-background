@@ -152,6 +152,6 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "INITIAL", policy: policy as never, conversationLanguageTag: null })).rejects.toBe(err);
     expect(f.logger.error).toHaveBeenCalledWith("recovery_template.integration.failed",
       expect.objectContaining({ errorType: "Error", shopId: "shop-1" }));
-    expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain("sensitive recipient");
+    expect(f.logger.error.mock.lastCall?.[1].errorMessage).toBe(err.message);
   });
 });

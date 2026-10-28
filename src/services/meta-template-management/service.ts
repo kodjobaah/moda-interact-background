@@ -78,6 +78,8 @@ export class MetaTemplateManagementService {
               recordError = persistenceError;
               this.reporting.error("meta.template.create.block_failure", {
                 registrationId, ...safeMetaError(persistenceError),
+                errorMessage: persistenceError instanceof Error ? persistenceError.message : String(persistenceError),
+                error: persistenceError,
               });
             }
             if (recordError !== undefined) throw new AggregateError([error, recordError],
@@ -103,6 +105,8 @@ export class MetaTemplateManagementService {
         compensationError = persistenceError;
         this.reporting.error("meta.template.create.compensation_failed", {
           registrationId, ...safeMetaError(persistenceError),
+          errorMessage: persistenceError instanceof Error ? persistenceError.message : String(persistenceError),
+          error: persistenceError,
         });
       }
       if (compensationError !== undefined) {
@@ -154,7 +158,10 @@ export class MetaTemplateManagementService {
       this.reporting.info("meta.template.reconcile.current", { registrationId, status });
       return { kind: "current", status };
     } catch (error) {
-      this.reporting.error("meta.template.reconcile.error", { registrationId, ...safeMetaError(error) });
+      this.reporting.error("meta.template.reconcile.error", { registrationId, ...safeMetaError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
+      });
       if (row) {
         let retryPersistenceError: unknown;
         try { await this.repository.deferFailedReconciliation(row); }
@@ -162,6 +169,8 @@ export class MetaTemplateManagementService {
           retryPersistenceError = persistenceError;
           this.reporting.error("meta.template.reconcile.defer_failed", {
             registrationId, ...safeMetaError(persistenceError),
+            errorMessage: persistenceError instanceof Error ? persistenceError.message : String(persistenceError),
+            error: persistenceError,
           });
         }
         if (retryPersistenceError !== undefined) {
@@ -192,7 +201,10 @@ export class MetaTemplateManagementService {
         processed += 1;
       } catch (error) {
         failures.push(error);
-        this.reporting.error("meta.template.due.failed", { registrationId: item.id, ...safeMetaError(error) });
+        this.reporting.error("meta.template.due.failed", { registrationId: item.id, ...safeMetaError(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
+        });
       }
     }
     if (failures.length) {
@@ -234,6 +246,8 @@ export class MetaTemplateManagementService {
       this.reporting.error("meta.template.webhook.error", {
         eventIdentity: typeof input?.eventIdentity === "string" ? input.eventIdentity.slice(0, 191) : null,
         ...safeMetaError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

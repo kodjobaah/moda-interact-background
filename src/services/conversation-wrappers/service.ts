@@ -93,6 +93,8 @@ export class ConversationWrapperService {
         platformFallbackTag: this.dependencies.platformFallbackLanguageTag ?? null,
       }, (error) => this.logger.warn("conversation_wrapper.invalid_language_exception", {
         conversationId: input.conversationId, errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
       }));
       if (choices === "invalid") return this.refuse("rejected", "INVALID_LANGUAGE", input);
       const locale = choices.map((tag) => slot.definition.locales.find((row) => row.languageTag === tag))
@@ -139,6 +141,8 @@ export class ConversationWrapperService {
         errorType: error instanceof Error ? error.name : "unknown",
         errorCode: error && typeof error === "object" && "code" in error &&
           typeof error.code === "string" ? error.code.slice(0, 48) : undefined,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

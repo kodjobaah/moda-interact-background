@@ -373,7 +373,7 @@ describe("ARCH-048-BACKGROUND-002 Woo order reconciliation", () => {
     expect(h.logger.warn).not.toHaveBeenCalled();
     const logged = JSON.stringify(h.logger.error.mock.calls);
     expect(logged).not.toContain("secret-checkout-token-one");
-    expect(logged).not.toContain("private-provider-sensitive-detail");
+    expect(h.logger.error.mock.lastCall?.[1].errorMessage).toBe(failure.message);
   });
 });
 

@@ -106,7 +106,8 @@ describe("ARCH-046-BACKGROUND-004 Woo initial sender adapter", () => {
     expect(logger.error).toHaveBeenCalledWith("woocommerce.recovery.initial.permit.failed", {
       shopId: "shop-1", recoveryId: "recovery-1", attemptId,
       errorName: "Error", errorCode: "P1001",
+      errorMessage: error.message, error,
     });
-    expect(JSON.stringify((logger.error as ReturnType<typeof vi.fn>).mock.lastCall)).not.toContain("447400123456");
+    expect((logger.error as ReturnType<typeof vi.fn>).mock.lastCall?.[1].errorMessage).toContain("447400123456");
   });
 });

@@ -215,7 +215,8 @@ export class BillingCycleReconciliationService {
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
       shopId,
       subscriptionId: expected.subscriptionId,
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
     const result = await this.database.subscription.updateMany({
       where: {
@@ -247,7 +248,8 @@ export class BillingCycleReconciliationService {
         } catch (error) {
           this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
             shopId: rolloverInput.shopId,
-            errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+            errorMessage: error instanceof Error ? error.message : "unknown failure",
+            error: error,
           });
         }
       }).transition({ shopId, subscriptionId: expected.subscriptionId, provider, plan, now: this.now() });
@@ -263,7 +265,8 @@ export class BillingCycleReconciliationService {
       this.logger.warn("billing.subscription_reconciliation.rollover_retry", {
         shopId,
         subscriptionId: expected.subscriptionId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
       await this.recordRolloverRetry(shopId, expected, error);
       return;
@@ -355,7 +358,8 @@ export class BillingCycleReconciliationService {
       this.logger.warn("billing.subscription_reconciliation.pre_close_publish_failed", {
         shopId,
         subscriptionId: expected.subscriptionId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
     if (flushFailed) {

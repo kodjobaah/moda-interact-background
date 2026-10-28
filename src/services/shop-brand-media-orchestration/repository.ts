@@ -98,8 +98,7 @@ export class ShopBrandMediaRepository {
         const code = typeof error === "object" && error !== null && "code" in error
           ? error.code : undefined;
         const retryable = code === "P2002" || code === "P2034";
-        // Prisma errors may embed SQL parameters, URLs or tenant data in their messages.
-        // Log only an allowlisted failure code and safe operation identifiers.
+        // Preserve the original Prisma failure message for development diagnosis.
         const fields = {
           shopId: /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? shopId : "INVALID_SHOP_ID",
           operation: create ? "observe_source" : "update_role",
@@ -107,6 +106,8 @@ export class ShopBrandMediaRepository {
             retryable ? code : "PERSISTENCE_FAILURE",
           exceptionType: error instanceof BrandStateError ? "BrandStateError" :
             error instanceof Error ? "Error" : "NonErrorThrownValue",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         };
         if (retryable && attempt < 3) {
           this.logger.warn("shop_brand.media.transaction_retry", fields);

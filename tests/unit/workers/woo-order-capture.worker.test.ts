@@ -84,7 +84,9 @@ describe("ARCH-048 Woo order worker reconciliation", () => {
     mocked.reconcile.mockRejectedValueOnce(failure);
     await expect(process(good())).rejects.toBe(failure);
     expect(mocked.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("password");
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
+      errorMessage: "db connection password", error: failure,
+    }));
   });
 
   it("keeps order and credit business logic outside the capture worker", async () => {
@@ -93,11 +95,12 @@ describe("ARCH-048 Woo order worker reconciliation", () => {
     expect(code).not.toMatch(/\bprisma\b|checkoutRecoveryService|reserveRecoveryCredit|sendTemplate/);
   });
 
-  it("logs worker infrastructure errors without their raw messages", () => {
-    mocked.listeners.get("error")?.(new Error("secret Redis URL"));
+  it("logs worker infrastructure errors with their original messages", () => {
+    const error = new Error("secret Redis URL");
+    mocked.listeners.get("error")?.(error);
     expect(mocked.error).toHaveBeenCalledWith("woocommerce.order_capture.worker_error", {
       queueName: "woo-order-capture-v1", errorName: "Error",
+      errorMessage: "secret Redis URL", error,
     });
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("secret Redis URL");
   });
 });

@@ -24,8 +24,11 @@ export function loadWooCouponReadKeyring(
 ): CredentialKeyring {
   try {
     return parseCredentialKeyring(environment.COMMERCE_CONNECTION_KEYS_JSON);
-  } catch {
-    throw new WooCouponReadError("grant_configuration");
+  } catch (error) {
+    throw new WooCouponReadError("grant_configuration", {
+      cause: error,
+      message: `Invalid WooCommerce credential keyring configuration: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
 }
 
@@ -101,8 +104,11 @@ export class WooCouponGrantService {
           !parsed.every((item) => typeof item === "string" && item.length > 0 && item.length <= 256 &&
             !/[\r\n\0:]/.test(item))) throw new Error("invalid");
       credential = { consumerKey: parsed[0] as string, consumerSecret: parsed[1] as string };
-    } catch {
-      throw new WooCouponReadError("grant_unavailable");
+    } catch (error) {
+      throw new WooCouponReadError("grant_unavailable", {
+        cause: error,
+        message: `Unable to load the WooCommerce coupon read grant: ${error instanceof Error ? error.message : String(error)}`,
+      });
     }
     const result = await read(site, credential);
     // Grant status or installation identity may change during slow paginated reads.

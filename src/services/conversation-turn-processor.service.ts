@@ -551,6 +551,8 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         observedVersion,
         ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       if (admission && !providerSendAttempted && !reservationFailed) {
         try {
@@ -558,6 +560,8 @@ export class ConversationTurnProcessor<TContext, TResult> {
         } catch (cleanupError) {
           this.logger.error("whatsapp.turn.cleanup_failed", {
             conversationId, observedVersion, ...boundedError(cleanupError),
+            errorMessage: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            error: cleanupError,
           });
           await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
           throw new AggregateError([error, cleanupError], "AI_TURN_CLEANUP_FAILED", { cause: cleanupError });
@@ -619,6 +623,8 @@ export class ConversationTurnProcessor<TContext, TResult> {
         jobId,
         delayMs: boundedDelay,
         ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }
@@ -681,13 +687,13 @@ function boundedError(error: unknown): { errorName: string; errorMessage: string
   if (error instanceof Error) {
     return {
       errorName: error.name.slice(0, 64),
-      errorMessage: error.message.slice(0, 256),
+      errorMessage: error.message,
     };
   }
 
   return {
     errorName: "UnknownError",
-    errorMessage: String(error).slice(0, 256),
+    errorMessage: String(error),
   };
 }
 

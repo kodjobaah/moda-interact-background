@@ -368,7 +368,8 @@ export class BillingSubscriptionReconciliationService {
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
       shopId,
       subscriptionId,
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
     const updated = await this.database.subscription.updateMany({
       where: {

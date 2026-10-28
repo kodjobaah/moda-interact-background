@@ -40,6 +40,8 @@ export async function processTemplateStatusJob(jobName: string, raw: unknown, jo
     logger.error("whatsapp.template_status.failed", {
       jobId: typeof jobId === "string" ? jobId.slice(0, 192) : null,
       ...safeMetaError(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
     throw error; // BullMQ retry/failure diagnostics, never silently acknowledge.
   }

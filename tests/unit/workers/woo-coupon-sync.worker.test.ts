@@ -38,6 +38,7 @@ import {
 import {
   WOO_COUPON_SYNC_JOB_NAME, WOO_COUPON_SYNC_QUEUE_NAME, createWooCouponJobId,
 } from "../../../src/services/woo-coupon-dispatcher.service.js";
+import { WooCouponReadError } from "../../../src/providers/woo-coupon-transport.js";
 
 const requestedAt = "2026-10-13T12:00:00.000Z";
 const job = (shopId = "woo-shop-one") => ({
@@ -91,23 +92,63 @@ describe("ARCH-036 Woo coupon BullMQ consumer", () => {
     expect(mock.info).toHaveBeenCalledWith("woo.coupon_sync.skipped", expect.objectContaining({ outcome: "already-running" }));
   });
 
-  it("rethrows transient failures to BullMQ without logging credential-bearing error text", async () => {
-    const error = new Error("unexpected query failure https://private/?password=secret");
+  it("rethrows transient failures and logs the actual bounded error message", async () => {
+    const error = new Error("unexpected query failure https://private.example/?password=secret");
     mock.run.mockRejectedValueOnce(error);
     await expect(process(job())).rejects.toBe(error);
     expect(mock.error).toHaveBeenCalledWith("woo.coupon_sync.failed", expect.objectContaining({
       shopId: "woo-shop-one", errorCode: "woo_coupon_sync_error",
+      errorName: "Error",
+      errorMessage: "unexpected query failure https://private.example/?password=secret",
     }));
-    expect(JSON.stringify(mock.error.mock.calls)).not.toContain("password=secret");
+    expect(JSON.stringify(mock.error.mock.calls)).toContain("password=secret");
+    expect(JSON.stringify(mock.error.mock.calls)).toContain("private.example");
   });
 
-  it("records worker readiness and classifies worker-level errors without logging messages", () => {
+  it("logs safe underlying transport cause details while preserving the read error code", async () => {
+    const cause = Object.assign(new Error("connect ECONNRESET"), {
+      code: "ECONNRESET", syscall: "connect",
+    });
+    const error = new WooCouponReadError("provider_unavailable", { cause, stage: "http" });
+    mock.run.mockRejectedValueOnce(error);
+    await expect(process(job())).rejects.toBe(error);
+    expect(mock.error).toHaveBeenCalledWith("woo.coupon_sync.failed", expect.objectContaining({
+      errorCode: "provider_unavailable",
+      errorName: "WooCouponReadError",
+      errorMessage: expect.stringContaining("connect ECONNRESET"),
+      causeCode: "ECONNRESET",
+      causeSyscall: "connect",
+      errorStage: "http",
+    }));
+  });
+
+  it("logs the actual WooCommerce response, provider status and message", async () => {
+    const body = JSON.stringify({ code: "woocommerce_rest_cannot_view", message: "Coupon access denied" });
+    const error = new WooCouponReadError("unauthorized", {
+      stage: "http", httpStatus: 401, providerResponseBody: body,
+      message: `WooCommerce coupon API returned HTTP 401; message: Coupon access denied; response: ${body}`,
+    });
+    mock.run.mockRejectedValueOnce(error);
+    await expect(process(job())).rejects.toBe(error);
+    expect(mock.error).toHaveBeenCalledWith("woo.coupon_sync.failed", expect.objectContaining({
+      errorCode: "unauthorized", httpStatus: 401, errorStage: "http", providerResponseBody: body,
+      errorMessage: expect.stringContaining("Coupon access denied"),
+      error,
+    }));
+  });
+
+  it("records readiness and logs the actual worker-level error message", () => {
     mock.listeners.get("ready")?.();
-    mock.listeners.get("error")?.(new Error("secret in redis error"));
+    mock.listeners.get("error")?.(new Error("redis error password=secret https://private.example/path"));
     expect(mock.info).toHaveBeenCalledWith("woo.coupon_sync.worker_ready", {
       queueName: WOO_COUPON_SYNC_QUEUE_NAME, concurrency: 4,
     });
-    expect(JSON.stringify(mock.error.mock.calls)).not.toContain("secret in redis error");
+    expect(mock.error).toHaveBeenCalledWith("woo.coupon_sync.worker_error", expect.objectContaining({
+      errorName: "Error",
+      errorMessage: "redis error password=secret https://private.example/path",
+    }));
+    expect(JSON.stringify(mock.error.mock.calls)).toContain("password=secret");
+    expect(JSON.stringify(mock.error.mock.calls)).toContain("private.example");
   });
 
   it("bounds worker concurrency, including invalid environment overrides", () => {

@@ -71,11 +71,11 @@ describe("Shopify consent sync job processing", () => {
     });
   });
 
-  it("bounds unexpected provider errors without disclosing GraphQL responses", async () => {
+  it("logs unexpected provider error messages for development diagnostics", async () => {
     syncCustomer.mockRejectedValueOnce(new Error("secret customer phone +447400123456"));
     await expect(processShopifyWhatsAppConsentSyncJob(job, { syncCustomer }, logger))
       .rejects.toThrow("SYNC_EXCEPTION");
-    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain("447400123456");
+    expect(logger.warn.mock.lastCall?.[1].errorMessage).toContain("447400123456");
   });
 
   it.each([

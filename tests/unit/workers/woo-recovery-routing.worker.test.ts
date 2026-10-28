@@ -103,6 +103,8 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
     expect(mocked.shopifyCleanup).not.toHaveBeenCalled();
     expect(mocked.logger.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
     expect(mocked.logger.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.anything());
-    expect(JSON.stringify(mocked.logger.error.mock.calls)).not.toContain("private phone number");
+    expect(mocked.logger.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
+      errorMessage: "provider error private phone number", error: failure,
+    }));
   });
 });

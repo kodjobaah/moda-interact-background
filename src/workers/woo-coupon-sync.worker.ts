@@ -5,7 +5,7 @@ import { connectionRedis } from "../lib/redis.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { WooCouponCatalogueService } from "../services/woo-coupon-catalogue.service.js";
 import { WooCouponReaderService } from "../services/woo-coupon-reader.service.js";
-import { WooCouponPageTransport } from "../providers/woo-coupon-transport.js";
+import { WooCouponPageTransport, WooCouponReadError } from "../providers/woo-coupon-transport.js";
 import { WooCouponGrantService } from "../services/woo-coupon-grant.service.js";
 import { readWooCouponPolicy } from "../services/platform-configuration/consumers.js";
 import {
@@ -18,6 +18,43 @@ const logger = createLogger({
   serviceName: "moda-recovery-worker",
   environment: resolveDeploymentEnvironmentName(),
 });
+
+function boundedErrorMessage(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) return "unknown failure";
+  return value;
+}
+
+function safeErrorName(error: unknown): string {
+  const name = error instanceof Error ? error.name : "UnknownError";
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "UnknownError";
+}
+
+function safeCauseField(error: unknown, key: "code" | "syscall"): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as Record<string, unknown>)[key];
+  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value) ? value : undefined;
+}
+
+function wooCouponErrorFields(error: unknown) {
+  const cause = error instanceof WooCouponReadError ? error.cause : undefined;
+  const messageSource = cause instanceof Error ? cause : error;
+  return {
+    errorName: safeErrorName(error),
+    errorMessage: error instanceof WooCouponReadError && error.message !== error.code
+      ? error.message
+      : boundedErrorMessage(messageSource instanceof Error ? messageSource.message : String(error)),
+    ...(safeCauseField(cause, "code") ? { causeCode: safeCauseField(cause, "code") } : {}),
+    ...(safeCauseField(cause, "syscall") ? { causeSyscall: safeCauseField(cause, "syscall") } : {}),
+    ...(error instanceof WooCouponReadError && error.stage ? { errorStage: error.stage } : {}),
+    ...(error instanceof WooCouponReadError && Number.isInteger(error.httpStatus)
+      ? { httpStatus: error.httpStatus }
+      : {}),
+    ...(error instanceof WooCouponReadError && error.providerResponseBody !== undefined
+      ? { providerResponseBody: error.providerResponseBody } : {}),
+    ...(error instanceof WooCouponReadError && error.redirectLocation !== undefined
+      ? { redirectLocation: error.redirectLocation } : {}),
+  };
+}
 
 export interface WooCouponSyncJobData {
   shopId: string;
@@ -103,13 +140,13 @@ export function createWooCouponSyncWorker(
         // The global dispatcher will revisit the shop after its cooldown.
         return outcome;
       } catch (error) {
-        // Never log provider payloads or arbitrary error.message (which may
-        // contain credential-bearing URLs in third-party transport failures).
         logger.error("woo.coupon_sync.failed", {
           ...fields,
           errorCode: error instanceof Error && error.name === "WooCouponReadError"
             ? String((error as Error & { code?: unknown }).code).slice(0, 64)
             : "woo_coupon_sync_error",
+          ...wooCouponErrorFields(error),
+          error,
         });
         throw error; // BullMQ's bounded retry policy remains authoritative.
       }
@@ -125,7 +162,8 @@ export function createWooCouponSyncWorker(
   worker.on("error", (error) => {
     logger.error("woo.coupon_sync.worker_error", {
       queueName: WOO_COUPON_SYNC_QUEUE_NAME,
-      errorName: error.name.slice(0, 64),
+      ...wooCouponErrorFields(error),
+      error,
     });
   });
   return worker;

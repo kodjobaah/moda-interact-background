@@ -131,6 +131,7 @@ describe("ReconciliationQueueService", () => {
       shopId: "failed-shop",
       subscriptionId: "failed-sub",
       errorMessage: "queue unavailable",
+      error: expect.objectContaining({ message: "queue unavailable" }),
     });
   });
 });

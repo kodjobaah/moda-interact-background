@@ -152,6 +152,10 @@ export class WooCouponCatalogueService {
       });
       if (error instanceof WooCouponReadError &&
           ["grant_missing", "shop_unavailable", "grant_unavailable", "grant_changed"].includes(error.code)) {
+        logger.warn("woo.coupon_sync.read_unavailable", {
+          shopId, reasonCode: error.code,
+          errorMessage: error.message, error,
+        });
         return "unavailable";
       }
       throw error;

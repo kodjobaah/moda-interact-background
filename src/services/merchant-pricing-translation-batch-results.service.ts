@@ -125,6 +125,8 @@ export class MerchantPricingTranslationBatchResultsService {
         failureCode,
         errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
         durationMs: Date.now() - startedAt,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       return { status: "failed", batchId: batch.id, failureCode };
     }
@@ -165,6 +167,8 @@ export class MerchantPricingTranslationBatchResultsService {
         failureCode,
         errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
         durationMs: Date.now() - startedAt,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       return { status: "failed", batchId: batch.id, failureCode };
     }

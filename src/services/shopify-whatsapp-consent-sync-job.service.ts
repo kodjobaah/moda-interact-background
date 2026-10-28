@@ -43,9 +43,10 @@ export async function processShopifyWhatsAppConsentSyncJob(
       shopId,
       shopifyCustomerId: identity.numericId,
     });
-  } catch {
+  } catch (error) {
     logger.warn("shopify.whatsapp_consent.sync_job", {
       shopId, outcome: "retry", reasonCode: "SYNC_EXCEPTION",
+      errorMessage: error instanceof Error ? error.message : String(error), error,
     });
     throw new ShopifyConsentSyncRetryableError("SYNC_EXCEPTION");
   }

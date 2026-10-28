@@ -523,6 +523,8 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       stage: state.stage,
       errorClass: error instanceof AggregateError ? "aggregate" :
         error instanceof Error ? "exception" : "unknown",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
   }
 }

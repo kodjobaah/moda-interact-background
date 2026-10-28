@@ -174,6 +174,8 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
         ...fields, outcome: "failed", reason: "unexpected_error",
         errorType: error instanceof Prisma.PrismaClientKnownRequestError
           ? "PrismaClientKnownRequestError" : error instanceof Error ? "Error" : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

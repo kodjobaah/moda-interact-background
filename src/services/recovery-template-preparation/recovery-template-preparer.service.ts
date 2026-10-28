@@ -119,6 +119,8 @@ export class RecoveryTemplatePreparer {
           purpose: purpose ?? "unknown",
           reason: error.reason,
           errorType: error.name,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         return { outcome: "unavailable", reason: error.reason, purpose };
       }
@@ -129,6 +131,8 @@ export class RecoveryTemplatePreparer {
         shopId: typeof input?.shopId === "string" ? input.shopId : "unknown",
         purpose: purpose ?? "unknown",
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

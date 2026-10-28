@@ -72,10 +72,12 @@ export async function sendRoutingGuidance(
       { to: event.customerPhone, text: routingGuidanceText[reason] },
       AbortSignal.timeout(10_000),
     );
-  } catch {
+  } catch (error) {
     // Keep the guard even on ambiguous provider failures: no automatic resend.
     console.warn("Platform routing guidance suppressed", {
       outcome: "send-failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }

@@ -297,7 +297,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       expect(f.created).toHaveLength(0);
       expect(f.logger.error).toHaveBeenCalledWith("woocommerce.recovery.admission.failed",
         expect.objectContaining({ outcome: "failed", errorType: "Error" }));
-      expect(JSON.stringify(vi.mocked(f.logger.error).mock.calls)).not.toContain(failure.message);
+      expect(vi.mocked(f.logger.error).mock.lastCall?.[1].errorMessage).toBe(failure.message);
     },
   );
 });

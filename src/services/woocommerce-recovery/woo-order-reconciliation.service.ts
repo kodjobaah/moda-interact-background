@@ -286,6 +286,8 @@ export class WooOrderReconciliationService implements WooOrderReconciler {
         reason: "dependency-or-validation-failure",
         errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
           ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

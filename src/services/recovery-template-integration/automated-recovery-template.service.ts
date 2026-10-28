@@ -57,9 +57,11 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
     }
     return null;
   } catch (error) {
-    // Legacy or corrupt receipts fail closed; never log the original content.
+    // Legacy or corrupt receipts fail closed; record the parse exception for diagnosis.
     logger.warn("recovery_template.previous_promise.invalid_receipt", {
       errorType: boundedFailure(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
     return null;
   }
@@ -185,6 +187,8 @@ export class AutomatedRecoveryTemplateService {
       this.log.error("recovery_template.integration.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId,
         stage: input.stage, errorType: boundedFailure(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
       });
       throw error;
     }

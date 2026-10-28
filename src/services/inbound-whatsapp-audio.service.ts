@@ -63,7 +63,11 @@ export class InboundWhatsAppAudioService {
       let metadata;
       try {
         metadata = await parseBuffer(downloaded.bytes, { mimeType: downloaded.mimeType });
-      } catch {
+      } catch (error) {
+        this.logger.warn("whatsapp.inbound.media_parse_failed", {
+          providerMessageId: event.providerMessageId,
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
         if (await this.isStale(conversationId, reservation.id, eventTime)) {
           await this.reject(reservation.id, "STALE_TRANSCRIPTION", 0);
           return { kind: "ignored" };
@@ -102,10 +106,16 @@ export class InboundWhatsAppAudioService {
           return { kind: "ignored" };
         }
         await this.fail(reservation.id, "MEDIA_UNREADABLE");
-        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", { providerMessageId: event.providerMessageId, reason: "typed-terminal-error" });
+        this.logger.warn("whatsapp.inbound.transcription-terminal-failure", {
+          providerMessageId: event.providerMessageId, reason: "typed-terminal-error",
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
         return { kind: "failed", fallback: UNREADABLE };
       }
-      this.logger.warn("whatsapp.inbound.transcription-retryable-failure", { providerMessageId: event.providerMessageId });
+      this.logger.warn("whatsapp.inbound.transcription-retryable-failure", {
+        providerMessageId: event.providerMessageId,
+        errorMessage: error instanceof Error ? error.message : String(error), error,
+      });
       throw error instanceof WhatsAppMediaError || error instanceof SpeechTranscriptionError
         ? error : new SpeechTranscriptionError("network", true);
     }

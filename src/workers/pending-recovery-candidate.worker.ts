@@ -91,6 +91,8 @@ async function processWooJob(
       ...(eventId ? { eventId } : {}),
       reason: "processing_failure",
       errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
     throw error;
   }
@@ -199,12 +201,16 @@ export function createPendingRecoveryCandidateWorker(
       logger.error("recovery.pending_candidate.job_failed", {
         jobId: job?.id ? createHash("sha256").update(job.id).digest("hex") : null,
         errorName: error.name.slice(0, 64),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
     }
   });
   worker.on("error", (error) => logger.error("recovery.pending_candidate.worker_error", {
     errorName: error.name.slice(0, 64),
-  }));
+    errorMessage: error instanceof Error ? error.message : String(error),
+    error: error,
+}));
   return worker;
 }
 

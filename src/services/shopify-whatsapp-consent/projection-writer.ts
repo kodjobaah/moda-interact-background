@@ -115,9 +115,10 @@ export class ShopifyConsentProjectionWriter {
           });
           return null;
         }
-      } catch {
+      } catch (error) {
         this.logger.warn("shopify.whatsapp_consent.sync", {
           shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE",
+          errorMessage: error instanceof Error ? error.message : String(error), error,
         });
         return unavailable("CONSENT_WRITE_FAILURE");
       }
@@ -191,9 +192,12 @@ export class ShopifyConsentProjectionWriter {
             whatsappConsentDecisionSequence: { increment: 1 },
           },
         });
-      } catch {
+      } catch (error) {
         // A constraint/permission failure is not proof of consent.
-        this.logger.warn("shopify.whatsapp_consent.sync", { shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE" });
+        this.logger.warn("shopify.whatsapp_consent.sync", {
+          shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE",
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
         return unavailable("CONSENT_WRITE_FAILURE");
       }
       if (updated.count === 1) {

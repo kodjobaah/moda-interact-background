@@ -112,6 +112,8 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       logger.warn("arch040.follow_up_credit_release_deferred", {
         commandId, reasonCode: "credit_release_unverified",
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       return "held";
     }
@@ -167,6 +169,8 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
             logger.error("arch040.follow_up_credit_inspection_failed", {
               commandId, reasonCode: "credit_inspection_unavailable",
               errorType: error instanceof Error ? error.name : "unknown",
+              errorMessage: error instanceof Error ? error.message : String(error),
+              error: error,
             });
             return { kind: "unsafe" as const };
           })

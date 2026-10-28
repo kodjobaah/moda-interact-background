@@ -126,7 +126,8 @@ export async function processNextWooSubscriptionReceipt(
       } catch (error) {
         console.warn("Woo recovery capacity resume enqueue failed", {
           shopId: resumeShopId,
-          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         });
       }
     }

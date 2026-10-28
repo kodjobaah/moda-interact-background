@@ -181,7 +181,9 @@ export class BackgroundRuntimeConfigService {
         return this.current();
       } catch (error) {
         if (startup || !this.snapshot) throw error;
-        this.log.warn("background.runtime_config.refresh_failed", { error });
+        this.log.warn("background.runtime_config.refresh_failed", { error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
         return this.snapshot;
       } finally {
         this.refreshInFlight = undefined;
@@ -204,7 +206,9 @@ export class BackgroundRuntimeConfigService {
       try {
         await listener(current, previous);
       } catch (error) {
-        this.log.warn("background.runtime_config.listener_failed", { error });
+        this.log.warn("background.runtime_config.listener_failed", { error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
       }
     }));
   }

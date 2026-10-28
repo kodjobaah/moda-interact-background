@@ -240,7 +240,7 @@ export class WooInitialSendFenceService {
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     } catch (error) {
       // Technical SQL/permit exceptions are never converted into consumer
-      // refusals. Record safe error identity and propagate the original cause.
+      // refusals. Log the original exception for diagnostics and propagate it unchanged.
       this.logger.error("woocommerce.recovery.initial.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
         errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
@@ -250,6 +250,8 @@ export class WooInitialSendFenceService {
           typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
             ? { errorCode: error.code } : {}
         ),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }
