@@ -8,6 +8,7 @@ import { MEDIA_RECHECK_MS, MEDIA_LEASE_MS, type BrandDocument, type BrandClaim,
 } from "../../../../src/services/shop-brand-media-orchestration/contracts.js";
 
 const SHOP = "shop_123";
+const DOMAIN = "merchant.myshopify.com";
 const DIGEST = "a".repeat(64);
 const OTHER = "b".repeat(64);
 const FINGERPRINT = `sha256:${DIGEST}`;
@@ -21,7 +22,7 @@ function initial(doc: BrandDocument = parseBrandDocument({})): BrandDocument {
   return updateObservedSource(doc, observation()).document;
 }
 function claim(doc: BrandDocument, at = after(10), owner = randomUUID()) {
-  return claimRole(doc, SHOP, "LOGO", owner, at);
+  return claimRole(doc, SHOP, DOMAIN, "LOGO", owner, at);
 }
 function output(c: BrandClaim, digest = DIGEST) {
   return { verifiedAt: after(20).toISOString(), result: {
@@ -84,6 +85,7 @@ describe("ARCH-049 ShopBrand source/update/claim state machine", () => {
   it("enforces one lease, stale owner, expired lease and later source generation", () => {
     const first = claim(initial());
     expect(first.claim?.kind).toBe("initial");
+    expect(first.claim?.domain).toBe(DOMAIN);
     expect(claim(first.document).claim).toBeNull();
     const staleOwner = { ...first.claim!, leaseOwner: randomUUID() };
     expect(completeClaim(first.document, staleOwner, output(staleOwner), after(20)).applied).toBe(false);

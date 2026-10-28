@@ -31,7 +31,7 @@ function fixture(count: number) {
         .slice(0, limit).map(([shopId, whatsAppMedia]) => ({ shopId, whatsAppMedia }));
     },
     async claim(shopId: string, role: BrandRole, at = NOW): Promise<BrandClaim | null> {
-      const { document, claim } = claimRole(rows.get(shopId)!, shopId, role, randomUUID(), at);
+      const { document, claim } = claimRole(rows.get(shopId)!, shopId, `${shopId}.myshopify.com`, role, randomUUID(), at);
       rows.set(shopId, document);
       return claim;
     },

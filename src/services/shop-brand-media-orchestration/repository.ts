@@ -8,7 +8,7 @@ import { BrandStateError } from "./contracts.js";
 import { claimRole, completeClaim, failClaim, parseBrandDocument, updateObservedSource } from "./state.js";
 
 export type ScannedBrandRow = { shopId: string; whatsAppMedia: unknown };
-export type ShopBrandMediaDatabase = Pick<PrismaClient, "$transaction" | "shopBrand">;
+export type ShopBrandMediaDatabase = Pick<PrismaClient, "$transaction" | "shop" | "shopBrand">;
 
 /**
  * Atomic ShopBrand JSONB role updates. The only transaction spans one row-lock and one JSON write.
@@ -33,9 +33,11 @@ export class ShopBrandMediaRepository {
   }
 
   async claim(shopId: string, role: BrandRole, at: Date = new Date()): Promise<BrandClaim | null> {
+    const shop = await this.database.shop.findUnique({ where: { id: shopId }, select: { domain: true } });
+    if (!shop) return null;
     const owner = randomUUID();
     return this.editLocked(shopId, false, (current) => {
-      const { document, claim } = claimRole(current, shopId, role, owner, at);
+      const { document, claim } = claimRole(current, shopId, shop.domain, role, owner, at);
       return { document, value: claim };
     });
   }

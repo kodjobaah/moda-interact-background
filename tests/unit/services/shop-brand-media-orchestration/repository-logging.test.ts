@@ -5,7 +5,9 @@ import { ShopBrandMediaRepository } from "../../../../src/services/shop-brand-me
 function fixture() {
   const logger = { warn: vi.fn(), error: vi.fn() };
   const transaction = vi.fn();
-  const database = { $transaction: transaction } as unknown as ShopBrandMediaDatabase;
+  const database = { $transaction: transaction,
+    shop: { findUnique: vi.fn(async () => ({ domain: "merchant.myshopify.com" })) },
+  } as unknown as ShopBrandMediaDatabase;
   return { logger, transaction, repository: new ShopBrandMediaRepository(database, logger) };
 }
 

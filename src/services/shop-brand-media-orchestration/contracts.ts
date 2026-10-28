@@ -77,6 +77,7 @@ export interface BrandClaim {
   generation: number;
   fingerprint: string;
   sourceUrl: string;
+  domain: string;
   leaseOwner: string;
   leaseUntil: string;
   kind: "initial" | "refresh";

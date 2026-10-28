@@ -150,7 +150,7 @@ export function claimable(slot: BrandSlot | undefined, now: number): boolean {
 }
 
 /** Deterministic transition done only while holding a PostgreSQL ShopBrand row lock. */
-export function claimRole(document: BrandDocument, shopId: string, role: BrandRole, owner: string, at: Date): {
+export function claimRole(document: BrandDocument, shopId: string, domain: string, role: BrandRole, owner: string, at: Date): {
   document: BrandDocument; claim: BrandClaim | null;
 } {
   if (!OWNERS.test(owner)) throw new BrandStateError("INVALID_OBSERVATION");
@@ -193,7 +193,7 @@ export function claimRole(document: BrandDocument, shopId: string, role: BrandRo
   }
   const claimed = putRole(document, role, { ...slot, work });
   return { document: claimed, claim: { shopId, role, generation: slot.source.generation,
-    fingerprint: slot.source.fingerprint, sourceUrl: slot.source.url, kind: refresh ? "refresh" : "initial",
+    fingerprint: slot.source.fingerprint, sourceUrl: slot.source.url, domain, kind: refresh ? "refresh" : "initial",
     leaseOwner: owner, leaseUntil } };
 }
 

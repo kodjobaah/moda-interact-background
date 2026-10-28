@@ -28,6 +28,7 @@ export class ShopBrandMediaError extends Error {
 
 export interface ShopBrandMediaInput {
   shopId: string;
+  domain: string;
   role: ShopBrandImageRole;
   sourceUrl: string;
   sourceFingerprint: string;

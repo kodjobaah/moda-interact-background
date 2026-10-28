@@ -157,6 +157,7 @@ export class ShopBrandMediaReconciliationService {
     try {
       result = await this.deps.processor.process({
         shopId: claim.shopId, role: claim.role, sourceUrl: claim.sourceUrl,
+        domain: claim.domain,
         sourceFingerprint: claim.fingerprint, sourceGeneration: claim.generation,
       });
     } catch (error) {
