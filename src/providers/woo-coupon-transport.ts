@@ -231,7 +231,8 @@ function requestPage(
           ];
           reject(new WooCouponReadError(status === 401 || status === 403 ? "unauthorized" : "provider_unavailable", {
             stage: "http", httpStatus: status, message: details.join("; "),
-            providerResponseBody: responseBody, redirectLocation,
+            providerResponseBody: responseBody,
+            ...(redirectLocation !== undefined ? { redirectLocation } : {}),
           }));
         });
         return;
