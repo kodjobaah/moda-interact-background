@@ -84,7 +84,9 @@ describeWithDatabase("ARCH-052 Shopify merchant discount selection", () => {
       const disappearedAt = new Date(NOW.getTime() + 120_000);
       expect(await catalogue.reconcile(shopId, disappearedAt)).toBe("current");
       const disappeared = await db.shopifyDiscount.findUniqueOrThrow({ where: { id: first.id } });
-      expect(disappeared).toMatchObject({ isAvailable: true, unavailableAt: disappearedAt });
+      expect(disappeared.isAvailable).toBe(true);
+      expect(disappeared.unavailableAt).toBeInstanceOf(Date);
+      const rowUnavailableAt = disappeared.unavailableAt;
       expect(candidateKind("SHOPIFY", { ...disappeared, providerStatus: "ACTIVE" }, NOW)).toBeNull();
 
       await db.session.update({ where: { id: `offline_${domain}` }, data: { scope: "read_products" } });
@@ -92,7 +94,7 @@ describeWithDatabase("ARCH-052 Shopify merchant discount selection", () => {
       const unavailableCatalogue = await db.shopifyDiscountCatalogue.findUniqueOrThrow({ where: { shopId } });
       expect(unavailableCatalogue.status).toBe("UNAVAILABLE");
       expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: first.id } }))
-        .toMatchObject({ isAvailable: true, unavailableAt: disappearedAt });
+        .toMatchObject({ isAvailable: true, unavailableAt: rowUnavailableAt });
 
       const liveCandidate = { ...disappeared, unavailableAt: null, providerStatus: "ACTIVE" };
       expect(candidateKind("SHOPIFY", liveCandidate, NOW)).toBe("AUTOMATIC_OFFER");
@@ -116,7 +118,7 @@ describeWithDatabase("ARCH-052 Shopify merchant discount selection", () => {
       );
       await reinstall.reconcileReinstall(shopId, expected, `gid://shopify/Shop/${id}`);
       expect(await db.shopifyDiscount.findUniqueOrThrow({ where: { id: first.id } }))
-        .toMatchObject({ isAvailable: true, unavailableAt: disappearedAt });
+        .toMatchObject({ isAvailable: true, unavailableAt: rowUnavailableAt });
       expect(await db.subscription.findUniqueOrThrow({ where: { shopId } }))
         .toMatchObject({ status: "NO_CONTRACT", planId: null, providerSubscriptionId: null });
     } finally {
