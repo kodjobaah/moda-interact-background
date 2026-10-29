@@ -101,7 +101,6 @@ export class ReinstallReconciliationService {
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
         const catalogue = await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null } });
-        await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
         if (catalogue.unavailableAt === null) await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { unavailableAt: now } });
         await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
       }
