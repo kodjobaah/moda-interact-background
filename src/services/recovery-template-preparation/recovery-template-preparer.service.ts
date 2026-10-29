@@ -92,6 +92,7 @@ export class RecoveryTemplatePreparer {
       const variables = new RecoveryVariableResolver(
         input, (shopId) => this.repository.readShopBrand(shopId),
         this.resolveReadyShopBrandMedia, this.approvedMediaHosts, this.clock,
+        (shopId, languageTag) => this.repository.readShopCategory(shopId, languageTag), canonicalLanguageTag,
       );
       const prepared = await prepareFrozenComponents({ registration, variables });
       return {

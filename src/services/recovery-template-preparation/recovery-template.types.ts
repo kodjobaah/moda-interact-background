@@ -177,4 +177,8 @@ export interface RecoveryTemplateRepository {
   readCatalogue(input: { shopId: string; senderWabaId: string; purpose: RecoveryTemplatePurpose }):
     Promise<{ shop: ShopSelectionRow | null; variants: readonly AssignedVariantRow[] }>;
   readShopBrand(shopId: string): Promise<ShopBrandRow | null>;
+  /** Resolve only the sending shop's ACTIVE taxonomy-backed Moda category.
+   * A non-English language needs an approved/published category translation.
+   * Null means the binding is unavailable; never borrow another tenant's category. */
+  readShopCategory(shopId: string, languageTag: string): Promise<string | null>;
 }
