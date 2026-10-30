@@ -15,6 +15,7 @@ import type {
   WooPendingCandidate,
   WooTerminalObservation,
 } from "../../../../src/services/woocommerce-recovery/contracts.js";
+import type { WooLatestRecovery } from "../../../../src/services/woocommerce-recovery/woo-checkout-activity.adapters.js";
 import type { WooActivityWatermark } from "../../../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
 
 const NOW = Date.parse("2026-10-24T11:05:00.000Z");
@@ -37,7 +38,7 @@ function event(id: string, minute = 0, changes: Partial<WooCheckoutCapture> = {}
 function harness() {
   const candidates = new Map<string, WooPendingCandidate>();
   const watermarks = new Map<string, WooActivityWatermark>();
-  const recoveries = new Map<string, string>();
+  const recoveries = new Map<string, WooLatestRecovery>();
   const terminal = new Map<string, WooTerminalObservation>();
   const lockTails = new Map<string, Promise<void>>();
   const calls: string[] = [];
@@ -53,10 +54,15 @@ function harness() {
   });
   const findExisting = vi.fn(async (ref: WooCheckoutRef) => {
     calls.push("recovery");
-    const id = recoveries.get(key(ref));
-    return id ? { id } : null;
+    return recoveries.get(key(ref)) ?? null;
   });
   const recordExternalActivity = vi.fn(async () => { calls.push("external-activity"); });
+  const closeForResumption = vi.fn(async ({ ref, recovery, occurredAt, eventId, nextGeneration }) => {
+    const changed = { ...recovery, status: "CANCELLED" as const, lastExternalActivityAt: occurredAt,
+      resumption: { eventId, nextGeneration } };
+    recoveries.set(key(ref), changed);
+    return true;
+  });
   const logOutcome = vi.fn();
   const withCheckoutLock = vi.fn(async <T>(ref: WooCheckoutRef, run: () => Promise<T>): Promise<T> => {
     const name = key(ref);
@@ -88,7 +94,10 @@ function harness() {
         watermarks.set(key(ref), wm);
       }),
     },
-    recoveries: { findExisting, recordExternalActivity },
+    recoveries: {
+      findExisting, recordExternalActivity,
+      closeForResumption,
+    },
     shops: { evaluate: vi.fn(async () => ({ allowed: true, shopDomain: "from-db.example.test" })) },
     resolveDelayMinutes: vi.fn(async () => 30),
     logOutcome,
@@ -96,7 +105,7 @@ function harness() {
   return {
     service: new WooCheckoutActivityService(deps), deps, candidates, watermarks,
     recoveries, terminal, schedule, cancel, calls, findExisting,
-    recordExternalActivity, logOutcome, withCheckoutLock,
+    recordExternalActivity, logOutcome, withCheckoutLock, closeForResumption,
   };
 }
 
@@ -104,7 +113,7 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
   it("schedules one typed Woo candidate with bounded latest event evidence and merchant delay", async () => {
     const h = harness();
     const result = await h.service.handleCheckout(event("evt-1"));
-    expect(result).toEqual({ kind: "scheduled", dueAt: at(30) });
+    expect(result).toEqual({ kind: "scheduled", dueAt: at(30), generation: 1 });
     expect(h.schedule).toHaveBeenCalledOnce();
     expect(h.schedule.mock.calls[0]?.[0]).toMatchObject({
       delayMinutes: 30, dueAtMs: Date.parse(at(30)),
@@ -127,7 +136,7 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
       items: [{ productId: "new", quantity: 2, total: "44.50" }],
       contact: { phone: "+447000000111" },
     } });
-    expect(await h.service.handleCheckout(later)).toEqual({ kind: "rescheduled", dueAt: at(32) });
+    expect(await h.service.handleCheckout(later)).toEqual({ kind: "rescheduled", dueAt: at(32), generation: 1 });
     expect(h.candidates.get("shop-a/checkout-1")?.basket).toEqual({ kind: "nonempty", checkout: later.checkout });
     expect(h.schedule).toHaveBeenCalledTimes(2);
     expect(h.findExisting).toHaveBeenCalledTimes(2);
@@ -195,21 +204,40 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
 
   it("checks PostgreSQL even with no job after MESSAGE_SENT; never schedules generation 2", async () => {
     const h = harness();
-    h.recoveries.set("shop-a/checkout-1", "recovery-sent");
-    expect(await h.service.handleCheckout(event("evt-after-message", 3))).toEqual({ kind: "existing-recovery", recoveryId: "recovery-sent" });
-    expect(h.recordExternalActivity).toHaveBeenCalledWith(
-      { shopId: "shop-a", checkoutToken: "checkout-1" }, "recovery-sent", new Date(at(3)));
-    expect(h.cancel).toHaveBeenCalledOnce();
-    expect(h.schedule).not.toHaveBeenCalled();
+    h.recoveries.set("shop-a/checkout-1", { id: "recovery-sent", generation: 1,
+      status: "MESSAGE_SENT", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
+    expect(await h.service.handleCheckout(event("evt-after-message", 3))).toEqual({
+      kind: "resumed", previousRecoveryId: "recovery-sent", nextGeneration: 2,
+      candidateOutcome: "scheduled", dueAt: at(33),
+    });
+    expect(h.schedule).toHaveBeenCalledOnce();
+    expect(h.schedule.mock.calls[0]?.[0].candidate.generation).toBe(2);
   });
 
   it("checks PostgreSQL with a candidate present and retires it without another first send", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-1"));
-    h.recoveries.set("shop-a/checkout-1", "recovery-existing");
-    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe("existing-recovery");
-    expect(h.candidates.size).toBe(0);
-    expect(h.schedule).toHaveBeenCalledOnce();
+    h.recoveries.set("shop-a/checkout-1", { id: "recovery-existing", generation: 1,
+      status: "DETECTED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
+    expect((await h.service.handleCheckout(event("evt-2", 1))).kind).toBe("resumed");
+    expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
+    expect(h.schedule).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays a committed resumption into the same next generation and keeps later edits there", async () => {
+    const h = harness();
+    h.recoveries.set("shop-a/checkout-1", { id: "recovery-1", generation: 1,
+      status: "ENGAGED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
+    const resumed = event("evt-resume", 2);
+    expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
+    expect(h.closeForResumption).toHaveBeenCalledOnce();
+    expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
+    expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
+    const later = event("evt-later", 3);
+    expect(await h.service.handleCheckout(later)).toMatchObject({ kind: "rescheduled", generation: 2 });
+    expect(h.closeForResumption).toHaveBeenCalledOnce();
+    expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
+    expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-later");
   });
 
   it("cancels terminal observed placed (not necessarily paid) and ambiguous order state", async () => {

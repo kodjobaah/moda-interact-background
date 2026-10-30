@@ -40,7 +40,9 @@ export type WooBasketEvidence =
 /** Internal candidate only: never derive a restore URL or Woo session token. */
 export type WooPendingCandidate = Readonly<
   WooCheckoutRef & {
-    source: "woocommerce";
+  source: "woocommerce";
+    /** Temporarily optional for v1 consumer compilation; BG007 always writes it. */
+    generation?: number;
     /** Last *accepted* Woo checkout event ID (not a fabricated revision). */
     lastEventId: string;
     lastActivityAt: string;
@@ -59,8 +61,8 @@ export type WooTerminalObservation =
 
 /** BG001: candidate storage/index adapter; absence is not proof of checkout safety. */
 export interface WooCandidateManager {
-  getPending(ref: WooCheckoutRef): Promise<WooPendingCandidate | null>;
-  cancelPending(ref: WooCheckoutRef): Promise<"cancelled" | "absent">;
+  getPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<WooPendingCandidate | null>;
+  cancelPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<"cancelled" | "absent">;
 }
 
 /** BG002: observed order evidence, never an HTTP/live Woo provider lookup. */
@@ -78,7 +80,10 @@ export interface WooCheckoutCoordinator {
 }
 
 export type WooCheckoutActivityOutcome =
-  | Readonly<{ kind: "scheduled" | "rescheduled"; dueAt: string }>
+  | Readonly<{ kind: "scheduled" | "rescheduled"; dueAt: string; generation: number }>
+  | Readonly<{ kind: "resumed"; previousRecoveryId: string; nextGeneration: number;
+      candidateOutcome: "scheduled" | "rescheduled" | "cancelled-empty" | "deferred-ambiguous"; dueAt?: string }>
+  | Readonly<{ kind: "repair-existing-initial"; recoveryId: string; generation: number }>
   | Readonly<{ kind: "existing-recovery"; recoveryId: string }>
   | Readonly<{
       kind:
@@ -111,8 +116,8 @@ export interface WooOrderReconciler {
 }
 
 export type WooAdmissionOutcome =
-  | Readonly<{ kind: "created"; recoveryId: string }>
-  | Readonly<{ kind: "already-exists"; recoveryId: string; status: string }>
+  | Readonly<{ kind: "created"; recoveryId: string; generation?: number }>
+  | Readonly<{ kind: "already-exists"; recoveryId: string; status: string; generation?: number; repairInitial?: boolean }>
   | Readonly<{ kind: "superseded" | "denied" | "deferred"; reason: string }>;
 
 /** BG003: idempotent mature-candidate evaluation and row-only admission. */
@@ -139,6 +144,7 @@ export type WooOutreachDispatchOutcome =
  * A checkout event, contact or uncommitted insert is not an outreach request.
  */
 export interface WooRecoveryOutreachDispatcher {
+  settleResumed?(previousRecoveryId: string): Promise<void>;
   enqueueInitial(recoveryId: string): Promise<WooOutreachEnqueueOutcome>;
   processInitial(recoveryId: string): Promise<WooOutreachDispatchOutcome>;
 }
