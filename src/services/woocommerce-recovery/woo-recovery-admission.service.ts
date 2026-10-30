@@ -1,4 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
+import { buildWooRecoveryUrl, generateWooRecoveryToken, prepareWooRecoveryLink,
+  type WooRecoveryLinkOmissionReason, type WooRecoveryLinkPlan } from "./woo-recovery-link-issuer.js";
 import {
   createLogger,
   type StructuredLogger,
@@ -259,11 +261,11 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
       const [shop, installation, eligibility] = await Promise.all([
         this.database.shop.findUnique({
           where: { id: ref.shopId },
-          select: { id: true, platform: true, status: true, onboardingCompleted: true, defaultCountryCode: true },
+          select: { id: true, domain: true, platform: true, status: true, onboardingCompleted: true, defaultCountryCode: true },
         }),
         this.database.wooCommerceInstallation.findUnique({
           where: { shopId: ref.shopId },
-          select: { id: true, status: true, revokedAt: true, credentialVersion: true },
+          select: { id: true, status: true, revokedAt: true, credentialVersion: true, canonicalSiteUrl: true },
         }),
         this.execution.evaluate(ref.shopId, undefined, "recovery"),
       ]);
@@ -356,6 +358,19 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
         return { kind: "denied", reason: "RECIPIENT_IDENTITY_MISMATCH" };
       }
 
+      let linkPlan: WooRecoveryLinkPlan;
+      let linkOmissionReason: WooRecoveryLinkOmissionReason | null = null;
+      if (!checkout.restoration) {
+        linkOmissionReason = "RESTORE_SNAPSHOT_ABSENT";
+        linkPlan = { kind: "omitted", reason: linkOmissionReason };
+      } else if (checkout.restoration.kind !== "supported") {
+        linkOmissionReason = "RESTORE_SNAPSHOT_UNSUPPORTED";
+        linkPlan = { kind: "omitted", reason: linkOmissionReason };
+      } else {
+        linkPlan = prepareWooRecoveryLink(installation.canonicalSiteUrl, shop.domain);
+        if (linkPlan.kind === "omitted") linkOmissionReason = linkPlan.reason;
+      }
+
       // No Redis/network operation inside this transaction. The shared checkout
       // lock excludes BG001/002, while PostgreSQL's unique key handles competing
       // or expired leases. A SHARE row lock fences concurrent STOP/revocation.
@@ -387,9 +402,16 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
           return { kind: "superseded", reason: "GENERATION_GAP" };
         }
 
-        if (!await confirmCurrentWooConsent(tx, ref.shopId, snapshot, checkout.contact?.email)) {
+        if (!await confirmCurrentWooConsent(tx, ref.shopId, snapshot, checkout.contact?.email, {
+          canonicalSiteUrl: installation.canonicalSiteUrl,
+          shopDomain: shop.domain,
+        })) {
           return { kind: "denied", reason: "CONSENT_CHANGED" };
         }
+
+        // Only mint entropy after this transaction has proved that no recovery
+        // already exists. An entropy failure aborts before any row is inserted.
+        const linkToken = linkPlan.kind === "ready" ? generateWooRecoveryToken() : null;
 
         const recovery = await tx.checkoutRecovery.create({
           data: {
@@ -401,7 +423,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
             customerId: snapshot.customerId,
             currency: checkout.currency,
             totalPrice: new Prisma.Decimal(checkout.total),
-            checkoutUrl: null, // No Woo restore URL in the authenticated wire contract.
+            checkoutUrl: null,
             // Keep the canonical restoration contract separate from lineItems,
             // which remains the historical display projection. Prisma.DbNull
             // records absent evidence as SQL NULL; unsupported evidence remains
@@ -423,6 +445,12 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
           },
           select: { id: true },
         });
+        if (linkPlan.kind === "ready" && linkToken) {
+          await tx.checkoutRecovery.update({
+            where: { id: recovery.id },
+            data: { checkoutUrl: buildWooRecoveryUrl(linkPlan, recovery.id, linkToken) },
+          });
+        }
         await tx.checkoutRecoveryStatusHistory.create({
           data: {
             checkoutRecoveryId: recovery.id,
@@ -430,7 +458,12 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
             toStatus: "DETECTED",
             source: "WOOCOMMERCE",
             reason: generation === 1 ? "FIRST_MATURE_CHECKOUT_ADMISSION" : "MATURE_CHECKOUT_REENTRY_ADMISSION",
-            metadata: { generation, lastEventId: candidate.lastEventId },
+            metadata: {
+              generation,
+              lastEventId: candidate.lastEventId,
+              checkoutUrlDisposition: linkPlan.kind === "ready" ? "ISSUED" : "OMITTED",
+              ...(linkOmissionReason ? { checkoutUrlOmissionReason: linkOmissionReason } : {}),
+            },
             occurredAt: clock,
           },
         });

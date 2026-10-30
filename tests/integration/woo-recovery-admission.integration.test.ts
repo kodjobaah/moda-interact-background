@@ -23,11 +23,11 @@ const SILENT_LOGGER = {
 
 async function setup(db: PrismaClient) {
   const shopId = randomUUID();
-  const site = `https://${shopId}.example.test`;
+  const site = `https://${shopId}.example.com`;
   await db.shop.create({ data: { id: shopId, domain: site, platform: "WOOCOMMERCE",
     status: "ACTIVE", onboardingCompleted: true, defaultCountryCode: "GB" } });
   const installation = await db.wooCommerceInstallation.create({ data: {
-    shopId, canonicalSiteUrl: site, credentialDigest: Uint8Array.from(randomBytes(32)),
+    shopId, canonicalSiteUrl: `${site}/store`, credentialDigest: Uint8Array.from(randomBytes(32)),
   } });
   const customer = await db.customer.create({ data: { shopId, email: "customer@example.test" } });
   const phone = await db.customerPhone.create({ data: { customerId: customer.id, phone: PHONE } });
@@ -125,6 +125,12 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
         currency: "GBP", wooRestoreSnapshot: { schemaVersion: "woo.cart-restore.v1",
           kind: "supported", appliedCouponCodes: ["original10"],
           lines: [{ productId: 42, quantity: 1 }] } });
+      const firstUrl = new URL(rows[0]!.checkoutUrl!);
+      expect(firstUrl.origin).toBe(`https://${shopId}.example.com`);
+      expect(firstUrl.pathname).toBe("/store/");
+      expect(firstUrl.searchParams.get("moda_interact_resume")).toBe("1");
+      expect(firstUrl.searchParams.get("r")).toBe(rows[0]!.id);
+      expect(firstUrl.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(rows[0]!.totalPrice?.toString()).toBe("10");
       const id = rows[0]!.id;
       expect(await db.checkoutRecoveryStatusHistory.count({ where: { checkoutRecoveryId: id } })).toBe(1);
@@ -134,9 +140,41 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       expect(await service.evaluateMatured(incoming)).toEqual({
         kind: "already-exists", recoveryId: id, status: "DETECTED", generation: 1, repairInitial: true,
       });
-      await db.checkoutRecovery.update({ where: { id }, data: { status: "EXPIRED" } });
-      expect(await service.evaluateMatured(incoming)).toMatchObject({ kind: "superseded", reason: "GENERATION_TERMINAL" });
-      expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: token } })).toBe(1);
+      expect((await db.checkoutRecovery.findUniqueOrThrow({ where: { id } })).checkoutUrl).toBe(firstUrl.href);
+      await db.checkoutRecovery.update({ where: { id }, data: { status: "CANCELLED" } });
+      await db.checkoutRecoveryStatusHistory.create({ data: {
+        checkoutRecoveryId: id, fromStatus: "DETECTED", toStatus: "CANCELLED",
+        source: "woocommerce.checkout", reason: "CHECKOUT_RESUMED",
+        metadata: { eventId: "resume-generation-2", nextGeneration: 2 }, occurredAt: new Date(),
+      } });
+      const next = {
+        ...incoming, generation: 2, lastEventId: `ev-${randomUUID()}`,
+        lastActivityAt: new Date(Date.parse(incoming.lastActivityAt) + 60_000).toISOString(),
+        basket: { kind: "nonempty" as const, checkout: {
+          currency: "GBP", total: "20.00",
+          restoration: { schemaVersion: "woo.cart-restore.v1" as const, kind: "supported" as const,
+            appliedCouponCodes: ["next-generation"], lines: [{ productId: 77, quantity: 2 }] },
+          items: [{ productId: "p2", quantity: 2, total: "20.00" }],
+          contact: { phone: PHONE, email: "customer@example.test" },
+        } },
+      };
+      await redis.set(key, JSON.stringify(next), "EX", 600);
+      await watermarks.write({ shopId, checkoutToken: token }, acceptedWatermark(next), WOO_REPLAY_BUFFER_MS + 60_000);
+      expect(await service.evaluateMatured(next)).toMatchObject({ kind: "created", generation: 2 });
+      const generations = await db.checkoutRecovery.findMany({ where: { shopId, checkoutToken: token }, orderBy: { generation: "asc" } });
+      expect(generations).toHaveLength(2);
+      const secondUrl = new URL(generations[1]!.checkoutUrl!);
+      expect(generations[1]).toMatchObject({ generation: 2, wooRestoreSnapshot: {
+        schemaVersion: "woo.cart-restore.v1", kind: "supported",
+        appliedCouponCodes: ["next-generation"], lines: [{ productId: 77, quantity: 2 }],
+      } });
+      expect(secondUrl.href).not.toBe(firstUrl.href);
+      expect(secondUrl.searchParams.get("r")).toBe(generations[1]!.id);
+      expect(secondUrl.searchParams.get("t")).not.toBe(firstUrl.searchParams.get("t"));
+      expect(generations[0]!.checkoutUrl).toBe(firstUrl.href);
+      expect(await service.evaluateMatured(incoming)).toMatchObject({ kind: "superseded", reason: "GENERATION_SUPERSEDED" });
+      await db.checkoutRecovery.update({ where: { id: generations[1]!.id }, data: { status: "EXPIRED" } });
+      expect(await service.evaluateMatured(next)).toMatchObject({ kind: "superseded", reason: "GENERATION_TERMINAL" });
     } finally { await redis.quit(); await db.$disconnect(); }
   }, 45_000);
 

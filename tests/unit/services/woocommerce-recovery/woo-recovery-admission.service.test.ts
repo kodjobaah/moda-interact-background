@@ -16,6 +16,8 @@ const NOW = new Date("2026-10-24T12:00:00.000Z");
 const ACTIVITY = "2026-10-24T10:00:00.000Z";
 const PHONE = "+447400123456";
 const DIGITS = "447400123456";
+const SHOP_DOMAIN = "https://store.example.com";
+const CANONICAL_SITE_URL = `${SHOP_DOMAIN}/shop`;
 
 function candidate(overrides: Partial<WooPendingCandidate> = {}): WooPendingCandidate {
   return {
@@ -23,6 +25,8 @@ function candidate(overrides: Partial<WooPendingCandidate> = {}): WooPendingCand
     generation: 1,
     lastEventId: "woo-event-1", lastActivityAt: ACTIVITY,
     basket: { kind: "nonempty", checkout: {
+      restoration: { schemaVersion: "woo.cart-restore.v1", kind: "supported",
+        appliedCouponCodes: [], lines: [{ productId: 42, quantity: 2 }] },
       currency: "GBP", total: "34.20", items: [{ quantity: 2, productId: "product-1", total: "34.20" }],
       contact: { phone: PHONE, email: "customer@example.test" },
     } },
@@ -47,6 +51,7 @@ function permittedFence(overrides: Record<string, unknown> = {}) {
     installationStatus: "ACTIVE", revokedAt: null, credentialVersion: 1,
     phoneVerifiedAt: NOW, consentPurpose: "WHATSAPP_CHECKOUT_RECOVERY",
     consentDecision: "GRANTED", consentSource: "WOO_MODA_CHECKBOX",
+    canonicalSiteUrl: CANONICAL_SITE_URL, shopDomain: SHOP_DOMAIN,
     consentVerifiedAt: NOW, providerObservedAt: NOW,
     consentRevision: 1n, decisionSequence: 1n, noContact: false, noContactReason: null,
     noContactRevision: 0n,
@@ -55,10 +60,11 @@ function permittedFence(overrides: Record<string, unknown> = {}) {
 }
 
 type RecoveryRow = { id: string; status: string; generation: number; lastExternalActivityAt: Date;
-  statusHistory: Array<Record<string, unknown>> };
+  checkoutUrl?: string | null; statusHistory: Array<Record<string, unknown>> };
 function fixtures() {
   const rows: RecoveryRow[] = [];
   const created: unknown[] = [];
+  const updated: unknown[] = [];
   const histories: unknown[] = [];
   let fence = [permittedFence()];
   let current: WooPendingCandidate | null = candidate();
@@ -68,7 +74,8 @@ function fixtures() {
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     created.push(data);
     const row = { id: `recovery-${created.length}`, status: "DETECTED", generation: Number(data.generation),
-      lastExternalActivityAt: data.lastExternalActivityAt as Date, statusHistory: [] as Array<Record<string, unknown>> };
+      lastExternalActivityAt: data.lastExternalActivityAt as Date, checkoutUrl: data.checkoutUrl as string | null,
+      statusHistory: [] as Array<Record<string, unknown>> };
     rows.push(row);
     return row;
   });
@@ -78,16 +85,20 @@ function fixtures() {
     recovery?.statusHistory.push(data);
     return data;
   });
+  const update = vi.fn(async (args: Record<string, unknown>) => {
+    updated.push(args);
+    return args;
+  });
   const queryRaw = vi.fn(async () => fence);
   const db = {
-    shop: { findUnique: vi.fn(async () => ({ id: "woo-shop", platform: "WOOCOMMERCE",
+    shop: { findUnique: vi.fn(async () => ({ id: "woo-shop", domain: SHOP_DOMAIN, platform: "WOOCOMMERCE",
       status: "ACTIVE", onboardingCompleted: true, defaultCountryCode: "GB" })) },
     wooCommerceInstallation: { findUnique: vi.fn(async () => ({ id: "installation", status: "ACTIVE",
-      revokedAt: null, credentialVersion: 1 })) },
+      revokedAt: null, credentialVersion: 1, canonicalSiteUrl: CANONICAL_SITE_URL })) },
     customer: { findUnique: vi.fn(async () => ({ id: "customer", shopId: "woo-shop", email: "customer@example.test" })) },
     checkoutRecovery: { findFirst },
     $transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run({
-      checkoutRecovery: { findFirst, create }, checkoutRecoveryStatusHistory: { create: historyCreate },
+      checkoutRecovery: { findFirst, create, update }, checkoutRecoveryStatusHistory: { create: historyCreate },
       $queryRaw: queryRaw,
     })),
   };
@@ -123,8 +134,8 @@ function fixtures() {
     candidates, orders, coordinator, consent, policy: policy as never,
     execution: execution as never, logger, watermarks, now: () => NOW, onDeniedAdmission: denied,
   });
-  return { service, db, rows, created, histories, candidates, orders, coordinator, consent, policy,
-    execution, logger, denied, queryRaw, create, historyCreate, watermarks,
+  return { service, db, rows, created, updated, histories, candidates, orders, coordinator, consent, policy,
+    execution, logger, denied, queryRaw, create, update, historyCreate, watermarks,
     setCandidate: (value: WooPendingCandidate | null) => { current = value; },
     setOrder: (value: WooTerminalObservation) => { order = value; },
     setFence: (value: ReturnType<typeof permittedFence>[]) => { fence = value; },
@@ -141,15 +152,25 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       customerId: "customer", generation: 1, status: "DETECTED", cartToken: null,
       currency: "GBP", checkoutUrl: null, lastExternalActivityAt: new Date(ACTIVITY),
       lineItems: [{ quantity: 2, productId: "product-1", total: "34.20" }],
-      wooRestoreSnapshot: Prisma.DbNull,
+      wooRestoreSnapshot: { schemaVersion: "woo.cart-restore.v1", kind: "supported",
+        appliedCouponCodes: [], lines: [{ productId: 42, quantity: 2 }] },
     });
     expect(f.histories).toHaveLength(1);
     expect(f.histories[0]).toMatchObject({ toStatus: "DETECTED", fromStatus: null, source: "WOOCOMMERCE",
-      reason: "FIRST_MATURE_CHECKOUT_ADMISSION", metadata: { generation: 1, lastEventId: "woo-event-1" } });
+      reason: "FIRST_MATURE_CHECKOUT_ADMISSION", metadata: { generation: 1, lastEventId: "woo-event-1",
+        checkoutUrlDisposition: "ISSUED" } });
+    const issuedUrl = new URL((f.updated[0] as { data: { checkoutUrl: string } }).data.checkoutUrl);
+    expect(issuedUrl.origin).toBe(SHOP_DOMAIN);
+    expect(issuedUrl.pathname).toBe("/shop/");
+    expect(issuedUrl.searchParams.get("moda_interact_resume")).toBe("1");
+    expect(issuedUrl.searchParams.get("r")).toBe("recovery-1");
+    expect(issuedUrl.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(f.logger.info).toHaveBeenCalledWith("woocommerce.recovery.admission.evaluated",
       expect.objectContaining({ outcome: "created", recoveryId: "recovery-1", jobIdHash: expect.any(String) }));
     expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain(PHONE);
     expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain("woo-checkout");
+    expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain(SHOP_DOMAIN);
+    expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain(issuedUrl.searchParams.get("t"));
     expect(f.denied).not.toHaveBeenCalled();
   });
 
@@ -176,6 +197,47 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       wooRestoreSnapshot: restoration,
       lineItems: [{ quantity: 2, productId: "product-1", total: "34.20" }],
     });
+  });
+
+  it.each([
+    ["host mismatch", "https://other.example.com", CANONICAL_SITE_URL, "SHOP_HOST_MISMATCH"],
+    ["invalid canonical site", SHOP_DOMAIN, "http://store.example.com/shop", "CANONICAL_SITE_INVALID"],
+  ] as const)("omits the link and records the bounded reason for %s", async (_case, shopDomain, canonicalSiteUrl, reason) => {
+    const f = fixtures();
+    f.db.shop.findUnique.mockResolvedValueOnce({ id: "woo-shop", domain: shopDomain,
+      platform: "WOOCOMMERCE", status: "ACTIVE", onboardingCompleted: true, defaultCountryCode: "GB" });
+    f.db.wooCommerceInstallation.findUnique.mockResolvedValueOnce({ id: "installation", status: "ACTIVE",
+      revokedAt: null, credentialVersion: 1, canonicalSiteUrl });
+    f.setFence([permittedFence({ shopDomain, canonicalSiteUrl })]);
+
+    expect(await f.service.evaluateMatured(candidate())).toMatchObject({ kind: "created" });
+    expect(f.created[0]).toMatchObject({ checkoutUrl: null });
+    expect(f.updated).toHaveLength(0);
+    expect(f.histories[0]).toMatchObject({ metadata: {
+      checkoutUrlDisposition: "OMITTED", checkoutUrlOmissionReason: reason,
+    } });
+  });
+
+  it.each([
+    ["absent", undefined, "RESTORE_SNAPSHOT_ABSENT"],
+    ["unsupported", { schemaVersion: "woo.cart-restore.v1", kind: "unsupported",
+      appliedCouponCodes: [], reason: "unsupported-product-type" }, "RESTORE_SNAPSHOT_UNSUPPORTED"],
+  ] as const)("omits the recovery link for %s restoration evidence and records a bounded reason", async (_kind, restoration, reason) => {
+    const f = fixtures();
+    const base = candidate().basket;
+    if (base.kind !== "nonempty") throw new Error("invalid fixture");
+    const { restoration: _ignored, ...checkout } = base.checkout;
+    const incoming = candidate({ basket: { kind: "nonempty", checkout: {
+      ...checkout, ...(restoration ? { restoration } : {}),
+    } } });
+    f.setCandidate(incoming);
+
+    expect(await f.service.evaluateMatured(incoming)).toMatchObject({ kind: "created" });
+    expect(f.created[0]).toMatchObject({ checkoutUrl: null });
+    expect(f.updated).toHaveLength(0);
+    expect(f.histories[0]).toMatchObject({ metadata: {
+      checkoutUrlDisposition: "OMITTED", checkoutUrlOmissionReason: reason,
+    } });
   });
 
   it("repairs only the exact admission-origin row when the delayed job/index is gone", async () => {
@@ -205,6 +267,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     ]);
     expect([a.kind, b.kind].sort()).toEqual(["already-exists", "created"]);
     expect(f.created).toHaveLength(1);
+    expect(f.updated).toHaveLength(1);
     expect(f.histories).toHaveLength(1);
   });
 
@@ -330,7 +393,8 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
   it("admits generation 2 only after a provenance-backed checkout resumption and freezes generation 1", async () => {
     const f = fixtures();
     f.rows.push({ id: "generation-1", status: "CANCELLED", generation: 1,
-      lastExternalActivityAt: new Date("2026-10-24T10:30:00.000Z"), statusHistory: [
+      lastExternalActivityAt: new Date("2026-10-24T10:30:00.000Z"),
+      checkoutUrl: "https://store.example.com/shop/?moda_interact_resume=1&r=old&t=old-token", statusHistory: [
         { fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE", reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
           metadata: { generation: 1, lastEventId: "old-event" } },
         { fromStatus: "DETECTED", toStatus: "CANCELLED", source: "woocommerce.checkout", reason: "CHECKOUT_RESUMED",
@@ -349,11 +413,16 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     expect(f.created[0]).toMatchObject({ generation: 2, currency: "USD", totalPrice: expect.anything(),
       wooRestoreSnapshot: { appliedCouponCodes: ["new-generation"], lines: [{ productId: 77, quantity: 3 }] },
       lineItems: [{ productId: "new-product", quantity: 3 }] });
+    const generation2Url = new URL((f.updated[0] as { data: { checkoutUrl: string } }).data.checkoutUrl);
+    expect(generation2Url.searchParams.get("r")).toBe("recovery-1");
+    expect(generation2Url.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(generation2Url.href).not.toBe(f.rows[0]?.checkoutUrl);
     expect(f.histories[0]).toMatchObject({ reason: "MATURE_CHECKOUT_REENTRY_ADMISSION", source: "WOOCOMMERCE",
       metadata: { generation: 2, lastEventId: "new-event" } });
     expect(f.rows[0]).toMatchObject({ id: "generation-1", status: "CANCELLED", generation: 1 });
     expect(await f.service.evaluateMatured(next)).toMatchObject({ kind: "already-exists",
       recoveryId: "recovery-1", generation: 2, repairInitial: true });
+    expect(f.updated).toHaveLength(1);
   });
 
   it.each([
