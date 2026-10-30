@@ -7,7 +7,10 @@ import { PendingRecoveryCandidateIndexStore } from "../pending-recovery-candidat
 import { WooCheckoutLeaseGuard } from "../pending-recovery-candidate/checkout-order-guard.service.js";
 import { recoveryConsentMerchantNoticeService } from "../checkout-recovery/recovery-consent-merchant-notice.service.js";
 import { WooCheckoutCoordinatorService, WooOrderReconciliationService, WooOrderTerminalEvidenceStore } from "./woo-order-reconciliation.service.js";
-import { WooPendingCandidateQueueService, getWooCandidateQueue } from "./woo-candidate-queue.service.js";
+import {
+  WooPendingCandidateQueueService, getWooCandidateQueue, wooCandidateJobId,
+  type WooCandidateQueuePort, type WooCandidateIndexPort,
+} from "./woo-candidate-queue.service.js";
 import { createWooCheckoutActivityService } from "./woo-checkout-activity.service.js";
 import { WooRecoveryAdmissionService } from "./woo-recovery-admission.service.js";
 import { createWooRecoveryConsentDeniedAdmissionNotifier } from "./woo-recovery-consent-notice.adapter.js";
@@ -16,6 +19,36 @@ import { createWooRecoveryOutreachService } from "./woo-recovery-outreach.adapte
 import { WooInitialDispatchQueue } from "./woo-initial-dispatch.queue.js";
 import { WooRecoveryOrchestratorService } from "./woo-recovery-orchestrator.service.js";
 import type { WooPendingCandidate } from "./contracts.js";
+import type { WooCheckoutCoordinator } from "./contracts.js";
+
+export async function clearMaturedWooCandidate(
+  dependencies: {
+    coordinator: Pick<WooCheckoutCoordinator, "withCheckoutLock">;
+    index: Pick<WooCandidateIndexPort, "findByCheckout" | "compareAndRemoveCheckout">;
+    queue: Pick<WooCandidateQueuePort, "getJob">;
+  },
+  candidate: WooPendingCandidate,
+  jobId: string,
+): Promise<void> {
+  const ref = { shopId: candidate.shopId, checkoutToken: candidate.checkoutToken };
+  await dependencies.coordinator.withCheckoutLock(ref, async () => {
+    if (await dependencies.index.findByCheckout(ref) !== jobId) return;
+    if (wooCandidateJobId(ref, candidate.generation) !== jobId) {
+      throw new Error("WOO_MATURED_JOB_GENERATION_MISMATCH");
+    }
+    const job = await dependencies.queue.getJob(jobId);
+    if (!job || job.data.source !== "woocommerce" ||
+      job.data.shopId !== candidate.shopId || job.data.checkoutToken !== candidate.checkoutToken ||
+      job.data.generation !== candidate.generation ||
+      job.data.lastEventId !== candidate.lastEventId ||
+      job.data.lastActivityAt !== candidate.lastActivityAt) {
+      throw new Error("WOO_MATURED_INDEX_OWNERSHIP_CHANGED");
+    }
+    // The checkout pointer can now belong to the successor generation.
+    // Compare-and-delete preserves that successor under a stale job race.
+    await dependencies.index.compareAndRemoveCheckout(ref, jobId);
+  });
+}
 
 /** One coordinator + candidate store per process, backed by the same Redis
  * checkout lease. All provider, consent and billing behaviour belongs to the
@@ -66,22 +99,9 @@ export function createWooRecoveryRuntime(serviceName: "moda-shopify-event-worker
         throw new Error("WOO_INITIAL_DISPATCH_OWNERSHIP_MISMATCH");
       }
     },
-    async clearMatured(candidate: WooPendingCandidate, jobId: string) {
-      const ref = { shopId: candidate.shopId, checkoutToken: candidate.checkoutToken };
-      await coordinator.withCheckoutLock(ref, async () => {
-        if (await index.findByCheckout(ref) !== jobId) return;
-        const job = await candidateQueue.getJob(jobId);
-        // A newer accepted checkout version must keep its own index; a missing
-        // job is handled by a retry rather than blind index deletion.
-        if (!job || job.data.source !== "woocommerce" ||
-          job.data.shopId !== candidate.shopId || job.data.checkoutToken !== candidate.checkoutToken ||
-          job.data.lastEventId !== candidate.lastEventId ||
-          job.data.lastActivityAt !== candidate.lastActivityAt) {
-          throw new Error("WOO_MATURED_INDEX_OWNERSHIP_CHANGED");
-        }
-        await index.remove(candidate, jobId);
-      });
-    },
+    clearMatured: (candidate, jobId) => clearMaturedWooCandidate(
+      { coordinator, index, queue: candidateQueue }, candidate, jobId,
+    ),
   });
 
   return {

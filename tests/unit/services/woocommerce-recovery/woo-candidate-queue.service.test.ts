@@ -84,7 +84,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     const input = { candidate: initial, delayMinutes: 30, dueAtMs: NOW + 30 * 60_000,
       retentionMs: 24 * 60 * 60_000 + 30 * 60_000 };
     expect(await h.service.schedulePending(input)).toBe("scheduled");
-    const jobId = wooCandidateJobId(initial);
+    const jobId = wooCandidateJobId(initial, initial.generation);
     expect(h.add).toHaveBeenCalledWith(EVALUATE_PENDING_RECOVERY_JOB, initial, { jobId, delay: 30 * 60_000 });
     expect(await h.service.getPending(initial)).toEqual(initial);
     expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({
@@ -109,7 +109,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
         dueAtMs: NOW + 1_800_000, retentionMs: 90_000_000 });
     }
     expect(h.jobs.size).toBe(2);
-    expect(wooCandidateJobId(candidate("woo-a"))).not.toBe(wooCandidateJobId(candidate("woo-b")));
+    expect(wooCandidateJobId(candidate("woo-a"), 1)).not.toBe(wooCandidateJobId(candidate("woo-b"), 1));
     await h.service.cancelPending(candidate("woo-a"));
     expect(await h.service.getPending(candidate("woo-b"))).toMatchObject({ shopId: "woo-b" });
   });
@@ -161,7 +161,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     const input = { candidate: woo, delayMinutes: 30, dueAtMs: NOW + 1_800_000,
       retentionMs: 90_000_000 };
     await h.service.schedulePending(input);
-    const job = h.jobs.get(wooCandidateJobId(woo))!;
+    const job = h.jobs.get(wooCandidateJobId(woo, woo.generation))!;
     job.state = state;
     await expect(h.service.schedulePending(input)).rejects.toThrow("job_not_mutable");
     expect(h.add).toHaveBeenCalledOnce();
@@ -171,7 +171,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
   it("cleans dangling Woo indexes when a completed job has been removed", async () => {
     const h = harness();
     const woo = candidate();
-    h.indexes.set(pendingCandidateCheckoutIndexKey(woo), wooCandidateJobId(woo));
+    h.indexes.set(pendingCandidateCheckoutIndexKey(woo), wooCandidateJobId(woo, woo.generation));
     expect(await h.service.cancelPending(woo)).toBe("absent");
     expect(h.indexes.size).toBe(0);
     expect(h.compareAndRemoveCheckout).toHaveBeenCalledOnce();

@@ -10,7 +10,7 @@ import type { WooOrderCapture } from "../../../../src/events/woo-order-capture.j
 const checkout = { shopId: "shop-1", checkoutKey: "checkout-1", eventId: "event-1" } as WooCheckoutCapture;
 const order = { shopId: "shop-1", checkoutKey: "checkout-1", eventId: "order-1" } as WooOrderCapture;
 const candidate: WooPendingCandidate = {
-  source: "woocommerce", shopId: "shop-1", checkoutToken: "checkout-1",
+  source: "woocommerce", shopId: "shop-1", checkoutToken: "checkout-1", generation: 1,
   lastEventId: "event-1", lastActivityAt: "2026-10-25T00:00:00.000Z",
   basket: { kind: "empty" },
 };
@@ -18,10 +18,11 @@ const candidate: WooPendingCandidate = {
 const dependencies = () => {
   const log = { info: vi.fn(), error: vi.fn(), warn: vi.fn() };
   const deps = {
-    checkout: { handleCheckout: vi.fn().mockResolvedValue({ kind: "scheduled", dueAt: "2026-10-26T00:00:00.000Z" }) },
+    checkout: { handleCheckout: vi.fn().mockResolvedValue({ kind: "scheduled", dueAt: "2026-10-26T00:00:00.000Z", generation: 1 }) },
     order: { reconcileOrder: vi.fn().mockResolvedValue({ kind: "placed-suppressed" }) },
-    admission: { evaluateMatured: vi.fn().mockResolvedValue({ kind: "created", recoveryId: "recovery-1" }) },
+    admission: { evaluateMatured: vi.fn().mockResolvedValue({ kind: "created", recoveryId: "recovery-1", generation: 1 }) },
     outreach: {
+      settleResumed: vi.fn().mockResolvedValue(undefined),
       enqueueInitial: vi.fn().mockResolvedValue({ kind: "queued", attemptId: "attempt-1" }),
       processInitial: vi.fn().mockResolvedValue({ kind: "sent", attemptId: "attempt-1" }),
     },
@@ -44,13 +45,28 @@ describe("ARCH-048-BACKGROUND-005 orchestrator", () => {
     expect(f.deps.outreach.enqueueInitial).not.toHaveBeenCalled();
   });
 
-  it("resumes an already-created recovery after a later checkout without a second sender", async () => {
+  it("settles the old recovery on resumed checkout without enqueueing its initial again", async () => {
     const f = dependencies();
-    f.deps.checkout.handleCheckout.mockResolvedValue({ kind: "existing-recovery", recoveryId: "recovery-1" });
-    f.deps.outreach.enqueueInitial.mockResolvedValue({ kind: "already-initialized", attemptId: "attempt-1" });
+    f.deps.checkout.handleCheckout.mockResolvedValue({
+      kind: "resumed", previousRecoveryId: "recovery-1", nextGeneration: 2, candidateOutcome: "scheduled",
+    });
+    await f.service.onCheckout(checkout);
+    expect(f.deps.outreach.settleResumed).toHaveBeenCalledExactlyOnceWith("recovery-1");
+    expect(f.deps.outreach.enqueueInitial).not.toHaveBeenCalled();
+    expect(f.deps.outreach.processInitial).not.toHaveBeenCalled();
+  });
+
+  it("repairs only the exact admission-origin checkout initial", async () => {
+    const f = dependencies();
+    f.deps.checkout.handleCheckout.mockResolvedValue({
+      kind: "repair-existing-initial", recoveryId: "recovery-1", generation: 1,
+    });
     await f.service.onCheckout(checkout);
     expect(f.deps.outreach.enqueueInitial).toHaveBeenCalledExactlyOnceWith("recovery-1");
-    expect(f.deps.outreach.processInitial).not.toHaveBeenCalled();
+    f.deps.checkout.handleCheckout.mockResolvedValue({ kind: "existing-recovery", recoveryId: "recovery-1" });
+    f.deps.outreach.enqueueInitial.mockClear();
+    await f.service.onCheckout(checkout);
+    expect(f.deps.outreach.enqueueInitial).not.toHaveBeenCalled();
   });
 
   it("does not bypass a refused shop or a failed checkout adapter", async () => {
@@ -80,12 +96,26 @@ describe("ARCH-048-BACKGROUND-005 orchestrator", () => {
     expect(f.log.info).not.toHaveBeenCalled();
   });
 
-  it.each(["created", "already-exists"])("republishes an existing eligible first attempt on %s and cleans index", async (kind) => {
+  it.each([
+    { kind: "created", generation: 1 },
+    { kind: "already-exists", generation: 1, repairInitial: true, status: "DETECTED" },
+  ])("enqueues a created or proven same-generation repair and cleans the completed candidate", async (outcome) => {
     const f = dependencies();
-    f.deps.admission.evaluateMatured.mockResolvedValue({ kind, recoveryId: "recovery-1", status: "DETECTED" });
+    f.deps.admission.evaluateMatured.mockResolvedValue({ ...outcome, recoveryId: "recovery-1" });
     await f.service.onCandidateMatured(candidate, { jobId: "woo-candidate-1" });
     expect(f.deps.admission.evaluateMatured).toHaveBeenCalledExactlyOnceWith(candidate, { jobId: "woo-candidate-1" });
     expect(f.deps.outreach.enqueueInitial).toHaveBeenCalledExactlyOnceWith("recovery-1");
+    expect(f.deps.clearMatured).toHaveBeenCalledExactlyOnceWith(candidate, "woo-candidate-1");
+  });
+
+  it.each([
+    { kind: "already-exists", recoveryId: "old", status: "MESSAGE_SENT", generation: 1, repairInitial: false },
+    { kind: "already-exists", recoveryId: "old", status: "DETECTED", generation: 2, repairInitial: true },
+  ])("does not enqueue an unproven or other-generation existing recovery", async (outcome) => {
+    const f = dependencies();
+    f.deps.admission.evaluateMatured.mockResolvedValue(outcome);
+    await f.service.onCandidateMatured(candidate, { jobId: "woo-candidate-1" });
+    expect(f.deps.outreach.enqueueInitial).not.toHaveBeenCalled();
     expect(f.deps.clearMatured).toHaveBeenCalledExactlyOnceWith(candidate, "woo-candidate-1");
   });
 
@@ -116,7 +146,9 @@ describe("ARCH-048-BACKGROUND-005 orchestrator", () => {
         .rejects.toBeInstanceOf(WooRecoveryRetryRequired);
       expect(f.deps.clearMatured).not.toHaveBeenCalled();
     } else if (stage === "checkout-resume") {
-      f.deps.checkout.handleCheckout.mockResolvedValue({ kind: "existing-recovery", recoveryId: "recovery-1" });
+      f.deps.checkout.handleCheckout.mockResolvedValue({
+        kind: "repair-existing-initial", recoveryId: "recovery-1", generation: 1,
+      });
       f.deps.outreach.enqueueInitial.mockResolvedValue({ kind: "failed-retryable", reason: "REDIS_UNAVAILABLE" });
       await expect(f.service.onCheckout(checkout)).rejects.toBeInstanceOf(WooRecoveryRetryRequired);
     } else {

@@ -43,6 +43,23 @@ const logger = createLogger({
 
 type PendingRecoveryJob = PendingRecoveryCandidate | WooPendingCandidate | WooInitialDispatchJob;
 
+function isWooCandidate(value: unknown): value is WooPendingCandidate {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.source !== "woocommerce" ||
+    typeof candidate.shopId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(candidate.shopId) ||
+    typeof candidate.checkoutToken !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.checkoutToken) ||
+    !Number.isSafeInteger(candidate.generation) || Number(candidate.generation) < 1 ||
+    typeof candidate.lastEventId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:~-]{0,127}$/.test(candidate.lastEventId) ||
+    typeof candidate.lastActivityAt !== "string" ||
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(candidate.lastActivityAt)) return false;
+  const timestamp = Date.parse(candidate.lastActivityAt);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== candidate.lastActivityAt) return false;
+  const basket = candidate.basket;
+  return Boolean(basket && typeof basket === "object" &&
+    ["nonempty", "empty", "unknown"].includes(String((basket as { kind?: unknown }).kind)));
+}
+
 function wooJobFields(job: { id?: string; attemptsMade: number }, stage: string) {
   return { queue: PENDING_RECOVERY_CANDIDATE_QUEUE, source: "woocommerce", stage,
     jobId: typeof job.id === "string" && /^woo-(?:candidate|initial)-[0-9a-f]{64}$/.test(job.id)
@@ -74,9 +91,12 @@ async function processWooJob(
       (job.data as { source?: unknown }).source !== "woocommerce") {
       throw new Error("WOO_CANDIDATE_SOURCE_INVALID");
     }
-    const candidate = job.data as WooPendingCandidate;
+    if (!isWooCandidate(job.data)) throw new Error("WOO_CANDIDATE_IDENTITY_INVALID");
+    const candidate = job.data;
     shopId = candidate.shopId;
-    if (wooCandidateJobId(candidate) !== job.id) throw new Error("WOO_CANDIDATE_JOB_IDENTITY_INVALID");
+    if (wooCandidateJobId(candidate, candidate.generation) !== job.id) {
+      throw new Error("WOO_CANDIDATE_JOB_IDENTITY_INVALID");
+    }
     eventId = typeof candidate.lastEventId === "string"
       ? createHash("sha256").update(candidate.lastEventId).digest("hex") : undefined;
     logger.info("woocommerce.recovery.job.started", { ...fields, shopId, ...(eventId ? { eventId } : {}) });
