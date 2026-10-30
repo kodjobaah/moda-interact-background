@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 // Service modules import production adapters, but injected unit harnesses do
 // not connect to Redis/PostgreSQL or require local integration credentials.
@@ -224,7 +225,7 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     expect(h.schedule).toHaveBeenCalledTimes(2);
   });
 
-  it("replays a committed resumption into the same next generation and keeps later edits there", async () => {
+  it("does not let a resumption replay overwrite a later successor candidate or watermark", async () => {
     const h = harness();
     h.recoveries.set("shop-a/checkout-1", { id: "recovery-1", generation: 1,
       status: "ENGAGED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
@@ -232,13 +233,44 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
     expect(h.closeForResumption).toHaveBeenCalledOnce();
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
-    expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
     const later = event("evt-later", 3);
     expect(await h.service.handleCheckout(later)).toMatchObject({ kind: "rescheduled", generation: 2 });
+    const successorBeforeReplay = structuredClone(h.candidates.get("shop-a/checkout-1"));
+    const watermarkBeforeReplay = structuredClone(h.watermarks.get("shop-a/checkout-1"));
+    expect(await h.service.handleCheckout(resumed)).toMatchObject({ kind: "resumed",
+      previousRecoveryId: "recovery-1", nextGeneration: 2 });
     expect(h.closeForResumption).toHaveBeenCalledOnce();
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
+    expect(h.candidates.get("shop-a/checkout-1")).toEqual(successorBeforeReplay);
+    expect(h.watermarks.get("shop-a/checkout-1")).toEqual(watermarkBeforeReplay);
     expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-later");
   });
+
+  it.each(["stale", "duplicate", "same-second conflict", "event-ID reuse", "generation mismatch"] as const)(
+    "does not close an active recovery when the pre-close watermark classifies the event as %s",
+    async (classification) => {
+      const h = harness();
+      const incoming = event(classification === "duplicate" ? "evt-watermark" : "evt-incoming", 2);
+      const watermarkEvent = classification === "stale" || classification === "event-ID reuse"
+        ? event(classification === "event-ID reuse" ? incoming.eventId : "evt-watermark", 3)
+        : classification === "generation mismatch" ? event("evt-watermark", 1)
+        : classification === "duplicate" ? incoming : event("evt-other", 2);
+      h.recoveries.set("shop-a/checkout-1", { id: "active-recovery", generation: 1,
+        status: "MESSAGE_SENT", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
+      h.watermarks.set("shop-a/checkout-1", {
+        generation: classification === "generation mismatch" ? 7 : 1,
+        lastEventId: watermarkEvent.eventId,
+        lastActivityAt: watermarkEvent.occurredAt,
+        checkoutDigest: createHash("sha256").update(JSON.stringify(watermarkEvent.checkout)).digest("hex"),
+        state: "nonempty",
+      });
+      const result = await h.service.handleCheckout(incoming);
+      expect(h.closeForResumption).not.toHaveBeenCalled();
+      expect(h.recoveries.get("shop-a/checkout-1")).toMatchObject({ status: "MESSAGE_SENT", resumption: null });
+      expect(result.kind).toBe(classification === "stale" || classification === "duplicate"
+        ? "ignored-stale" : "deferred-ambiguous");
+    },
+  );
 
   it("cancels terminal observed placed (not necessarily paid) and ambiguous order state", async () => {
     const h = harness();

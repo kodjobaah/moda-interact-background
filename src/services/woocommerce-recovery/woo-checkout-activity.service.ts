@@ -57,6 +57,29 @@ function checkoutDigest(checkout: WooCheckoutCapture["checkout"]): string {
   return createHash("sha256").update(JSON.stringify(checkout)).digest("hex");
 }
 
+type WatermarkOrdering = "clear" | "stale" | "duplicate" | "conflict";
+
+function classifyWatermark(
+  watermark: WooActivityWatermark,
+  event: WooCheckoutCapture,
+  digest: string,
+): WatermarkOrdering {
+  const eventMs = Date.parse(event.occurredAt);
+  const watermarkMs = Date.parse(watermark.lastActivityAt);
+  if (!Number.isFinite(watermarkMs)) return "conflict";
+  const eventSecond = Math.floor(eventMs / 1_000);
+  const watermarkSecond = Math.floor(watermarkMs / 1_000);
+  if (watermark.lastEventId === event.eventId) {
+    return watermark.state !== "conflicting" && watermark.lastActivityAt === event.occurredAt &&
+      watermark.checkoutDigest === digest ? "duplicate" : "conflict";
+  }
+  if (eventSecond < watermarkSecond) return "stale";
+  if (eventSecond === watermarkSecond) {
+    return "conflict";
+  }
+  return "clear";
+}
+
 /** Events with omitted/over-limit items must not reuse an older complete basket. */
 function basketFrom(event: WooCheckoutCapture): WooBasketEvidence {
   const items = event.checkout.items;
@@ -119,6 +142,11 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
   ): Promise<WooCheckoutActivityOutcome> {
     const occurredMs = Date.parse(event.occurredAt);
     if (!Number.isFinite(occurredMs)) throw new Error("Invalid authenticated Woo event timestamp");
+    const incomingDigest = checkoutDigest(event.checkout);
+    // Keep this pre-close watermark separately. A successor-generation
+    // watermark may be ignored by candidate reconciliation below, but it must
+    // still fence a stale/conflicting event from closing an active recovery.
+    const boundaryWatermark = await this.deps.watermarks.read(ref);
 
     // PostgreSQL is authoritative even when a maturity job disappeared. The
     // latest generation and its bounded origin/resumption evidence define the
@@ -136,6 +164,33 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
         if (existing.resumption.eventId === event.eventId) {
           resumed = { previousRecoveryId: existing.id, nextGeneration: generation };
           exactResumptionReplay = true;
+        }
+      }
+      if (!exactResumptionReplay && ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+        if (boundaryWatermark) {
+          const ordering = classifyWatermark(boundaryWatermark, event, incomingDigest);
+          if (ordering === "stale") return { kind: "ignored-stale", reason: "older_than_activity_watermark" };
+          if (ordering === "duplicate") return { kind: "ignored-stale", reason: "duplicate_event" };
+          if (ordering === "conflict") {
+            await this.deps.candidates.cancelPending(ref, existing.generation + 1);
+            return { kind: "deferred-ambiguous", reason: "activity_watermark_conflict" };
+          }
+          if (boundaryWatermark.generation !== existing.generation) {
+            return { kind: "deferred-ambiguous", reason: "activity_watermark_generation_mismatch" };
+          }
+        }
+      }
+      if (exactResumptionReplay && boundaryWatermark) {
+        const ordering = classifyWatermark(boundaryWatermark, event, incomingDigest);
+        if (ordering === "stale") {
+          // A later successor update is already durable in Redis. The replay is
+          // acknowledged for old-generation cleanup but must not rewrite it.
+          return { kind: "resumed", previousRecoveryId: existing.id,
+            nextGeneration: generation, candidateOutcome: "rescheduled" };
+        }
+        if (ordering === "conflict") {
+          return { kind: "resumed", previousRecoveryId: existing.id,
+            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
         }
       }
       if (!exactResumptionReplay) {
@@ -198,13 +253,31 @@ export class WooCheckoutActivityService implements WooCheckoutActivityHandler {
       return { kind: "deferred-ambiguous", reason: "timestamp_outside_safe_horizon" };
     }
 
-    const incomingDigest = checkoutDigest(event.checkout);
-    let watermark = await this.deps.watermarks.read(ref);
+    let watermark = boundaryWatermark;
     if (watermark && watermark.generation !== generation) watermark = null;
     const pending = await this.deps.candidates.getPending(ref, generation);
     if (pending) {
       const pendingAt = Date.parse(pending.lastActivityAt);
       if (!Number.isFinite(pendingAt)) throw new Error("Invalid Woo candidate timestamp");
+      if (exactResumptionReplay) {
+        const pendingSecond = Math.floor(pendingAt / 1_000);
+        const replaySecond = Math.floor(occurredMs / 1_000);
+        if (pendingSecond > replaySecond) {
+          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation, candidateOutcome: "rescheduled" };
+        }
+        if (pendingSecond === replaySecond && !(pending.lastEventId === event.eventId &&
+          pending.lastActivityAt === event.occurredAt && pending.basket.kind === "nonempty" &&
+          checkoutDigest(pending.basket.checkout) === incomingDigest)) {
+          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
+        }
+        if (pending.lastEventId === event.eventId && pending.basket.kind === "nonempty" &&
+          checkoutDigest(pending.basket.checkout) !== incomingDigest) {
+          return { kind: "resumed", previousRecoveryId: resumed!.previousRecoveryId,
+            nextGeneration: generation, candidateOutcome: "deferred-ambiguous" };
+        }
+      }
       // The queue update may have succeeded while the index or watermark
       // failed. A replay of that very event must repair BOTH, not just mark
       // it a duplicate and strand an unindexed maturity job.
