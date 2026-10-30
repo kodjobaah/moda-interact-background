@@ -21,7 +21,7 @@ describe("saved checkout item summaries", () => {
       { productId: "p4", variantId: null, title: "Gourde", quantity: 3, total: "6.00" },
     ];
     expect(formatCheckoutItemsSummary(items, "fr-FR"))
-      .toBe("2 × Chaussures, 1 × Bouteille, 1 × Sac et 1 more");
+      .toBe("2 × Chaussures, 1 × Bouteille, 1 × Sac et +1");
   });
 
   it("omits invalid titles and fails closed if no valid product title remains", () => {
@@ -38,7 +38,7 @@ describe("saved checkout item summaries", () => {
   it("limits displayed rows, appends a bounded remainder and caps output length", () => {
     const many = Array.from({ length: 8 }, (_, index) => ({ title: `Item ${index}`, quantity: 1 }));
     expect(formatCheckoutItemsSummary(many, "en"))
-      .toBe("1 × Item 0, 1 × Item 1, 1 × Item 2, and 5 more");
+      .toBe("1 × Item 0, 1 × Item 1, 1 × Item 2, and +5");
     const long = formatCheckoutItemsSummary(Array.from({ length: 3 }, () => ({
       title: "x".repeat(160), quantity: 1,
     })), "en");

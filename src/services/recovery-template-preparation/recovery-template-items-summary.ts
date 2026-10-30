@@ -45,7 +45,9 @@ export function formatCheckoutItemsSummary(lineItems: unknown, languageTag: stri
   const visible = items.slice(0, MAX_DISPLAYED_ITEMS).map(({ title, quantity }) =>
     `${numbers.format(quantity)} × ${title}`);
   if (items.length > MAX_DISPLAYED_ITEMS) {
-    visible.push(`${numbers.format(items.length - MAX_DISPLAYED_ITEMS)} more`);
+    // A compact, language-neutral remainder marker avoids mixing translated
+    // list conjunctions with a hard-coded English word such as "more".
+    visible.push(`+${numbers.format(items.length - MAX_DISPLAYED_ITEMS)}`);
   }
   const summary = list.format(visible);
   if (summary.length <= MAX_SUMMARY_LENGTH) return summary;
