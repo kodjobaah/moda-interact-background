@@ -35,6 +35,7 @@ const recovery = {
   checkoutToken: "checkout-1",
   generation: 1,
   status: "MESSAGE_SENT",
+  shop: { platform: "WOOCOMMERCE" },
   customer: { phone: "  +4477 " },
 };
 beforeEach(() => {
@@ -99,6 +100,7 @@ describe("C2 strict recovery routing", () => {
       expect(query).toContain('"sentAt" IS NOT NULL');
       expect(query).toContain("r.status IN ('MESSAGE_SENT', 'ENGAGED')");
       expect(query).toContain('newer.generation > r.generation');
+      expect(query).toContain("shop.platform <> 'WOOCOMMERCE'");
     },
   );
   it.each([
@@ -209,6 +211,20 @@ describe("C2 strict recovery routing", () => {
     expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
       .toMatchObject({ kind: "resolved", conversationId: "c1", mode: "historical" });
     expect(active).toHaveBeenLastCalledWith("shop1", "general");
+  });
+
+  it("preserves Shopify generation routing without a latest-generation fence", async () => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "old"
+        ? { direction: "OUTBOUND", sentAt: new Date(), conversationId: "c1", conversation: { checkoutRecovery: { customer: { phone: "+4477" } } } }
+        : null,
+    );
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, shop: { platform: "SHOPIFY" } },
+    });
+    expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
+      .toMatchObject({ kind: "resolved", conversationId: "c1", mode: "active" });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(0);
   });
 
   it("rechecks the selected active generation before scheduling work", async () => {

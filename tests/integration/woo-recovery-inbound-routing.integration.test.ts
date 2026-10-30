@@ -27,7 +27,9 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
     const currentConversationId = randomUUID();
     const oldProviderId = `outbound-old-${randomUUID()}`;
     try {
-      await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, status: "ACTIVE" } });
+      await db.shop.create({ data: {
+        id: shopId, domain: `${shopId}.example.test`, platform: "WOOCOMMERCE", status: "ACTIVE",
+      } });
       await db.customer.create({ data: { id: customerId, shopId, phone: PHONE } });
       await db.checkoutRecovery.createMany({ data: [
         { id: oldRecoveryId, shopId, checkoutToken: token, customerId, generation: 1,
@@ -74,7 +76,9 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
     const unsentRecoveryId = randomUUID();
     const unsentConversationId = randomUUID();
     try {
-      await db.shop.createMany({ data: shopIds.map((id) => ({ id, domain: `${id}.example.test`, status: "ACTIVE" })) });
+      await db.shop.createMany({ data: shopIds.map((id) => ({
+        id, domain: `${id}.example.test`, platform: "WOOCOMMERCE", status: "ACTIVE",
+      })) });
       await db.customer.createMany({ data: customerIds.map((id, i) => ({ id, shopId: shopIds[i]!, phone: PHONE })) });
       await db.checkoutRecovery.createMany({ data: recoveryIds.map((id, i) => ({
         id, shopId: shopIds[i]!, checkoutToken: i === 0 ? tokenA : tokenB,
@@ -107,6 +111,42 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
       });
     } finally {
       await db.shop.deleteMany({ where: { id: { in: shopIds } } });
+      await db.$disconnect();
+    }
+  }, 45_000);
+
+  it("preserves Shopify ambiguity across older generations and terminal statuses", async () => {
+    const db = new PrismaClient({ datasourceUrl: databaseUrl! });
+    const shopId = randomUUID();
+    const customerId = randomUUID();
+    const token = `shopify-checkout-${randomUUID()}`;
+    const recoveryIds = [randomUUID(), randomUUID()];
+    const conversationIds = [randomUUID(), randomUUID()];
+    try {
+      await db.shop.create({
+        data: { id: shopId, domain: `${shopId}.example.test`, platform: "SHOPIFY", status: "ACTIVE" },
+      });
+      await db.customer.create({ data: { id: customerId, shopId, phone: PHONE } });
+      await db.checkoutRecovery.createMany({ data: recoveryIds.map((id, i) => ({
+        id, shopId, checkoutToken: token, customerId, generation: i + 1,
+        status: i === 0 ? "CANCELLED" : "MESSAGE_SENT", lastExternalActivityAt: new Date(),
+      })) });
+      await db.conversation.createMany({ data: conversationIds.map((id, i) => ({
+        id, type: "RECOVERY", checkoutRecoveryId: recoveryIds[i]!,
+      })) });
+      await db.conversationMessage.createMany({ data: conversationIds.map((conversationId) => ({
+        conversationId, providerMessageId: `shopify-outbound-${randomUUID()}`, direction: "OUTBOUND",
+        senderType: "AUTOMATION", status: "SENT", content: "Basket", sentAt: new Date(),
+      })) });
+
+      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
+        resolveSender: async () => ({ providerAccountId: "account", providerPhoneNumberId: "sender" }),
+      });
+      expect(await service.resolveInboundMessage(event(`shopify-inbound-${randomUUID()}`))).toEqual({
+        kind: "guidance", reason: "MULTIPLE_RECOVERIES",
+      });
+    } finally {
+      await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();
     }
   }, 45_000);

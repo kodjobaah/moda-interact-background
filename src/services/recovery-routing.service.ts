@@ -128,13 +128,19 @@ export class RecoveryRoutingService {
           FROM commerce."CheckoutRecovery" r
           JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId" = r.id
           JOIN commerce."Customer" customer ON customer.id = r."customerId"
+          JOIN commerce."Shop" shop ON shop.id = r."shopId"
           WHERE regexp_replace(regexp_replace(customer.phone, '^[[:space:]]+|[[:space:]]+$', '', 'g'), '^\\+', '') = ${phone}
-            AND r.status IN ('MESSAGE_SENT', 'ENGAGED')
-            AND NOT EXISTS (
-              SELECT 1 FROM commerce."CheckoutRecovery" newer
-              WHERE newer."shopId" = r."shopId"
-                AND newer."checkoutToken" = r."checkoutToken"
-                AND newer.generation > r.generation
+            AND (
+              shop.platform <> 'WOOCOMMERCE'
+              OR (
+                r.status IN ('MESSAGE_SENT', 'ENGAGED')
+                AND NOT EXISTS (
+                  SELECT 1 FROM commerce."CheckoutRecovery" newer
+                  WHERE newer."shopId" = r."shopId"
+                    AND newer."checkoutToken" = r."checkoutToken"
+                    AND newer.generation > r.generation
+                )
+              )
             )
             AND EXISTS (
               SELECT 1 FROM whatsapp."ConversationMessage" m
@@ -165,6 +171,7 @@ export class RecoveryRoutingService {
               checkoutToken: true,
               generation: true,
               status: true,
+              shop: { select: { platform: true } },
               customer: { select: { phone: true } },
             },
           },
@@ -181,14 +188,16 @@ export class RecoveryRoutingService {
       }
 
       identifiers = { conversationId, checkoutRecoveryId: recovery.id, shopId: recovery.shopId };
-      const [lineage] = await this.database.$queryRaw<Array<{ isLatest: boolean }>>(Prisma.sql`
+      const [lineage] = recovery.shop.platform === "WOOCOMMERCE"
+        ? await this.database.$queryRaw<Array<{ isLatest: boolean }>>(Prisma.sql`
         SELECT NOT EXISTS (
           SELECT 1 FROM commerce."CheckoutRecovery" newer
           WHERE newer."shopId" = ${recovery.shopId}
             AND newer."checkoutToken" = ${recovery.checkoutToken}
             AND newer.generation > ${recovery.generation}
         ) AS "isLatest"
-      `);
+      `)
+        : [{ isLatest: true }];
       const mode = isContinuingRecoveryStatus(recovery.status) && lineage?.isLatest
         ? "active"
         : "historical";
@@ -216,14 +225,18 @@ export class RecoveryRoutingService {
         SELECT 1
         FROM commerce."CheckoutRecovery" r
         JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId" = r.id
+        JOIN commerce."Shop" shop ON shop.id = r."shopId"
         WHERE r.id = ${route.checkoutRecoveryId}
           AND c.id = ${route.conversationId}
           AND r.status IN ('MESSAGE_SENT', 'ENGAGED')
-          AND NOT EXISTS (
-            SELECT 1 FROM commerce."CheckoutRecovery" newer
-            WHERE newer."shopId" = r."shopId"
-              AND newer."checkoutToken" = r."checkoutToken"
-              AND newer.generation > r.generation
+          AND (
+            shop.platform <> 'WOOCOMMERCE'
+            OR NOT EXISTS (
+              SELECT 1 FROM commerce."CheckoutRecovery" newer
+              WHERE newer."shopId" = r."shopId"
+                AND newer."checkoutToken" = r."checkoutToken"
+                AND newer.generation > r.generation
+            )
           )
       ) AS current
     `);
