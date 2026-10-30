@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { Redis } from "ioredis";
@@ -11,6 +11,7 @@ import type {
   WooPendingCandidate, WooTerminalObservation,
 } from "../../src/services/woocommerce-recovery/contracts.js";
 import { WooRecoveryAdmissionService } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
+import { WOO_REPLAY_BUFFER_MS, WooActivityWatermarkStore } from "../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -84,6 +85,7 @@ async function setup(db: PrismaClient, redis: Redis) {
       },
       cancelPending: async () => await redis.del(pendingKey) ? "cancelled" : "absent",
     },
+    watermarks: new WooActivityWatermarkStore(redis),
     orders: { read: async (): Promise<WooTerminalObservation> => {
       const value = await redis.get(terminalKey);
       return value ? JSON.parse(value) as WooTerminalObservation : { kind: "none-observed" };
@@ -95,6 +97,7 @@ async function setup(db: PrismaClient, redis: Redis) {
   const candidate = (lastEventId = `event-${randomUUID()}`,
     lastActivityAt = new Date(Date.now() - 45 * 60_000).toISOString()): WooPendingCandidate => ({
     source: "woocommerce", shopId, checkoutToken, lastEventId, lastActivityAt,
+    generation: 1,
     basket: { kind: "nonempty", checkout: {
       currency: "GBP", total: "10.00",
       items: [{ productId: "p1", quantity: 1, total: "10.00" }],
@@ -103,6 +106,14 @@ async function setup(db: PrismaClient, redis: Redis) {
   });
   const store = async (incoming: WooPendingCandidate) => {
     await redis.set(pendingKey, JSON.stringify(incoming), "EX", 600);
+    await new WooActivityWatermarkStore(redis).write({ shopId, checkoutToken }, {
+      generation: incoming.generation!, lastEventId: incoming.lastEventId,
+      lastActivityAt: incoming.lastActivityAt,
+      checkoutDigest: createHash("sha256").update(JSON.stringify(
+        incoming.basket.kind === "nonempty" ? incoming.basket.checkout : {},
+      )).digest("hex"),
+      state: incoming.basket.kind === "nonempty" ? "nonempty" : incoming.basket.kind,
+    }, WOO_REPLAY_BUFFER_MS + 60_000);
   };
   const noOutboundOrBilling = async () => {
     expect(await db.recoveryOutreachAttempt.count({ where: { checkoutRecovery: { shopId } } })).toBe(0);
@@ -170,8 +181,8 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       expect(await f.db.checkoutRecovery.count({ where: { shopId: f.shopId } })).toBe(0);
       const admitted = await f.service.evaluateMatured(updated);
       expect(admitted.kind).toBe("created");
-      expect(await f.service.evaluateMatured(stale)).toMatchObject({
-        kind: "already-exists", recoveryId: admitted.kind === "created" ? admitted.recoveryId : "",
+      expect(await f.service.evaluateMatured(stale)).toEqual({
+        kind: "superseded", reason: "ADMISSION_PROVENANCE_MISMATCH",
       });
       const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
       expect(rows).toHaveLength(1);
@@ -209,7 +220,9 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
         messageSentAt: new Date(), currency: "GBP", totalPrice: "10.00",
       } });
       await f.db.checkoutRecoveryStatusHistory.createMany({ data: [
-        { checkoutRecoveryId: previous.id, fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE" },
+        { checkoutRecoveryId: previous.id, fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE",
+          reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+          metadata: { generation: 1, lastEventId: stale.lastEventId } },
         { checkoutRecoveryId: previous.id, fromStatus: "DETECTED", toStatus: "MESSAGE_SENT", source: "WOOCOMMERCE" },
       ] });
       const conversation = await f.db.conversation.create({ data: {
@@ -232,12 +245,13 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       } });
       expect(await f.redis.exists(f.pendingKey)).toBe(0);
       expect(await f.service.evaluateMatured(stale, { jobId: "removed-bullmq-job" })).toEqual({
-        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT",
+        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT", generation: 1,
+        repairInitial: false,
       });
       // Even an independently re-materialised candidate cannot create generation 2.
       await f.store(f.candidate("new-maturity-after-sent"));
       expect(await f.service.evaluateMatured(stale)).toMatchObject({
-        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT",
+        kind: "already-exists", recoveryId: previous.id, generation: 1, repairInitial: false,
       });
       const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
       expect(rows).toHaveLength(1);

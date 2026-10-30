@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { Redis } from "ioredis";
@@ -9,6 +9,7 @@ import { CheckoutOrderGuardService } from "../../src/services/pending-recovery-c
 import { WooRecoveryConsentReader } from "../../src/services/woocommerce-recovery-consent.service.js";
 import type { WooPendingCandidate } from "../../src/services/woocommerce-recovery/contracts.js";
 import { WooRecoveryAdmissionService } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
+import { WOO_REPLAY_BUFFER_MS, WooActivityWatermarkStore } from "../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -65,11 +66,22 @@ function candidate(shopId: string, checkoutToken: string): WooPendingCandidate {
   const lastActivityAt = new Date(Date.now() - 45 * 60_000).toISOString();
   return {
     source: "woocommerce", shopId, checkoutToken,
+    generation: 1,
     lastEventId: `ev-${randomUUID()}`, lastActivityAt,
     basket: { kind: "nonempty", checkout: {
       currency: "GBP", total: "10.00", items: [{ productId: "p1", quantity: 1, total: "10.00" }],
       contact: { phone: PHONE, email: "customer@example.test" },
     } },
+  };
+}
+
+function acceptedWatermark(candidate: WooPendingCandidate) {
+  return {
+    generation: candidate.generation!, lastEventId: candidate.lastEventId,
+    lastActivityAt: candidate.lastActivityAt,
+    checkoutDigest: createHash("sha256")
+      .update(JSON.stringify(candidate.basket.kind === "nonempty" ? candidate.basket.checkout : {})).digest("hex"),
+    state: "nonempty" as const,
   };
 }
 
@@ -85,6 +97,8 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       const incoming = candidate(shopId, token);
       const key = `arch048-bg003:${shopId}:${token}`;
       await redis.set(key, JSON.stringify(incoming), "EX", 600);
+      const watermarks = new WooActivityWatermarkStore(redis);
+      await watermarks.write({ shopId, checkoutToken: token }, acceptedWatermark(incoming), WOO_REPLAY_BUFFER_MS + 60_000);
       const service = new WooRecoveryAdmissionService({
         database: db,
         coordinator: { withCheckoutLock: (ref, run) => lock.withCheckoutLock(ref.shopId, ref.checkoutToken, run) },
@@ -92,7 +106,7 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
           getPending: async () => { const value = await redis.get(key); return value ? JSON.parse(value) as WooPendingCandidate : null; },
           cancelPending: async () => "absent" as const,
         },
-        orders: { read: async () => ({ kind: "none-observed" }) },
+        orders: { read: async () => ({ kind: "none-observed" }) }, watermarks,
         execution: { evaluate: async (id) => ({ allowed: true, shopId: id }) },
         policy: { resolve: async () => ({ recoveryDelayMinutes: 30 }) } as never,
         consent: new WooRecoveryConsentReader(db), logger: SILENT_LOGGER,
@@ -113,10 +127,10 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       expect(await db.usageEvent.count({ where: { shopId } })).toBe(0);
       await redis.del(key); // completed BullMQ job/index no longer exists.
       expect(await service.evaluateMatured(incoming)).toEqual({
-        kind: "already-exists", recoveryId: id, status: "DETECTED",
+        kind: "already-exists", recoveryId: id, status: "DETECTED", generation: 1, repairInitial: true,
       });
       await db.checkoutRecovery.update({ where: { id }, data: { status: "EXPIRED" } });
-      expect((await service.evaluateMatured(incoming)).kind).toBe("already-exists");
+      expect(await service.evaluateMatured(incoming)).toMatchObject({ kind: "superseded", reason: "GENERATION_TERMINAL" });
       expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: token } })).toBe(1);
     } finally { await redis.quit(); await db.$disconnect(); }
   }, 45_000);
@@ -131,6 +145,8 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       const incoming = candidate(shopId, token);
       const key = `arch048-bg003:${shopId}:${token}`;
       await redis.set(key, JSON.stringify(incoming), "EX", 600);
+      const watermarks = new WooActivityWatermarkStore(redis);
+      await watermarks.write({ shopId, checkoutToken: token }, acceptedWatermark(incoming), WOO_REPLAY_BUFFER_MS + 60_000);
       const realConsent = new WooRecoveryConsentReader(db);
       const service = new WooRecoveryAdmissionService({
         database: db,
@@ -141,6 +157,7 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
         orders: { read: async () => ({ kind: "none-observed" }) },
         execution: { evaluate: async (id) => ({ allowed: true, shopId: id }) },
         policy: { resolve: async () => ({ recoveryDelayMinutes: 30 }) } as never,
+        watermarks,
         consent: { evaluateRecipient: async (input) => {
           const result = await realConsent.evaluateRecipient(input);
           if (result.status === "ALLOWED") {
@@ -154,6 +171,71 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       });
       expect(await service.evaluateMatured(incoming)).toEqual({ kind: "denied", reason: "CONSENT_CHANGED" });
       expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: token } })).toBe(0);
+    } finally { await redis.quit(); await db.$disconnect(); }
+  }, 45_000);
+
+  it("inserts a provenance-backed generation 2 from its latest basket without changing generation 1", async () => {
+    const db = new PrismaClient({ datasourceUrl: databaseUrl! });
+    const redis = new Redis(redisUrl!, { maxRetriesPerRequest: null });
+    const lock = new CheckoutOrderGuardService();
+    try {
+      const { shopId, customerId } = await setup(db);
+      const token = `checkout-${randomUUID()}`;
+      const priorActivity = new Date(Date.now() - 60 * 60_000);
+      const previous = await db.checkoutRecovery.create({ data: {
+        shopId, checkoutToken: token, customerId, generation: 1, status: "CANCELLED",
+        lastExternalActivityAt: priorActivity, currency: "GBP", totalPrice: "10.00",
+        lineItems: [{ productId: "old-product", quantity: 1 }],
+      } });
+      await db.checkoutRecoveryStatusHistory.createMany({ data: [
+        { checkoutRecoveryId: previous.id, fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE",
+          reason: "FIRST_MATURE_CHECKOUT_ADMISSION", metadata: { generation: 1, lastEventId: "original-event" } },
+        { checkoutRecoveryId: previous.id, fromStatus: "DETECTED", toStatus: "CANCELLED",
+          source: "woocommerce.checkout", reason: "CHECKOUT_RESUMED",
+          metadata: { eventId: "resumption-event", nextGeneration: 2 } },
+      ] });
+      const incoming = {
+        ...candidate(shopId, token), generation: 2, lastEventId: "generation-2-event",
+        lastActivityAt: new Date(Date.now() - 40 * 60_000).toISOString(),
+        basket: { kind: "nonempty" as const, checkout: {
+          currency: "USD", total: "99.00", items: [{ productId: "new-product", quantity: 3, total: "99.00" }],
+          contact: { phone: PHONE, email: "customer@example.test" },
+        } },
+      };
+      const key = `arch048-bg003:${shopId}:${token}`;
+      await redis.set(key, JSON.stringify(incoming), "EX", 600);
+      const watermarks = new WooActivityWatermarkStore(redis);
+      await watermarks.write({ shopId, checkoutToken: token }, acceptedWatermark(incoming), WOO_REPLAY_BUFFER_MS + 60_000);
+      const service = new WooRecoveryAdmissionService({
+        database: db,
+        coordinator: { withCheckoutLock: (ref, run) => lock.withCheckoutLock(ref.shopId, ref.checkoutToken, run) },
+        candidates: { getPending: async () => {
+          const value = await redis.get(key); return value ? JSON.parse(value) as WooPendingCandidate : null;
+        }, cancelPending: async () => "absent" as const },
+        orders: { read: async () => ({ kind: "none-observed" }) }, watermarks,
+        execution: { evaluate: async (id) => ({ allowed: true, shopId: id }) },
+        policy: { resolve: async () => ({ recoveryDelayMinutes: 30 }) } as never,
+        consent: new WooRecoveryConsentReader(db), logger: SILENT_LOGGER,
+      });
+      const admitted = await service.evaluateMatured(incoming);
+      expect(admitted.kind).toBe("created");
+      if (admitted.kind !== "created") throw new Error("generation 2 was not admitted");
+      expect(admitted.generation).toBe(2);
+      expect(await service.evaluateMatured(incoming)).toMatchObject({ kind: "already-exists",
+        recoveryId: admitted.recoveryId, generation: 2, repairInitial: true });
+      const rows = await db.checkoutRecovery.findMany({ where: { shopId, checkoutToken: token }, orderBy: { generation: "asc" } });
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id: previous.id, generation: 1, status: "CANCELLED", currency: "GBP" });
+      expect(rows[1]).toMatchObject({ id: admitted.recoveryId, generation: 2, status: "DETECTED",
+        currency: "USD", customerId });
+      expect(rows[1]!.totalPrice?.toString()).toBe("99");
+      expect(rows[1]!.lineItems).toEqual([{ productId: "new-product", variantId: null, sku: null,
+        title: null, quantity: 3, price: null, total: "99.00" }]);
+      const origin = await db.checkoutRecoveryStatusHistory.findFirst({ where: { checkoutRecoveryId: admitted.recoveryId } });
+      expect(origin).toMatchObject({ reason: "MATURE_CHECKOUT_REENTRY_ADMISSION", source: "WOOCOMMERCE",
+        metadata: { generation: 2, lastEventId: "generation-2-event" } });
+      expect(await db.checkoutRecoveryStatusHistory.count({ where: { checkoutRecoveryId: previous.id } })).toBe(2);
+      expect(await db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: admitted.recoveryId } })).toBe(0);
     } finally { await redis.quit(); await db.$disconnect(); }
   }, 45_000);
 });
