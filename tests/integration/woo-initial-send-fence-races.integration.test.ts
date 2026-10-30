@@ -90,6 +90,57 @@ withDatabase("ARCH-046 Woo final permit: PostgreSQL lock and fault races", () =>
     }
   }, 60_000);
 
+  it("checkout resumption closing the recovery row first suppresses the waiting provider permit", async () => {
+    const closeClient = client(); const sendClient = client();
+    const { input } = await seed(closeClient);
+    const recoveryLocked = deferred();
+    const releaseClose = deferred();
+    const permitAttemptedRecoveryLock = deferred();
+    const operations: Promise<unknown>[] = [];
+    try {
+      const close = closeClient.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "commerce"."CheckoutRecovery" WHERE "id"=$1 FOR UPDATE`, input.recoveryId);
+        recoveryLocked.resolve();
+        await releaseClose.promise;
+        const changed = await tx.checkoutRecovery.updateMany({
+          where: { id: input.recoveryId, shopId: input.shopId, checkoutToken: input.checkoutToken,
+            status: "DETECTED" },
+          data: { status: "CANCELLED" },
+        });
+        if (changed.count !== 1) throw new Error("ARCH048_CLOSE_RACE_CONFLICT");
+        await tx.checkoutRecoveryStatusHistory.create({ data: {
+          checkoutRecoveryId: input.recoveryId, fromStatus: "DETECTED", toStatus: "CANCELLED",
+          reason: "CHECKOUT_RESUMED", source: "woocommerce.checkout",
+          metadata: { eventId: randomUUID(), nextGeneration: 2 },
+        } });
+      });
+      operations.push(close);
+      await recoveryLocked.promise;
+      const observingSendDatabase = {
+        $transaction: (callback: (tx: unknown) => Promise<unknown>, options: never) =>
+          sendClient.$transaction(async (tx) => callback({
+            $queryRawUnsafe: async (sql: string, ...params: unknown[]) => {
+              if (sql.includes('"commerce"."CheckoutRecovery"') && sql.includes("FOR UPDATE"))
+                permitAttemptedRecoveryLock.resolve();
+              return tx.$queryRawUnsafe(sql, ...params);
+            },
+          }), options),
+      };
+      const permit = new WooInitialSendFenceService(observingSendDatabase as never).admitFinalSend(input);
+      operations.push(permit);
+      await permitAttemptedRecoveryLock.promise;
+      releaseClose.resolve();
+      await close;
+      expect(await permit).toEqual({ kind: "suppressed", reason: "woo-recovery-terminal-or-mismatched" });
+      const message = await sendClient.conversationMessage.findUniqueOrThrow({ where: { id: input.messageId } });
+      expect(message).toMatchObject({ status: "PENDING", providerDispatchKey: null,
+        providerDispatchAdmittedAt: null });
+    } finally {
+      releaseClose.resolve();
+      await Promise.allSettled(operations);
+    }
+  }, 60_000);
+
   it.each(["COMPLETED", "CANCELLED"] as const)(
     "already-observed Woo %s order committed before the waiting permit blocks dispatch",
     async (terminalStatus) => {
@@ -157,9 +208,12 @@ withDatabase("ARCH-046 Woo final permit: PostgreSQL lock and fault races", () =>
     await expect(guarded.admitFinalSend(input)).rejects.toBe(injected);
     expect(error).toHaveBeenCalledWith("woocommerce.recovery.initial.sql_permit.failed", {
       shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
-      errorName: "Error",
+      errorName: "Error", error: new Error("PERSISTENCE_FAILURE"),
     });
-    expect(JSON.stringify(error.mock.calls)).not.toContain("simulated commit failure");
+    const loggedError = error.mock.calls[0]?.[1].error;
+    expect(loggedError).toBeInstanceOf(Error);
+    expect(loggedError.message).toBe("PERSISTENCE_FAILURE");
+    expect(loggedError.message).not.toContain("simulated commit failure");
     const message = await db.conversationMessage.findUniqueOrThrow({ where: { id: input.messageId } });
     expect(message).toMatchObject({ status: "PENDING", providerDispatchKey: null,
       providerDispatchAdmittedAt: null });

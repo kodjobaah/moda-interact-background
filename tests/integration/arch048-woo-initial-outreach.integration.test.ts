@@ -1,11 +1,15 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
+import { recoveryBillingService } from "../../src/services/recovery-billing.service.js";
+import { conversationService } from "../../src/services/conversation.service.js";
 import { whatsAppService } from "../../src/services/whatsapp.service.js";
 import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
 import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/services/platform-configuration/contracts.js";
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import {
   createWooOutreachFixture,
@@ -105,6 +109,290 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({ kind: "already-initialized" });
     expect(a.providerRequests).toBe(1);
     expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+  }, 90_000);
+
+  it("cancels a resumed generation, releases its reserved free credit once, and permits generation two independently", async () => {
+    const a = f!;
+    expect(await a.service.enqueueInitial(a.recoveryId)).toMatchObject({ kind: "queued" });
+    const oldAttempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const oldAdmission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: oldAttempt.id,
+    });
+    expect(oldAdmission.kind).toBe("admitted");
+    await a.resumePreviousRecovery();
+
+    await a.service.settleResumed(a.recoveryId);
+    await a.service.settleResumed(a.recoveryId);
+    const oldSettled = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: oldAttempt.id } });
+    expect(oldSettled).toMatchObject({ status: "CANCELLED", sentAt: null, outboundMessageId: null });
+    expect(oldSettled.closedAt).not.toBeNull();
+    const oldReservation = await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey: oldAdmission.kind === "admitted" ? oldAdmission.admission.sourceKey : "" } });
+    expect(oldReservation).toMatchObject({ status: "RELEASED", quantity: 1 });
+    const freeCounter = await a.db.shopEntitlementCounter.findUniqueOrThrow({
+      where: { shopId_counter: { shopId: a.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+    });
+    expect(freeCounter).toMatchObject({ committedQuantity: 0, reservedQuantity: 0 });
+
+    const next = await a.db.checkoutRecovery.create({ data: {
+      shopId: a.shopId, customerId: a.customerId, checkoutToken: a.checkoutToken,
+      generation: 2, status: "DETECTED", lastExternalActivityAt: new Date(),
+    } });
+    expect(await a.service.enqueueInitial(next.id)).toMatchObject({ kind: "queued" });
+    const newAttempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: next.id, sequence: 1 } },
+    });
+    expect(newAttempt.id).not.toBe(oldAttempt.id);
+    expect((await a.queue.getJob(`arch048-${newAttempt.id}`))?.data)
+      .toMatchObject({ recoveryId: next.id, attemptId: newAttempt.id });
+    expect(await a.service.processInitial(next.id)).toMatchObject({ kind: "sent", attemptId: newAttempt.id });
+    expect(a.providerRequests).toBe(1);
+    const nextReservation = await a.db.usageReservation.findFirstOrThrow({
+      where: { shopId: a.shopId, sourceKey: { not: oldReservation.sourceKey } },
+    });
+    expect(nextReservation).toMatchObject({ status: "COMMITTED", quantity: 1 });
+    expect(nextReservation.sourceKey).not.toBe(oldReservation.sourceKey);
+  }, 90_000);
+
+  it("fails closed when follow-up state prevents the conditional cancellation and retains its reservation", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+    const followUpDueAt = new Date(Date.now() + 60_000);
+    await a.db.recoveryOutreachAttempt.update({ where: { id: attempt.id }, data: { followUpDueAt } });
+    await a.resumePreviousRecovery();
+
+    await expect(a.service.settleResumed(a.recoveryId))
+      .rejects.toThrow("WOO_RESUMED_FOLLOW_UP_ATTEMPT_NOT_CANCELLABLE");
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ status: "PENDING", followUpDueAt });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey: admission.kind === "admitted" ? admission.admission.sourceKey : "" } }))
+      .toMatchObject({ status: "RESERVED", quantity: 1 });
+    expect(a.providerRequests).toBe(0);
+  }, 90_000);
+
+  it("replays a validated already-cancelled pre-permit attempt without changing its released credit", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+    await a.resumePreviousRecovery();
+
+    await a.service.settleResumed(a.recoveryId);
+    const cancelled = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+    expect(cancelled).toMatchObject({
+      checkoutRecoveryId: a.recoveryId, sequence: 1, status: "CANCELLED",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null,
+    });
+    const sourceKey = admission.kind === "admitted" ? admission.admission.sourceKey : "";
+    const released = await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } });
+    expect(released).toMatchObject({ status: "RELEASED", quantity: 1 });
+
+    await expect(a.service.settleResumed(a.recoveryId)).resolves.toBeUndefined();
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ id: attempt.id, status: "CANCELLED", followUpDueAt: null });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } }))
+      .toMatchObject({ status: "RELEASED", quantity: 1 });
+  }, 90_000);
+
+  it("reconciles a confirmed provider send after resumption when attempt finalization did not commit", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+    const conversation = await conversationService.getOrCreateRecoveryConversation(a.recoveryId);
+    const control = await a.db.conversation.findUniqueOrThrow({
+      where: { id: conversation.id }, select: { controlRevision: true },
+    });
+    const sentAt = new Date();
+    const message = await a.db.conversationMessage.create({ data: {
+      conversationId: conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION",
+      status: "SENT", content: "Integration-only confirmed template", sentAt,
+      providerDispatchKey: `recovery-outreach:${attempt.id}`,
+      providerDispatchAdmittedAt: sentAt,
+      providerDispatchControlRevision: control.controlRevision,
+      providerMessageId: `wamid-resumed-${randomUUID()}`,
+    } });
+    // Simulate worker termination after the durable provider result but before
+    // RecoveryOutreachAttempt finalisation: attempt identity remains unset.
+    await a.resumePreviousRecovery();
+
+    await a.service.settleResumed(a.recoveryId);
+    const reconciled = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+    expect(reconciled).toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: message.id });
+    expect(reconciled.sentAt).toEqual(sentAt);
+    expect(await a.db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } }))
+      .toMatchObject({ status: "SENT", direction: "OUTBOUND" });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey: admission.kind === "admitted" ? admission.admission.sourceKey : "" } }))
+      .toMatchObject({ status: "COMMITTED", quantity: 1 });
+    expect(a.providerRequests).toBe(0);
+  }, 90_000);
+
+  it.each(["lifetime-free", "paid-included", "purchased", "promotional"] as const)(
+    "releases a resumed attempt from its exact %s reservation owner and replays idempotently",
+    async (bucket) => {
+      const a = f!;
+      await a.service.enqueueInitial(a.recoveryId);
+      const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+        where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+      });
+      const sourceKey = createRecoveryIdempotencyKey(a.shopId, `recovery-outreach:${attempt.id}`);
+      const subscription = await a.db.subscription.findUniqueOrThrow({ where: { shopId: a.shopId } });
+      let counterId: string | undefined;
+      let billingPeriodEntitlementCounterId: string | undefined;
+      let purchasedCreditPurchaseId: string | undefined;
+      let promotionalCreditGrantId: string | undefined;
+      let checkReleased!: () => Promise<void>;
+
+      if (bucket === "lifetime-free") {
+        const counter = await a.db.shopEntitlementCounter.findUniqueOrThrow({
+          where: { shopId_counter: { shopId: a.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+        });
+        await a.db.shopEntitlementCounter.update({ where: { id: counter.id }, data: { reservedQuantity: 1 } });
+        counterId = counter.id;
+        checkReleased = async () => expect(await a.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
+          .toMatchObject({ reservedQuantity: 0 });
+      } else if (bucket === "paid-included") {
+        const now = new Date();
+        const period = await a.db.billingPeriod.create({ data: {
+          shopId: a.shopId, subscriptionId: subscription.id, planId: subscription.planId,
+          planKindSnapshot: "PAID_METERED", periodStart: new Date(now.getTime() - 60_000),
+          periodEnd: new Date(now.getTime() + 60_000), status: "OPEN",
+        } });
+        billingPeriodEntitlementCounterId = (await a.db.billingPeriodEntitlementCounter.create({ data: {
+          shopId: a.shopId, billingPeriodId: period.id, counter: "INCLUDED_RECOVERY_CREDITS",
+          grantedQuantity: 1, reservedQuantity: 1,
+        } })).id;
+        checkReleased = async () => expect(await a.db.billingPeriodEntitlementCounter.findUniqueOrThrow({
+          where: { id: billingPeriodEntitlementCounterId! },
+        })).toMatchObject({ reservedQuantity: 0 });
+      } else if (bucket === "purchased") {
+        const counter = await a.db.shopEntitlementCounter.create({ data: {
+          shopId: a.shopId, counter: "PURCHASED_RECOVERY_CREDITS", grantedQuantity: 1, reservedQuantity: 1,
+        } });
+        counterId = counter.id;
+        const purchase = await a.db.recoveryCreditPurchase.create({ data: {
+          id: randomUUID(), shopId: a.shopId, planId: subscription.planId!,
+          provider: "WOOCOMMERCE", providerReference: `woo-pack-${attempt.id}`,
+          providerPurchaseAmount: "1.00", providerPurchaseCurrency: "USD",
+          providerValuationConfirmedAt: new Date(), providerPriceSnapshot: { amount: "1.00", currency: "USD" },
+          creditsGranted: 1, currentAmount: 1, reservedAmount: 1,
+          status: "ACTIVE", activatedAt: new Date(),
+        } });
+        purchasedCreditPurchaseId = purchase.id;
+        checkReleased = async () => {
+          expect(await a.db.recoveryCreditPurchase.findUniqueOrThrow({ where: { id: purchase.id } }))
+            .toMatchObject({ reservedAmount: 0 });
+          expect(await a.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
+            .toMatchObject({ reservedQuantity: 0 });
+        };
+      } else {
+        const admin = await a.db.platformAdmin.create({ data: { email: `${a.shopId}@promotion.test` } });
+        const now = new Date();
+        const campaign = await a.db.promotionCampaign.create({ data: {
+          name: `ARCH048-${a.shopId}`, scope: "GLOBAL", quantity: 1,
+          startsAt: new Date(now.getTime() - 60_000), expiresAt: new Date(now.getTime() + 60_000),
+          status: "ACTIVE", createdByPlatformAdminId: admin.id,
+        } });
+        const grant = await a.db.promotionalCreditGrant.create({ data: {
+          shopId: a.shopId, campaignId: campaign.id, quantity: 1, reservedQuantity: 1,
+        } });
+        promotionalCreditGrantId = grant.id;
+        checkReleased = async () => expect(await a.db.promotionalCreditGrant.findUniqueOrThrow({ where: { id: grant.id } }))
+          .toMatchObject({ reservedQuantity: 0 });
+      }
+
+      const reservation = await a.db.usageReservation.create({ data: {
+        shopId: a.shopId, sourceKey, quantity: 1, status: "RESERVED", counterId,
+        billingPeriodEntitlementCounterId, purchasedCreditPurchaseId, promotionalCreditGrantId,
+      } });
+      await a.resumePreviousRecovery();
+      await a.service.settleResumed(a.recoveryId);
+      await a.service.settleResumed(a.recoveryId);
+      expect(await a.db.usageReservation.findUniqueOrThrow({ where: { id: reservation.id } }))
+        .toMatchObject({ status: "RELEASED", quantity: 1 });
+      await checkReleased();
+    },
+  );
+
+  it("keeps resumption settlement serialized while the Redis checkout lease renews past its original expiry", async () => {
+    const a = f!;
+    a.useRedisCheckoutCoordinator();
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+
+    let signalLeaseHeld!: () => void;
+    let signalClosed!: () => void;
+    const leaseHeld = new Promise<void>((resolve) => { signalLeaseHeld = resolve; });
+    const closed = new Promise<void>((resolve) => { signalClosed = resolve; });
+    const holder = a.coordinator.withCheckoutLock(
+      { shopId: a.shopId, checkoutToken: a.checkoutToken }, async () => {
+        signalLeaseHeld();
+        // Woo's initial Redis lease is 10 seconds and its guard renews it every 3 seconds.
+        await new Promise((resolve) => setTimeout(resolve, 10_500));
+        await a.resumePreviousRecovery();
+        signalClosed();
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      },
+    );
+    await leaseHeld;
+    await closed;
+    let settlementFinished = false;
+    const settlement = a.service.settleResumed(a.recoveryId).then(() => { settlementFinished = true; });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(settlementFinished).toBe(false);
+    await holder;
+    await settlement;
+    expect(settlementFinished).toBe(true);
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ status: "CANCELLED" });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey: admission.kind === "admitted" ? admission.admission.sourceKey : "" } }))
+      .toMatchObject({ status: "RELEASED" });
+  }, 90_000);
+
+  it("retains credit and retries when attempt sentAt has no confirmed durable message", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const billing = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(billing.kind).toBe("admitted");
+    await a.db.recoveryOutreachAttempt.update({ where: { id: attempt.id }, data: { sentAt: new Date() } });
+    await a.resumePreviousRecovery();
+
+    await expect(a.service.settleResumed(a.recoveryId))
+      .rejects.toThrow("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ status: "PENDING", outboundMessageId: null });
+    expect(await a.db.usageReservation.findFirstOrThrow({ where: { shopId: a.shopId } }))
+      .toMatchObject({ status: "RESERVED", quantity: 1 });
+    expect(a.providerRequests).toBe(0);
   }, 90_000);
 
   it.each(["placed", "paid", "cancelled"] as const)(
