@@ -12,7 +12,7 @@ import {
 } from "../shop-brand-media-shopify/contracts.js";
 import { shopifyBrandObservations } from "../shop-brand-media-shopify/mapping.js";
 
-export type ScannedBrandRow = { shopId: string; whatsAppMedia: unknown };
+export type ScannedBrandRow = { shopId: string; domain: string; whatsAppMedia: unknown };
 export type ShopifyShopScanRow = { id: string; domain: string; brand: { whatsAppMedia: unknown } | null };
 export type ShopBrandMediaDatabase = Pick<PrismaClient, "$transaction" | "shopBrand" | "shop">;
 
@@ -211,7 +211,9 @@ export class ShopBrandMediaRepository {
 
   private async editLocked<T>(
     shopId: string, create: boolean,
-    edit: (current: BrandDocument) => { document: BrandDocument; value: T; fields?: Partial<ShopifyBrandColumns> },
+    edit: (current: BrandDocument, currentDomain: string) => {
+      document: BrandDocument; value: T; fields?: Partial<ShopifyBrandColumns>;
+    },
     requireActiveShopify = false,
     expectedShopDomain?: string,
   ): Promise<T | null> {
@@ -240,7 +242,7 @@ export class ShopBrandMediaRepository {
           const row = locked[0];
           if (!row) return null;
           const current = parseBrandDocument(row.whatsAppMedia);
-          const outcome = edit(current);
+          const outcome = edit(current, row.domain);
           if (outcome.document !== current || outcome.fields) {
             await tx.shopBrand.update({ where: { shopId },
               data: { ...outcome.fields,

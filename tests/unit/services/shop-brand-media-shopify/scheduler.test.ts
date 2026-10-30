@@ -104,7 +104,8 @@ describe("ARCH-049 BG003 bounded source scheduler", () => {
       sourceUrl: "https://cdn.shopify.com/logo.jpg", sourceReference: "shopify:1", sourceFingerprint: null,
       observedAt: T0.toISOString() }).document;
     expect(observed.shopifySourceSync).toEqual(sync);
-    const claim = claimRole(observed, "shop_1", "LOGO", randomUUID(), new Date(T0.getTime() + 1000));
+    const claim = claimRole(observed, "shop_1", "shop-1.myshopify.com", "LOGO",
+      randomUUID(), new Date(T0.getTime() + 1000));
     expect(claim.document.shopifySourceSync).toEqual(sync);
     expect(parseBrandDocument(claim.document).shopifySourceSync).toEqual(sync);
   });
