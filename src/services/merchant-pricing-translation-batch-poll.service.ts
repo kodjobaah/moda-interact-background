@@ -164,6 +164,8 @@ export class MerchantPricingTranslationBatchPollService {
           pollSequence: schedule.pollSequence,
           nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
           errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
       },
@@ -380,7 +382,8 @@ export class MerchantPricingTranslationBatchPollService {
       logger.warn("background.merchant_pricing_translation.poll_enqueue_failed", {
         batchId,
         pollSequence,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }
@@ -397,7 +400,8 @@ export class MerchantPricingTranslationBatchPollService {
     } catch (error) {
       logger.warn("background.merchant_pricing_translation.results_enqueue_failed", {
         batchId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

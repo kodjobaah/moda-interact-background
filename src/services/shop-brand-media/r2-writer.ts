@@ -3,7 +3,7 @@ import {
   HeadObjectCommand, PutObjectCommand, S3Client,
   type HeadObjectCommandInput, type HeadObjectCommandOutput, type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
-import { ShopBrandMediaError, type R2ObjectWriter } from "./contracts.js";
+import { isShopBrandDomainSegment, ShopBrandMediaError, type R2ObjectWriter } from "./contracts.js";
 import type { ShopBrandR2Credentials } from "./r2-config.js";
 
 export const SHOP_BRAND_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -12,6 +12,24 @@ export const SHOP_BRAND_CACHE_CONTROL = "public, max-age=31536000, immutable";
 export interface BrandR2Transport {
   head(input: HeadObjectCommandInput): Promise<HeadObjectCommandOutput>;
   put(input: PutObjectCommandInput): Promise<void>;
+  safeErrorMessage?(error: unknown): string | undefined;
+}
+
+export function sanitizeR2ProviderMessage(error: unknown, credentials: ShopBrandR2Credentials): string | undefined {
+  if (!error || typeof error !== "object" || !("message" in error) || typeof error.message !== "string") return undefined;
+  let message = [...error.message].map((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127 ? " " : character;
+  }).join("");
+  for (const secret of [credentials.secretAccessKey, credentials.accessKeyId]) {
+    if (secret) message = message.split(secret).join("[REDACTED]");
+  }
+  message = message
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/\b(bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[REDACTED]")
+    .replace(/((?:access.?key(?:.?id)?|secret.?key|session.?token|security.?token|token|password|signature|credential|api.?key)\s*[:=]\s*)[^\s,;&"'<>]+/gi, "$1[REDACTED]")
+    .replace(/\s+/g, " ").trim().slice(0, 300);
+  return message || undefined;
 }
 
 export function createBrandR2S3Transport(credentials: ShopBrandR2Credentials): BrandR2Transport {
@@ -21,6 +39,7 @@ export function createBrandR2S3Transport(credentials: ShopBrandR2Credentials): B
   return {
     head(input) { return client.send(new HeadObjectCommand(input)); },
     async put(input) { await client.send(new PutObjectCommand(input)); },
+    safeErrorMessage(error) { return sanitizeR2ProviderMessage(error, credentials); },
   };
 }
 
@@ -35,27 +54,33 @@ function isMissing(error: unknown): boolean {
   return error !== null && typeof error === "object" && "name" in error &&
     (error.name === "NotFound" || error.name === "NoSuchKey");
 }
-function r2Failure(error: unknown): ShopBrandMediaError {
+function r2Failure(error: unknown, transport: BrandR2Transport): ShopBrandMediaError {
   if (error instanceof ShopBrandMediaError) return error;
   const status = httpStatus(error);
-  return new ShopBrandMediaError("R2_UNAVAILABLE", status === undefined || status >= 500 || status === 429 || status === 408 || status === 409);
+  return new ShopBrandMediaError("R2_UNAVAILABLE",
+    status === undefined || status >= 500 || status === 429 || status === 408 || status === 409,
+    transport.safeErrorMessage?.(error));
 }
 
-export function createShopBrandR2Writer(transport: BrandR2Transport): R2ObjectWriter {
+export function createShopBrandR2Writer(transportOrFactory: BrandR2Transport | (() => Promise<BrandR2Transport>)): R2ObjectWriter {
   return {
     async putVerified({ bucket, objectKey, image }): Promise<void> {
+      const [prefix, domain, role, filename] = objectKey.split("/");
       if (!/^(?!.*\.\.)(?!.*\.-|.*-\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
           /^\d+\.\d+\.\d+\.\d+$/.test(bucket) ||
-          !/^shop-brands\/[A-Za-z0-9_-]{1,128}\/(logo|square_logo|cover_image)\/sha256-[a-f0-9]{64}\.(jpg|png)$/.test(objectKey) ||
+          prefix !== "shop-brands" || !isShopBrandDomainSegment(domain) ||
+          !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
+          !/^sha256-[a-f0-9]{64}\.(jpg|png)$/.test(filename ?? "") || objectKey.split("/").length !== 4 ||
           !/^[a-f0-9]{64}$/.test(image.contentSha256) ||
           createHash("sha256").update(image.bytes).digest("hex") !== image.contentSha256 ||
           image.sizeBytes !== image.bytes.length ||
           (image.contentType === "image/jpeg" ? !objectKey.endsWith(".jpg") : !objectKey.endsWith(".png"))) {
         throw new ShopBrandMediaError("OUTPUT_VERIFICATION_FAILED");
       }
+      const transport = typeof transportOrFactory === "function" ? await transportOrFactory() : transportOrFactory;
       const head = async (): Promise<HeadObjectCommandOutput | null> => {
         try { return await transport.head({ Bucket: bucket, Key: objectKey }); }
-        catch (error) { if (isMissing(error)) return null; throw r2Failure(error); }
+        catch (error) { if (isMissing(error)) return null; throw r2Failure(error, transport); }
       };
       let existing = await head();
       if (existing === null) {
@@ -68,7 +93,7 @@ export function createShopBrandR2Writer(transport: BrandR2Transport): R2ObjectWr
             IfNoneMatch: "*", // Concurrent identical writes may reuse; never overwrite a collision.
           });
         } catch (error) {
-          if (httpStatus(error) !== 412 && httpStatus(error) !== 409) throw r2Failure(error);
+          if (httpStatus(error) !== 412 && httpStatus(error) !== 409) throw r2Failure(error, transport);
           // Another producer may have won this immutable key race.
         }
         existing = await head();

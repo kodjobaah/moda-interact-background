@@ -77,7 +77,8 @@ export class BillingReconciliationSchedulerService {
       this.logger.warn("billing.subscription_reconciliation.enqueue_failed", {
         shopId,
         subscriptionId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

@@ -35,6 +35,8 @@ function language(value: string | null | undefined, logger: Pick<StructuredLogge
     logger.warn("recovery_template.language_validation_rejected", {
       source,
       errorType: error instanceof Error ? error.name : "unknown",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
     return null;
   }

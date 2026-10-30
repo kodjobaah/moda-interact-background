@@ -222,6 +222,13 @@ export class MerchantKnowledgeProcessingService {
       }
     } catch (error) {
       const processingError = classifyMerchantKnowledgeProcessingError(error);
+      this.logger.error("merchant_knowledge.processing.failed", {
+        shopId: job.shopId, sourceRevisionId: job.sourceRevisionId,
+        failureCode: processingError.failureCode,
+        retryable: processingError.retryable,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      });
       if (processingError.retryable) throw processingError;
       await this.markPermanentFailure(job, processingError.failureCode, {
         formatKey: revision.source.dataFormat.key,
@@ -356,11 +363,13 @@ export class MerchantKnowledgeProcessingService {
             correlationId: job.sourceRevisionId,
             occurredAt: this.now().toISOString(),
           });
-        } catch {
+        } catch (error) {
           // An incident-reporting failure must not undo the terminal source state.
           this.logger.error("merchant_knowledge.incident.report_failed", {
             shopId: job.shopId,
             sourceRevisionId: job.sourceRevisionId,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            error,
           });
         }
       }

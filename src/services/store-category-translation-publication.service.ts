@@ -392,6 +392,8 @@ export class StoreCategoryTranslationPublicationService {
         logger.error("background.store_category_translation.run_publish_retryable_failure", {
           runId: row.id,
           failureCode: error instanceof Error ? error.name : "publication-failed",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
       }
     }

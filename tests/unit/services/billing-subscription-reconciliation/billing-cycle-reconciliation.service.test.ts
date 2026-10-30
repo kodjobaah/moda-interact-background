@@ -265,6 +265,7 @@ describe("BillingCycleReconciliationService", () => {
       shopId: input.shopId,
       subscriptionId: input.expected.subscriptionId,
       errorMessage: "partner unavailable",
+      error,
     });
     expect(harness.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({

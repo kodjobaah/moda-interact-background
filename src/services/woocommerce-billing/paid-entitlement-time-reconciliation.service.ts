@@ -62,7 +62,8 @@ export class WooPaidEntitlementTimeReconciliationService {
           } catch (error) {
             logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
               shopId: candidate.shopId,
-              errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+              errorMessage: error instanceof Error ? error.message : "unknown failure",
+              error: error,
             });
           }
         }
@@ -72,7 +73,8 @@ export class WooPaidEntitlementTimeReconciliationService {
           subscriptionId: candidate.id,
           shopId: candidate.shopId,
           errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          errorMessage: error instanceof Error ? error.message : "unknown failure",
+          error: error,
         });
       }
     }

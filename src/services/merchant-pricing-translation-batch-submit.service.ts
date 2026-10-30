@@ -335,7 +335,8 @@ export class MerchantPricingTranslationBatchSubmitService {
       logger.warn("background.merchant_pricing_translation.poll_enqueue_failed", {
         batchId,
         pollSequence,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

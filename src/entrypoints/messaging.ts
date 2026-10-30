@@ -45,7 +45,7 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(error instanceof Error ? error.message : "worker readiness failed");
+  console.error("worker readiness failed", error);
   await closeWorkerObservability();
   process.exitCode = 1;
 }

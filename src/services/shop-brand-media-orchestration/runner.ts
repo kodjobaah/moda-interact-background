@@ -17,6 +17,8 @@ export async function startShopBrandMediaReconciler(): Promise<() => Promise<voi
     logger.error("shop_brand.media.start_failed", {
       reasonCode: "DATABASE_CLIENT_IMPORT_FAILURE",
       exceptionType: error instanceof Error ? "Error" : "NonErrorThrownValue",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error: error,
     });
     throw error;
   });
@@ -44,6 +46,8 @@ export async function startShopBrandMediaReconciler(): Promise<() => Promise<voi
         exceptionType: error instanceof AggregateError ? "AggregateError" :
           error instanceof Error ? "Error" : "NonErrorThrownValue",
         failureCount: error instanceof AggregateError ? error.errors.length : 1,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
     }).finally(() => {
       running = undefined;

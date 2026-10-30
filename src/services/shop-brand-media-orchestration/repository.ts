@@ -176,23 +176,23 @@ export class ShopBrandMediaRepository {
 
   async claim(shopId: string, role: BrandRole, at: Date = new Date()): Promise<BrandClaim | null> {
     const owner = randomUUID();
-    return this.editLocked(shopId, false, (current) => {
-      const { document, claim } = claimRole(current, shopId, role, owner, at);
+    return this.editLocked(shopId, false, (current, currentDomain) => {
+      const { document, claim } = claimRole(current, shopId, currentDomain, role, owner, at);
       return { document, value: claim };
     });
   }
 
   async complete(claim: BrandClaim, result: BrandOutcome, at: Date = new Date()): Promise<boolean> {
-    const outcome = await this.editLocked(claim.shopId, false, (current) => {
-      const { document, applied } = completeClaim(current, claim, result, at);
+    const outcome = await this.editLocked(claim.shopId, false, (current, currentDomain) => {
+      const { document, applied } = completeClaim(current, claim, result, at, currentDomain);
       return { document, value: applied };
     });
     return outcome ?? false;
   }
 
   async fail(claim: BrandClaim, failureCode: string, retryable: boolean, at: Date = new Date()): Promise<boolean> {
-    const outcome = await this.editLocked(claim.shopId, false, (current) => {
-      const { document, applied } = failClaim(current, claim, failureCode, retryable, at);
+    const outcome = await this.editLocked(claim.shopId, false, (current, currentDomain) => {
+      const { document, applied } = failClaim(current, claim, failureCode, retryable, at, currentDomain);
       return { document, value: applied };
     });
     return outcome ?? false;
@@ -204,9 +204,9 @@ export class ShopBrandMediaRepository {
     const rows = await this.database.shopBrand.findMany({
       where: afterShopId ? { shopId: { gt: afterShopId } } : {},
       orderBy: { shopId: "asc" }, take: limit,
-      select: { shopId: true, whatsAppMedia: true },
+      select: { shopId: true, whatsAppMedia: true, shop: { select: { domain: true } } },
     });
-    return rows;
+    return rows.map(({ shopId, whatsAppMedia, shop }) => ({ shopId, domain: shop.domain, whatsAppMedia }));
   }
 
   private async editLocked<T>(
@@ -230,10 +230,12 @@ export class ShopBrandMediaRepository {
           if (create) {
             await tx.shopBrand.upsert({ where: { shopId }, create: { shopId }, update: {} });
           }
-          const locked = await tx.$queryRaw<Array<{ whatsAppMedia: Prisma.JsonValue }>>(Prisma.sql`
-            SELECT "whatsAppMedia" FROM "commerce"."ShopBrand"
-            WHERE "shopId" = ${shopId}
-            FOR UPDATE
+          const locked = await tx.$queryRaw<Array<{ whatsAppMedia: Prisma.JsonValue; domain: string }>>(Prisma.sql`
+            SELECT brand."whatsAppMedia", shop."domain"
+            FROM "commerce"."ShopBrand" AS brand
+            JOIN "commerce"."Shop" AS shop ON shop."id" = brand."shopId"
+            WHERE brand."shopId" = ${shopId}
+            FOR UPDATE OF brand, shop
           `);
           const row = locked[0];
           if (!row) return null;
@@ -250,8 +252,7 @@ export class ShopBrandMediaRepository {
         const code = typeof error === "object" && error !== null && "code" in error
           ? error.code : undefined;
         const retryable = code === "P2002" || code === "P2034";
-        // Prisma errors may embed SQL parameters, URLs or tenant data in their messages.
-        // Log only an allowlisted failure code and safe operation identifiers.
+        // Preserve the original Prisma failure message for development diagnosis.
         const fields = {
           shopId: /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? shopId : "INVALID_SHOP_ID",
           operation: requireActiveShopify ? "shopify_sync" : create ? "observe_source" : "update_role",
@@ -259,6 +260,8 @@ export class ShopBrandMediaRepository {
             retryable ? code : "PERSISTENCE_FAILURE",
           exceptionType: error instanceof BrandStateError ? "BrandStateError" :
             error instanceof Error ? "Error" : "NonErrorThrownValue",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
         };
         if (retryable && attempt < 3) {
           this.logger.warn("shop_brand.media.transaction_retry", fields);

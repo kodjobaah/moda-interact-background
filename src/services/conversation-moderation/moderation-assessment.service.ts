@@ -132,6 +132,8 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
     } catch (error) {
       logger.warn("conversation.moderation.allowance_recheck_failed", {
         actor: input.subject.kind, errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       return false;
     }
@@ -222,6 +224,7 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
         moderationConfigVersion: operation.moderation.version,
         providerCredentialVersion: operation.providerVersion,
         ...moderationExceptionLogFields(error, deploymentEnvironment),
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
     }
     const decision = retryAt ? "RETRYABLE_ERROR" : classified.decision;

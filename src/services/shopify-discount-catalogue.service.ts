@@ -77,6 +77,8 @@ export class ShopifyDiscountCatalogueService {
         shopId,
         generation: claimed.generation,
         ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       await prisma.$transaction(async (transaction) => {
         const catalogue = await this.lockCatalogue(transaction, shopId);
@@ -96,9 +98,8 @@ export class ShopifyDiscountCatalogueService {
       const now = new Date();
       for (const discount of observed) {
         const providerSnapshot = discount.providerSnapshot as unknown as Prisma.InputJsonValue;
-        await transaction.shopifyDiscount.upsert({ where: { shopId_shopifyDiscountNodeId: { shopId, shopifyDiscountNodeId: discount.shopifyDiscountNodeId } }, create: { shopId, ...discount, providerSnapshot, lastSeenSyncGeneration: claimed.generation, lastSyncedAt: now, isAvailable: true, unavailableAt: null }, update: { ...discount, providerSnapshot, lastSeenSyncGeneration: claimed.generation, lastSyncedAt: now, isAvailable: true, unavailableAt: null } });
+        await transaction.shopifyDiscount.upsert({ where: { shopId_shopifyDiscountNodeId: { shopId, shopifyDiscountNodeId: discount.shopifyDiscountNodeId } }, create: { shopId, ...discount, providerSnapshot, lastSeenSyncGeneration: claimed.generation, lastSyncedAt: now, isAvailable: false, unavailableAt: null }, update: { ...discount, providerSnapshot, lastSeenSyncGeneration: claimed.generation, lastSyncedAt: now, unavailableAt: null } });
       }
-      await transaction.shopifyDiscount.updateMany({ where: { shopId, lastSeenSyncGeneration: { not: claimed.generation } }, data: { isAvailable: false } });
       await transaction.shopifyDiscount.updateMany({ where: { shopId, lastSeenSyncGeneration: { not: claimed.generation }, unavailableAt: null }, data: { unavailableAt: now } });
       await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { status: "CURRENT", activeSyncToken: null, syncStartedAt: null, lastSuccessfulSyncAt: now, unavailableAt: null } });
       return "current";
@@ -129,7 +130,6 @@ export class ShopifyDiscountCatalogueService {
   private async markCatalogueUnavailable(transaction: Prisma.TransactionClient, shopId: string, unavailableAt: Date | null | undefined, syncRequestedAt?: Date): Promise<void> {
     const now = new Date();
     await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now, ...(syncRequestedAt ? { syncRequestedAt } : {}) }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null, unavailableAt: unavailableAt ?? now, ...(syncRequestedAt ? { syncRequestedAt } : {}) } });
-    await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
     await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
   }
 }
@@ -138,13 +138,13 @@ function boundedError(error: unknown): { errorName: string; errorMessage: string
   if (error instanceof Error) {
     return {
       errorName: error.name.slice(0, 64),
-      errorMessage: error.message.slice(0, 256),
+      errorMessage: error.message,
     };
   }
 
   return {
     errorName: "UnknownError",
-    errorMessage: String(error).slice(0, 256),
+    errorMessage: String(error),
   };
 }
 

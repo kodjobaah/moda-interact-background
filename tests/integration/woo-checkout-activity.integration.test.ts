@@ -18,7 +18,7 @@ const minute = 60_000;
 /** A disposable real PostgreSQL + Redis/BullMQ regression. No worker is started;
  * BG005 alone owns the capture and maturity worker hookups. */
 suite("ARCH-048-BACKGROUND-001 real candidate/row/index lifecycle", () => {
-  it("does not resurrect a checkout with a removed candidate and a MESSAGE_SENT recovery; coordinates competing updates", async () => {
+  it("closes the latest recovery once and repairs the next generation after Redis publication failure", async () => {
     const [
       { WooCheckoutActivityService },
       { WooExistingRecoveryRepository },
@@ -61,10 +61,19 @@ suite("ARCH-048-BACKGROUND-001 real candidate/row/index lifecycle", () => {
       try { return await action(); } finally { done(); }
     } };
     const candidates = new WooPendingCandidateQueueService(queue, new PendingRecoveryCandidateIndexStore());
+    let failNextSchedule = false;
+    const candidatePort = {
+      getPending: (...args: Parameters<typeof candidates.getPending>) => candidates.getPending(...args),
+      cancelPending: (...args: Parameters<typeof candidates.cancelPending>) => candidates.cancelPending(...args),
+      schedulePending: async (...args: Parameters<typeof candidates.schedulePending>) => {
+        if (failNextSchedule) { failNextSchedule = false; throw new Error("simulated redis publication failure"); }
+        return candidates.schedulePending(...args);
+      },
+    };
     const watermarks = new WooActivityWatermarkStore(redis);
     const service = new WooCheckoutActivityService({
       coordinator, observedOrders: { read: async () => ({ kind: "none-observed" }) },
-      candidates, watermarks, recoveries: new WooExistingRecoveryRepository(db),
+      candidates: candidatePort, watermarks, recoveries: new WooExistingRecoveryRepository(db),
       shops: { evaluate: async () => ({ allowed: true, shopDomain: `${shopId}.example.test` }) },
       resolveDelayMinutes: async () => 30,
     });
@@ -75,37 +84,49 @@ suite("ARCH-048-BACKGROUND-001 real candidate/row/index lifecycle", () => {
       } });
       const first = await service.handleCheckout(event(refs[0]!, 0));
       expect(first.kind).toBe("scheduled");
-      expect((await queue.getJob(wooCandidateJobId(refs[0]!)))?.data).toMatchObject({
+      expect((await queue.getJob(wooCandidateJobId(refs[0]!, 1)))?.data).toMatchObject({
         source: "woocommerce", shopId, checkoutToken: checkout,
       });
       expect((await service.handleCheckout(event(refs[0]!, 1))).kind).toBe("rescheduled");
-
-      // Simulate a consumed/removed maturity job before an existing recovery is
-      // discovered. No BullMQ/index presence is consulted as a proxy for DB.
-      expect(await candidates.cancelPending(refs[0]!)).toBe("cancelled");
       const recovery = await db.checkoutRecovery.create({ data: {
-        shopId, checkoutToken: checkout, status: "MESSAGE_SENT",
-        lastExternalActivityAt: new Date(originMs),
+        shopId, checkoutToken: checkout, generation: 1, status: "MESSAGE_SENT",
+        lastExternalActivityAt: new Date(originMs + 1_000),
       } });
       const later = event(refs[0]!, 4);
-      expect(await service.handleCheckout(later)).toEqual({
-        kind: "existing-recovery", recoveryId: recovery.id,
+      failNextSchedule = true;
+      await expect(service.handleCheckout(later)).rejects.toThrow("simulated redis publication failure");
+      const closed = await db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovery.id } });
+      expect(closed.status).toBe("CANCELLED");
+      expect(closed.lastExternalActivityAt).toEqual(new Date(later.occurredAt));
+      expect(await db.checkoutRecoveryStatusHistory.count({ where: {
+        checkoutRecoveryId: recovery.id, reason: "CHECKOUT_RESUMED", source: "woocommerce.checkout",
+      } })).toBe(1);
+      expect(await service.handleCheckout(later)).toMatchObject({
+        kind: "resumed", previousRecoveryId: recovery.id, nextGeneration: 2,
       });
+      expect(await service.handleCheckout(event(refs[0]!, 5))).toMatchObject({ kind: "rescheduled", generation: 2 });
       expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: checkout } })).toBe(1);
-      expect((await db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovery.id } }))
-        .lastExternalActivityAt).toEqual(new Date(later.occurredAt));
-      expect(await candidates.getPending(refs[0]!)).toBeNull();
+      expect((await candidates.getPending(refs[0]!, 2))?.generation).toBe(2);
+      expect((await queue.getJob(wooCandidateJobId(refs[0]!, 2)))?.data.lastEventId).toBe(
+        (await candidates.getPending(refs[0]!, 2))?.lastEventId);
+      expect(await db.checkoutRecoveryStatusHistory.count({ where: {
+        checkoutRecoveryId: recovery.id, reason: "CHECKOUT_RESUMED",
+      } })).toBe(1);
 
       // Real BullMQ state/index under simultaneous events, serialized at the
       // checkout identity rather than globally or by customer contact.
       const updates = Array.from({ length: 8 }, (_, i) => event(refs[1]!, i));
       await Promise.all(updates.map((update) => service.handleCheckout(update)));
       expect((await candidates.getPending(refs[1]!))?.lastActivityAt).toBe(updates[7]?.occurredAt);
-      expect((await queue.getJob(wooCandidateJobId(refs[1]!)))?.data.source).toBe("woocommerce");
+      expect((await queue.getJob(wooCandidateJobId(refs[1]!, 1)))?.data.source).toBe("woocommerce");
       expect(await candidates.cancelPending(refs[1]!)).toBe("cancelled");
     } finally {
       for (const ref of refs) {
         await candidates.cancelPending(ref);
+        for (const generation of [1, 2]) {
+          const job = await queue.getJob(wooCandidateJobId(ref, generation));
+          if (job) await job.remove();
+        }
         await redis.del(wooActivityWatermarkKey(ref));
       }
       await db.shop.deleteMany({ where: { id: shopId } });

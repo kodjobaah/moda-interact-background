@@ -256,6 +256,7 @@ describe("EstablishedPlanChangeReconciliationService", () => {
       shopId: "shop-1",
       subscriptionId: expected.subscriptionId,
       errorMessage: "provider unavailable",
+      error,
     });
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledTimes(2);
   });

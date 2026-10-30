@@ -6,13 +6,12 @@ export type ShopBrandR2Credentials = Readonly<{
   secretAccessKey: string;
 }>;
 
-/** Dedicated public-brand R2 credentials. Never use Merchant Knowledge secrets or bucket. */
-export function loadShopBrandR2Credentials(environment: Readonly<NodeJS.ProcessEnv>): ShopBrandR2Credentials {
-  const endpoint = environment.SHOPBRAND_R2_ENDPOINT;
-  const accessKeyId = environment.SHOPBRAND_R2_ACCESS_KEY_ID;
-  const secretAccessKey = environment.SHOPBRAND_R2_SECRET_ACCESS_KEY;
+/** Use the validated platform R2 endpoint and credentials; the public-media bucket remains separate. */
+export function loadShopBrandR2Credentials(configuration: Readonly<Partial<ShopBrandR2Credentials>>): ShopBrandR2Credentials {
+  const { endpoint, accessKeyId, secretAccessKey } = configuration;
   try {
-    if (!endpoint || !accessKeyId || !secretAccessKey ||
+    if (typeof endpoint !== "string" || !endpoint || typeof accessKeyId !== "string" || !accessKeyId ||
+        typeof secretAccessKey !== "string" || !secretAccessKey ||
         accessKeyId.trim() !== accessKeyId || secretAccessKey.trim() !== secretAccessKey ||
         /\p{Cc}/u.test(accessKeyId + secretAccessKey) ||
         accessKeyId.length > 256 || secretAccessKey.length > 4096) {

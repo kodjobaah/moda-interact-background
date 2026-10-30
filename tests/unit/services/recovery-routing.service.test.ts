@@ -32,7 +32,10 @@ const event = {
 const recovery = {
   id: "r1",
   shopId: "shop1",
+  checkoutToken: "checkout-1",
+  generation: 1,
   status: "MESSAGE_SENT",
+  shop: { platform: "WOOCOMMERCE" },
   customer: { phone: "  +4477 " },
 };
 beforeEach(() => {
@@ -40,6 +43,12 @@ beforeEach(() => {
   active.mockResolvedValue(true);
   db.conversationMessage.findUnique.mockResolvedValue(null);
   db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: recovery });
+  db.$queryRaw.mockImplementation(async (query: { strings: string[] }) => {
+    const sql = query.strings.join("?");
+    if (sql.includes('AS "isLatest"')) return [{ isLatest: true }];
+    if (sql.includes("AS current")) return [{ current: true }];
+    return [];
+  });
 });
 describe("C2 strict recovery routing", () => {
   it.each([1, 10])(
@@ -66,18 +75,18 @@ describe("C2 strict recovery routing", () => {
         conversationId: "c1",
         checkoutRecoveryId: "r1",
         shopId: "shop1",
+        mode: "active",
       });
-      expect(db.$queryRaw).not.toHaveBeenCalled();
+      expect(db.$queryRaw).toHaveBeenCalledTimes(1);
     },
   );
   it.each([0, 1, 2])(
     "counts %i distinct recoveries before checking shop eligibility",
     async (count) => {
-      db.$queryRaw.mockResolvedValue(
-        Array.from({ length: count }, (_, i) => ({
-          conversationId: `c${i + 1}`,
-        })),
-      );
+      db.$queryRaw.mockImplementation(async (query: { strings: string[] }) => {
+        if (query.strings.join("?").includes('AS "isLatest"')) return [{ isLatest: true }];
+        return Array.from({ length: count }, (_, i) => ({ conversationId: `c${i + 1}` }));
+      });
       const result = await new RecoveryRoutingService().resolveInboundMessage(
         event,
       );
@@ -86,10 +95,12 @@ describe("C2 strict recovery routing", () => {
       const query = db.$queryRaw.mock.calls[0][0].strings.join("?");
       expect(query).toContain("SELECT DISTINCT");
       expect(query).toContain("LIMIT 2");
-      expect(query).not.toContain("status");
       expect(query).not.toContain("ORDER BY");
       expect(query).toContain('commerce."Customer"');
       expect(query).toContain('"sentAt" IS NOT NULL');
+      expect(query).toContain("r.status IN ('MESSAGE_SENT', 'ENGAGED')");
+      expect(query).toContain('newer.generation > r.generation');
+      expect(query).toContain("shop.platform <> 'WOOCOMMERCE'");
     },
   );
   it.each([
@@ -111,7 +122,7 @@ describe("C2 strict recovery routing", () => {
         contextMessageId: "bad",
       }),
     ).toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
-    expect(db.$queryRaw).not.toHaveBeenCalled();
+      expect(db.$queryRaw).not.toHaveBeenCalled();
     expect(active).not.toHaveBeenCalled();
   });
   it("rejects wrong provider before database access", async () => {
@@ -130,10 +141,10 @@ describe("C2 strict recovery routing", () => {
     });
     expect(
       await new RecoveryRoutingService().resolveInboundMessage(event),
-    ).toMatchObject({ kind: "resolved", conversationId: "original" });
-    expect(db.$queryRaw).not.toHaveBeenCalled();
+      ).toMatchObject({ kind: "resolved", conversationId: "original", mode: "active" });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
   });
-  it("rejects reference disagreement with stored inbound ownership", async () => {
+  it("keeps a stored inbound pinned when a duplicate payload changes its context", async () => {
     db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
       where.providerMessageId === "incoming"
         ? { direction: "INBOUND", conversationId: "other" }
@@ -144,12 +155,8 @@ describe("C2 strict recovery routing", () => {
             conversation: { checkoutRecovery: recovery },
           },
     );
-    expect(
-      await new RecoveryRoutingService().resolveInboundMessage({
-        ...event,
-        contextMessageId: "old",
-      }),
-    ).toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
+    expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
+      .toMatchObject({ kind: "resolved", conversationId: "other", mode: "active" });
   });
   it("does not manufacture ownership from a missing recovery", async () => {
     db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
@@ -160,7 +167,8 @@ describe("C2 strict recovery routing", () => {
   });
 
   it("uses post-contract recovery scope only for a continuing recovery", async () => {
-    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+    db.$queryRaw.mockImplementation(async (query: { strings: string[] }) =>
+      query.strings.join("?").includes('AS "isLatest"') ? [{ isLatest: true }] : [{ conversationId: "c1" }]);
 
     db.conversation.findUnique.mockResolvedValue({
       checkoutRecovery: { ...recovery, status: "ENGAGED" },
@@ -174,6 +182,59 @@ describe("C2 strict recovery routing", () => {
     });
     await new RecoveryRoutingService().resolveInboundMessage(event);
     expect(active).toHaveBeenLastCalledWith("shop1", "general");
+  });
+
+  it("classifies explicit replies to a closed generation as historical", async () => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "old"
+        ? { direction: "OUTBOUND", sentAt: new Date(), conversationId: "c1", conversation: { checkoutRecovery: { customer: { phone: "+4477" } } } }
+        : null,
+    );
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, status: "CANCELLED", generation: 1, checkoutToken: "checkout-1" },
+    });
+    expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
+      .toMatchObject({ kind: "resolved", conversationId: "c1", mode: "historical" });
+    expect(active).toHaveBeenLastCalledWith("shop1", "general");
+  });
+
+  it("classifies a superseded generation as historical even if its row still appears active", async () => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "old"
+        ? { direction: "OUTBOUND", sentAt: new Date(), conversationId: "c1", conversation: { checkoutRecovery: { customer: { phone: "+4477" } } } }
+        : null,
+    );
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, generation: 1, checkoutToken: "checkout-1" },
+    });
+    db.$queryRaw.mockResolvedValueOnce([{ isLatest: false }]);
+    expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
+      .toMatchObject({ kind: "resolved", conversationId: "c1", mode: "historical" });
+    expect(active).toHaveBeenLastCalledWith("shop1", "general");
+  });
+
+  it("preserves Shopify generation routing without a latest-generation fence", async () => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "old"
+        ? { direction: "OUTBOUND", sentAt: new Date(), conversationId: "c1", conversation: { checkoutRecovery: { customer: { phone: "+4477" } } } }
+        : null,
+    );
+    db.conversation.findUnique.mockResolvedValue({
+      checkoutRecovery: { ...recovery, shop: { platform: "SHOPIFY" } },
+    });
+    expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
+      .toMatchObject({ kind: "resolved", conversationId: "c1", mode: "active" });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(0);
+  });
+
+  it("rechecks the selected active generation before scheduling work", async () => {
+    const service = new RecoveryRoutingService();
+    const route = { kind: "resolved", conversationId: "c1", checkoutRecoveryId: "r1", shopId: "shop1", mode: "active" } as const;
+    db.$queryRaw.mockResolvedValue([{ current: false }]);
+    expect(await service.isCurrentActiveRoute(route)).toBe(false);
+    const sql = db.$queryRaw.mock.calls[0]![0].strings.join("?");
+    expect(sql).toContain('r.status IN (\'MESSAGE_SENT\', \'ENGAGED\')');
+    expect(sql).toContain('newer.generation > r.generation');
   });
 
   it("checks availability only after selecting the one recovery", async () => {
@@ -208,7 +269,7 @@ it.each(["initial template", "follow-up template", "later agent reply"])(
       conversationId: "one-recovery-conversation",
       checkoutRecoveryId: "r1",
     });
-    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
   },
 );
 it("terminal candidates in different shops remain ambiguous before eligibility", async () => {

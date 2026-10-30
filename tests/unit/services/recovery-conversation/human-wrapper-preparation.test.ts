@@ -66,8 +66,7 @@ describe("ARCH-047-BG009 human wrapper preparation (no send admission)", () => {
     vi.mocked(x.renderConversationResponse).mockRejectedValue(failure);
     await expect(x.service.prepare(command)).rejects.toBe(failure);
     expect(x.logger.error).toHaveBeenCalledWith("arch047.human_wrapper.prepare_failed", {
-      commandId: command.id, errorType: "Error",
+      commandId: command.id, errorType: "Error", errorMessage: failure.message, error: failure,
     });
-    expect(JSON.stringify(vi.mocked(x.logger.error).mock.calls)).not.toContain("sensitive checkout URL");
   });
 });

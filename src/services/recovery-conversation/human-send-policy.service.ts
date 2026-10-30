@@ -112,6 +112,8 @@ export class HumanSendPolicyService {
       logger.warn("arch040.human_screening.unavailable", {
         commandId: input.commandId, shopId: input.shopId,
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       return { kind: "retryable", reason: "human_screening_unavailable" };
     }

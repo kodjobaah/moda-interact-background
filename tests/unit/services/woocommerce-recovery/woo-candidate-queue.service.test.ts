@@ -18,7 +18,7 @@ import {
 
 const NOW = Date.parse("2026-10-24T10:00:00.000Z");
 const candidate = (shopId = "woo-shop", checkoutToken = "same-token", eventId = "first"): WooPendingCandidate => ({
-  source: "woocommerce", shopId, checkoutToken, lastEventId: eventId,
+  source: "woocommerce", generation: 1, shopId, checkoutToken, lastEventId: eventId,
   lastActivityAt: "2026-10-24T10:00:00.000Z",
   basket: { kind: "nonempty", checkout: {
     currency: "GBP", total: "12.00", items: [{ quantity: 1, total: "12.00" }],
@@ -50,12 +50,17 @@ function harness() {
     indexes.delete(pendingCandidateCheckoutIndexKey(ref));
     if (jobId) shopIndex.delete(jobId);
   });
+  const compareAndRemoveCheckout = vi.fn(async (ref: { shopId: string; checkoutToken: string }, jobId: string) => {
+    const key = pendingCandidateCheckoutIndexKey(ref);
+    if (indexes.get(key) !== jobId) return false;
+    indexes.delete(key); shopIndex.delete(jobId); return true;
+  });
   const queue = { add, getJob: vi.fn(async (jobId: string) => jobs.get(jobId) ?? null) };
-  const index = { upsert, remove, findByCheckout: vi.fn(async (ref: {
+  const index = { upsert, remove, compareAndRemoveCheckout, findByCheckout: vi.fn(async (ref: {
     shopId: string; checkoutToken: string;
   }) => indexes.get(pendingCandidateCheckoutIndexKey(ref)) ?? null) };
   const service = new WooPendingCandidateQueueService(queue, index as never, () => NOW);
-  return { service, add, upsert, remove, queue, indexes, jobs, shopIndex };
+  return { service, add, upsert, remove, compareAndRemoveCheckout, index, queue, indexes, jobs, shopIndex };
 
   function fakeJob(value: WooPendingCandidate) {
     const job = {
@@ -79,7 +84,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     const input = { candidate: initial, delayMinutes: 30, dueAtMs: NOW + 30 * 60_000,
       retentionMs: 24 * 60 * 60_000 + 30 * 60_000 };
     expect(await h.service.schedulePending(input)).toBe("scheduled");
-    const jobId = wooCandidateJobId(initial);
+    const jobId = wooCandidateJobId(initial, initial.generation);
     expect(h.add).toHaveBeenCalledWith(EVALUATE_PENDING_RECOVERY_JOB, initial, { jobId, delay: 30 * 60_000 });
     expect(await h.service.getPending(initial)).toEqual(initial);
     expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({
@@ -97,6 +102,42 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     expect(await h.service.getPending(initial)).toBeNull();
   });
 
+  it("keeps the whole restoration snapshot in the delayed job across candidate replacement", async () => {
+    const h = harness();
+    const initial = {
+      ...candidate(),
+      basket: { kind: "nonempty" as const, checkout: {
+        currency: "GBP", total: "12.00", items: [{ quantity: 1, productId: "123" }],
+        restoration: {
+          schemaVersion: "woo.cart-restore.v1", kind: "supported" as const,
+          appliedCouponCodes: ["save10"], lines: [{ productId: "123", quantity: 1 }],
+        },
+      } },
+    };
+    const input = (value: WooPendingCandidate) => ({ candidate: value, delayMinutes: 30,
+      dueAtMs: NOW + 30 * 60_000, retentionMs: 90_000_000 });
+    await h.service.schedulePending(input(initial));
+    expect(await h.service.getPending(initial)).toEqual(initial);
+
+    const changed: WooPendingCandidate = {
+      ...initial,
+      lastEventId: "coupon-change",
+      lastActivityAt: "2026-10-24T10:01:00.000Z",
+      basket: { kind: "nonempty", checkout: {
+        currency: "GBP", total: "12.00", items: [{ quantity: 1, productId: "123" }],
+        restoration: {
+          schemaVersion: "woo.cart-restore.v1", kind: "unsupported",
+          reason: "CUSTOM_CART_ITEM_DATA", appliedCouponCodes: ["save10"],
+        },
+      } },
+    };
+    expect(await h.service.schedulePending(input(changed))).toBe("rescheduled");
+    expect(h.jobs.get(wooCandidateJobId(changed, 1))?.data).toEqual(changed);
+    expect(await h.service.getPending(changed)).toEqual(changed);
+    expect(await h.service.cancelPending(changed)).toBe("cancelled");
+    expect(await h.service.getPending(changed)).toBeNull();
+  });
+
   it("keeps two tenant lineages with identical checkout keys isolated", async () => {
     const h = harness();
     for (const shopId of ["woo-a", "woo-b"]) {
@@ -104,9 +145,31 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
         dueAtMs: NOW + 1_800_000, retentionMs: 90_000_000 });
     }
     expect(h.jobs.size).toBe(2);
-    expect(wooCandidateJobId(candidate("woo-a"))).not.toBe(wooCandidateJobId(candidate("woo-b")));
+    expect(wooCandidateJobId(candidate("woo-a"), 1)).not.toBe(wooCandidateJobId(candidate("woo-b"), 1));
     await h.service.cancelPending(candidate("woo-a"));
     expect(await h.service.getPending(candidate("woo-b"))).toMatchObject({ shopId: "woo-b" });
+  });
+
+  it("uses a distinct generation-specific job identity", () => {
+    const ref = { shopId: "woo-shop", checkoutToken: "same-token" };
+    expect(wooCandidateJobId(ref, 1)).not.toBe(wooCandidateJobId(ref, 2));
+    expect(() => wooCandidateJobId(ref, 0)).toThrow("Invalid Woo candidate generation");
+  });
+
+  it("does not let prior-generation cleanup remove the successor checkout index", async () => {
+    const h = harness();
+    const first = candidate();
+    const next = { ...first, generation: 2, lastEventId: "next" };
+    const input = (value: WooPendingCandidate) => ({ candidate: value, delayMinutes: 30,
+      dueAtMs: NOW + 1_800_000, retentionMs: 90_000_000 });
+    await h.service.schedulePending(input(first));
+    await h.service.schedulePending(input(next));
+    const successorId = wooCandidateJobId(next, 2);
+    expect(h.indexes.get(pendingCandidateCheckoutIndexKey(first))).toBe(successorId);
+    expect(await h.index.compareAndRemoveCheckout(first, wooCandidateJobId(first, 1))).toBe(false);
+    expect(await h.service.cancelPending(first, 1)).toBe("absent");
+    expect(h.indexes.get(pendingCandidateCheckoutIndexKey(first))).toBe(successorId);
+    expect(await h.service.getPending(first, 2)).toMatchObject({ generation: 2 });
   });
 
   it("refuses an unmarked Shopify candidate or a forged source instead of migrating it", async () => {
@@ -134,7 +197,7 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     const input = { candidate: woo, delayMinutes: 30, dueAtMs: NOW + 1_800_000,
       retentionMs: 90_000_000 };
     await h.service.schedulePending(input);
-    const job = h.jobs.get(wooCandidateJobId(woo))!;
+    const job = h.jobs.get(wooCandidateJobId(woo, woo.generation))!;
     job.state = state;
     await expect(h.service.schedulePending(input)).rejects.toThrow("job_not_mutable");
     expect(h.add).toHaveBeenCalledOnce();
@@ -144,9 +207,9 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
   it("cleans dangling Woo indexes when a completed job has been removed", async () => {
     const h = harness();
     const woo = candidate();
-    h.indexes.set(pendingCandidateCheckoutIndexKey(woo), wooCandidateJobId(woo));
+    h.indexes.set(pendingCandidateCheckoutIndexKey(woo), wooCandidateJobId(woo, woo.generation));
     expect(await h.service.cancelPending(woo)).toBe("absent");
     expect(h.indexes.size).toBe(0);
-    expect(h.remove).toHaveBeenCalledOnce();
+    expect(h.compareAndRemoveCheckout).toHaveBeenCalledOnce();
   });
 });

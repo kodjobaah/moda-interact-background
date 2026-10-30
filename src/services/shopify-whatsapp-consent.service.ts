@@ -124,8 +124,11 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
         shopDomain: scoped.shop.domain,
         customerGid: scoped.identity.gid,
       });
-    } catch {
-      this.logger.warn("shopify.whatsapp_consent.read", { shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "SHOPIFY_READ_FAILURE" });
+    } catch (error) {
+      this.logger.warn("shopify.whatsapp_consent.read", {
+        shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "SHOPIFY_READ_FAILURE",
+        errorMessage: error instanceof Error ? error.message : String(error), error,
+      });
       return unavailable("SHOPIFY_READ_FAILURE");
     }
     if (observation.kind === "UNAVAILABLE") {

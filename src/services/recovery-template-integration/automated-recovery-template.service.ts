@@ -57,9 +57,11 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
     }
     return null;
   } catch (error) {
-    // Legacy or corrupt receipts fail closed; never log the original content.
+    // Legacy or corrupt receipts fail closed; record the parse exception for diagnosis.
     logger.warn("recovery_template.previous_promise.invalid_receipt", {
       errorType: boundedFailure(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
     return null;
   }
@@ -105,7 +107,7 @@ export class AutomatedRecoveryTemplateService {
       const recovery = await this.database.checkoutRecovery.findUnique({
         where: { id: input.recoveryId },
         select: {
-          id: true, shopId: true, status: true, checkoutUrl: true, updatedAt: true,
+          id: true, shopId: true, status: true, checkoutUrl: true, lineItems: true, updatedAt: true,
           customer: { select: { firstName: true } },
           shop: { select: { id: true, domain: true, status: true, defaultLanguageTag: true } },
           outreachAttempts: { where: { sequence: 1 }, select: { sentAt: true, outboundMessageId: true } },
@@ -165,6 +167,7 @@ export class AutomatedRecoveryTemplateService {
         merchantLanguageTag: recovery.shop.defaultLanguageTag,
         customerFirstName: input.customerFirstName ?? recovery.customer?.firstName ?? null,
         shopName: { shopId: input.shopId, value: recovery.shop.domain },
+        checkoutItems: { shopId: input.shopId, lineItems: recovery.lineItems },
         checkout: recovery.checkoutUrl ? {
           shopId: input.shopId, url: recovery.checkoutUrl,
           observedAt: recovery.updatedAt, expiresAt: null,
@@ -185,6 +188,8 @@ export class AutomatedRecoveryTemplateService {
       this.log.error("recovery_template.integration.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId,
         stage: input.stage, errorType: boundedFailure(error),
+        // Shared logger serializes Error values with bounded, stack-free fields.
+        error,
       });
       throw error;
     }

@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import { ShopBrandMediaRepository } from "../../src/services/shop-brand-media-orchestration/repository.js";
 import { parseBrandDocument, currentReady } from "../../src/services/shop-brand-media-orchestration/state.js";
+import { normalizeShopBrandDomain } from "../../src/services/shop-brand-media/contracts.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
@@ -17,16 +18,16 @@ const source = (shopId: string, role: "LOGO" | "COVER_IMAGE", url: string | null
   shopId, role, sourceUrl: url, sourceReference: "shopify:test", sourceFingerprint: url ? fingerprint : null,
   observedAt: time.toISOString(),
 });
-const outcome = (shopId: string, role: "LOGO" | "COVER_IMAGE", generation: number, digest = HASH, verifiedAt = at(0.001)) => ({
+const outcome = (domain: string, role: "LOGO" | "COVER_IMAGE", generation: number, digest = HASH, verifiedAt = at(0.001)) => ({
   result: { sourceGeneration: generation, sourceFingerprint: fingerprint,
     contentType: "image/jpeg" as const, width: 1125, height: 600, sizeBytes: 1000,
-    contentSha256: digest, objectKey: `shop-brands/${shopId}/${role.toLowerCase()}/sha256-${digest}.jpg` },
+    contentSha256: digest, objectKey: `shop-brands/${normalizeShopBrandDomain(domain)}/${role.toLowerCase()}/sha256-${digest}.jpg` },
   verifiedAt: verifiedAt.toISOString(),
 });
 
 async function shop(db: PrismaClient): Promise<string> {
   const id = `arch049_${randomUUID()}`;
-  await db.shop.create({ data: { id, domain: `${id}.myshopify.com`, platform: "SHOPIFY" } });
+  await db.shop.create({ data: { id, domain: `shop-${randomUUID()}.myshopify.com`, platform: "SHOPIFY" } });
   return id;
 }
 
@@ -68,8 +69,8 @@ describeDb("ARCH-049 BG002 PostgreSQL serialisation and crash reconciliation", (
       const claims = await Promise.all([one.claim(id, "LOGO", at(0.001)), two.claim(id, "LOGO", at(0.001))]);
       expect(claims.filter(Boolean)).toHaveLength(1);
       const holder = claims.find(Boolean)!;
-      expect(await two.complete({ ...holder, leaseOwner: randomUUID() }, outcome(id, "LOGO", 1), at(0.002))).toBe(false);
-      expect(await one.complete(holder, outcome(id, "LOGO", 1), at(0.002))).toBe(true);
+      expect(await two.complete({ ...holder, leaseOwner: randomUUID() }, outcome(holder.domain, "LOGO", 1), at(0.002))).toBe(false);
+      expect(await one.complete(holder, outcome(holder.domain, "LOGO", 1), at(0.002))).toBe(true);
       const ready = parseBrandDocument((await db.shopBrand.findUniqueOrThrow({ where: { shopId: id } })).whatsAppMedia);
       expect(currentReady(ready.roles.LOGO!)).not.toBeNull();
       const refresh = await two.claim(id, "LOGO", at(9));
@@ -83,12 +84,12 @@ describeDb("ARCH-049 BG002 PostgreSQL serialisation and crash reconciliation", (
       expect(failed.roles.LOGO?.work.refresh?.failureCode).toBe("SOURCE_TIMEOUT");
       const newer = await two.claim(id, "LOGO", at(9.01));
       expect(newer?.kind).toBe("refresh");
-      expect(await one.complete(newer!, outcome(id, "LOGO", 1, HASH2, at(9.0101)), at(9.0101))).toBe(true);
+      expect(await one.complete(newer!, outcome(newer!.domain, "LOGO", 1, HASH2, at(9.0101)), at(9.0101))).toBe(true);
       const latest = parseBrandDocument((await db.shopBrand.findUniqueOrThrow({ where: { shopId: id } })).whatsAppMedia);
       expect(latest.roles.LOGO?.ready?.contentSha256).toBe(HASH2);
       await one.observeSource(source(id, "LOGO", "https://test.example/updated.jpg", at(10)));
       expect(await two.claim(id, "LOGO", at(11))).toMatchObject({ generation: 2, kind: "initial" });
-      expect(await one.complete(holder, outcome(id, "LOGO", 1), at(11))).toBe(false);
+      expect(await one.complete(holder, outcome(holder.domain, "LOGO", 1), at(11))).toBe(false);
       const pending = parseBrandDocument((await db.shopBrand.findUniqueOrThrow({ where: { shopId: id } })).whatsAppMedia);
       expect(currentReady(pending.roles.LOGO!)).toBeNull();
     } finally {
@@ -110,7 +111,7 @@ describeDb("ARCH-049 BG002 PostgreSQL serialisation and crash reconciliation", (
       const recovered = await afterRestart.claim(id, "LOGO", at(0.001));
       expect(recovered).not.toBeNull();
       await afterRestart.observeSource(source(id, "LOGO", null, at(1)));
-      expect(await beforeRestart.complete(recovered!, outcome(id, "LOGO", 1), at(1.1))).toBe(false);
+      expect(await beforeRestart.complete(recovered!, outcome(recovered!.domain, "LOGO", 1), at(1.1))).toBe(false);
       const removed = parseBrandDocument((await db.shopBrand.findUniqueOrThrow({ where: { shopId: id } })).whatsAppMedia);
       expect(removed.roles.LOGO?.work.status).toBe("MISSING");
       expect(removed.roles.LOGO?.source.generation).toBe(2);

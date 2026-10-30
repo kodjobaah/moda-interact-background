@@ -34,7 +34,8 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
       errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
   }
 
@@ -48,11 +49,13 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
   let wooChargeReceipts: Awaited<ReturnType<typeof wooChargeReceiptReconciliationService.reconcileBatch>> | undefined;
   try {
     wooChargeReceipts = await wooChargeReceiptReconciliationService.reconcileBatch();
-  } catch {
+  } catch (error) {
     logger.error("billing.woocommerce.charge_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
       outcome: "failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 
@@ -66,11 +69,13 @@ export async function reconcileWooReceiptsAndGlobalBillingScan<T>(
   let wooChargeRefundReceipts: Awaited<ReturnType<typeof wooChargeRefundReceiptReconciliationService.reconcileBatch>> | undefined;
   try {
     wooChargeRefundReceipts = await wooChargeRefundReceiptReconciliationService.reconcileBatch();
-  } catch {
+  } catch (error) {
     logger.error("billing.woocommerce.charge_refund_receipts.failed", {
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
       outcome: "failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
   if (wooChargeRefundReceipts !== undefined) {
@@ -100,7 +105,8 @@ export async function reconcileWooPaidEntitlementsAndContinue<T>(
       leaseGeneration: leaseHandle.generation,
       configVersion: runtimeConfig.version,
       errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
   }
 
@@ -108,10 +114,11 @@ export async function reconcileWooPaidEntitlementsAndContinue<T>(
 }
 
 function reportBillingReconciliationFailure(error: unknown): void {
-  const message = error instanceof Error ? error.message.slice(0, 256) : "unknown failure";
+  const message = error instanceof Error ? error.message : String(error);
   logger.error("billing.reconciliation.scan_failed", {
     errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
     errorMessage: message,
+    error: error,
   });
 }
 
@@ -216,8 +223,9 @@ void startReadyWorkerProcess({
                 error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
               errorMessage:
                 error instanceof Error
-                  ? error.message.slice(0, 256)
+                  ? error.message
                   : "unknown failure",
+              error: error,
             });
           }
 
@@ -279,7 +287,7 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(error instanceof Error ? error.message : "worker readiness failed");
+  console.error("worker readiness failed", error);
   await closeWorkerObservability();
   process.exitCode = 1;
 }

@@ -81,19 +81,21 @@ function setup(rows: AssignedVariantRow[] = [fixture()], options: {
   media?: ReadyBrandMedia | null;
   mediaHosts?: string[];
   defaultLanguage?: string | null;
+  categoryNames?: Record<string, string | null>;
 } = {}) {
   const readCatalogue = vi.fn(async () => ({
     shop: { id: "shop-1", status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
     variants: rows,
   }));
   const readShopBrand = vi.fn(async () => options.brand ?? null);
-  const repo = { readCatalogue, readShopBrand } satisfies RecoveryTemplateRepository;
+  const readShopCategory = vi.fn(async (_shopId: string, languageTag: string) => options.categoryNames?.[languageTag] ?? null);
+  const repo = { readCatalogue, readShopBrand, readShopCategory } satisfies RecoveryTemplateRepository;
   const warn = vi.fn(); const error = vi.fn();
   const resolveConfiguredSender = vi.fn(async () => "waba-1");
   const resolveMedia = vi.fn(async () => options.media ?? null);
   const service = new RecoveryTemplatePreparer(repo, resolveConfiguredSender,
     resolveMedia, options.mediaHosts ?? [], () => now, { warn, error });
-  return { service, repo, readCatalogue, readShopBrand, warn, error, resolveMedia, resolveConfiguredSender };
+  return { service, repo, readCatalogue, readShopBrand, readShopCategory, warn, error, resolveMedia, resolveConfiguredSender };
 }
 
 const unavailable = async (service: RecoveryTemplatePreparer, reason: string,
@@ -120,7 +122,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       });
       expect(readCatalogue).toHaveBeenCalledWith({ shopId: "shop-1",
         senderWabaId: "waba-1", purpose: `${stage}_${offer}` });
-      expect(readShopBrand).not.toHaveBeenCalled();
+      expect(readShopBrand).toHaveBeenCalledWith("shop-1");
     }
   });
 
@@ -338,5 +340,85 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       shopId: "shop-1", errorType: "Error",
     }));
     expect(JSON.stringify(error.mock.calls)).not.toContain("SENSITIVE");
+    expect(error.mock.lastCall?.[1]).not.toHaveProperty("errorMessage");
+  });
+});
+
+
+describe("taxonomy-backed recovery template binding", () => {
+  const categoryTemplate = (language: string, code: string) => fixture({
+    language, languageCode: code,
+    components: [{ type: "BODY", text: "We sell {{1}} at {{2}}" }],
+    bindings: { header: [], body: [
+      { position: 1, variable: "shop.categoryName" },
+      { position: 2, variable: "shop.name" },
+    ], buttons: [] },
+  });
+
+  it("uses the sending shop's active category for the selected Meta language", async () => {
+    const { service, readShopCategory } = setup([categoryTemplate("en", "en_US"), categoryTemplate("fr", "fr_FR")], {
+      categoryNames: { en: "Outdoor equipment", fr: "Équipement de plein air" },
+    });
+    const result = await service.prepare(input());
+    expect(result).toMatchObject({ outcome: "prepared", template: { components: [
+      { type: "body", parameters: [{ text: "Outdoor equipment" }, { text: "Merchant" }] },
+    ] } });
+    expect(readShopCategory).toHaveBeenCalledWith("shop-1", "en");
+    const translated = await service.prepare(input({ conversationLanguageTag: "fr-CA" }));
+    expect(translated).toMatchObject({ outcome: "prepared", canonicalLanguageTag: "fr",
+      template: { components: [{ parameters: [{ text: "Équipement de plein air" }, { text: "Merchant" }] }] } });
+    expect(readShopCategory).toHaveBeenCalledWith("shop-1", "fr");
+  });
+
+  it("refuses category-dependent templates for shops without an active/translated category", async () => {
+    const { service } = setup([categoryTemplate("en", "en_US")]);
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
+    const untranslated = setup([categoryTemplate("fr", "fr_FR")], { categoryNames: { en: "Fashion" } });
+    await unavailable(untranslated.service, "BINDING_VALUE_UNAVAILABLE", input({ conversationLanguageTag: "fr" }));
+    const untrusted = setup([categoryTemplate("en", "en_US")], { categoryNames: { en: "Bad {{1}}" } });
+    await unavailable(untrusted.service, "BINDING_VALUE_UNAVAILABLE");
+  });
+});
+
+describe("ARCH-052 saved basket and merchant bindings", () => {
+  const basketTemplate = fixture({
+    components: [{ type: "BODY", text: "{{1}}" }],
+    bindings: { header: [], body: [{ position: 1, variable: "checkout.itemsSummary" }], buttons: [] },
+  });
+
+  it("binds a deterministic Shopify basket summary and prefers the configured shop display name", async () => {
+    const brand: ShopBrandRow = { brandName: "Verified Outfitters", logoUrl: null,
+      logoAltText: null, logoWidth: null, logoHeight: null, squareLogoUrl: null,
+      squareLogoAltText: null, coverImageUrl: null };
+    const { service } = setup([basketTemplate], { brand });
+    const result = await service.prepare(input({ checkoutItems: { shopId: "shop-1", lineItems: [
+      { title: "Shoes", variantTitle: "Blue", quantity: 2 },
+      { title: "Water bottle", quantity: 1 },
+    ] } }));
+    expect(result).toMatchObject({ outcome: "prepared", template: { components: [{
+      parameters: [{ text: "2 × Shoes (Blue) and 1 × Water bottle" }],
+    }] } });
+
+    const nameTemplate = fixture({ components: [{ type: "BODY", text: "{{1}}" }],
+      bindings: { header: [], body: [{ position: 1, variable: "shop.name" }], buttons: [] } });
+    const branded = setup([nameTemplate], { brand });
+    expect(await branded.service.prepare(input())).toMatchObject({ template: { components: [{
+      parameters: [{ text: "Verified Outfitters" }],
+    }] } });
+    const invalidBrand = setup([nameTemplate], { brand: { ...brand, brandName: "{{unsafe}}" } });
+    expect(await invalidBrand.service.prepare(input())).toMatchObject({ template: { components: [{
+      parameters: [{ text: "Merchant" }],
+    }] } });
+  });
+
+  it("fails closed for missing basket data, malformed rows and cross-tenant facts", async () => {
+    const { service } = setup([basketTemplate]);
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
+      shopId: "other-shop", lineItems: [{ title: "PRIVATE OTHER TENANT", quantity: 1 }],
+    } }));
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
+      shopId: "shop-1", lineItems: [{ title: "{{1}}", quantity: 1 }],
+    } }));
   });
 });

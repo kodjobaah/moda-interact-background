@@ -48,7 +48,8 @@ export class SamePlanPeriodProgressionService {
         } catch (error) {
           this.logger.warn("billing.recovery_capacity_resume.enqueue_failed", {
             shopId,
-            errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+            errorMessage: error instanceof Error ? error.message : "unknown failure",
+            error: error,
           });
         }
       }

@@ -5,6 +5,7 @@ import type { WooCheckoutRef } from "./contracts.js";
 
 /** No contact, basket or unhashed checkout identifier is persisted here. */
 export type WooActivityWatermark = Readonly<{
+  generation: number;
   lastEventId: string;
   lastActivityAt: string;
   checkoutDigest: string;
@@ -47,7 +48,8 @@ function isWatermark(value: unknown): value is WooActivityWatermark {
     Number.isFinite(Date.parse(candidate.lastActivityAt)) &&
     typeof candidate.checkoutDigest === "string" &&
     /^[0-9a-f]{64}$/.test(candidate.checkoutDigest) &&
-    ["nonempty", "empty", "unknown", "conflicting"].includes(String(candidate.state));
+    ["nonempty", "empty", "unknown", "conflicting"].includes(String(candidate.state)) &&
+    Number.isSafeInteger(candidate.generation) && Number(candidate.generation) > 0;
 }
 
 /** A corrupt Redis watermark is a retryable failure, not permission to send. */

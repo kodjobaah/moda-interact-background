@@ -51,7 +51,8 @@ export class InitialActivationReconciliationService {
     this.logger.error("billing.subscription_reconciliation.provider_failed", {
       shopId,
       subscriptionId: expected.subscriptionId,
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
     const updated = await this.casPendingUpdate(expected, {
         lastSyncErrorCode: "PARTNER_API_ERROR",

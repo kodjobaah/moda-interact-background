@@ -1,3 +1,5 @@
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -19,6 +21,11 @@ import { createMerchantKnowledgeEmbeddingResolver } from "../services/merchant-k
 import { MerchantKnowledgeProcessingService } from "../services/merchant-knowledge-processing.service.js";
 import { merchantKnowledgeReconciliationService } from "../services/merchant-knowledge-reconciliation.service.js";
 import { merchantKnowledgeEntitlementReconciliationService } from "../services/merchant-knowledge-entitlement-reconciliation.service.js";
+
+const logger = createLogger({
+  serviceName: "moda-merchant-knowledge-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 void startReadyWorkerProcess({
   serviceName: "moda-merchant-knowledge-worker",
@@ -65,7 +72,10 @@ void startReadyWorkerProcess({
           pageSize: 100,
         });
       },
-      onError: () => console.error("Merchant Knowledge reconciliation failed"),
+      onError: (error) => logger.error("merchant_knowledge.pending_reconciliation.failed", {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      }),
     });
     const stopEntitlementReconciliation = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -78,7 +88,10 @@ void startReadyWorkerProcess({
           shopPageSize: 100,
         });
       },
-      onError: () => console.error("Merchant Knowledge entitlement reconciliation failed"),
+      onError: (error) => logger.error("merchant_knowledge.entitlement_reconciliation.failed", {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      }),
     });
     const stopUploadCleanup = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -89,7 +102,10 @@ void startReadyWorkerProcess({
       run: async () => {
         await cleanup();
       },
-      onError: () => console.error("Merchant Knowledge upload cleanup failed"),
+      onError: (error) => logger.error("merchant_knowledge.upload_cleanup.failed", {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      }),
     });
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
@@ -116,7 +132,7 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(error instanceof Error ? error.message : "worker readiness failed");
+  console.error("worker readiness failed", error);
   await closeWorkerObservability();
   process.exitCode = 1;
 }

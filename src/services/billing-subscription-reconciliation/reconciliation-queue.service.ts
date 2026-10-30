@@ -113,7 +113,8 @@ export class ReconciliationQueueService {
         this.logger.error("billing.subscription_reconciliation.enqueue_failed", {
           shopId: row.id,
           subscriptionId: row.subscription.id,
-          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          errorMessage: error instanceof Error ? error.message : "unknown failure",
+          error: error,
         });
       }
     }
@@ -131,7 +132,8 @@ export class ReconciliationQueueService {
       this.logger.error("billing.subscription_reconciliation.enqueue_failed", {
         shopId,
         subscriptionId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

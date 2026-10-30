@@ -1,4 +1,6 @@
 import { Worker, type Job } from "bullmq";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import {
   MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME,
@@ -10,6 +12,9 @@ import {
 import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 
+const logger = createLogger({
+  serviceName: "moda-merchant-knowledge-worker", environment: resolveDeploymentEnvironmentName(),
+});
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-merchant-knowledge-worker",
   enableMetrics: false,
@@ -42,7 +47,7 @@ export function createMerchantKnowledgeWorker(
   void,
   typeof MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME
 > {
-  return new Worker<
+  const worker = new Worker<
     MerchantKnowledgeProcessSourceRevisionJob,
     void,
     typeof MERCHANT_KNOWLEDGE_PROCESS_JOB_NAME
@@ -78,4 +83,20 @@ export function createMerchantKnowledgeWorker(
       telemetry: bullMQTelemetry,
     },
   );
+  worker.on("failed", (job, error) => {
+    logger.error("merchant_knowledge.job.failed", {
+      jobId: job?.id ?? null,
+      shopId: job?.data?.shopId ?? null,
+      sourceRevisionId: job?.data?.sourceRevisionId ?? null,
+      attempt: job ? job.attemptsMade + 1 : null,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      error,
+    });
+  });
+  worker.on("error", (error) => {
+    logger.error("merchant_knowledge.worker.error", {
+      errorMessage: error.message, error,
+    });
+  });
+  return worker;
 }

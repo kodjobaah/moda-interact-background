@@ -23,10 +23,23 @@ const digest = (value: object) => createHash("sha256").update(JSON.stringify(val
 const shopId = "woo-shop-1";
 const jobId = (shop: string, id: string) => `woo-checkout-${createHash("sha256")
   .update(shop).update("\0").update(id).digest("hex")}`;
-const fixture = () => ({
-  id: jobId(shopId, event.eventId), name: "checkout-updated",
-  data: { ...event, shopId, contentDigest: digest(event) },
+const fixture = <T extends { eventId: string }>(payload: T = event as T) => ({
+  id: jobId(shopId, payload.eventId), name: "checkout-updated",
+  data: { ...payload, shopId, contentDigest: digest(payload) },
 });
+
+const supportedRestoration = {
+  schemaVersion: "woo.cart-restore.v1",
+  kind: "supported",
+  appliedCouponCodes: ["save10"],
+  lines: [{ productId: "123", quantity: 2 }],
+} as const;
+const unsupportedRestoration = {
+  schemaVersion: "woo.cart-restore.v1",
+  kind: "unsupported",
+  reason: "CUSTOM_CART_ITEM_DATA",
+  appliedCouponCodes: [],
+} as const;
 
 function invalid(input: unknown, reason?: InvalidWooCheckoutCaptureJob["reason"]) {
   expect(() => parseWooCheckoutCaptureJob(input as ReturnType<typeof fixture>))
@@ -43,6 +56,15 @@ describe("ARCH-035 Woo checkout capture queue boundary", () => {
     expect(parseWooCheckoutCaptureJob(input)).toEqual({ ...event, shopId });
     expect(input.data.checkout.contact.email).toBe("customer@example.test");
     expect(Object.keys(parseWooCheckoutCaptureJob(input))).not.toContain("contentDigest");
+  });
+
+  it("keeps an absent restoration unknown and carries only Shared-validated snapshots", () => {
+    expect(parseWooCheckoutCaptureJob(fixture())).toEqual({ ...event, shopId });
+
+    for (const restoration of [supportedRestoration, unsupportedRestoration]) {
+      const payload = { ...event, checkout: { ...event.checkout, restoration } };
+      expect(parseWooCheckoutCaptureJob(fixture(payload)).checkout.restoration).toEqual(restoration);
+    }
   });
 
   it("fails closed on queue kind, authenticated shop identity, replay digest and unknown version", () => {
@@ -66,6 +88,14 @@ describe("ARCH-035 Woo checkout capture queue boundary", () => {
     invalid(altered({ ...event.checkout, contact: { email: "wrong-email" } }), "invalid_payload");
     invalid(altered({ ...event.checkout, contact: { phone: "123" } }), "invalid_payload");
     invalid(altered({ ...event.checkout, contact: { firstName: "X\nY" } }), "invalid_payload");
+    invalid(altered({ ...event.checkout, restoration: {
+      ...supportedRestoration,
+      lines: [],
+    } }), "invalid_payload");
+    invalid(altered({ ...event.checkout, restoration: {
+      ...unsupportedRestoration,
+      lines: [{ productId: "123", quantity: 1 }],
+    } }), "invalid_payload");
     invalid(altered({ ...event.checkout, additional: "unrecognised" }), "invalid_payload");
     invalid({ ...base, data: { ...base.data, occurredAt: "2026-02-30T12:00:00.000Z" } }, "invalid_payload");
     invalid({ ...base, data: { ...base.data, order: { orderId: "1" } } }, "invalid_payload");

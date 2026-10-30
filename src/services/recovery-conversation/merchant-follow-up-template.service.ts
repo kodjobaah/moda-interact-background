@@ -111,6 +111,8 @@ export class MerchantFollowUpTemplateService {
       this.log.error("arch047.merchant_follow_up.prepare_failed", {
         commandId: command.id, shopId: command.shopId,
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

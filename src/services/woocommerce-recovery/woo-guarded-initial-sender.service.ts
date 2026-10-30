@@ -104,9 +104,8 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
         return this.suppress(recovery.shopId, recovery.id, input.attemptId, result.reason);
       return { kind: "admitted" };
     } catch (error) {
-      // The shared logger owns sanitisation and sink isolation. Never emit
-      // the recipient, checkout token, template body or raw provider/SQL error
-      // message, which can contain customer data.
+      // Preserve the actual exception message for development diagnostics.
+      // The shared logger remains responsible for serialization and sink isolation.
       this.log.error("woocommerce.recovery.initial.permit.failed", {
         shopId: recovery.shopId, recoveryId: recovery.id, attemptId: input.attemptId,
         errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
@@ -116,6 +115,8 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
           typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
             ? { errorCode: error.code } : {}
         ),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

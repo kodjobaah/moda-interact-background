@@ -101,7 +101,6 @@ export class ReinstallReconciliationService {
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
         const catalogue = await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null } });
-        await transaction.shopifyDiscount.updateMany({ where: { shopId }, data: { isAvailable: false } });
         if (catalogue.unavailableAt === null) await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { unavailableAt: now } });
         await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
       }
@@ -279,7 +278,8 @@ export class ReinstallReconciliationService {
     this.logger.error("billing.subscription_reconciliation.reinstall_provider_failed", {
       shopId,
       subscriptionId: expected.subscriptionId,
-      errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+      errorMessage: error instanceof Error ? error.message : "unknown failure",
+      error: error,
     });
     const updated = await this.database.subscription.updateMany({
       where: { id: expected.subscriptionId, nextReconcileAt: expected.nextReconcileAt },

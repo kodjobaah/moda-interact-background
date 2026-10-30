@@ -92,6 +92,7 @@ export class RecoveryTemplatePreparer {
       const variables = new RecoveryVariableResolver(
         input, (shopId) => this.repository.readShopBrand(shopId),
         this.resolveReadyShopBrandMedia, this.approvedMediaHosts, this.clock,
+        (shopId, languageTag) => this.repository.readShopCategory(shopId, languageTag), canonicalLanguageTag,
       );
       const prepared = await prepareFrozenComponents({ registration, variables });
       return {
@@ -119,6 +120,8 @@ export class RecoveryTemplatePreparer {
           purpose: purpose ?? "unknown",
           reason: error.reason,
           errorType: error.name,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         return { outcome: "unavailable", reason: error.reason, purpose };
       }
@@ -129,6 +132,9 @@ export class RecoveryTemplatePreparer {
         shopId: typeof input?.shopId === "string" ? input.shopId : "unknown",
         purpose: purpose ?? "unknown",
         errorType: error instanceof Error ? error.name : "unknown",
+        // The Shared logger performs bounded, stack-free Error serialization.
+        // Do not duplicate arbitrary provider/database messages into fields.
+        error: error,
       });
       throw error;
     }

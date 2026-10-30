@@ -7,6 +7,7 @@ import {
   BrandStateError, BRAND_ROLES, MEDIA_LEASE_MS, MEDIA_MAX_ATTEMPTS,
   MEDIA_RECHECK_MS, MEDIA_RETRY_DELAYS_MS,
 } from "./contracts.js";
+import { normalizeShopBrandDomain } from "../shop-brand-media/contracts.js";
 
 const FINGERPRINT = /^sha256:[a-f0-9]{64}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -127,8 +128,10 @@ function expired(value: string | null, now: number): boolean {
 }
 
 /** Role eligibility: no source or stale ready metadata can masquerade as deliverable READY. */
-export function currentReady(slot: BrandSlot): BrandReady | null {
+export function currentReady(slot: BrandSlot, expectedDomain?: string, expectedRole?: BrandRole): BrandReady | null {
   const { source, work, ready } = slot;
+  const [prefix, domainSegment, role, filename] = ready?.objectKey.split("/") ?? [];
+  const domain = domainSegment === undefined ? null : normalizeShopBrandDomain(domainSegment);
   if (work.status !== "READY" || !source.url || !source.fingerprint ||
       !ready || ready.sourceGeneration !== source.generation ||
       ready.sourceFingerprint !== source.fingerprint ||
@@ -136,8 +139,13 @@ export function currentReady(slot: BrandSlot): BrandReady | null {
       ready.width !== 1125 || ready.height !== 600 ||
       !Number.isSafeInteger(ready.sizeBytes) || ready.sizeBytes <= 0 || ready.sizeBytes >= 5 * 1024 * 1024 ||
       !DIGEST.test(ready.contentSha256) ||
-      !/^shop-brands\/[A-Za-z0-9_-]{1,128}\/(?:logo|square_logo|cover_image)\/sha256-[a-f0-9]{64}\.(?:jpg|png)$/.test(ready.objectKey)) return null;
-  if (!ready.objectKey.endsWith(`/sha256-${ready.contentSha256}.${ready.contentType === "image/png" ? "png" : "jpg"}`)) return null;
+        prefix !== "shop-brands" || domain === null ||
+        !["logo", "square_logo", "cover_image"].includes(role ?? "") ||
+        (expectedDomain !== undefined && domain !== normalizeShopBrandDomain(expectedDomain)) ||
+        (expectedRole !== undefined && role !== expectedRole.toLowerCase()) ||
+        !/^sha256-[a-f0-9]{64}\.(?:jpg|png)$/.test(filename ?? "") ||
+        ready.objectKey.split("/").length !== 4) return null;
+      if (filename !== `sha256-${ready.contentSha256}.${ready.contentType === "image/png" ? "png" : "jpg"}`) return null;
   return ready;
 }
 
@@ -150,28 +158,28 @@ function refreshDue(slot: BrandSlot, now: number): boolean {
   return intervalElapsed;
 }
 
-export function claimable(slot: BrandSlot | undefined, now: number): boolean {
+export function claimable(slot: BrandSlot | undefined, now: number, domain?: string, role?: BrandRole): boolean {
   if (!slot?.source.url || !slot.source.fingerprint) return false;
   const work = slot.work;
   if (work.status === "PENDING") return true;
   if (work.status === "FAILED") return work.attempts < MEDIA_MAX_ATTEMPTS &&
     Boolean(work.retryAfter) && due(work.retryAfter, now);
   if (work.status === "PROCESSING") return expired(work.leaseUntil, now);
-  if (work.status === "READY") return !currentReady(slot) || refreshDue(slot, now);
+  if (work.status === "READY") return !currentReady(slot, domain, role) || refreshDue(slot, now);
   return false;
 }
 
 /** Deterministic transition done only while holding a PostgreSQL ShopBrand row lock. */
-export function claimRole(document: BrandDocument, shopId: string, role: BrandRole, owner: string, at: Date): {
+export function claimRole(document: BrandDocument, shopId: string, domain: string, role: BrandRole, owner: string, at: Date): {
   document: BrandDocument; claim: BrandClaim | null;
 } {
-  if (!OWNERS.test(owner)) throw new BrandStateError("INVALID_OBSERVATION");
+  if (!OWNERS.test(owner) || normalizeShopBrandDomain(domain) === null) throw new BrandStateError("INVALID_OBSERVATION");
   const slot = document.roles[role];
-  if (!slot || !claimable(slot, at.getTime()) || !slot.source.url || !slot.source.fingerprint) {
+  if (!slot || !claimable(slot, at.getTime(), domain, role) || !slot.source.url || !slot.source.fingerprint) {
     return { document, claim: null };
   }
   const now = at.getTime();
-  const validReady = currentReady(slot);
+  const validReady = currentReady(slot, domain, role);
   const refresh = Boolean(validReady);
   const leaseUntil = new Date(now + MEDIA_LEASE_MS).toISOString();
   // An abandoned refresh must consume its attempt budget just like a failed initial
@@ -205,7 +213,7 @@ export function claimRole(document: BrandDocument, shopId: string, role: BrandRo
   }
   const claimed = putRole(document, role, { ...slot, work });
   return { document: claimed, claim: { shopId, role, generation: slot.source.generation,
-    fingerprint: slot.source.fingerprint, sourceUrl: slot.source.url, kind: refresh ? "refresh" : "initial",
+    fingerprint: slot.source.fingerprint, sourceUrl: slot.source.url, domain, kind: refresh ? "refresh" : "initial",
     leaseOwner: owner, leaseUntil } };
 }
 
@@ -213,29 +221,32 @@ function putRole(doc: BrandDocument, role: BrandRole, slot: BrandSlot): BrandDoc
   return { ...doc, roles: { ...doc.roles, [role]: slot } };
 }
 
-export function claimStillCurrent(slot: BrandSlot | undefined, claim: BrandClaim, at: Date): slot is BrandSlot {
+export function claimStillCurrent(slot: BrandSlot | undefined, claim: BrandClaim, at: Date,
+  currentDomain: string = claim.domain): slot is BrandSlot {
   if (!slot || slot.source.generation !== claim.generation ||
       slot.source.fingerprint !== claim.fingerprint || slot.source.url !== claim.sourceUrl ||
+      currentDomain !== claim.domain ||
       Date.parse(claim.leaseUntil) <= at.getTime()) return false;
   const holder = claim.kind === "refresh" ? slot.work.refresh : slot.work;
   return holder?.leaseOwner === claim.leaseOwner &&
     Boolean(holder.leaseUntil) && holder.leaseUntil === claim.leaseUntil &&
     Date.parse(holder.leaseUntil) > at.getTime() &&
-    (claim.kind === "refresh" ? Boolean(currentReady(slot)) : slot.work.status === "PROCESSING");
+    (claim.kind === "refresh" ? Boolean(currentReady(slot, claim.domain, claim.role)) : slot.work.status === "PROCESSING");
 }
 
-export function completeClaim(doc: BrandDocument, claim: BrandClaim, result: BrandOutcome, at: Date): {
+export function completeClaim(doc: BrandDocument, claim: BrandClaim, result: BrandOutcome, at: Date,
+  currentDomain: string = claim.domain): {
   document: BrandDocument; applied: boolean;
 } {
   const slot = doc.roles[claim.role];
-  if (!claimStillCurrent(slot, claim, at) ||
+  if (!claimStillCurrent(slot, claim, at, currentDomain) ||
       result.result.sourceGeneration !== claim.generation ||
       result.result.sourceFingerprint !== claim.fingerprint ||
       !DIGEST.test(result.result.contentSha256) ||
       !["image/jpeg", "image/png"].includes(result.result.contentType) ||
       result.result.width !== 1125 || result.result.height !== 600 ||
       result.result.sizeBytes <= 0 || result.result.sizeBytes >= 5 * 1024 * 1024 ||
-      result.result.objectKey !== `shop-brands/${claim.shopId}/${claim.role.toLowerCase()}/sha256-${result.result.contentSha256}.${result.result.contentType === "image/png" ? "png" : "jpg"}`) {
+      result.result.objectKey !== `shop-brands/${normalizeShopBrandDomain(claim.domain)}/${claim.role.toLowerCase()}/sha256-${result.result.contentSha256}.${result.result.contentType === "image/png" ? "png" : "jpg"}`) {
     return { document: doc, applied: false };
   }
   const ready: BrandReady = {
@@ -251,11 +262,12 @@ export function completeClaim(doc: BrandDocument, claim: BrandClaim, result: Bra
   return { document: putRole(doc, claim.role, { ...slot, work, ready }), applied: true };
 }
 
-export function failClaim(doc: BrandDocument, claim: BrandClaim, code: string, retryable: boolean, at: Date): {
+export function failClaim(doc: BrandDocument, claim: BrandClaim, code: string, retryable: boolean, at: Date,
+  currentDomain: string = claim.domain): {
   document: BrandDocument; applied: boolean;
 } {
   const slot = doc.roles[claim.role];
-  if (!claimStillCurrent(slot, claim, at)) return { document: doc, applied: false };
+  if (!claimStillCurrent(slot, claim, at, currentDomain)) return { document: doc, applied: false };
   // Whitelist the category so provider exceptions/URLs cannot leak into JSONB.
   const failureCode = /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "UNEXPECTED_FAILURE";
   if (claim.kind === "refresh") {

@@ -42,7 +42,9 @@ export class DiscountSyncPublisherService {
         removeOnFail: false,
       });
     } catch (error) {
-      this.logger.warn("shopify.discount_sync.enqueue_failed", { shopId, reason, errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure" });
+      this.logger.warn("shopify.discount_sync.enqueue_failed", { shopId, reason, errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
+      });
     }
   }
 }
