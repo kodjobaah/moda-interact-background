@@ -170,7 +170,11 @@ describe("ReinstallReconciliationService", () => {
       create: expect.objectContaining({ status: "UNAVAILABLE" }),
       update: expect.objectContaining({ status: "UNAVAILABLE" }),
     }));
-    expect(test.transaction.shopifyDiscount.updateMany).toHaveBeenCalledTimes(2);
+    expect(test.transaction.shopifyDiscount.updateMany).toHaveBeenCalledOnce();
+    expect(test.transaction.shopifyDiscount.updateMany).toHaveBeenCalledWith({
+      where: { shopId: "shop-1", unavailableAt: null },
+      data: { unavailableAt: now },
+    });
     expect(test.discountPublisher.publishDiscountSync).not.toHaveBeenCalled();
     expect(test.reconciliationQueue.publishNext).not.toHaveBeenCalled();
   });
