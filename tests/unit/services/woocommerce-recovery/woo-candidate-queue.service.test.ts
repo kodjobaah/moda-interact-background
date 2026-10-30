@@ -102,6 +102,42 @@ describe("ARCH-048-BACKGROUND-001 Woo candidate queue/index adapter", () => {
     expect(await h.service.getPending(initial)).toBeNull();
   });
 
+  it("keeps the whole restoration snapshot in the delayed job across candidate replacement", async () => {
+    const h = harness();
+    const initial = {
+      ...candidate(),
+      basket: { kind: "nonempty" as const, checkout: {
+        currency: "GBP", total: "12.00", items: [{ quantity: 1, productId: "123" }],
+        restoration: {
+          schemaVersion: "woo.cart-restore.v1", kind: "supported" as const,
+          appliedCouponCodes: ["save10"], lines: [{ productId: "123", quantity: 1 }],
+        },
+      } },
+    };
+    const input = (value: WooPendingCandidate) => ({ candidate: value, delayMinutes: 30,
+      dueAtMs: NOW + 30 * 60_000, retentionMs: 90_000_000 });
+    await h.service.schedulePending(input(initial));
+    expect(await h.service.getPending(initial)).toEqual(initial);
+
+    const changed: WooPendingCandidate = {
+      ...initial,
+      lastEventId: "coupon-change",
+      lastActivityAt: "2026-10-24T10:01:00.000Z",
+      basket: { kind: "nonempty", checkout: {
+        currency: "GBP", total: "12.00", items: [{ quantity: 1, productId: "123" }],
+        restoration: {
+          schemaVersion: "woo.cart-restore.v1", kind: "unsupported",
+          reason: "CUSTOM_CART_ITEM_DATA", appliedCouponCodes: ["save10"],
+        },
+      } },
+    };
+    expect(await h.service.schedulePending(input(changed))).toBe("rescheduled");
+    expect(h.jobs.get(wooCandidateJobId(changed, 1))?.data).toEqual(changed);
+    expect(await h.service.getPending(changed)).toEqual(changed);
+    expect(await h.service.cancelPending(changed)).toBe("cancelled");
+    expect(await h.service.getPending(changed)).toBeNull();
+  });
+
   it("keeps two tenant lineages with identical checkout keys isolated", async () => {
     const h = harness();
     for (const shopId of ["woo-a", "woo-b"]) {
