@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { Redis } from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
@@ -8,10 +8,11 @@ import { connectionRedis } from "../../src/lib/redis.js";
 import { CheckoutOrderGuardService } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 import { WooRecoveryConsentReader } from "../../src/services/woocommerce-recovery-consent.service.js";
 import type {
-  WooPendingCandidate, WooTerminalObservation,
+  WooCheckoutCoordinator, WooPendingCandidate, WooTerminalObservation,
 } from "../../src/services/woocommerce-recovery/contracts.js";
-import { WooRecoveryAdmissionService } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
+import { WooRecoveryAdmissionService, type WooAdmissionDatabase } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
 import { WOO_REPLAY_BUFFER_MS, WooActivityWatermarkStore } from "../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
+import { WooCheckoutLeaseGuard } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -23,18 +24,26 @@ const SILENT_LOGGER = {
   info() {}, warn() {}, error() {}, debug() {}, child() { return this; },
 } as unknown as StructuredLogger;
 
-async function fixture(run: (state: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
+type FixtureOverrides = Readonly<{
+  database?: WooAdmissionDatabase;
+  coordinator?: WooCheckoutCoordinator;
+}>;
+
+async function fixture(
+  run: (state: Awaited<ReturnType<typeof setup>>) => Promise<void>,
+  overrides?: (db: PrismaClient) => FixtureOverrides,
+) {
   const db = new PrismaClient({ datasourceUrl: databaseUrl! });
   const redis = new Redis(redisUrl!, { maxRetriesPerRequest: null });
   try {
-    await run(await setup(db, redis));
+    await run(await setup(db, redis, overrides?.(db)));
   } finally {
     await redis.quit();
     await db.$disconnect();
   }
 }
 
-async function setup(db: PrismaClient, redis: Redis) {
+async function setup(db: PrismaClient, redis: Redis, overrides: FixtureOverrides = {}) {
   const shopId = randomUUID();
   const checkoutToken = `checkout-${randomUUID()}`;
   const site = `https://${shopId}.example.test`;
@@ -72,8 +81,8 @@ async function setup(db: PrismaClient, redis: Redis) {
   const guard = new CheckoutOrderGuardService();
   let onAdmissionLockAttempt: (() => void) | undefined;
   const service = new WooRecoveryAdmissionService({
-    database: db,
-    coordinator: { withCheckoutLock: <T>(ref: { shopId: string; checkoutToken: string },
+    database: overrides.database ?? db,
+    coordinator: overrides.coordinator ?? { withCheckoutLock: <T>(ref: { shopId: string; checkoutToken: string },
       action: () => Promise<T>) => {
       onAdmissionLockAttempt?.();
       return guard.withCheckoutLock(ref.shopId, ref.checkoutToken, action);
@@ -265,5 +274,53 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       expect(await f.db.usageEvent.findMany({ where: { shopId: f.shopId } }))
         .toEqual([expect.objectContaining({ id: charged.id })]);
     });
+  }, 45_000);
+
+  it("fences simultaneous admission after an expired checkout lease with the PostgreSQL generation key", async () => {
+    let transactionsAtBarrier = 0;
+    let releaseTransactions!: () => void;
+    const bothTransactions = new Promise<void>((resolve) => { releaseTransactions = resolve; });
+    await fixture(async (f) => {
+      const incoming = f.candidate("event-after-lease-expiry");
+      await f.store(incoming);
+      const [first, second] = await Promise.all([
+        f.service.evaluateMatured(incoming, { jobId: "expired-lease-worker-a" }),
+        f.service.evaluateMatured(incoming, { jobId: "expired-lease-worker-b" }),
+      ]);
+      expect([first.kind, second.kind].sort()).toEqual(["already-exists", "created"]);
+      const admitted = first.kind === "created" ? first : second;
+      const replay = first.kind === "already-exists" ? first : second;
+      expect(admitted).toMatchObject({ kind: "created", generation: 1 });
+      expect(replay).toMatchObject({ kind: "already-exists", generation: 1, repairInitial: true,
+        recoveryId: admitted.kind === "created" ? admitted.recoveryId : "" });
+      const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ generation: 1, status: "DETECTED" });
+      expect(await f.db.checkoutRecoveryStatusHistory.count({ where: { checkoutRecoveryId: rows[0]!.id } })).toBe(1);
+      await f.noOutboundOrBilling();
+    }, (db) => {
+      // The fake Redis lets both owners acquire the checkout key, modelling the
+      // prior owner's lease expiring during its action. No wall-clock delay is used.
+      const leaseGuard = new WooCheckoutLeaseGuard({
+        set: async () => "OK",
+        eval: async () => 1,
+      } as never);
+      const database = {
+        shop: db.shop, wooCommerceInstallation: db.wooCommerceInstallation,
+        customer: db.customer, checkoutRecovery: db.checkoutRecovery,
+        $transaction: ((callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+          db.$transaction(async (tx) => {
+            transactionsAtBarrier += 1;
+            if (transactionsAtBarrier === 2) releaseTransactions();
+            await bothTransactions;
+            return callback(tx);
+          })) as WooAdmissionDatabase["$transaction"],
+      } as WooAdmissionDatabase;
+      const coordinator: WooCheckoutCoordinator = {
+        withCheckoutLock: (ref, run) => leaseGuard.withCheckoutLock(ref.shopId, ref.checkoutToken, run),
+      };
+      return { database, coordinator };
+    });
+    expect(transactionsAtBarrier).toBe(2);
   }, 45_000);
 });
