@@ -18,6 +18,8 @@ type AdmissionFenceRow = {
   installationStatus: string;
   revokedAt: Date | null;
   credentialVersion: number;
+  canonicalSiteUrl: string;
+  shopDomain: string;
   phoneVerifiedAt: Date | null;
   consentPurpose: string;
   consentDecision: string;
@@ -104,11 +106,14 @@ function currentConsentStillValid(
   row: AdmissionFenceRow | undefined,
   expected: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
+  expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): boolean {
   if (!row || row.customerId !== expected.customerId || row.customerPhoneId !== expected.customerPhoneId ||
     row.customerShopId !== expected.shopId || row.shopStatus !== "ACTIVE" || row.shopPlatform !== "WOOCOMMERCE" ||
     row.installationId !== expected.installationId || row.installationStatus !== "ACTIVE" || row.revokedAt ||
-    row.credentialVersion !== expected.credentialVersion || row.endedAt ||
+    row.credentialVersion !== expected.credentialVersion ||
+    (expectedSite && (row.canonicalSiteUrl !== expectedSite.canonicalSiteUrl ||
+      row.shopDomain !== expectedSite.shopDomain)) || row.endedAt ||
     row.canonicalPhone !== expected.canonicalRecipient || emailConflicts(observedEmail, row.customerEmail) ||
     row.noContact || row.noContactReason !== null || row.noContactRevision !== expected.noContactRevision ||
     row.consentRevision !== expected.consentRevision || row.decisionSequence !== expected.consentDecisionSequence ||
@@ -129,13 +134,15 @@ export async function confirmCurrentWooConsent(
   shopId: string,
   snapshot: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
+  expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): Promise<boolean> {
   const fences = await tx.$queryRaw<AdmissionFenceRow[]>(Prisma.sql`
           SELECT cp."id" AS "customerPhoneId", cp."customerId", c."shopId" AS "customerShopId",
             c."email" AS "customerEmail", cp."whatsappCanonicalPhone" AS "canonicalPhone", cp."endedAt",
             s."status"::text AS "shopStatus", s."platform"::text AS "shopPlatform",
             i."id" AS "installationId", i."status"::text AS "installationStatus",
-            i."revokedAt", i."credentialVersion",
+            i."revokedAt", i."credentialVersion", i."canonicalSiteUrl",
+            s."domain" AS "shopDomain",
             cp."whatsappPhoneVerifiedAt" AS "phoneVerifiedAt",
             cp."whatsappConsentPurpose"::text AS "consentPurpose",
             cp."whatsappConsentDecision"::text AS "consentDecision",
@@ -155,5 +162,5 @@ export async function confirmCurrentWooConsent(
             AND s."id" = ${shopId}
           FOR SHARE OF cp, c, s, i
   `);
-  return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail);
+  return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail, expectedSite);
 }
