@@ -64,15 +64,16 @@ export class ShopifyAdminBrandReader implements ShopifyBrandReader {
           headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
           body: JSON.stringify({ query: SHOPIFY_BRAND_QUERY }), signal: controller.signal,
         }), controller.signal);
-      if (response.status === 401) {
-        throw new ShopifyBrandSyncError("ACCESS_DENIED", false);
-      }
-      if (response.status === 403) {
-        throw new ShopifyBrandSyncError("MISSING_READ_BRAND_SCOPE", false);
-      }
+      if (response.status === 401) throw new ShopifyBrandSyncError("ACCESS_DENIED", false);
+      if (response.status === 402) throw new ShopifyBrandSyncError("SHOP_FROZEN", false);
+      // For Admin GraphQL, a 403 indicates a shop-level restriction. Missing scopes
+      // are returned as HTTP 200 with errors[n].extensions.code=ACCESS_DENIED.
+      if (response.status === 403) throw new ShopifyBrandSyncError("SHOP_FORBIDDEN", false);
+      if (response.status === 404) throw new ShopifyBrandSyncError("SHOP_NOT_FOUND", false);
       if (response.status === 429) {
         throw new ShopifyBrandSyncError("SHOPIFY_THROTTLED", true, parseRetryAfter(response.headers.get("retry-after")));
       }
+      if (response.status === 423) throw new ShopifyBrandSyncError("SHOP_LOCKED", false);
       if (!response.ok) throw new ShopifyBrandSyncError("SHOPIFY_UNAVAILABLE", response.status >= 500);
       const body = await raceAbort(readBoundedJson(response), controller.signal);
       const record = asRecord(body);
@@ -89,8 +90,13 @@ export class ShopifyAdminBrandReader implements ShopifyBrandReader {
         if (codes.includes("THROTTLED") || codes.includes("MAX_COST_EXCEEDED")) {
           throw new ShopifyBrandSyncError("SHOPIFY_THROTTLED", true);
         }
-        if (codes.includes("ACCESS_DENIED") || codes.includes("FORBIDDEN")) {
+        if (codes.includes("ACCESS_DENIED")) {
           throw new ShopifyBrandSyncError("MISSING_READ_BRAND_SCOPE", false);
+        }
+        if (codes.includes("SHOP_INACTIVE")) throw new ShopifyBrandSyncError("SHOP_INACTIVE", false);
+        if (codes.includes("FORBIDDEN")) throw new ShopifyBrandSyncError("SHOP_FORBIDDEN", false);
+        if (codes.includes("INTERNAL_SERVER_ERROR")) {
+          throw new ShopifyBrandSyncError("SHOPIFY_UNAVAILABLE", true);
         }
         throw new ShopifyBrandSyncError("SHOPIFY_GRAPHQL_FAILURE", true);
       }

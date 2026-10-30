@@ -62,11 +62,14 @@ describe("ARCH-049 Shopify BrandingBrand authenticated GraphQL", () => {
   });
 
   it.each([
-    [403, "MISSING_READ_BRAND_SCOPE"],
     [401, "ACCESS_DENIED"],
+    [402, "SHOP_FROZEN"],
+    [403, "SHOP_FORBIDDEN"],
+    [404, "SHOP_NOT_FOUND"],
     [429, "SHOPIFY_THROTTLED"],
+    [423, "SHOP_LOCKED"],
     [500, "SHOPIFY_UNAVAILABLE"],
-  ])("rejects HTTP %d with safe %s code", async (status, code) => {
+  ])("classifies HTTP %d with safe %s code", async (status, code) => {
     await reader(async () => new Response("untrusted provider body secret", { status }))
       .read("merchant.myshopify.com", T0).then(() => { throw new Error("expected rejection"); },
         (error: unknown) => expectsCode(error, code));
@@ -78,6 +81,9 @@ describe("ARCH-049 Shopify BrandingBrand authenticated GraphQL", () => {
       "SHOPIFY_INVALID_RESPONSE"],
     [{ errors: [{ extensions: { code: "THROTTLED" } }] }, "SHOPIFY_THROTTLED"],
     [{ errors: [{ extensions: { code: "ACCESS_DENIED" } }] }, "MISSING_READ_BRAND_SCOPE"],
+    [{ errors: [{ extensions: { code: "SHOP_INACTIVE" } }] }, "SHOP_INACTIVE"],
+    [{ errors: [{ extensions: { code: "FORBIDDEN" } }] }, "SHOP_FORBIDDEN"],
+    [{ errors: [{ extensions: { code: "INTERNAL_SERVER_ERROR" } }] }, "SHOPIFY_UNAVAILABLE"],
     [{ errors: [{ message: "secret" }] }, "SHOPIFY_GRAPHQL_FAILURE"],
     [{ data: { shop: { name: "M", brand: { logo: { ...image("1"), originalSrc: "http://localhost/logo" } } } } },
       "SHOPIFY_INVALID_RESPONSE"],
