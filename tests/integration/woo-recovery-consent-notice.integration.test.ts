@@ -26,7 +26,7 @@ async function createShop(db: PrismaClient): Promise<string> {
 
 function accepted(shopId: string, checkoutToken: string): WooPendingCandidate {
   return {
-    source: "woocommerce", shopId, checkoutToken,
+    source: "woocommerce", shopId, checkoutToken, generation: 1,
     lastEventId: "accepted-woo-event-1", lastActivityAt: "2026-10-25T08:30:00.000Z",
     basket: { kind: "nonempty", checkout: {
       currency: "USD", total: "64.50",

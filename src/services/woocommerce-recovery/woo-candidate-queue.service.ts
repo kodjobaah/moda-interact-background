@@ -49,7 +49,7 @@ export class WooCandidateMutationBlocked extends Error {
 
 /** A separate deterministic namespace keeps Woo candidate jobs away from the
  * existing Shopify job IDs, while sharing the approved candidate queue/index. */
-export function wooCandidateJobId(ref: WooCheckoutRef, generation = 1): string {
+export function wooCandidateJobId(ref: WooCheckoutRef, generation: number): string {
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Invalid Woo candidate generation");
   const digest = createHash("sha256")
     .update(ref.shopId).update("\0").update(ref.checkoutToken).update("\0").update(String(generation)).digest("hex");

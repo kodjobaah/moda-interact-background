@@ -162,7 +162,7 @@ export async function createWooOutreachFixture() {
           providerDispatchKey: input.idempotencyKey,
           providerDispatchAdmittedAt: admittedAt,
           providerDispatchControlRevision: control.controlRevision,
-          providerMessageId: `wamid-arch048-${runId}`,
+          providerMessageId: `wamid-arch048-${runId}-${providerRequests + 1}`,
         } });
         ++providerRequests;
         return { kind: "admitted" };

@@ -41,8 +41,8 @@ export type WooBasketEvidence =
 export type WooPendingCandidate = Readonly<
   WooCheckoutRef & {
   source: "woocommerce";
-    /** Temporarily optional for v1 consumer compilation; BG007 always writes it. */
-    generation?: number;
+    /** Required identity component for the Woo candidate v2 job format. */
+    generation: number;
     /** Last *accepted* Woo checkout event ID (not a fabricated revision). */
     lastEventId: string;
     lastActivityAt: string;
@@ -116,8 +116,8 @@ export interface WooOrderReconciler {
 }
 
 export type WooAdmissionOutcome =
-  | Readonly<{ kind: "created"; recoveryId: string; generation?: number }>
-  | Readonly<{ kind: "already-exists"; recoveryId: string; status: string; generation?: number; repairInitial?: boolean }>
+  | Readonly<{ kind: "created"; recoveryId: string; generation: number }>
+  | Readonly<{ kind: "already-exists"; recoveryId: string; status: string; generation: number; repairInitial: boolean }>
   | Readonly<{ kind: "superseded" | "denied" | "deferred"; reason: string }>;
 
 /** BG003: idempotent mature-candidate evaluation and row-only admission. */
@@ -144,7 +144,7 @@ export type WooOutreachDispatchOutcome =
  * A checkout event, contact or uncommitted insert is not an outreach request.
  */
 export interface WooRecoveryOutreachDispatcher {
-  settleResumed?(previousRecoveryId: string): Promise<void>;
+  settleResumed(previousRecoveryId: string): Promise<void>;
   enqueueInitial(recoveryId: string): Promise<WooOutreachEnqueueOutcome>;
   processInitial(recoveryId: string): Promise<WooOutreachDispatchOutcome>;
 }

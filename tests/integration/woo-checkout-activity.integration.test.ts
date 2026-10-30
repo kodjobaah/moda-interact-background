@@ -84,7 +84,7 @@ suite("ARCH-048-BACKGROUND-001 real candidate/row/index lifecycle", () => {
       } });
       const first = await service.handleCheckout(event(refs[0]!, 0));
       expect(first.kind).toBe("scheduled");
-      expect((await queue.getJob(wooCandidateJobId(refs[0]!)))?.data).toMatchObject({
+      expect((await queue.getJob(wooCandidateJobId(refs[0]!, 1)))?.data).toMatchObject({
         source: "woocommerce", shopId, checkoutToken: checkout,
       });
       expect((await service.handleCheckout(event(refs[0]!, 1))).kind).toBe("rescheduled");

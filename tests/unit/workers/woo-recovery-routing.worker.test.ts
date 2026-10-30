@@ -42,7 +42,7 @@ import { wooCandidateJobId } from "../../../src/services/woocommerce-recovery/wo
 import { wooInitialDispatchJobId, WOO_INITIAL_DISPATCH_JOB } from "../../../src/services/woocommerce-recovery/woo-initial-dispatch.queue.js";
 
 const wooData = { source: "woocommerce", shopId: "woo-shop", checkoutToken: "wc1",
-  lastEventId: "evt1", lastActivityAt: "2026-10-25T00:00:00.000Z", basket: { kind: "empty" } } as const;
+  generation: 1, lastEventId: "evt1", lastActivityAt: "2026-10-25T00:00:00.000Z", basket: { kind: "empty" } } as const;
 const job = (data: unknown, name = "evaluate-pending-recovery", id = "shopify-job") => ({
   name, data, id, attemptsMade: 0, failedReason: "",
 });
@@ -68,7 +68,7 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
   });
 
   it("routes only verified marked Woo jobs to admission, never Shopify", async () => {
-    const id = wooCandidateJobId(wooData);
+    const id = wooCandidateJobId(wooData, wooData.generation);
     await run(job(wooData, "evaluate-pending-recovery", id));
     expect(mocked.wooMature).toHaveBeenCalledExactlyOnceWith(wooData, { jobId: id });
     expect(mocked.shopify).not.toHaveBeenCalled();
@@ -81,8 +81,19 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
     await expect(run(job({ ...wooData, source: "shopify" }))).rejects.toThrow("UNKNOWN_RECOVERY_CANDIDATE_SOURCE");
     await expect(run(job(wooData, "evaluate-pending-recovery", "spoofed"))).rejects.toThrow();
     createPendingRecoveryCandidateWorker();
-    await expect(run(job(wooData, "evaluate-pending-recovery", wooCandidateJobId(wooData))))
+    await expect(run(job(wooData, "evaluate-pending-recovery", wooCandidateJobId(wooData, wooData.generation))))
       .rejects.toThrow("WOO_RECOVERY_ORCHESTRATOR_UNAVAILABLE");
+    expect(mocked.shopify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ...wooData, generation: undefined },
+    { ...wooData, generation: 0 },
+    { ...wooData, shopId: "bad shop" },
+    { ...wooData, checkoutToken: "" },
+  ])("rejects malformed Woo candidate identity before dispatch", async (data) => {
+    await expect(run(job(data, "evaluate-pending-recovery", "woo-candidate-invalid"))).rejects.toThrow();
+    expect(mocked.wooMature).not.toHaveBeenCalled();
     expect(mocked.shopify).not.toHaveBeenCalled();
   });
 
@@ -98,7 +109,7 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
   it("rethrows service failures without cleanup or a completed event", async () => {
     const failure = new Error("provider error private phone number");
     mocked.wooMature.mockRejectedValueOnce(failure);
-    await expect(run(job(wooData, "evaluate-pending-recovery", wooCandidateJobId(wooData))))
+    await expect(run(job(wooData, "evaluate-pending-recovery", wooCandidateJobId(wooData, wooData.generation))))
       .rejects.toBe(failure);
     expect(mocked.shopifyCleanup).not.toHaveBeenCalled();
     expect(mocked.logger.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());

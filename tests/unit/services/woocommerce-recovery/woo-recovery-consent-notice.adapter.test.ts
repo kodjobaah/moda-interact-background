@@ -19,7 +19,7 @@ const ACTIVITY = "2026-10-24T10:00:00.000Z";
 
 function candidate(overrides: Partial<WooPendingCandidate> = {}): WooPendingCandidate {
   return {
-    source: "woocommerce", shopId: SHOP, checkoutToken: TOKEN,
+    source: "woocommerce", shopId: SHOP, checkoutToken: TOKEN, generation: 1,
     lastEventId: "accepted-event-1", lastActivityAt: ACTIVITY,
     basket: { kind: "nonempty", checkout: {
       currency: "GBP", total: "44.20",

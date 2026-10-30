@@ -6,7 +6,7 @@ const mocked = vi.hoisted(() => ({
   worker: null as null | { queue: string; processor: (job: any) => Promise<void>; options: any },
   listeners: new Map<string, (...args: any[]) => void>(),
   info: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  checkout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-25T00:30:00.000Z" })),
+  checkout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-25T00:30:00.000Z", generation: 1 })),
   metric: vi.fn(async (_definition, _job, fn) => fn()),
 }));
 vi.mock("bullmq", () => ({

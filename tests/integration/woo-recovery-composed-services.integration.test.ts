@@ -85,62 +85,95 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
         if (!attempt || attempt.checkoutRecoveryId !== recoveryId || attempt.sequence !== 1)
           throw new Error("WOO_INITIAL_DISPATCH_OWNERSHIP_MISMATCH");
       },
-      async clearMatured(candidate, jobId) { await index.remove(candidate, jobId); },
+      async clearMatured(candidate, jobId) {
+        await index.compareAndRemoveCheckout(candidate, jobId);
+      },
     });
     const checkoutToken = `new-checkout-${randomUUID()}`;
     const event = {
       schemaVersion: "woo.activity.v1" as const, shopId: f.shopId,
       eventId: `evt-${randomUUID()}`, eventType: "CHECKOUT_UPDATED" as const,
-      checkoutKey: checkoutToken, occurredAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+      checkoutKey: checkoutToken, occurredAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
       checkout: { currency: "GBP", total: "20.00", items: [{ quantity: 1, title: "Test product" }],
         contact: { phone: "+447400123456" } },
     };
     let worker: ReturnType<typeof createPendingRecoveryCandidateWorker> | undefined;
     try {
       expect((await orchestrator.onCheckout(event)).kind).toBe("scheduled");
-      const candidateId = wooCandidateJobId({ shopId: f.shopId, checkoutToken });
+      const candidateId = wooCandidateJobId({ shopId: f.shopId, checkoutToken }, 1);
       expect((await sourceQueue.getJob(candidateId))?.data.source).toBe("woocommerce");
       worker = createPendingRecoveryCandidateWorker(orchestrator);
       await worker.waitUntilReady();
       await eventually(async () => (await f.db.checkoutRecovery.findFirst({
         where: { shopId: f.shopId, checkoutToken, status: "MESSAGE_SENT" },
       })) !== null);
-      const recovered = await f.db.checkoutRecovery.findFirstOrThrow({ where: { shopId: f.shopId, checkoutToken } });
-      const attempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: recovered.id } });
-      expect(attempts).toHaveLength(1);
-      expect(attempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
+      const first = await f.db.checkoutRecovery.findFirstOrThrow({
+        where: { shopId: f.shopId, checkoutToken, generation: 1 },
+      });
+      const firstAttempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: first.id } });
+      expect(firstAttempts).toHaveLength(1);
+      expect(firstAttempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
       expect(await f.db.merchantSupportMessage.count({
         where: {
-          checkoutRecoveryId: recovered.id,
+          checkoutRecoveryId: first.id,
           systemCode: "RECOVERY_INITIAL_OUTREACH_SENT",
-          sourceKey: `recovery-initial-outreach:v1:${attempts[0]!.id}`,
+          sourceKey: `recovery-initial-outreach:v1:${firstAttempts[0]!.id}`,
         },
       })).toBe(1);
       expect(f.providerRequests).toBe(1);
-      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: recovered.id, sequence: 2 } })).toBe(0);
+      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: first.id, sequence: 2 } })).toBe(0);
       expect(await f.db.usageEvent.count({ where: {
         shopId: f.shopId, metric: "RECOVERY_CONVERSATION",
       } })).toBe(1);
-      expect((await orchestrator.onCheckout({ ...event, eventId: `evt-${randomUUID()}` })).kind)
-        .toBe("existing-recovery");
-      expect(f.providerRequests).toBe(1);
+      // Generation two has an independent initial; provision its own test
+      // credit so this integration verifies the no-cross-generation-cap path.
+      await f.db.shopEntitlementCounter.updateMany({
+        where: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" },
+        data: { grantedQuantity: 2 },
+      });
+
+      const resumedEvent = {
+        ...event, eventId: `evt-${randomUUID()}`,
+        occurredAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+        checkout: { ...event.checkout, total: "35.00", items: [{ quantity: 2, title: "Generation two product" }] },
+      };
+      expect((await orchestrator.onCheckout(resumedEvent)).kind).toBe("resumed");
+      await eventually(async () => (await f.db.checkoutRecovery.findFirst({
+        where: { shopId: f.shopId, checkoutToken, generation: 2, status: "MESSAGE_SENT" },
+      })) !== null);
+      const rows = await f.db.checkoutRecovery.findMany({
+        where: { shopId: f.shopId, checkoutToken }, orderBy: { generation: "asc" },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id: first.id, generation: 1, status: "CANCELLED",
+        lineItems: [{ title: "Test product", quantity: 1 }] });
+      expect(rows[1]).toMatchObject({ generation: 2, status: "MESSAGE_SENT",
+        lineItems: [{ title: "Generation two product", quantity: 2 }] });
+      expect(rows[1]!.totalPrice?.toString()).toBe("35");
+      const secondAttempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: rows[1]!.id } });
+      expect(secondAttempts).toHaveLength(1);
+      expect(secondAttempts[0]).toMatchObject({ sequence: 1, status: "WAITING_FOR_RESPONSE", followUpDueAt: null });
       expect(await f.db.merchantSupportMessage.count({
-        where: { checkoutRecoveryId: recovered.id, systemCode: "RECOVERY_INITIAL_OUTREACH_SENT" },
+        where: { checkoutRecoveryId: first.id, systemCode: "RECOVERY_INITIAL_OUTREACH_SENT" },
       })).toBe(1);
+      expect(f.providerRequests).toBe(2);
+      expect(await f.db.usageEvent.count({ where: {
+        shopId: f.shopId, metric: "RECOVERY_CONVERSATION",
+      } })).toBe(2);
       // A local STOP received after the first send may not create a second send.
       await f.stop();
-      await expect(orchestrator.onInitialDispatch(recovered.id, attempts[0]!.id))
+      await expect(orchestrator.onInitialDispatch(rows[1]!.id, secondAttempts[0]!.id))
         .resolves.toMatchObject({ kind: "already-initialized" });
-      expect(f.providerRequests).toBe(1);
+      expect(f.providerRequests).toBe(2);
       expect((await orchestrator.onOrder({
         schemaVersion: "woo.activity.v1", eventId: `order-${randomUUID()}`,
         eventType: "ORDER_PAID", shopId: f.shopId, checkoutKey: checkoutToken,
         occurredAt: new Date().toISOString(),
         order: { orderId: `woo-order-${randomUUID()}`, checkoutKey: checkoutToken, status: "completed" },
       })).kind).toBe("paid-terminal");
-      expect((await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovered.id } })).status)
+      expect((await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: rows[1]!.id } })).status)
         .toBe("COMPLETED");
-      expect(f.providerRequests).toBe(1);
+      expect(f.providerRequests).toBe(2);
     } finally {
       if (worker) await worker.close();
       await Promise.allSettled([candidates.cancelPending({ shopId: f.shopId, checkoutToken })]);

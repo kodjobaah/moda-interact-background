@@ -5,8 +5,7 @@ import type { WooCheckoutRef } from "./contracts.js";
 
 /** No contact, basket or unhashed checkout identifier is persisted here. */
 export type WooActivityWatermark = Readonly<{
-  /** Temporarily optional in the type bridge; all BG007 writes include it. */
-  generation?: number;
+  generation: number;
   lastEventId: string;
   lastActivityAt: string;
   checkoutDigest: string;

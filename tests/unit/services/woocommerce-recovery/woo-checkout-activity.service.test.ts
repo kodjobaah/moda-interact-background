@@ -120,7 +120,7 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
       delayMinutes: 30, dueAtMs: Date.parse(at(30)),
       retentionMs: expect.any(Number),
       candidate: {
-        source: "woocommerce", shopId: "shop-a", checkoutToken: "checkout-1",
+        source: "woocommerce", shopId: "shop-a", checkoutToken: "checkout-1", generation: 1,
         lastActivityAt: at(0), lastEventId: "evt-1",
         basket: { kind: "nonempty", checkout: { currency: "GBP", total: "29.99" } },
       },
