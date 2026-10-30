@@ -104,6 +104,22 @@ export class PendingRecoveryCandidateIndexStore {
     }
   }
 
+  /** Woo cleanup may only clear the checkout pointer while it still owns it. */
+  async compareAndRemoveCheckout(input: { shopId: string; checkoutToken: string }, jobId: string): Promise<boolean> {
+    const key = pendingCandidateCheckoutIndexKey(input);
+    const removed = await connectionRedis.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+      1,
+      key,
+      jobId,
+    );
+    if (Number(removed) === 1) {
+      await this.removeShopMember(input.shopId, jobId);
+      return true;
+    }
+    return false;
+  }
+
   async removeShopMember(shopId: string, jobId: string) {
     await connectionRedis.zrem(pendingCandidateShopIndexKey(shopId), jobId);
   }
