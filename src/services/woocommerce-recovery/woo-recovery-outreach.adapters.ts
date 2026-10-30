@@ -8,9 +8,11 @@ import { conversationService } from "../conversation.service.js";
 import { automatedRecoveryTemplateService } from "../recovery-template-integration/automated-recovery-template.service.js";
 import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
+import { recoveryDeliveryCompensationService } from "../recovery-delivery-compensation/reconcile.service.js";
 import { WooRecoveryOutreachService, type WooOutreachDependencies, type WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
 import type { WooCheckoutCoordinator, WooObservedOrderStateReader } from "./contracts.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { WooResumedOutreachSettlementAdapter } from "./woo-resumed-outreach-settlement.adapter.js";
 
 /**
  * BG004's existing-service adapters. No queue, worker or provider is registered.
@@ -62,7 +64,7 @@ export function createWooRecoveryOutreachService(input: {
         const updated = await prisma.recoveryOutreachAttempt.updateMany({
           where: {
             id: attemptId, sequence: 1, sentAt: null, outboundMessageId: null,
-            status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+            status: { in: ["PENDING", "CAPACITY_BLOCKED", "CANCELLED"] },
           },
           data: { status: "FAILED", failureCode: reason },
         });
@@ -118,7 +120,17 @@ export function createWooRecoveryOutreachService(input: {
           await recoveryBillingService.handleProviderFailure({ admission, error });
         }
       },
+      async reconcileRecorded({ admission, messageId, error }) {
+        if (isSynchronousRecipientFailure(error)) {
+          const result = await recoveryDeliveryCompensationService.reconcileMessage(messageId);
+          if (result === "not-terminal" || result === "not-recovery")
+            throw new Error("WOO_RECORDED_PROVIDER_FAILURE_COMPENSATION_UNRESOLVED");
+          return;
+        }
+        await recoveryBillingService.handleProviderFailure({ admission, error });
+      },
     },
+    resumedSettlement: new WooResumedOutreachSettlementAdapter(),
     finalize: {
       async confirmed({ recovery, attempt, message, admission }) {
         if (attempt.sequence !== 1 || attempt.followUpDueAt !== null)

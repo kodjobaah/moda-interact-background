@@ -4,6 +4,7 @@ import type { WooRecoveryConsentReaderPort, WooRecoveryConsentSnapshot } from ".
 import type { RecoveryBillingAdmission, RecoveryBillingService } from "../recovery-billing.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
+import { WhatsAppServiceError } from "../whatsapp.service.js";
 import type {
   WooCheckoutCoordinator,
   WooCheckoutRef,
@@ -12,6 +13,10 @@ import type {
   WooOutreachEnqueueOutcome,
   WooOutreachDispatchOutcome,
 } from "./contracts.js";
+import type {
+  WooResumedAttemptSettlement,
+  WooResumedSettlementPort,
+} from "./woo-resumed-outreach-settlement.adapter.js";
 
 /** A committed, trusted recovery row. Source is verified against its Shop, not inferred from a token. */
 export type WooOutreachRecovery = Readonly<{
@@ -112,7 +117,13 @@ export interface WooOutreachDependencies {
   providerFailure: {
     /** Existing billing disposition; keep special 131026 compensation with its owner. */
     compensate(admission: RecoveryBillingAdmission, error: unknown): Promise<void>;
+    reconcileRecorded(input: {
+      admission: RecoveryBillingAdmission;
+      messageId: string;
+      error: unknown;
+    }): Promise<void>;
   };
+  resumedSettlement: WooResumedSettlementPort;
   sender: WooGuardedInitialSender;
   finalize: {
     /** Finalize a confirmed initial only; MUST NOT schedule sequence 2. */
@@ -148,6 +159,108 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
 
   constructor(private readonly deps: WooOutreachDependencies) {
     this.log = deps.logger.child({ component: "woocommerce-recovery-outreach" });
+  }
+
+  /**
+   * Reconcile only the closed Woo generation supplied by BG007. The SQL
+   * adapter independently proves the durable resumption history and provider
+   * permit state before it transitions an attempt or releases its reservation.
+   */
+  async settleResumed(previousRecoveryId: string): Promise<void> {
+    const state: RunState = { recoveryId: previousRecoveryId, stage: "read-resumed-recovery" };
+    try {
+      const recovery = await this.deps.recoveries.get(previousRecoveryId);
+      if (!this.isWoo(recovery) || recovery.status !== "CANCELLED") {
+        this.logOutcome(state, "suppressed", "resumed-recovery-unavailable");
+        return;
+      }
+      state.shopId = recovery.shopId;
+      if (!await this.deps.resumedSettlement.hasResumedHistory(recovery.id, recovery.shopId)) {
+        this.logOutcome(state, "suppressed", "checkout-resumed-history-missing");
+        return;
+      }
+
+      await this.deps.coordinator.withCheckoutLock(this.ref(recovery), async () => {
+        state.stage = "locked-resumed-recovery";
+        const fresh = await this.requireSameRecovery(recovery);
+        if (fresh.status !== "CANCELLED" ||
+          !await this.deps.resumedSettlement.hasResumedHistory(fresh.id, fresh.shopId)) {
+          this.logOutcome(state, "suppressed", "checkout-resumed-recovery-changed");
+          return;
+        }
+        const attempts = await this.deps.resumedSettlement.findSettleableAttempts(fresh.id);
+        for (const attempt of attempts) {
+          state.attemptId = attempt.id;
+          state.stage = "classify-resumed-attempt";
+          const outcome = await this.deps.resumedSettlement.cancelIfPrePermit({
+            recovery: fresh,
+            attempt,
+          });
+          await this.applyResumedSettlement(fresh, attempt, outcome, state);
+        }
+        state.stage = "resumed-settlement-complete";
+        this.logOutcome(state, "settled", "checkout-resumed");
+      });
+    } catch (error) {
+      this.failed(state, error);
+      throw error;
+    }
+  }
+
+  private async applyResumedSettlement(
+    recovery: WooOutreachRecovery,
+    attempt: WooInitialAttempt,
+    outcome: WooResumedAttemptSettlement,
+    state: RunState,
+  ): Promise<void> {
+    if (outcome.kind === "not-resumed" || outcome.kind === "ignored") return;
+    if (outcome.kind === "provider-uncertain")
+      throw new Error("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
+    if (outcome.kind === "provider-confirmed") {
+      if (attempt.followUpDueAt !== null) throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
+      const message = outcome.message;
+      if (!message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status))
+        throw new Error("WOO_CONFIRMED_PROVIDER_MESSAGE_INVALID");
+      state.stage = "finalize-resumed-confirmed-send";
+      await this.finalizeExisting(recovery, attempt, {
+        id: message.id, conversationId: message.conversationId,
+        status: message.status as WooConfirmedMessage["status"], sentAt: message.sentAt,
+      }, state);
+      return;
+    }
+    if (outcome.kind === "provider-failed") {
+      state.stage = "reconcile-resumed-provider-failure";
+      if (outcome.reservationStatus === "RELEASED") {
+        await this.deps.attempts.markFailed(attempt.id, "PROVIDER_FAILED");
+        return;
+      }
+      if (outcome.reservationStatus === null)
+        throw new Error("WOO_FAILED_PROVIDER_RESERVATION_MISSING");
+      // The adapter has already proved this exact shop/source reservation
+      // exists; this call reuses it to obtain the existing owner's typed
+      // admission for its canonical definitive-failure compensation path.
+      const billing = await this.deps.billing.admit({
+        shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: attempt.id,
+      });
+      if (billing.kind !== "admitted") throw new Error("WOO_FAILED_PROVIDER_CREDIT_RECONCILIATION_BLOCKED");
+      const failure = new WhatsAppServiceError(
+        "provider-rejected", "Persisted provider failure", outcome.message.providerFailureCode ?? undefined,
+      );
+      await this.deps.providerFailure.reconcileRecorded({
+        admission: billing.admission, messageId: outcome.message.id, error: failure,
+      });
+      await this.deps.attempts.markFailed(attempt.id, "PROVIDER_FAILED");
+      return;
+    }
+    if (outcome.kind === "cancelled") {
+      if (outcome.sourceKey && outcome.owner) {
+        state.stage = "release-resumed-reservation";
+        await this.deps.resumedSettlement.releaseReservedCredit({
+          shopId: recovery.shopId, sourceKey: outcome.sourceKey, owner: outcome.owner,
+        });
+      }
+      this.logOutcome(state, "cancelled", "pre-permit-resumption");
+    }
   }
 
   async enqueueInitial(recoveryId: string): Promise<WooOutreachEnqueueOutcome> {
@@ -523,8 +636,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       stage: state.stage,
       errorClass: error instanceof AggregateError ? "aggregate" :
         error instanceof Error ? "exception" : "unknown",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error: error,
+      error,
     });
   }
 }

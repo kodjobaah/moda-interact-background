@@ -239,8 +239,8 @@ export class WooInitialSendFenceService {
         : { kind: "suppressed", reason: "already-admitted-or-sent" };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     } catch (error) {
-      // Technical SQL/permit exceptions are never converted into consumer
-      // refusals. Log the original exception for diagnostics and propagate it unchanged.
+      // Preserve the failure signal through the shared Error serializer without
+      // exposing arbitrary SQL/provider messages or customer payloads.
       this.logger.error("woocommerce.recovery.initial.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
         errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
@@ -250,8 +250,7 @@ export class WooInitialSendFenceService {
           typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
             ? { errorCode: error.code } : {}
         ),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
+        error: new Error("PERSISTENCE_FAILURE"),
       });
       throw error;
     }
