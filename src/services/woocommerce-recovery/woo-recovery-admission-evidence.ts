@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { Prisma } from "@prisma/client";
 import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import type { WooBasketEvidence, WooPendingCandidate } from "./contracts.js";
+import type { WooActivityWatermark } from "./woo-activity-watermark.store.js";
 
 type AdmissionFenceRow = {
   customerId: string;
@@ -67,13 +69,31 @@ export function validBasket(basket: WooBasketEvidence): basket is Extract<WooBas
 }
 
 export function sameAcceptedCandidate(expected: WooPendingCandidate, current: WooPendingCandidate): boolean {
-  // BG001 owns the accepted event watermark. Comparing only timestamps is not
-  // enough for same-second conflicts. Evidence must be identical as well.
+  // Comparing only timestamps is not enough for same-second conflicts.
   return current.source === "woocommerce" &&
     current.shopId === expected.shopId && current.checkoutToken === expected.checkoutToken &&
+    Number.isSafeInteger(expected.generation) && expected.generation! > 0 &&
+    current.generation === expected.generation &&
     current.lastEventId === expected.lastEventId &&
     current.lastActivityAt === expected.lastActivityAt &&
-    JSON.stringify(current.basket) === JSON.stringify(expected.basket);
+    isDeepStrictEqual(current.basket, expected.basket);
+}
+
+/** The activity watermark is the accepted event fence; the queue/index alone is
+ * not sufficient evidence when stale or partially-written Redis state exists. */
+export function matchesAcceptedWatermark(
+  candidate: WooPendingCandidate,
+  watermark: WooActivityWatermark | null,
+): boolean {
+  if (!watermark || !Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) return false;
+  const state = candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind;
+  const digest = candidate.basket.kind === "nonempty"
+    ? createHash("sha256").update(JSON.stringify(candidate.basket.checkout)).digest("hex")
+    : "0".repeat(64);
+  return watermark.generation === candidate.generation &&
+    watermark.lastEventId === candidate.lastEventId &&
+    watermark.lastActivityAt === candidate.lastActivityAt &&
+    watermark.checkoutDigest === digest && watermark.state === state;
 }
 
 export function emailConflicts(observed: string | undefined, stored: string | null): boolean {

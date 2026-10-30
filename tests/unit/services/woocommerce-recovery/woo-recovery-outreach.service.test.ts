@@ -45,6 +45,13 @@ function makeFixture() {
   const release = vi.fn(async () => undefined);
   const compensate = vi.fn(async () => undefined);
   const committed = vi.fn(async () => undefined);
+  let settlementOutcome: import("../../../../src/services/woocommerce-recovery/woo-resumed-outreach-settlement.adapter.js")
+    .WooResumedAttemptSettlement = { kind: "cancelled" };
+  const hasResumedHistory = vi.fn(async () => true);
+  const findSettleableAttempts = vi.fn(async () => attempt ? [attempt] : []);
+  const cancelIfPrePermit = vi.fn(async () => settlementOutcome);
+  const releaseReservedCredit = vi.fn(async () => undefined);
+  const reconcileRecorded = vi.fn(async () => undefined);
   const admit = vi.fn(async () => ({ kind: "admitted" as const, admission }));
   const revalidateBeforeProvider = vi.fn(async () => ({ kind: "admitted" as const, admission }));
   const enqueue = vi.fn(async () => undefined);
@@ -111,7 +118,10 @@ function makeFixture() {
       admit, revalidateBeforeProvider, releaseBeforeProvider: release,
       commitSuccessfulInitiation: committed,
     } as unknown as WooOutreachDependencies["billing"],
-    providerFailure: { compensate },
+    providerFailure: { compensate, reconcileRecorded },
+    resumedSettlement: {
+      hasResumedHistory, findSettleableAttempts, cancelIfPrePermit, releaseReservedCredit,
+    },
     sender: { sendInitial: send as unknown as WooOutreachDependencies["sender"]["sendInitial"],
       findExistingAdmission: existing },
     finalize: { confirmed: finalize },
@@ -122,6 +132,8 @@ function makeFixture() {
     service: new WooRecoveryOutreachService(deps), deps, logs, admission, send,
     admit, revalidateBeforeProvider, release, compensate, committed,
     finalize, consent, select, enqueue, existing, markFailed, messages,
+    hasResumedHistory, findSettleableAttempts, cancelIfPrePermit, releaseReservedCredit, reconcileRecorded,
+    setSettlementOutcome(value: typeof settlementOutcome) { settlementOutcome = value; },
     get attempt() { return attempt; },
     get initialCreates() { return initialCreates; },
     setRecipient(value: string) { recipient = value; },
@@ -476,6 +488,127 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.release).toHaveBeenCalledOnce();
     expect(f.send).not.toHaveBeenCalled();
   });
+  it("cancels and releases only the pre-permit attempt of a resumed Woo recovery", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    f.setSettlementOutcome({ kind: "cancelled", sourceKey: "persisted-source", owner: "purchased" });
+    await f.service.settleResumed("recovery");
+    expect(f.hasResumedHistory).toHaveBeenCalledWith("recovery", "woo-shop");
+    expect(f.cancelIfPrePermit).toHaveBeenCalledOnce();
+    expect(f.releaseReservedCredit).toHaveBeenCalledWith({
+      shopId: "woo-shop", sourceKey: "persisted-source", owner: "purchased",
+    });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("logs and retries a failed reservation release on settlement replay", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    f.setSettlementOutcome({ kind: "cancelled", sourceKey: "persisted-source", owner: "lifetime-free" });
+    f.releaseReservedCredit.mockRejectedValueOnce(new Error("temporary ledger conflict"));
+    await expect(f.service.settleResumed("recovery")).rejects.toThrow("temporary ledger conflict");
+    expect(f.logs.some((entry) => entry.level === "error" &&
+      entry.event === "woocommerce.recovery.outreach.failed")).toBe(true);
+    await expect(f.service.settleResumed("recovery")).resolves.toBeUndefined();
+    expect(f.releaseReservedCredit).toHaveBeenCalledTimes(2);
+  });
+
+  it("logs bounded failure metadata without the raw error and rethrows the same exception", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    const sensitive = new Error("phone=447000111222 SQL=select * from private_customer_data");
+    f.cancelIfPrePermit.mockRejectedValueOnce(sensitive);
+
+    const failure = await f.service.settleResumed("recovery").then(
+      () => { throw new Error("expected settlement to fail"); },
+      (error: unknown) => error,
+    );
+    expect(failure).toBe(sensitive);
+    const failedLog = f.logs.find((entry) => entry.event === "woocommerce.recovery.outreach.failed");
+    expect(failedLog?.data).toMatchObject({
+      stage: "classify-resumed-attempt", errorClass: "exception",
+      errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
+    });
+    expect(failedLog?.data).not.toHaveProperty("error");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("447000111222");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("private_customer_data");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("stack");
+  });
+
+  it("suppresses enqueue and dispatch for a recovery closed before its old job retries", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    await expect(f.service.enqueueInitial("recovery"))
+      .resolves.toEqual({ kind: "suppressed", reason: "recovery-terminal-or-inactive" });
+    await expect(f.service.processInitial("recovery"))
+      .resolves.toEqual({ kind: "suppressed", reason: "recovery-terminal-or-inactive" });
+    expect(f.enqueue).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+    expect(f.admit).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when cancellation history does not prove checkout resumption", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.hasResumedHistory.mockResolvedValue(false);
+    await f.service.settleResumed("recovery");
+    expect(f.cancelIfPrePermit).not.toHaveBeenCalled();
+    expect(f.releaseReservedCredit).not.toHaveBeenCalled();
+  });
+
+  it("finalizes an admitted confirmed delivery without releasing its credit or sending again", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    f.setSettlementOutcome({ kind: "provider-confirmed", message: {
+      id: "message", conversationId: "conversation", status: "DELIVERED",
+      sentAt: new Date("2026-10-24T01:00:00Z"), providerFailureCode: null,
+      providerDispatchKey: "arch046-permit", providerDispatchAdmittedAt: new Date(),
+    } });
+    await f.service.settleResumed("recovery");
+    expect(f.finalize).toHaveBeenCalledOnce();
+    expect(f.admit).toHaveBeenCalledOnce();
+    expect(f.releaseReservedCredit).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("propagates uncertain provider admission for retry and logs the exception", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    f.setSettlementOutcome({ kind: "provider-uncertain" });
+    await expect(f.service.settleResumed("recovery")).rejects.toThrow("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
+    expect(f.releaseReservedCredit).not.toHaveBeenCalled();
+    expect(f.logs.some((entry) => entry.level === "error" &&
+      entry.event === "woocommerce.recovery.outreach.failed")).toBe(true);
+  });
+
+  it("reconciles a persisted provider failure and marks its attempt failed", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    f.setSettlementOutcome({ kind: "provider-failed", sourceKey: "persisted-source",
+      reservationStatus: "COMMITTED", message: {
+        id: "message", conversationId: "conversation", status: "FAILED", sentAt: null,
+        providerFailureCode: "131026", providerDispatchKey: "arch046-permit",
+        providerDispatchAdmittedAt: new Date(),
+      } });
+    await f.service.settleResumed("recovery");
+    expect(f.reconcileRecorded).toHaveBeenCalledOnce();
+    expect(f.markFailed).toHaveBeenCalledWith("attempt-1", "PROVIDER_FAILED");
+    expect(f.releaseReservedCredit).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
   it("never authorises a Woo follow-up when a historic initial attempt has a due date", async () => {
     const f = makeFixture();
     f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
