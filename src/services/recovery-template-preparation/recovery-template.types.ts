@@ -28,6 +28,12 @@ export type TrustedCheckout = Readonly<{
   approvedHosts: readonly string[];
 }>;
 
+/** Persisted checkout lines are untrusted JSON and remain bound to their shop. */
+export type TrustedCheckoutItems = Readonly<{
+  shopId: string;
+  lineItems: unknown;
+}>;
+
 export type TrustedOffer = Readonly<{
   shopId: string;
   kind: VerifiedOfferPresentation;
@@ -51,6 +57,7 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   customerFirstName?: string | null;
   shopName?: Readonly<{ shopId: string; value: string }> | null;
   checkout?: TrustedCheckout | null;
+  checkoutItems?: TrustedCheckoutItems | null;
   verifiedOffer?: TrustedOffer | null;
 }>;
 

@@ -2,6 +2,7 @@ import type {
   BrandMediaResolver, BrandMediaRole, RecoveryTemplatePreparationInput,
   ShopBrandRow, TemplateUnavailableReason,
 } from "./recovery-template.types.js";
+import { formatCheckoutItemsSummary } from "./recovery-template-items-summary.js";
 
 export class BindingUnavailable extends Error {
   constructor(readonly reason: TemplateUnavailableReason) {
@@ -21,13 +22,13 @@ export const BRAND_KEYS = [...BRAND_TEXT_KEYS, ...BRAND_URL_KEYS] as const;
 
 export type SemanticKey =
   | (typeof BRAND_KEYS)[number]
-  | "customer.firstName" | "shop.name" | "shop.categoryName" | "checkout.url"
+  | "customer.firstName" | "shop.name" | "shop.categoryName" | "checkout.url" | "checkout.itemsSummary"
   | "offer.code" | "offer.description";
 
 export function isSemanticKey(value: unknown): value is SemanticKey {
   return typeof value === "string" && (
     BRAND_KEYS.some((key) => key === value) ||
-    ["customer.firstName", "shop.name", "shop.categoryName", "checkout.url", "offer.code", "offer.description"].includes(value)
+    ["customer.firstName", "shop.name", "shop.categoryName", "checkout.url", "checkout.itemsSummary", "offer.code", "offer.description"].includes(value)
   );
 }
 
@@ -160,6 +161,14 @@ export class RecoveryVariableResolver {
         if (this.input.shopName?.shopId !== this.input.shopId) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
+        // Prefer the sending shop's configured display name. The authenticated
+        // shop domain remains a safe, tenant-scoped fallback (including Woo).
+        try {
+          const configuredName = (await this.brand())?.brandName;
+          if (configuredName !== null && configuredName !== undefined) return boundedText(configuredName, 200);
+        } catch (error) {
+          if (!(error instanceof BindingUnavailable)) throw error;
+        }
         return boundedText(this.input.shopName.value, 200);
       case "shop.categoryName":
         // Only the active category for this shop, resolved for the selected
@@ -168,6 +177,13 @@ export class RecoveryVariableResolver {
         return boundedText(await this.categoryRead, 200);
       case "checkout.url":
         return this.checkout();
+      case "checkout.itemsSummary": {
+        const items = this.input.checkoutItems;
+        if (!items || items.shopId !== this.input.shopId) {
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        }
+        return boundedText(formatCheckoutItemsSummary(items.lineItems, this.languageTag), 500);
+      }
       case "offer.code":
       case "offer.description": {
         const offer = this.input.verifiedOffer;

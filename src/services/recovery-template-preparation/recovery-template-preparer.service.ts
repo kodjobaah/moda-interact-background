@@ -132,7 +132,8 @@ export class RecoveryTemplatePreparer {
         shopId: typeof input?.shopId === "string" ? input.shopId : "unknown",
         purpose: purpose ?? "unknown",
         errorType: error instanceof Error ? error.name : "unknown",
-        errorMessage: error instanceof Error ? error.message : String(error),
+        // The Shared logger performs bounded, stack-free Error serialization.
+        // Do not duplicate arbitrary provider/database messages into fields.
         error: error,
       });
       throw error;

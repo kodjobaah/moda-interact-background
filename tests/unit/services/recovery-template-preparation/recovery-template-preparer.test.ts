@@ -122,7 +122,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       });
       expect(readCatalogue).toHaveBeenCalledWith({ shopId: "shop-1",
         senderWabaId: "waba-1", purpose: `${stage}_${offer}` });
-      expect(readShopBrand).not.toHaveBeenCalled();
+      expect(readShopBrand).toHaveBeenCalledWith("shop-1");
     }
   });
 
@@ -340,6 +340,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       shopId: "shop-1", errorType: "Error",
     }));
     expect(JSON.stringify(error.mock.calls)).not.toContain("SENSITIVE");
+    expect(error.mock.lastCall?.[1]).not.toHaveProperty("errorMessage");
   });
 });
 
@@ -376,5 +377,48 @@ describe("taxonomy-backed recovery template binding", () => {
     await unavailable(untranslated.service, "BINDING_VALUE_UNAVAILABLE", input({ conversationLanguageTag: "fr" }));
     const untrusted = setup([categoryTemplate("en", "en_US")], { categoryNames: { en: "Bad {{1}}" } });
     await unavailable(untrusted.service, "BINDING_VALUE_UNAVAILABLE");
+  });
+});
+
+describe("ARCH-052 saved basket and merchant bindings", () => {
+  const basketTemplate = fixture({
+    components: [{ type: "BODY", text: "{{1}}" }],
+    bindings: { header: [], body: [{ position: 1, variable: "checkout.itemsSummary" }], buttons: [] },
+  });
+
+  it("binds a deterministic Shopify basket summary and prefers the configured shop display name", async () => {
+    const brand: ShopBrandRow = { brandName: "Verified Outfitters", logoUrl: null,
+      logoAltText: null, logoWidth: null, logoHeight: null, squareLogoUrl: null,
+      squareLogoAltText: null, coverImageUrl: null };
+    const { service } = setup([basketTemplate], { brand });
+    const result = await service.prepare(input({ checkoutItems: { shopId: "shop-1", lineItems: [
+      { title: "Shoes", variantTitle: "Blue", quantity: 2 },
+      { title: "Water bottle", quantity: 1 },
+    ] } }));
+    expect(result).toMatchObject({ outcome: "prepared", template: { components: [{
+      parameters: [{ text: "2 × Shoes (Blue) and 1 × Water bottle" }],
+    }] } });
+
+    const nameTemplate = fixture({ components: [{ type: "BODY", text: "{{1}}" }],
+      bindings: { header: [], body: [{ position: 1, variable: "shop.name" }], buttons: [] } });
+    const branded = setup([nameTemplate], { brand });
+    expect(await branded.service.prepare(input())).toMatchObject({ template: { components: [{
+      parameters: [{ text: "Verified Outfitters" }],
+    }] } });
+    const invalidBrand = setup([nameTemplate], { brand: { ...brand, brandName: "{{unsafe}}" } });
+    expect(await invalidBrand.service.prepare(input())).toMatchObject({ template: { components: [{
+      parameters: [{ text: "Merchant" }],
+    }] } });
+  });
+
+  it("fails closed for missing basket data, malformed rows and cross-tenant facts", async () => {
+    const { service } = setup([basketTemplate]);
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
+      shopId: "other-shop", lineItems: [{ title: "PRIVATE OTHER TENANT", quantity: 1 }],
+    } }));
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
+      shopId: "shop-1", lineItems: [{ title: "{{1}}", quantity: 1 }],
+    } }));
   });
 });

@@ -20,6 +20,7 @@ const policy = { recoveryOfferMode: "NONE" as const,
   fixedShopifyDiscountId: null, offerSnapshot: null };
 const recovered = {
   id: "recovery-1", shopId: "shop-1", checkoutUrl: "https://shop.test/checkouts/abc",
+  lineItems: [{ title: "Shoes", variantTitle: "Blue", quantity: 2 }],
   updatedAt: new Date("2026-10-26T08:59:00Z"), status: "DETECTED",
   customer: { firstName: "Alice" },
   shop: { id: "shop-1", domain: "shop.test", status: "ACTIVE", defaultLanguageTag: "en-GB" },
@@ -61,6 +62,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "INITIAL", offerPresentation: "NO_OFFER", conversationLanguageTag: null,
       merchantLanguageTag: "en-GB", senderWabaId: "waba-1", customerFirstName: "Alice",
       checkout: expect.objectContaining({ shopId: "shop-1", approvedHosts: ["shop.test"] }),
+      checkoutItems: { shopId: "shop-1", lineItems: recovered.lineItems },
     }));
   });
 
@@ -152,6 +154,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "INITIAL", policy: policy as never, conversationLanguageTag: null })).rejects.toBe(err);
     expect(f.logger.error).toHaveBeenCalledWith("recovery_template.integration.failed",
       expect.objectContaining({ errorType: "Error", shopId: "shop-1" }));
-    expect(f.logger.error.mock.lastCall?.[1].errorMessage).toBe(err.message);
+    expect(f.logger.error.mock.lastCall?.[1].error).toBe(err);
+    expect(f.logger.error.mock.lastCall?.[1]).not.toHaveProperty("errorMessage");
   });
 });
