@@ -630,13 +630,14 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
 
   private failed(state: RunState, error: unknown): void {
     // Error messages often carry phone numbers, provider bodies or SQL. Log
-    // ONLY a bounded error class, not the raw Error or arbitrary error.name.
+    // only bounded metadata. Do not pass the original Error to the shared
+    // serializer: even its message and stack can contain sensitive details.
     this.log.error("woocommerce.recovery.outreach.failed", {
       shopId: state.shopId, recoveryId: state.recoveryId, attemptId: state.attemptId,
       stage: state.stage,
       errorClass: error instanceof AggregateError ? "aggregate" :
         error instanceof Error ? "exception" : "unknown",
-      error,
+      errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
     });
   }
 }

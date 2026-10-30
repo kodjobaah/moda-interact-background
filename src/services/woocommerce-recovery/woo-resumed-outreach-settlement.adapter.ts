@@ -229,6 +229,31 @@ export class WooResumedOutreachSettlementAdapter {
       // without a durable confirmed message it must never be called unsent.
       if (current.sentAt !== null) return { kind: "provider-uncertain" } as const;
 
+      const cancelEligibleAttempt = async (): Promise<void> => {
+        if (current.status === "CANCELLED") {
+          // A replay is accepted only when the persisted row still proves an
+          // unsent initial attempt. In particular, a follow-up due date must
+          // never be treated as a completed cancellation.
+          if (current.sentAt !== null || current.outboundMessageId !== null || current.followUpDueAt !== null)
+            throw new Error("WOO_RESUMED_CANCELLED_ATTEMPT_NOT_PRE_PERMIT");
+          return;
+        }
+        if (current.followUpDueAt !== null)
+          throw new Error("WOO_RESUMED_FOLLOW_UP_ATTEMPT_NOT_CANCELLABLE");
+        if ((current.status !== "PENDING" && current.status !== "CAPACITY_BLOCKED") ||
+          current.outboundMessageId !== null)
+          throw new Error("WOO_RESUMED_ATTEMPT_NOT_CANCELLABLE");
+
+        const changed = await tx.recoveryOutreachAttempt.updateMany({
+          where: { id: current.id, checkoutRecoveryId: recovery.id, sequence: 1,
+            status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+            sentAt: null, outboundMessageId: null, followUpDueAt: null },
+          data: { status: "CANCELLED", closedAt: new Date() },
+        });
+        if (changed.count !== 1)
+          throw new Error("WOO_RESUMED_ATTEMPT_CANCELLATION_CONFLICT");
+      };
+
       const reservation = await tx.usageReservation.findUnique({
         where: { sourceKey },
         select: { shopId: true, sourceKey: true, quantity: true, status: true,
@@ -239,38 +264,17 @@ export class WooResumedOutreachSettlementAdapter {
       if (reservation) {
         const owner = reservationOwner(reservation, recovery.shopId, sourceKey);
         if (reservation.status === "RESERVED") {
-          if (current.status !== "CANCELLED") {
-            await tx.recoveryOutreachAttempt.updateMany({
-              where: { id: current.id, checkoutRecoveryId: recovery.id, sequence: 1,
-                status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
-                sentAt: null, outboundMessageId: null, followUpDueAt: null },
-              data: { status: "CANCELLED", closedAt: new Date() },
-            });
-          }
+          await cancelEligibleAttempt();
           return { kind: "cancelled", sourceKey, owner } as const;
         }
         if (reservation.status === "RELEASED") {
-          if (current.status !== "CANCELLED") {
-            await tx.recoveryOutreachAttempt.updateMany({
-              where: { id: current.id, checkoutRecoveryId: recovery.id, sequence: 1,
-                status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
-                sentAt: null, outboundMessageId: null, followUpDueAt: null },
-              data: { status: "CANCELLED", closedAt: new Date() },
-            });
-          }
+          await cancelEligibleAttempt();
           return { kind: "cancelled" } as const;
         }
         throw new Error("WOO_RESUMED_RESERVATION_NOT_PRE_PERMIT");
       }
 
-      if (current.status !== "CANCELLED") {
-        await tx.recoveryOutreachAttempt.updateMany({
-          where: { id: current.id, checkoutRecoveryId: recovery.id, sequence: 1,
-            status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
-            sentAt: null, outboundMessageId: null, followUpDueAt: null },
-          data: { status: "CANCELLED", closedAt: new Date() },
-        });
-      }
+      await cancelEligibleAttempt();
       return { kind: "cancelled" } as const;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }

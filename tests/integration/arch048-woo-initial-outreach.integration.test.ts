@@ -155,6 +155,58 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     expect(nextReservation.sourceKey).not.toBe(oldReservation.sourceKey);
   }, 90_000);
 
+  it("fails closed when follow-up state prevents the conditional cancellation and retains its reservation", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+    const followUpDueAt = new Date(Date.now() + 60_000);
+    await a.db.recoveryOutreachAttempt.update({ where: { id: attempt.id }, data: { followUpDueAt } });
+    await a.resumePreviousRecovery();
+
+    await expect(a.service.settleResumed(a.recoveryId))
+      .rejects.toThrow("WOO_RESUMED_FOLLOW_UP_ATTEMPT_NOT_CANCELLABLE");
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ status: "PENDING", followUpDueAt });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey: admission.kind === "admitted" ? admission.admission.sourceKey : "" } }))
+      .toMatchObject({ status: "RESERVED", quantity: 1 });
+    expect(a.providerRequests).toBe(0);
+  }, 90_000);
+
+  it("replays a validated already-cancelled pre-permit attempt without changing its released credit", async () => {
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+    const attempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 } },
+    });
+    const admission = await recoveryBillingService.admit({
+      shopId: a.shopId, recoveryId: a.recoveryId, outreachAttemptId: attempt.id,
+    });
+    expect(admission.kind).toBe("admitted");
+    await a.resumePreviousRecovery();
+
+    await a.service.settleResumed(a.recoveryId);
+    const cancelled = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+    expect(cancelled).toMatchObject({
+      checkoutRecoveryId: a.recoveryId, sequence: 1, status: "CANCELLED",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null,
+    });
+    const sourceKey = admission.kind === "admitted" ? admission.admission.sourceKey : "";
+    const released = await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } });
+    expect(released).toMatchObject({ status: "RELEASED", quantity: 1 });
+
+    await expect(a.service.settleResumed(a.recoveryId)).resolves.toBeUndefined();
+    expect(await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } }))
+      .toMatchObject({ id: attempt.id, status: "CANCELLED", followUpDueAt: null });
+    expect(await a.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } }))
+      .toMatchObject({ status: "RELEASED", quantity: 1 });
+  }, 90_000);
+
   it("reconciles a confirmed provider send after resumption when attempt finalization did not commit", async () => {
     const a = f!;
     await a.service.enqueueInitial(a.recoveryId);

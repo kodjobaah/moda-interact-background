@@ -517,6 +517,30 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.releaseReservedCredit).toHaveBeenCalledTimes(2);
   });
 
+  it("logs bounded failure metadata without the raw error and rethrows the same exception", async () => {
+    const f = makeFixture();
+    f.setRecovery({ status: "CANCELLED" });
+    f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
+      sentAt: null, outboundMessageId: null, followUpDueAt: null });
+    const sensitive = new Error("phone=447000111222 SQL=select * from private_customer_data");
+    f.cancelIfPrePermit.mockRejectedValueOnce(sensitive);
+
+    const failure = await f.service.settleResumed("recovery").then(
+      () => { throw new Error("expected settlement to fail"); },
+      (error: unknown) => error,
+    );
+    expect(failure).toBe(sensitive);
+    const failedLog = f.logs.find((entry) => entry.event === "woocommerce.recovery.outreach.failed");
+    expect(failedLog?.data).toMatchObject({
+      stage: "classify-resumed-attempt", errorClass: "exception",
+      errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
+    });
+    expect(failedLog?.data).not.toHaveProperty("error");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("447000111222");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("private_customer_data");
+    expect(JSON.stringify(failedLog?.data)).not.toContain("stack");
+  });
+
   it("suppresses enqueue and dispatch for a recovery closed before its old job retries", async () => {
     const f = makeFixture();
     f.setRecovery({ status: "CANCELLED" });
