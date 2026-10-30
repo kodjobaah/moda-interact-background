@@ -69,7 +69,10 @@ function candidate(shopId: string, checkoutToken: string): WooPendingCandidate {
     generation: 1,
     lastEventId: `ev-${randomUUID()}`, lastActivityAt,
     basket: { kind: "nonempty", checkout: {
-      currency: "GBP", total: "10.00", items: [{ productId: "p1", quantity: 1, total: "10.00" }],
+      currency: "GBP", total: "10.00",
+      restoration: { schemaVersion: "woo.cart-restore.v1", kind: "supported",
+        appliedCouponCodes: ["original10"], lines: [{ productId: 42, quantity: 1 }] },
+      items: [{ productId: "p1", quantity: 1, total: "10.00" }],
       contact: { phone: PHONE, email: "customer@example.test" },
     } },
   };
@@ -119,7 +122,9 @@ integration("ARCH-048 BG003: PostgreSQL recovery idempotency + Redis coordinatio
       const rows = await db.checkoutRecovery.findMany({ where: { shopId, checkoutToken: token } });
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ generation: 1, status: "DETECTED", customerId,
-        currency: "GBP" });
+        currency: "GBP", wooRestoreSnapshot: { schemaVersion: "woo.cart-restore.v1",
+          kind: "supported", appliedCouponCodes: ["original10"],
+          lines: [{ productId: 42, quantity: 1 }] } });
       expect(rows[0]!.totalPrice?.toString()).toBe("10");
       const id = rows[0]!.id;
       expect(await db.checkoutRecoveryStatusHistory.count({ where: { checkoutRecoveryId: id } })).toBe(1);
