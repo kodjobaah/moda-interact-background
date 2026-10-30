@@ -334,7 +334,17 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     expect((await f.service.evaluateMatured(candidate())).kind).toBe("denied");
     f.db.wooCommerceInstallation.findUnique.mockResolvedValueOnce({ id: "installation", status: "REVOKED",
       revokedAt: NOW, credentialVersion: 1 });
-    expect((await f.service.evaluateMatured(candidate())).kind).toBe("denied");
+    expect(await f.service.evaluateMatured(candidate())).toEqual({
+      kind: "denied", reason: "INSTALLATION_INACTIVE",
+    });
+    expect(f.created).toHaveLength(0);
+    expect(f.updated).toHaveLength(0);
+    expect(f.histories).toHaveLength(0);
+    expect(JSON.stringify([
+      vi.mocked(f.logger.info).mock.calls,
+      vi.mocked(f.logger.warn).mock.calls,
+      vi.mocked(f.logger.error).mock.calls,
+    ])).not.toContain("t=");
     f.db.customer.findUnique.mockResolvedValueOnce({ id: "customer", shopId: "another-shop", email: null });
     expect((await f.service.evaluateMatured(candidate())).kind).toBe("denied");
     expect(f.created).toHaveLength(0);
@@ -360,6 +370,24 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     expect(await f.service.evaluateMatured(candidate())).toMatchObject({ kind: "denied", reason: "CONSENT_CHANGED" });
     expect(f.created).toHaveLength(0);
     expect(f.queryRaw).toHaveBeenCalledTimes(2); // prior-row lock, then current-consent fence
+  });
+
+  it("denies a revocation discovered by the locked transaction fence without writing admission state", async () => {
+    const f = fixtures();
+    f.setFence([permittedFence({ installationStatus: "REVOKED", revokedAt: NOW })]);
+
+    expect(await f.service.evaluateMatured(candidate())).toEqual({
+      kind: "denied", reason: "CONSENT_CHANGED",
+    });
+    expect(f.created).toHaveLength(0);
+    expect(f.updated).toHaveLength(0);
+    expect(f.histories).toHaveLength(0);
+    expect(f.queryRaw).toHaveBeenCalledTimes(2); // prior-row lock, then the revoked installation fence
+    expect(JSON.stringify([
+      vi.mocked(f.logger.info).mock.calls,
+      vi.mocked(f.logger.warn).mock.calls,
+      vi.mocked(f.logger.error).mock.calls,
+    ])).not.toContain("t=");
   });
 
   it("cannot mark an uncertain unique transaction failure as created or already-exists", async () => {
