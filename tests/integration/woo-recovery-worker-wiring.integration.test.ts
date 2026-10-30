@@ -79,20 +79,23 @@ integrated("ARCH-048-BG005 real BullMQ workers + PostgreSQL source isolation", (
     const admission = {
       evaluateMatured: vi.fn(async () => {
         const existing = await db.checkoutRecovery.findUnique({ where: { id: recoveryId } });
-        if (existing) return { kind: "already-exists" as const, recoveryId, status: existing.status };
+        if (existing) return { kind: "already-exists" as const, recoveryId, status: existing.status,
+          generation: 1, repairInitial: true };
         await db.checkoutRecovery.create({ data: {
           id: recoveryId, shopId: wooShopId, checkoutToken, status: "DETECTED",
           lastExternalActivityAt: new Date("2026-10-24T00:00:00.000Z"),
         } });
-        return { kind: "created" as const, recoveryId };
+        return { kind: "created" as const, recoveryId, generation: 1 };
       }),
     };
-    const checkout = { handleCheckout: vi.fn(async () => ({ kind: "existing-recovery" as const, recoveryId })) };
+    const checkout = { handleCheckout: vi.fn(async () => ({ kind: "resumed" as const,
+      previousRecoveryId: recoveryId, nextGeneration: 2, candidateOutcome: "scheduled" as const })) };
     const orders = { reconcileOrder: vi.fn(async () => {
       await db.checkoutRecovery.update({ where: { id: recoveryId }, data: { status: "COMPLETED", completedAt: new Date() } });
       return { kind: "paid-terminal" as const, recoveryId };
     }) };
     const outreach = {
+      settleResumed: vi.fn(async () => undefined),
       enqueueInitial: vi.fn(async (id: string) => {
         enqueueCalls++;
         if (delivered > 0) return { kind: "already-initialized" as const, attemptId };
@@ -111,7 +114,7 @@ integrated("ARCH-048-BG005 real BullMQ workers + PostgreSQL source isolation", (
           throw new Error("WOO_RECOVERY_SHOP_PLATFORM_MISMATCH");
         }
       },
-      clearMatured: async (candidate, id) => { await index.remove(candidate, id); },
+      clearMatured: async (candidate, id) => { await index.compareAndRemoveCheckout(candidate, id); },
       async assertInitialAttempt(id, attempted) {
         if (id !== recoveryId || attempted !== attemptId) throw new Error("invalid attempt");
       },
@@ -122,10 +125,11 @@ integrated("ARCH-048-BG005 real BullMQ workers + PostgreSQL source isolation", (
     try {
       await Promise.all([maturity.waitUntilReady(), checkoutWorker.waitUntilReady(), orderWorker.waitUntilReady()]);
       const candidate = { source: "woocommerce" as const, shopId: wooShopId, checkoutToken,
+        generation: 1,
         lastEventId: `evt-${randomUUID()}`, lastActivityAt: "2026-10-24T00:00:00.000Z",
         basket: { kind: "empty" as const },
       };
-      const candidateId = wooCandidateJobId(candidate);
+      const candidateId = wooCandidateJobId(candidate, candidate.generation);
       const initialId = wooInitialDispatchJobId({ source: "woocommerce", recoveryId, attemptId });
       await index.upsert({ candidate, jobId: candidateId, delayMinutes: 1,
         dueAtMs: Date.now(), shouldIndexShop: true, retentionMs: 60_000 });
@@ -153,7 +157,8 @@ integrated("ARCH-048-BG005 real BullMQ workers + PostgreSQL source isolation", (
         ...event, shopId: wooShopId, contentDigest: createHash("sha256").update(JSON.stringify(event)).digest("hex"),
       }, { jobId: checkoutJobId });
       await checkoutDone;
-      expect(enqueueCalls).toBe(2);
+      expect(enqueueCalls).toBe(1);
+      expect(outreach.settleResumed).toHaveBeenCalledOnce();
       expect(delivered).toBe(1);
 
       // BG002 is always called even when the candidate index is gone.

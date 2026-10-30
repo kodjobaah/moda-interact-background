@@ -21,6 +21,8 @@ import type {
   WooRecoveryOutreachDispatcher,
   WooTerminalObservation,
 } from "../../src/services/woocommerce-recovery/contracts.js";
+import type { WooActivityWatermark } from "../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
+import { wooCandidateJobId } from "../../src/services/woocommerce-recovery/woo-candidate-queue.service.js";
 
 type Assert<T extends true> = T;
 type Equal<A, B> =
@@ -38,10 +40,19 @@ export type OptionalFixtureRejected = Assert<
 export type RequiredWooSource = Assert<IsRequired<WooPendingCandidate, "source">>;
 export type RequiredWooShop = Assert<IsRequired<WooPendingCandidate, "shopId">>;
 export type RequiredWooCheckout = Assert<IsRequired<WooPendingCandidate, "checkoutToken">>;
+export type RequiredWooGeneration = Assert<IsRequired<WooPendingCandidate, "generation">>;
 export type RequiredWooEvent = Assert<IsRequired<WooPendingCandidate, "lastEventId">>;
 export type RequiredWooActivity = Assert<IsRequired<WooPendingCandidate, "lastActivityAt">>;
 export type RequiredWooBasket = Assert<IsRequired<WooPendingCandidate, "basket">>;
 export type WooOnlySource = Assert<Equal<WooPendingCandidate["source"], "woocommerce">>;
+export type RequiredWatermarkGeneration = Assert<IsRequired<WooActivityWatermark, "generation">>;
+export type CreatedAdmissionGeneration = Assert<IsRequired<Extract<WooAdmissionOutcome, { kind: "created" }>, "generation">>;
+export type ExistingAdmissionRepairProof = Assert<IsRequired<Extract<WooAdmissionOutcome, { kind: "already-exists" }>, "repairInitial" | "generation">>;
+export type RequiredResumptionSettlement = Assert<IsRequired<WooRecoveryOutreachDispatcher, "settleResumed">>;
+export type ExplicitCandidateGenerationParameter = Assert<Equal<Parameters<typeof wooCandidateJobId>["length"], 2>>;
+
+// @ts-expect-error Every Woo candidate includes a generation.
+wooCandidateJobId({ shopId: "woo-shop-1", checkoutToken: "checkout-key-1" });
 
 // Legacy Shopify candidates remain source-unmarked. No Shopify candidate type
 // or worker routing is changed by this type-only implementation.
@@ -110,32 +121,39 @@ export const pending: WooPendingCandidate = {
   source: "woocommerce",
   shopId: parsedCheckout.shopId,
   checkoutToken: parsedCheckout.checkoutKey,
+  generation: 1,
   lastEventId: parsedCheckout.eventId,
   lastActivityAt: parsedCheckout.occurredAt,
   basket: nonempty,
 };
 
+// @ts-expect-error Candidate generation is a required v2 identity field.
+export const missingGeneration: WooPendingCandidate = {
+  source: "woocommerce", shopId: parsedCheckout.shopId, checkoutToken: parsedCheckout.checkoutKey,
+  lastEventId: parsedCheckout.eventId, lastActivityAt: parsedCheckout.occurredAt, basket: nonempty,
+};
+
 // @ts-expect-error Explicit Woo source is required.
 export const sourceMissing: WooPendingCandidate = {
-  shopId: "woo-shop-1", checkoutToken: "checkout-key-1",
+  shopId: "woo-shop-1", checkoutToken: "checkout-key-1", generation: 1,
   lastEventId: "checkout-event-1", lastActivityAt: "2026-10-23T12:00:00.000Z",
   basket: empty,
 };
 // @ts-expect-error Shop identity is required for every Woo candidate.
 export const shopMissing: WooPendingCandidate = {
-  source: "woocommerce", checkoutToken: "checkout-key-1",
+  source: "woocommerce", checkoutToken: "checkout-key-1", generation: 1,
   lastEventId: "checkout-event-1", lastActivityAt: "2026-10-23T12:00:00.000Z",
   basket: empty,
 };
 // @ts-expect-error Checkout identity is required for every Woo candidate.
 export const checkoutMissing: WooPendingCandidate = {
-  source: "woocommerce", shopId: "woo-shop-1",
+  source: "woocommerce", shopId: "woo-shop-1", generation: 1,
   lastEventId: "checkout-event-1", lastActivityAt: "2026-10-23T12:00:00.000Z",
   basket: empty,
 };
 // @ts-expect-error Basket evidence cannot be omitted or defaulted to empty.
 export const basketMissing: WooPendingCandidate = {
-  source: "woocommerce", shopId: "woo-shop-1", checkoutToken: "checkout-key-1",
+  source: "woocommerce", shopId: "woo-shop-1", checkoutToken: "checkout-key-1", generation: 1,
   lastEventId: "checkout-event-1", lastActivityAt: "2026-10-23T12:00:00.000Z",
 };
 export const wrongSource: WooPendingCandidate = {
@@ -189,7 +207,7 @@ export const checkoutCoordinator: WooCheckoutCoordinator = {
 };
 export const checkoutActivity: WooCheckoutActivityHandler = {
   async handleCheckout(event) {
-    return { kind: "scheduled", dueAt: event.occurredAt };
+    return { kind: "scheduled", dueAt: event.occurredAt, generation: 1 };
   },
 };
 export const orderReconciler: WooOrderReconciler = {
@@ -201,6 +219,7 @@ export const recoveryAdmission: WooRecoveryAdmissionEvaluator = {
   async evaluateMatured(candidate, context) {
     const result: WooAdmissionOutcome = {
       kind: "already-exists", recoveryId: "existing-recovery-1", status: "PENDING",
+      generation: 1, repairInitial: false,
     };
     void candidate;
     void context;
@@ -208,6 +227,7 @@ export const recoveryAdmission: WooRecoveryAdmissionEvaluator = {
   },
 };
 export const outreach: WooRecoveryOutreachDispatcher = {
+  async settleResumed(_previousRecoveryId) {},
   async enqueueInitial(_recoveryId) {
     return { kind: "queued", attemptId: "attempt-1" };
   },

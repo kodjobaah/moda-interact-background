@@ -7,7 +7,7 @@ import {
 import type { WooPendingCandidate, WooAdmissionOutcome, WooOutreachEnqueueOutcome, WooOutreachDispatchOutcome } from "../../../../src/services/woocommerce-recovery/contracts.js";
 
 const candidate: WooPendingCandidate = {
-  source: "woocommerce", shopId: "shop-1", checkoutToken: "opaque-checkout-secret",
+  source: "woocommerce", shopId: "shop-1", checkoutToken: "opaque-checkout-secret", generation: 1,
   lastEventId: "opaque-event-secret", lastActivityAt: "2026-10-24T00:00:00.000Z",
   basket: { kind: "empty" },
 };
@@ -16,10 +16,11 @@ const order = { shopId: "shop-1" } as Parameters<WooRecoveryOrchestratorService[
 
 function fixture(sink: (record: LogRecord) => void = () => undefined) {
   const deps = {
-    checkout: { handleCheckout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-27T00:00:00.000Z" })) },
+    checkout: { handleCheckout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-27T00:00:00.000Z", generation: 1 })) },
     order: { reconcileOrder: vi.fn(async () => ({ kind: "placed-suppressed" as const })) },
-    admission: { evaluateMatured: vi.fn(async () => ({ kind: "created" as const, recoveryId: "recovery-1" } as WooAdmissionOutcome)) },
+    admission: { evaluateMatured: vi.fn(async () => ({ kind: "created" as const, recoveryId: "recovery-1", generation: 1 } as WooAdmissionOutcome)) },
     outreach: {
+      settleResumed: vi.fn(async () => undefined),
       enqueueInitial: vi.fn(async () => ({ kind: "queued" as const, attemptId: "attempt-1" } as WooOutreachEnqueueOutcome)),
       processInitial: vi.fn(async () => ({ kind: "sent" as const, attemptId: "attempt-1" } as WooOutreachDispatchOutcome)),
     },
@@ -73,7 +74,7 @@ describe("ARCH-048-BG005 exception propagation and approved logger isolation", (
     await expect(f.service.onCandidateMatured(candidate, { jobId: "woo-candidate-1" })).rejects.toBe(interrupted);
     expect(f.deps.clearMatured).not.toHaveBeenCalled();
     f.deps.admission.evaluateMatured.mockResolvedValueOnce({
-      kind: "already-exists", recoveryId: "recovery-1", status: "DETECTED",
+      kind: "already-exists", recoveryId: "recovery-1", status: "DETECTED", generation: 1, repairInitial: true,
     });
     await expect(f.service.onCandidateMatured(candidate, { jobId: "woo-candidate-1" }))
       .resolves.toMatchObject({ kind: "already-exists", recoveryId: "recovery-1" });

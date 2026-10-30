@@ -38,16 +38,16 @@ function awaitEvent(worker: EventEmitter, id: string, status: "completed" | "fai
 
 function fakes() {
   const log = createLogger({ serviceName: "moda-recovery-worker", environment: "test", sink: () => undefined });
-  const checkout = vi.fn(async () => ({ kind: "scheduled" as const, dueAt: new Date().toISOString() }));
+  const checkout = vi.fn(async () => ({ kind: "scheduled" as const, dueAt: new Date().toISOString(), generation: 1 }));
   const order = vi.fn(async () => ({ kind: "paid-terminal" as const }));
-  const admission = vi.fn(async () => ({ kind: "created" as const, recoveryId: "recovery-test" } as WooAdmissionOutcome));
+  const admission = vi.fn(async () => ({ kind: "created" as const, recoveryId: "recovery-test", generation: 1 } as WooAdmissionOutcome));
   const enqueue = vi.fn(async () => ({ kind: "queued" as const, attemptId: "attempt-test" }));
   const dispatch = vi.fn(async () => ({ kind: "sent" as const, attemptId: "attempt-test" }));
   const clear = vi.fn(async () => undefined);
   const orchestrator = new WooRecoveryOrchestratorService({
     checkout: { handleCheckout: checkout }, order: { reconcileOrder: order },
     admission: { evaluateMatured: admission },
-    outreach: { enqueueInitial: enqueue, processInitial: dispatch },
+    outreach: { settleResumed: vi.fn(async () => undefined), enqueueInitial: enqueue, processInitial: dispatch },
     assertWooShop: async () => undefined, assertInitialAttempt: async () => undefined,
     clearMatured: clear, logger: log,
   });
@@ -128,9 +128,9 @@ integrated("ARCH-048-BG005 real BullMQ retry and exception boundaries", () => {
     const queue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
     const index = new PendingRecoveryCandidateIndexStore();
     const candidate = { source: "woocommerce" as const, shopId: `shop-${randomUUID()}`,
-      checkoutToken: `checkout-${randomUUID()}`, lastEventId: `evt-${randomUUID()}`,
+      checkoutToken: `checkout-${randomUUID()}`, generation: 1, lastEventId: `evt-${randomUUID()}`,
       lastActivityAt: new Date().toISOString(), basket: { kind: "empty" as const } };
-    const id = wooCandidateJobId(candidate);
+    const id = wooCandidateJobId(candidate, candidate.generation);
     try {
       await index.upsert({ candidate, jobId: id, delayMinutes: 1, dueAtMs: Date.now(),
         shouldIndexShop: true, retentionMs: 60_000 });
@@ -151,22 +151,23 @@ integrated("ARCH-048-BG005 real BullMQ retry and exception boundaries", () => {
     const shopId = `shop-${randomUUID()}`;
     const checkoutToken = `checkout-${randomUUID()}`;
     const candidate = { source: "woocommerce" as const, shopId, checkoutToken,
-      lastEventId: `evt-${randomUUID()}`, lastActivityAt: new Date().toISOString(),
+      generation: 1, lastEventId: `evt-${randomUUID()}`, lastActivityAt: new Date().toISOString(),
       basket: { kind: "empty" as const } };
     const recoveryId = randomUUID();
     await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, platform: "WOOCOMMERCE" } });
     f.admission.mockImplementation(async () => {
       const existing = await db.checkoutRecovery.findUnique({ where: { id: recoveryId } });
-      if (existing) return { kind: "already-exists", recoveryId, status: existing.status } as WooAdmissionOutcome;
+      if (existing) return { kind: "already-exists", recoveryId, status: existing.status,
+        generation: 1, repairInitial: true } as WooAdmissionOutcome;
       await db.checkoutRecovery.create({ data: { id: recoveryId, shopId, checkoutToken,
         lastExternalActivityAt: new Date() } });
-      return { kind: "created", recoveryId } as WooAdmissionOutcome;
+      return { kind: "created", recoveryId, generation: 1 } as WooAdmissionOutcome;
     });
     const injected = new Error("BullMQ enqueue failed after successful INSERT");
     f.enqueue.mockRejectedValueOnce(injected);
     const worker = createPendingRecoveryCandidateWorker(f.orchestrator);
     const queue = new Queue(PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
-    const id = wooCandidateJobId(candidate);
+    const id = wooCandidateJobId(candidate, candidate.generation);
     let failures = 0;
     worker.on("failed", (job) => { if (job?.id === id) failures++; });
     try {
