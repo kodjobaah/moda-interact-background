@@ -141,6 +141,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       customerId: "customer", generation: 1, status: "DETECTED", cartToken: null,
       currency: "GBP", checkoutUrl: null, lastExternalActivityAt: new Date(ACTIVITY),
       lineItems: [{ quantity: 2, productId: "product-1", total: "34.20" }],
+      wooRestoreSnapshot: Prisma.DbNull,
     });
     expect(f.histories).toHaveLength(1);
     expect(f.histories[0]).toMatchObject({ toStatus: "DETECTED", fromStatus: null, source: "WOOCOMMERCE",
@@ -150,6 +151,31 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain(PHONE);
     expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain("woo-checkout");
     expect(f.denied).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["supported", {
+      schemaVersion: "woo.cart-restore.v1", kind: "supported",
+      appliedCouponCodes: ["summer10"], lines: [{ productId: 42, quantity: 2 }],
+    }],
+    ["unsupported", {
+      schemaVersion: "woo.cart-restore.v1", kind: "unsupported",
+      appliedCouponCodes: [], reason: "unsupported-product-type",
+    }],
+  ] as const)("persists the complete %s restoration evidence without changing display lineItems", async (_kind, restoration) => {
+    const f = fixtures();
+    const incoming = candidate({ basket: { kind: "nonempty", checkout: {
+      currency: "GBP", total: "34.20", restoration,
+      items: [{ quantity: 2, productId: "product-1", total: "34.20" }],
+      contact: { phone: PHONE, email: "customer@example.test" },
+    } } });
+    f.setCandidate(incoming);
+
+    expect(await f.service.evaluateMatured(incoming)).toMatchObject({ kind: "created", generation: 1 });
+    expect(f.created[0]).toMatchObject({
+      wooRestoreSnapshot: restoration,
+      lineItems: [{ quantity: 2, productId: "product-1", total: "34.20" }],
+    });
   });
 
   it("repairs only the exact admission-origin row when the delayed job/index is gone", async () => {
@@ -312,6 +338,8 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       ] });
     const next = candidate({ generation: 2, lastEventId: "new-event", basket: {
       kind: "nonempty", checkout: { currency: "USD", total: "99.00",
+        restoration: { schemaVersion: "woo.cart-restore.v1", kind: "supported",
+          appliedCouponCodes: ["new-generation"], lines: [{ productId: 77, quantity: 3 }] },
         items: [{ productId: "new-product", quantity: 3, total: "99.00" }], contact: { phone: PHONE } },
     } });
     f.setCandidate(next);
@@ -319,6 +347,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       kind: "created", recoveryId: "recovery-1", generation: 2,
     });
     expect(f.created[0]).toMatchObject({ generation: 2, currency: "USD", totalPrice: expect.anything(),
+      wooRestoreSnapshot: { appliedCouponCodes: ["new-generation"], lines: [{ productId: 77, quantity: 3 }] },
       lineItems: [{ productId: "new-product", quantity: 3 }] });
     expect(f.histories[0]).toMatchObject({ reason: "MATURE_CHECKOUT_REENTRY_ADMISSION", source: "WOOCOMMERCE",
       metadata: { generation: 2, lastEventId: "new-event" } });

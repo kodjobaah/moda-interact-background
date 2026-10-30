@@ -402,6 +402,13 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
             currency: checkout.currency,
             totalPrice: new Prisma.Decimal(checkout.total),
             checkoutUrl: null, // No Woo restore URL in the authenticated wire contract.
+            // Keep the canonical restoration contract separate from lineItems,
+            // which remains the historical display projection. Prisma.DbNull
+            // records absent evidence as SQL NULL; unsupported evidence remains
+            // an explicit JSON object and is therefore distinguishable.
+            wooRestoreSnapshot: checkout.restoration === undefined
+              ? Prisma.DbNull
+              : checkout.restoration as Prisma.InputJsonValue,
             lineItems: checkout.items.map((item) => ({
               productId: item.productId ?? null,
               variantId: item.variationId ?? null,
