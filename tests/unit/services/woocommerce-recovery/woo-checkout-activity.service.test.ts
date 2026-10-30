@@ -36,6 +36,19 @@ function event(id: string, minute = 0, changes: Partial<WooCheckoutCapture> = {}
   };
 }
 
+const supportedRestoration = {
+  schemaVersion: "woo.cart-restore.v1",
+  kind: "supported",
+  appliedCouponCodes: ["save10"],
+  lines: [{ productId: "123", quantity: 1 }],
+} as const;
+const unsupportedRestoration = {
+  schemaVersion: "woo.cart-restore.v1",
+  kind: "unsupported",
+  reason: "CUSTOM_CART_ITEM_DATA",
+  appliedCouponCodes: ["save10"],
+} as const;
+
 function harness() {
   const candidates = new Map<string, WooPendingCandidate>();
   const watermarks = new Map<string, WooActivityWatermark>();
@@ -143,6 +156,55 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     expect(h.findExisting).toHaveBeenCalledTimes(2);
   });
 
+  it("replaces restoration with the newest nonempty snapshot, including coupon-only and quantity changes", async () => {
+    const h = harness();
+    const first = event("evt-restore-1", 0, { checkout: {
+      currency: "GBP", total: "29.99",
+      items: [{ productId: "123", quantity: 1, total: "29.99" }],
+      restoration: supportedRestoration,
+    } });
+    await h.service.handleCheckout(first);
+    expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
+      kind: "nonempty", checkout: { restoration: supportedRestoration },
+    });
+
+    const couponOnly = event("evt-restore-coupon", 1, { checkout: {
+      ...first.checkout,
+      restoration: { ...supportedRestoration, appliedCouponCodes: ["vip20"] },
+    } });
+    expect(await h.service.handleCheckout(couponOnly)).toMatchObject({ kind: "rescheduled" });
+    expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
+      kind: "nonempty", checkout: { items: first.checkout.items, restoration: { appliedCouponCodes: ["vip20"] } },
+    });
+
+    const quantityChanged = event("evt-restore-quantity", 2, { checkout: {
+      currency: "GBP", total: "59.98",
+      items: [{ productId: "123", quantity: 2, total: "59.98" }],
+      restoration: unsupportedRestoration,
+    } });
+    expect(await h.service.handleCheckout(quantityChanged)).toMatchObject({ kind: "rescheduled" });
+    expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
+      kind: "nonempty", checkout: { items: quantityChanged.checkout.items, restoration: unsupportedRestoration },
+    });
+
+    const restorationAbsent = event("evt-restore-absent", 3, { checkout: {
+      currency: "GBP", total: "29.99",
+      items: [{ productId: "123", quantity: 1, total: "29.99" }],
+    } });
+    expect(await h.service.handleCheckout(restorationAbsent)).toMatchObject({ kind: "rescheduled" });
+    const latest = h.candidates.get("shop-a/checkout-1")!;
+    expect(latest.basket.kind).toBe("nonempty");
+    if (latest.basket.kind === "nonempty") {
+      expect(latest.basket.checkout).not.toHaveProperty("restoration");
+    }
+    const delayedSnapshot = event("evt-restore-stale", 2, { checkout: {
+      currency: "GBP", total: "29.99", items: [{ productId: "123", quantity: 1 }],
+      restoration: supportedRestoration,
+    } });
+    expect(await h.service.handleCheckout(delayedSnapshot)).toMatchObject({ kind: "ignored-stale" });
+    expect(h.candidates.get("shop-a/checkout-1")).toEqual(latest);
+  });
+
   it("deduplicates stable eventId and ignores older events without rewriting candidate", async () => {
     const h = harness();
     await h.service.handleCheckout(event("evt-new", 4));
@@ -229,11 +291,17 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     const h = harness();
     h.recoveries.set("shop-a/checkout-1", { id: "recovery-1", generation: 1,
       status: "ENGAGED", lastExternalActivityAt: new Date(at(0)), resumption: null, admissionEventId: null });
-    const resumed = event("evt-resume", 2);
+    const resumed = event("evt-resume", 2, { checkout: {
+      currency: "GBP", total: "29.99", items: [{ productId: "123", quantity: 1 }],
+      restoration: supportedRestoration,
+    } });
     expect((await h.service.handleCheckout(resumed)).kind).toBe("resumed");
     expect(h.closeForResumption).toHaveBeenCalledOnce();
     expect(h.candidates.get("shop-a/checkout-1")?.generation).toBe(2);
-    const later = event("evt-later", 3);
+    const later = event("evt-later", 3, { checkout: {
+      currency: "GBP", total: "59.98", items: [{ productId: "123", quantity: 2 }],
+      restoration: unsupportedRestoration,
+    } });
     expect(await h.service.handleCheckout(later)).toMatchObject({ kind: "rescheduled", generation: 2 });
     const successorBeforeReplay = structuredClone(h.candidates.get("shop-a/checkout-1"));
     const watermarkBeforeReplay = structuredClone(h.watermarks.get("shop-a/checkout-1"));
@@ -244,6 +312,9 @@ describe("ARCH-048-BACKGROUND-001 Woo checkout activity (injected dependencies)"
     expect(h.candidates.get("shop-a/checkout-1")).toEqual(successorBeforeReplay);
     expect(h.watermarks.get("shop-a/checkout-1")).toEqual(watermarkBeforeReplay);
     expect(h.candidates.get("shop-a/checkout-1")?.lastEventId).toBe("evt-later");
+    expect(h.candidates.get("shop-a/checkout-1")?.basket).toMatchObject({
+      kind: "nonempty", checkout: { restoration: unsupportedRestoration },
+    });
   });
 
   it.each(["stale", "duplicate", "same-second conflict", "event-ID reuse", "generation mismatch"] as const)(
