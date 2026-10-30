@@ -30,6 +30,13 @@ function productTarget(products: string[], variants: string[] = [], more = false
   };
 }
 
+const combinationPolicy = {
+  orderDiscounts: false,
+  productDiscounts: true,
+  shippingDiscounts: true,
+  productDiscountsWithTagsOnSameCartLine: ["LOYALTY"],
+};
+
 describe("ShopifyDiscountProvider", () => {
   it("normalizes code Basic fixed amounts, product and variant targets, subtotal minimum, and restricted customer scope", async () => {
     mocks.getShopifyAccessToken.mockResolvedValue("token-1");
@@ -41,6 +48,7 @@ describe("ShopifyDiscountProvider", () => {
         codesCount: { count: 1, precision: "EXACT" },
         codes: { nodes: [{ code: "SAVE20" }], pageInfo: { hasNextPage: false } },
         asyncUsageCount: 7, usageLimit: 50, appliesOncePerCustomer: true,
+        combinesWith: combinationPolicy,
         customerGets: {
           items: productTarget(["gid://shopify/Product/1"], ["gid://shopify/ProductVariant/2"]),
           value: { __typename: "DiscountAmount", amount: { amount: "20.00", currencyCode: "GBP" }, appliesOnEachItem: false },
@@ -55,7 +63,7 @@ describe("ShopifyDiscountProvider", () => {
 
     expect(discount).toMatchObject({ providerType: "DiscountCodeBasic", fixedSelectable: true, singleRedeemCode: "SAVE20" });
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      provider: "SHOPIFY", completeness: "COMPLETE", providerStatus: "ACTIVE",
+      provider: "SHOPIFY", completeness: "PARTIAL", providerStatus: "ACTIVE",
       discountKind: "FIXED_AMOUNT", discountValue: "20.00", discountCurrency: "GBP",
       targeting: {
         kind: "MIXED", includedProductIds: ["gid://shopify/Product/1"],
@@ -64,14 +72,18 @@ describe("ShopifyDiscountProvider", () => {
       },
       minimumSubtotal: "75.00", minimumQuantity: null,
       usageLimit: 50, usageCount: 7, perCustomerLimit: 1, customerScope: "RESTRICTED",
-      unrepresentedConditions: [],
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
+    expect(discount?.providerSnapshot.combinesWith).toEqual(combinationPolicy);
     expect(CommerceDiscountConditionFactsSchema.safeParse(discount?.providerSnapshot.conditionFacts).success).toBe(true);
     const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string; variables: { first: number } };
     expect(request.variables.first).toBeLessThanOrEqual(10);
     expect(request.query).toContain("products(first: 20)");
     expect(request.query).toContain("productVariants(first: 20)");
     expect(request.query).toContain("collections(first: 20)");
+    expect(request.query).toContain("orderDiscounts productDiscounts shippingDiscounts");
+    expect(request.query).toContain("productDiscountsWithTagsOnSameCartLine");
+    expect(request.query.match(/combinesWith \{/g)).toHaveLength(2);
   });
 
   it("normalizes automatic Basic percentage discounts, collection targets, quantity minimum, and all-customer scope", async () => {
@@ -81,6 +93,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Collection percentage", summary: "15 percent",
         status: "ACTIVE", startsAt: "2026-09-20T00:00:00.000Z", endsAt: null, asyncUsageCount: 11,
+        combinesWith: combinationPolicy,
         customerGets: {
           items: { __typename: "DiscountCollections", collections: { nodes: [{ id: "gid://shopify/Collection/4" }], pageInfo: { hasNextPage: false } } },
           value: { __typename: "DiscountPercentage", percentage: 15 },
@@ -93,9 +106,10 @@ describe("ShopifyDiscountProvider", () => {
     const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      completeness: "COMPLETE", discountKind: "PERCENTAGE", discountValue: "15", discountCurrency: null,
+      completeness: "PARTIAL", discountKind: "PERCENTAGE", discountValue: "15", discountCurrency: null,
       targeting: { kind: "COLLECTIONS", includedCollectionIds: ["gid://shopify/Collection/4"] },
       minimumSubtotal: null, minimumQuantity: 3, usageCount: 11, customerScope: "ALL",
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
   });
 
@@ -106,6 +120,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Product special", summary: "All products are on sale",
         status: "ACTIVE", startsAt: "2026-09-20T00:00:00.000Z", endsAt: null,
+        combinesWith: combinationPolicy,
         customerGets: {
           items: productTarget(["gid://shopify/Product/42"]),
           value: { __typename: "DiscountPercentage", percentage: 5 },
@@ -118,8 +133,9 @@ describe("ShopifyDiscountProvider", () => {
     const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      completeness: "COMPLETE", discountKind: "PERCENTAGE",
+      completeness: "PARTIAL", discountKind: "PERCENTAGE",
       targeting: { kind: "PRODUCTS", includedProductIds: ["gid://shopify/Product/42"] },
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
   });
 
@@ -131,6 +147,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Large target", summary: "10 percent", status: "ACTIVE",
         startsAt: "2026-09-20T00:00:00.000Z", endsAt: null,
+        combinesWith: combinationPolicy,
         customerGets: { items: productTarget(ids, [], true), value: { __typename: "DiscountPercentage", percentage: 10 } },
         minimumRequirement: null, context: { __typename: "DiscountBuyerSelectionAll" },
       },
