@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { randomBytes, randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { Prisma, PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { Redis } from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
@@ -8,9 +8,11 @@ import { connectionRedis } from "../../src/lib/redis.js";
 import { CheckoutOrderGuardService } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 import { WooRecoveryConsentReader } from "../../src/services/woocommerce-recovery-consent.service.js";
 import type {
-  WooPendingCandidate, WooTerminalObservation,
+  WooCheckoutCoordinator, WooPendingCandidate, WooTerminalObservation,
 } from "../../src/services/woocommerce-recovery/contracts.js";
-import { WooRecoveryAdmissionService } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
+import { WooRecoveryAdmissionService, type WooAdmissionDatabase } from "../../src/services/woocommerce-recovery/woo-recovery-admission.service.js";
+import { WOO_REPLAY_BUFFER_MS, WooActivityWatermarkStore } from "../../src/services/woocommerce-recovery/woo-activity-watermark.store.js";
+import { WooCheckoutLeaseGuard } from "../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -22,18 +24,26 @@ const SILENT_LOGGER = {
   info() {}, warn() {}, error() {}, debug() {}, child() { return this; },
 } as unknown as StructuredLogger;
 
-async function fixture(run: (state: Awaited<ReturnType<typeof setup>>) => Promise<void>) {
+type FixtureOverrides = Readonly<{
+  database?: WooAdmissionDatabase;
+  coordinator?: WooCheckoutCoordinator;
+}>;
+
+async function fixture(
+  run: (state: Awaited<ReturnType<typeof setup>>) => Promise<void>,
+  overrides?: (db: PrismaClient) => FixtureOverrides,
+) {
   const db = new PrismaClient({ datasourceUrl: databaseUrl! });
   const redis = new Redis(redisUrl!, { maxRetriesPerRequest: null });
   try {
-    await run(await setup(db, redis));
+    await run(await setup(db, redis, overrides?.(db)));
   } finally {
     await redis.quit();
     await db.$disconnect();
   }
 }
 
-async function setup(db: PrismaClient, redis: Redis) {
+async function setup(db: PrismaClient, redis: Redis, overrides: FixtureOverrides = {}) {
   const shopId = randomUUID();
   const checkoutToken = `checkout-${randomUUID()}`;
   const site = `https://${shopId}.example.test`;
@@ -71,8 +81,8 @@ async function setup(db: PrismaClient, redis: Redis) {
   const guard = new CheckoutOrderGuardService();
   let onAdmissionLockAttempt: (() => void) | undefined;
   const service = new WooRecoveryAdmissionService({
-    database: db,
-    coordinator: { withCheckoutLock: <T>(ref: { shopId: string; checkoutToken: string },
+    database: overrides.database ?? db,
+    coordinator: overrides.coordinator ?? { withCheckoutLock: <T>(ref: { shopId: string; checkoutToken: string },
       action: () => Promise<T>) => {
       onAdmissionLockAttempt?.();
       return guard.withCheckoutLock(ref.shopId, ref.checkoutToken, action);
@@ -84,6 +94,7 @@ async function setup(db: PrismaClient, redis: Redis) {
       },
       cancelPending: async () => await redis.del(pendingKey) ? "cancelled" : "absent",
     },
+    watermarks: new WooActivityWatermarkStore(redis),
     orders: { read: async (): Promise<WooTerminalObservation> => {
       const value = await redis.get(terminalKey);
       return value ? JSON.parse(value) as WooTerminalObservation : { kind: "none-observed" };
@@ -95,6 +106,7 @@ async function setup(db: PrismaClient, redis: Redis) {
   const candidate = (lastEventId = `event-${randomUUID()}`,
     lastActivityAt = new Date(Date.now() - 45 * 60_000).toISOString()): WooPendingCandidate => ({
     source: "woocommerce", shopId, checkoutToken, lastEventId, lastActivityAt,
+    generation: 1,
     basket: { kind: "nonempty", checkout: {
       currency: "GBP", total: "10.00",
       items: [{ productId: "p1", quantity: 1, total: "10.00" }],
@@ -103,6 +115,14 @@ async function setup(db: PrismaClient, redis: Redis) {
   });
   const store = async (incoming: WooPendingCandidate) => {
     await redis.set(pendingKey, JSON.stringify(incoming), "EX", 600);
+    await new WooActivityWatermarkStore(redis).write({ shopId, checkoutToken }, {
+      generation: incoming.generation!, lastEventId: incoming.lastEventId,
+      lastActivityAt: incoming.lastActivityAt,
+      checkoutDigest: createHash("sha256").update(JSON.stringify(
+        incoming.basket.kind === "nonempty" ? incoming.basket.checkout : {},
+      )).digest("hex"),
+      state: incoming.basket.kind === "nonempty" ? "nonempty" : incoming.basket.kind,
+    }, WOO_REPLAY_BUFFER_MS + 60_000);
   };
   const noOutboundOrBilling = async () => {
     expect(await db.recoveryOutreachAttempt.count({ where: { checkoutRecovery: { shopId } } })).toBe(0);
@@ -170,8 +190,8 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       expect(await f.db.checkoutRecovery.count({ where: { shopId: f.shopId } })).toBe(0);
       const admitted = await f.service.evaluateMatured(updated);
       expect(admitted.kind).toBe("created");
-      expect(await f.service.evaluateMatured(stale)).toMatchObject({
-        kind: "already-exists", recoveryId: admitted.kind === "created" ? admitted.recoveryId : "",
+      expect(await f.service.evaluateMatured(stale)).toEqual({
+        kind: "superseded", reason: "ADMISSION_PROVENANCE_MISMATCH",
       });
       const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
       expect(rows).toHaveLength(1);
@@ -209,7 +229,9 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
         messageSentAt: new Date(), currency: "GBP", totalPrice: "10.00",
       } });
       await f.db.checkoutRecoveryStatusHistory.createMany({ data: [
-        { checkoutRecoveryId: previous.id, fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE" },
+        { checkoutRecoveryId: previous.id, fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE",
+          reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+          metadata: { generation: 1, lastEventId: stale.lastEventId } },
         { checkoutRecoveryId: previous.id, fromStatus: "DETECTED", toStatus: "MESSAGE_SENT", source: "WOOCOMMERCE" },
       ] });
       const conversation = await f.db.conversation.create({ data: {
@@ -232,12 +254,13 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       } });
       expect(await f.redis.exists(f.pendingKey)).toBe(0);
       expect(await f.service.evaluateMatured(stale, { jobId: "removed-bullmq-job" })).toEqual({
-        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT",
+        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT", generation: 1,
+        repairInitial: false,
       });
       // Even an independently re-materialised candidate cannot create generation 2.
       await f.store(f.candidate("new-maturity-after-sent"));
       expect(await f.service.evaluateMatured(stale)).toMatchObject({
-        kind: "already-exists", recoveryId: previous.id, status: "MESSAGE_SENT",
+        kind: "already-exists", recoveryId: previous.id, generation: 1, repairInitial: false,
       });
       const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
       expect(rows).toHaveLength(1);
@@ -251,5 +274,53 @@ integration("ARCH-048 BG003: received Woo event races (PostgreSQL + Redis)", () 
       expect(await f.db.usageEvent.findMany({ where: { shopId: f.shopId } }))
         .toEqual([expect.objectContaining({ id: charged.id })]);
     });
+  }, 45_000);
+
+  it("fences simultaneous admission after an expired checkout lease with the PostgreSQL generation key", async () => {
+    let transactionsAtBarrier = 0;
+    let releaseTransactions!: () => void;
+    const bothTransactions = new Promise<void>((resolve) => { releaseTransactions = resolve; });
+    await fixture(async (f) => {
+      const incoming = f.candidate("event-after-lease-expiry");
+      await f.store(incoming);
+      const [first, second] = await Promise.all([
+        f.service.evaluateMatured(incoming, { jobId: "expired-lease-worker-a" }),
+        f.service.evaluateMatured(incoming, { jobId: "expired-lease-worker-b" }),
+      ]);
+      expect([first.kind, second.kind].sort()).toEqual(["already-exists", "created"]);
+      const admitted = first.kind === "created" ? first : second;
+      const replay = first.kind === "already-exists" ? first : second;
+      expect(admitted).toMatchObject({ kind: "created", generation: 1 });
+      expect(replay).toMatchObject({ kind: "already-exists", generation: 1, repairInitial: true,
+        recoveryId: admitted.kind === "created" ? admitted.recoveryId : "" });
+      const rows = await f.db.checkoutRecovery.findMany({ where: { shopId: f.shopId, checkoutToken: f.checkoutToken } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ generation: 1, status: "DETECTED" });
+      expect(await f.db.checkoutRecoveryStatusHistory.count({ where: { checkoutRecoveryId: rows[0]!.id } })).toBe(1);
+      await f.noOutboundOrBilling();
+    }, (db) => {
+      // The fake Redis lets both owners acquire the checkout key, modelling the
+      // prior owner's lease expiring during its action. No wall-clock delay is used.
+      const leaseGuard = new WooCheckoutLeaseGuard({
+        set: async () => "OK",
+        eval: async () => 1,
+      } as never);
+      const database = {
+        shop: db.shop, wooCommerceInstallation: db.wooCommerceInstallation,
+        customer: db.customer, checkoutRecovery: db.checkoutRecovery,
+        $transaction: ((callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+          db.$transaction(async (tx) => {
+            transactionsAtBarrier += 1;
+            if (transactionsAtBarrier === 2) releaseTransactions();
+            await bothTransactions;
+            return callback(tx);
+          })) as WooAdmissionDatabase["$transaction"],
+      } as WooAdmissionDatabase;
+      const coordinator: WooCheckoutCoordinator = {
+        withCheckoutLock: (ref, run) => leaseGuard.withCheckoutLock(ref.shopId, ref.checkoutToken, run),
+      };
+      return { database, coordinator };
+    });
+    expect(transactionsAtBarrier).toBe(2);
   }, 45_000);
 });

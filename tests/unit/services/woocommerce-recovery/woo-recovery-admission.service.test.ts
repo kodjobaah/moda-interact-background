@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -19,6 +20,7 @@ const DIGITS = "447400123456";
 function candidate(overrides: Partial<WooPendingCandidate> = {}): WooPendingCandidate {
   return {
     source: "woocommerce", shopId: "woo-shop", checkoutToken: "woo-checkout",
+    generation: 1,
     lastEventId: "woo-event-1", lastActivityAt: ACTIVITY,
     basket: { kind: "nonempty", checkout: {
       currency: "GBP", total: "34.20", items: [{ quantity: 2, productId: "product-1", total: "34.20" }],
@@ -52,7 +54,8 @@ function permittedFence(overrides: Record<string, unknown> = {}) {
   };
 }
 
-type RecoveryRow = { id: string; status: string; generation: number };
+type RecoveryRow = { id: string; status: string; generation: number; lastExternalActivityAt: Date;
+  statusHistory: Array<Record<string, unknown>> };
 function fixtures() {
   const rows: RecoveryRow[] = [];
   const created: unknown[] = [];
@@ -64,12 +67,15 @@ function fixtures() {
   const findFirst = vi.fn(async () => rows.length ? rows.at(-1)! : null);
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     created.push(data);
-    const row = { id: `recovery-${created.length}`, status: "DETECTED", generation: 1 };
+    const row = { id: `recovery-${created.length}`, status: "DETECTED", generation: Number(data.generation),
+      lastExternalActivityAt: data.lastExternalActivityAt as Date, statusHistory: [] as Array<Record<string, unknown>> };
     rows.push(row);
     return row;
   });
   const historyCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     histories.push(data);
+    const recovery = rows.find((row) => row.id === data.checkoutRecoveryId);
+    recovery?.statusHistory.push(data);
     return data;
   });
   const queryRaw = vi.fn(async () => fence);
@@ -86,6 +92,14 @@ function fixtures() {
     })),
   };
   const candidates = { getPending: vi.fn(async () => current), cancelPending: vi.fn(async () => "absent" as const) };
+  const watermarks = { read: vi.fn(async () => {
+    if (!current) return null;
+    const digest = current.basket.kind === "nonempty"
+      ? createHash("sha256").update(JSON.stringify(current.basket.checkout)).digest("hex") : "0".repeat(64);
+    return { generation: current.generation!, lastEventId: current.lastEventId,
+      lastActivityAt: current.lastActivityAt, checkoutDigest: digest,
+      state: current.basket.kind === "nonempty" ? "nonempty" : current.basket.kind } as const;
+  }) };
   const orders = { read: vi.fn(async () => order) };
   // This fake models the BG002 checkout-scoped critical section, independently
   // of its concrete (not-yet-wired) Redis implementation.
@@ -107,10 +121,10 @@ function fixtures() {
   const service = new WooRecoveryAdmissionService({
     database: db as unknown as WooAdmissionDatabase,
     candidates, orders, coordinator, consent, policy: policy as never,
-    execution: execution as never, logger, now: () => NOW, onDeniedAdmission: denied,
+    execution: execution as never, logger, watermarks, now: () => NOW, onDeniedAdmission: denied,
   });
   return { service, db, rows, created, histories, candidates, orders, coordinator, consent, policy,
-    execution, logger, denied, queryRaw, create, historyCreate,
+    execution, logger, denied, queryRaw, create, historyCreate, watermarks,
     setCandidate: (value: WooPendingCandidate | null) => { current = value; },
     setOrder: (value: WooTerminalObservation) => { order = value; },
     setFence: (value: ReturnType<typeof permittedFence>[]) => { fence = value; },
@@ -121,7 +135,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
   it("inserts exactly one DETECTED recovery plus initial history, with correct tenant/customer/basket; never sends", async () => {
     const f = fixtures();
     expect(await f.service.evaluateMatured(candidate(), { jobId: "job-1" }))
-      .toEqual({ kind: "created", recoveryId: "recovery-1" });
+      .toEqual({ kind: "created", recoveryId: "recovery-1", generation: 1 });
     expect(f.created).toHaveLength(1);
     expect(f.created[0]).toMatchObject({ shopId: "woo-shop", checkoutToken: "woo-checkout",
       customerId: "customer", generation: 1, status: "DETECTED", cartToken: null,
@@ -129,7 +143,8 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       lineItems: [{ quantity: 2, productId: "product-1", total: "34.20" }],
     });
     expect(f.histories).toHaveLength(1);
-    expect(f.histories[0]).toMatchObject({ toStatus: "DETECTED", fromStatus: null, source: "WOOCOMMERCE" });
+    expect(f.histories[0]).toMatchObject({ toStatus: "DETECTED", fromStatus: null, source: "WOOCOMMERCE",
+      reason: "FIRST_MATURE_CHECKOUT_ADMISSION", metadata: { generation: 1, lastEventId: "woo-event-1" } });
     expect(f.logger.info).toHaveBeenCalledWith("woocommerce.recovery.admission.evaluated",
       expect.objectContaining({ outcome: "created", recoveryId: "recovery-1", jobIdHash: expect.any(String) }));
     expect(JSON.stringify(vi.mocked(f.logger.info).mock.calls)).not.toContain(PHONE);
@@ -137,18 +152,24 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     expect(f.denied).not.toHaveBeenCalled();
   });
 
-  it("returns the durable existing row even if the delayed job/index is gone, including sent/expired generations", async () => {
+  it("repairs only the exact admission-origin row when the delayed job/index is gone", async () => {
     const f = fixtures();
-    f.rows.push({ id: "previous", status: "MESSAGE_SENT", generation: 1 });
+    f.rows.push({ id: "previous", status: "DETECTED", generation: 1,
+      lastExternalActivityAt: new Date(ACTIVITY), statusHistory: [{ fromStatus: null, toStatus: "DETECTED",
+        source: "WOOCOMMERCE", reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+        metadata: { generation: 1, lastEventId: "woo-event-1" } }] });
     f.setCandidate(null);
     expect(await f.service.evaluateMatured(candidate())).toEqual({
-      kind: "already-exists", recoveryId: "previous", status: "MESSAGE_SENT",
+      kind: "already-exists", recoveryId: "previous", status: "DETECTED", generation: 1, repairInitial: true,
     });
     expect(f.candidates.getPending).not.toHaveBeenCalled();
     expect(f.consent.evaluateRecipient).not.toHaveBeenCalled();
     expect(f.created).toHaveLength(0);
-    f.rows[0]!.status = "EXPIRED";
-    expect(await f.service.evaluateMatured(candidate())).toMatchObject({ kind: "already-exists", status: "EXPIRED" });
+    f.rows[0]!.status = "MESSAGE_SENT";
+    expect(await f.service.evaluateMatured(candidate())).toMatchObject({ kind: "already-exists",
+      status: "MESSAGE_SENT", repairInitial: false });
+    expect(await f.service.evaluateMatured(candidate({ lastEventId: "different-event" })))
+      .toMatchObject({ kind: "superseded", reason: "ADMISSION_PROVENANCE_MISMATCH" });
   });
 
   it("serialises two concurrent maturity evaluations; one creation survives retries", async () => {
@@ -249,7 +270,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
     f.setFence([permittedFence({ noContact: true, noContactReason: "CUSTOMER_STOP", noContactRevision: 1n })]);
     expect(await f.service.evaluateMatured(candidate())).toMatchObject({ kind: "denied", reason: "CONSENT_CHANGED" });
     expect(f.created).toHaveLength(0);
-    expect(f.queryRaw).toHaveBeenCalledOnce();
+    expect(f.queryRaw).toHaveBeenCalledTimes(2); // prior-row lock, then current-consent fence
   });
 
   it("cannot mark an uncertain unique transaction failure as created or already-exists", async () => {
@@ -268,13 +289,91 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       code: "P2002", clientVersion: "6.19.3", meta: { target: ["shopId", "checkoutToken", "generation"] },
     });
     f.create.mockImplementationOnce(async () => {
-      f.rows.push({ id: "racing-recovery", status: "MESSAGE_SENT", generation: 1 });
+      f.rows.push({ id: "racing-recovery", status: "DETECTED", generation: 1,
+        lastExternalActivityAt: new Date(ACTIVITY), statusHistory: [{ fromStatus: null, toStatus: "DETECTED",
+          source: "WOOCOMMERCE", reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+          metadata: { generation: 1, lastEventId: "woo-event-1" } }] });
       throw conflict;
     });
     expect(await f.service.evaluateMatured(candidate())).toEqual({
-      kind: "already-exists", recoveryId: "racing-recovery", status: "MESSAGE_SENT",
+      kind: "already-exists", recoveryId: "racing-recovery", status: "DETECTED", generation: 1, repairInitial: true,
     });
     expect(f.histories).toHaveLength(0);
+  });
+
+  it("admits generation 2 only after a provenance-backed checkout resumption and freezes generation 1", async () => {
+    const f = fixtures();
+    f.rows.push({ id: "generation-1", status: "CANCELLED", generation: 1,
+      lastExternalActivityAt: new Date("2026-10-24T10:30:00.000Z"), statusHistory: [
+        { fromStatus: null, toStatus: "DETECTED", source: "WOOCOMMERCE", reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+          metadata: { generation: 1, lastEventId: "old-event" } },
+        { fromStatus: "DETECTED", toStatus: "CANCELLED", source: "woocommerce.checkout", reason: "CHECKOUT_RESUMED",
+          metadata: { eventId: "resume-event", nextGeneration: 2 } },
+      ] });
+    const next = candidate({ generation: 2, lastEventId: "new-event", basket: {
+      kind: "nonempty", checkout: { currency: "USD", total: "99.00",
+        items: [{ productId: "new-product", quantity: 3, total: "99.00" }], contact: { phone: PHONE } },
+    } });
+    f.setCandidate(next);
+    expect(await f.service.evaluateMatured(next)).toEqual({
+      kind: "created", recoveryId: "recovery-1", generation: 2,
+    });
+    expect(f.created[0]).toMatchObject({ generation: 2, currency: "USD", totalPrice: expect.anything(),
+      lineItems: [{ productId: "new-product", quantity: 3 }] });
+    expect(f.histories[0]).toMatchObject({ reason: "MATURE_CHECKOUT_REENTRY_ADMISSION", source: "WOOCOMMERCE",
+      metadata: { generation: 2, lastEventId: "new-event" } });
+    expect(f.rows[0]).toMatchObject({ id: "generation-1", status: "CANCELLED", generation: 1 });
+    expect(await f.service.evaluateMatured(next)).toMatchObject({ kind: "already-exists",
+      recoveryId: "recovery-1", generation: 2, repairInitial: true });
+  });
+
+  it.each([
+    [{ status: "CANCELLED", generation: 1, statusHistory: [] }, "PRIOR_GENERATION_NOT_REENTERABLE"],
+    [{ status: "COMPLETED", generation: 1, statusHistory: [] }, "PRIOR_GENERATION_NOT_REENTERABLE"],
+    [{ status: "MESSAGE_SENT", generation: 1, statusHistory: [] }, "PRIOR_GENERATION_ACTIVE"],
+    [{ status: "CANCELLED", generation: 1, statusHistory: [{ source: "woocommerce.order",
+      metadata: { orderId: "order-1", eventId: "event-1", orderKind: "order-cancelled" } }] }, "PRIOR_GENERATION_NOT_REENTERABLE"],
+  ] as const)("does not admit generation 2 after unsafe prior state %j", async (prior, reason) => {
+    const f = fixtures();
+    f.rows.push({ id: "previous", lastExternalActivityAt: new Date(ACTIVITY),
+      statusHistory: prior.statusHistory as Array<Record<string, unknown>>, ...prior });
+    const next = candidate({ generation: 2, lastEventId: "new-event" });
+    f.setCandidate(next);
+    expect(await f.service.evaluateMatured(next)).toMatchObject({ kind: reason === "PRIOR_GENERATION_ACTIVE" ? "deferred" : "superseded", reason });
+    expect(f.created).toHaveLength(0);
+  });
+
+  it("requires candidate generation and watermark to match the accepted current state", async () => {
+    const missing = candidate({ generation: undefined });
+    const f = fixtures();
+    expect(await f.service.evaluateMatured(missing)).toMatchObject({ kind: "denied", reason: "INVALID_CANDIDATE" });
+    f.watermarks.read.mockResolvedValueOnce({ generation: 2, lastEventId: "other", lastActivityAt: ACTIVITY,
+      checkoutDigest: "0".repeat(64), state: "nonempty" });
+    expect(await f.service.evaluateMatured(candidate())).toEqual({
+      kind: "superseded", reason: "ACTIVITY_WATERMARK_CHANGED",
+    });
+    expect(f.created).toHaveLength(0);
+  });
+
+  it("supersedes a late generation-1 job after generation 2 exists", async () => {
+    const f = fixtures();
+    f.rows.push({ id: "generation-2", status: "DETECTED", generation: 2,
+      lastExternalActivityAt: new Date(ACTIVITY), statusHistory: [] });
+    expect(await f.service.evaluateMatured(candidate())).toEqual({
+      kind: "superseded", reason: "GENERATION_SUPERSEDED",
+    });
+    expect(f.candidates.getPending).not.toHaveBeenCalled();
+  });
+
+  it("retries on corrupt resumption metadata instead of treating it as permission to re-enter", async () => {
+    const f = fixtures();
+    f.rows.push({ id: "generation-1", status: "CANCELLED", generation: 1,
+      lastExternalActivityAt: new Date(ACTIVITY), statusHistory: [{ reason: "CHECKOUT_RESUMED",
+        source: "woocommerce.checkout", toStatus: "CANCELLED", fromStatus: "DETECTED",
+        metadata: { nextGeneration: "2" } }] });
+    const next = candidate({ generation: 2, lastEventId: "next-event" });
+    f.setCandidate(next);
+    await expect(f.service.evaluateMatured(next)).rejects.toThrow("Corrupt Woo checkout-resumption history metadata");
   });
 
   it.each(["candidate", "terminal", "consent", "db", "transaction", "redis-lock", "denied-hook"] as const)(
@@ -297,7 +396,7 @@ describe("ARCH-048-BACKGROUND-003 Woo first-recovery admission", () => {
       expect(f.created).toHaveLength(0);
       expect(f.logger.error).toHaveBeenCalledWith("woocommerce.recovery.admission.failed",
         expect.objectContaining({ outcome: "failed", errorType: "Error" }));
-      expect(vi.mocked(f.logger.error).mock.lastCall?.[1].errorMessage).toBe(failure.message);
+      expect(JSON.stringify(vi.mocked(f.logger.error).mock.calls)).not.toContain(failure.message);
     },
   );
 });
