@@ -50,12 +50,154 @@ const combinationPolicy = {
 const discountClasses = ["PRODUCT"];
 const discountTags = ["CAMPAIGN"];
 
+function basicDiscount(overrides: Record<string, unknown> = {}) {
+  return {
+    __typename: "DiscountAutomaticBasic",
+    title: "Observed Basic discount",
+    summary: "10 percent",
+    status: "ACTIVE",
+    startsAt: "2026-09-20T00:00:00.000Z",
+    endsAt: null,
+    recurringCycleLimit: 0,
+    discountClasses,
+    tags: discountTags,
+    combinesWith: combinationPolicy,
+    customerGets: {
+      items: { __typename: "AllDiscountItems" },
+      value: { __typename: "DiscountPercentage", percentage: 10 },
+    },
+    minimumRequirement: null,
+    context: { __typename: "DiscountBuyerSelectionAll" },
+    ...overrides,
+  };
+}
+
 describe("ShopifyDiscountProvider", () => {
+  it("keeps observed-empty own and allowed tags distinct from unknown arrays", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountAutomaticNode/empty-tags",
+      discount: basicDiscount({
+        tags: [],
+        discountClasses: ["ORDER", "PRODUCT", "SHIPPING"],
+        combinesWith: { ...combinationPolicy, productDiscountsWithTagsOnSameCartLine: [] },
+      }),
+    }])));
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = discount?.providerSnapshot.conditionFacts as {
+      completeness: string;
+      combination: { discountTags: string[] | null; allowedSameLineProductTags: string[] | null; discountClasses: string[] | null };
+      unrepresentedConditions: string[];
+    };
+
+    expect(discount?.providerSnapshot.tags).toEqual([]);
+    expect(discount?.providerSnapshot.discountClasses).toEqual(["ORDER", "PRODUCT", "SHIPPING"]);
+    expect(discount?.providerSnapshot.combinesWith).toMatchObject({ productDiscountsWithTagsOnSameCartLine: [] });
+    expect(facts).toMatchObject({
+      completeness: "PARTIAL",
+      combination: { discountTags: [], allowedSameLineProductTags: [], discountClasses: ["ORDER", "PRODUCT", "SHIPPING"] },
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
+    });
+  });
+
+  it.each([
+    { label: "missing own tags", fields: { tags: undefined }, reason: "DISCOUNT_TAGS_UNAVAILABLE", key: "tags" },
+    { label: "malformed own tags", fields: { tags: ["CAMPAIGN", 7] }, reason: "DISCOUNT_TAGS_INVALID", key: "tags" },
+    { label: "oversized own tags", fields: { tags: Array(65).fill("CAMPAIGN") }, reason: "DISCOUNT_TAGS_TRUNCATED", key: "tags" },
+    { label: "malformed classes", fields: { discountClasses: ["PRODUCT", "UNKNOWN"] }, reason: "DISCOUNT_CLASSES_INVALID", key: "discountClasses" },
+    { label: "oversized classes", fields: { discountClasses: ["ORDER", "PRODUCT", "SHIPPING", "ORDER"] }, reason: "DISCOUNT_CLASSES_TRUNCATED", key: "discountClasses" },
+    { label: "unknown allowed same-line tags", fields: { combinesWith: { ...combinationPolicy, productDiscountsWithTagsOnSameCartLine: null } }, reason: "SAME_LINE_TAG_POLICY_UNAVAILABLE", key: "allowedSameLineProductTags" },
+  ])("keeps $label non-authoritative", async ({ fields, reason, key }) => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountAutomaticNode/unknown-tags",
+      discount: basicDiscount(fields),
+    }])));
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = discount?.providerSnapshot.conditionFacts as {
+      completeness: string;
+      combination: Record<string, unknown>;
+      unrepresentedConditions: string[];
+    };
+
+    expect(facts.completeness).toBe("PARTIAL");
+    expect(facts.unrepresentedConditions).toContain(reason);
+    if (key === "tags" || key === "discountClasses") expect(discount?.providerSnapshot[key]).toBeNull();
+    else expect(facts.combination[key]).toBeNull();
+  });
+
+  it.each([
+    { label: "subtotal without currency", value: { __typename: "DiscountMinimumSubtotal", greaterThanOrEqualToSubtotal: { amount: "75.00" } }, reason: "MINIMUM_SUBTOTAL_UNAVAILABLE" },
+    { label: "unsupported minimum type", value: { __typename: "DiscountMinimumDate", minimumDate: "2026-10-01" }, reason: "MINIMUM_REQUIREMENT_UNKNOWN" },
+    { label: "missing minimum type", value: undefined, reason: "MINIMUM_REQUIREMENT_UNAVAILABLE" },
+  ])("keeps $label source-incomplete", async ({ value, reason }) => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountAutomaticNode/minimum-unknown",
+      discount: basicDiscount({ minimumRequirement: value }),
+    }])));
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = discount?.providerSnapshot.conditionFacts as {
+      completeness: string;
+      minimumSubtotal: string | null;
+      minimumQuantity: number | null;
+      unrepresentedConditions: string[];
+    };
+
+    expect(facts).toMatchObject({ completeness: "PARTIAL", minimumSubtotal: null, minimumQuantity: null });
+    expect(facts.unrepresentedConditions).toContain(reason);
+  });
+
+  it("does not claim complete facts when the selected customer audience is not represented", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountAutomaticNode/restricted-audience",
+      discount: basicDiscount({ context: { __typename: "DiscountCustomerSegments" } }),
+    }])));
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = discount?.providerSnapshot.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
+
+    expect(facts.completeness).toBe("PARTIAL");
+    expect(facts.unrepresentedConditions).toContain("CUSTOMER_RESTRICTION_NOT_REPRESENTED");
+  });
+
+  it("preserves observed-empty source arrays and keeps only the pending projection reason", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountAutomaticNode/empty-tags",
+      discount: basicDiscount({
+        tags: [],
+        discountClasses: ["ORDER", "PRODUCT", "SHIPPING"],
+        combinesWith: { ...combinationPolicy, productDiscountsWithTagsOnSameCartLine: [] },
+      }),
+    }])));
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = discount?.providerSnapshot.conditionFacts as {
+      completeness: string;
+      combination: { discountTags: string[] | null; allowedSameLineProductTags: string[] | null; discountClasses: string[] | null };
+      unrepresentedConditions: string[];
+    };
+
+    expect(discount?.providerSnapshot.tags).toEqual([]);
+    expect(discount?.providerSnapshot.discountClasses).toEqual(["ORDER", "PRODUCT", "SHIPPING"]);
+    expect(discount?.providerSnapshot.combinesWith).toMatchObject({ productDiscountsWithTagsOnSameCartLine: [] });
+    expect(facts).toMatchObject({
+      completeness: "PARTIAL",
+      combination: { discountTags: [], allowedSameLineProductTags: [], discountClasses: ["ORDER", "PRODUCT", "SHIPPING"] },
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
+    });
+  });
+
   it("preserves redacted GraphQL error messages and codes as bounded diagnostics", async () => {
     mocks.getShopifyAccessToken.mockResolvedValue("token-1");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       errors: [{
-        message: "Discount lookup failed for jane@example.com, +1 415 555 1212; Bearer private-bearer-value shpat_secret-token-123456",
+        message: "Discount lookup failed for jane@example.com, +1 415 555 1212; Discount code SAVE20; Bearer private-bearer-value shpat_secret-token-123456 https://example.test/signed?signature=private-signature",
         extensions: { code: "ACCESS_DENIED" },
       }],
       data: { privatePayload: "must never be logged" },
@@ -76,7 +218,8 @@ describe("ShopifyDiscountProvider", () => {
     expect(fields).toMatchObject({
       origin: "provider_response",
       provider: "shopify",
-      operation: "discountNodes",
+      operation: "DiscountNodes",
+      path: "/admin/api/2026-07/graphql.json",
       httpStatus: 200,
       providerRequestId: "request-123",
       redactionApplied: true,
@@ -85,10 +228,14 @@ describe("ShopifyDiscountProvider", () => {
     });
     const providerErrors = fields.providerErrors as Array<{ message?: string }>;
     expect(providerErrors[0]?.message).toContain("Discount lookup failed for [REDACTED], [REDACTED]");
+    expect(providerErrors[0]?.message).toContain("Discount code [REDACTED]");
     expect(providerErrors[0]?.message).toContain("Bearer [REDACTED]");
     expect(JSON.stringify(fields)).not.toContain("jane@example.com");
     expect(JSON.stringify(fields)).not.toContain("private-bearer-value");
     expect(JSON.stringify(fields)).not.toContain("shpat_secret-token-123456");
+    expect(JSON.stringify(fields)).not.toContain("SAVE20");
+    expect(JSON.stringify(fields)).not.toContain("private-signature");
+    expect(JSON.stringify(fields)).not.toContain("example.test");
     expect(JSON.stringify(fields)).not.toContain("must never be logged");
   });
 
@@ -110,7 +257,7 @@ describe("ShopifyDiscountProvider", () => {
           value: { __typename: "DiscountAmount", amount: { amount: "20.00", currencyCode: "GBP" }, appliesOnEachItem: false },
         },
         minimumRequirement: { __typename: "DiscountMinimumSubtotal", greaterThanOrEqualToSubtotal: { amount: "75.00", currencyCode: "GBP" } },
-        context: { __typename: "DiscountCustomerSegments" },
+        context: { __typename: "DiscountBuyerSelectionAll" },
       },
     }]));
     vi.stubGlobal("fetch", fetchMock);
@@ -119,7 +266,7 @@ describe("ShopifyDiscountProvider", () => {
 
     expect(discount).toMatchObject({ providerType: "DiscountCodeBasic", fixedSelectable: true, singleRedeemCode: "SAVE20" });
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      provider: "SHOPIFY", completeness: "COMPLETE", providerStatus: "ACTIVE",
+      provider: "SHOPIFY", completeness: "PARTIAL", providerStatus: "ACTIVE",
       discountKind: "FIXED_AMOUNT", discountValue: "20.00", discountCurrency: "GBP",
       targeting: {
         kind: "MIXED", includedProductIds: ["gid://shopify/Product/1"],
@@ -127,27 +274,34 @@ describe("ShopifyDiscountProvider", () => {
         excludedProductIds: [], excludedVariantIds: [], excludedCollectionIds: [],
       },
       minimumSubtotal: "75.00", minimumQuantity: null,
-      usageLimit: 50, usageCount: 7, perCustomerLimit: 1, customerScope: "RESTRICTED",
+      usageLimit: 50, usageCount: 7, perCustomerLimit: 1, customerScope: "ALL",
       combination: {
         discountClasses: ["PRODUCT"], shopifyPlus: true,
         combinesWith: { orderDiscounts: false, productDiscounts: true, shippingDiscounts: true },
         discountTags: ["CAMPAIGN"], allowedSameLineProductTags: ["LOYALTY"],
       },
-      unrepresentedConditions: [],
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
     expect(discount?.providerSnapshot.combinesWith).toEqual(combinationPolicy);
     expect(discount?.providerSnapshot.discountClasses).toEqual(discountClasses);
     expect(discount?.providerSnapshot.tags).toEqual(discountTags);
+    expect(discount?.providerSnapshot.minimumRequirement).toEqual({
+      __typename: "DiscountMinimumSubtotal",
+      greaterThanOrEqualToSubtotal: { amount: "75.00", currencyCode: "GBP" },
+    });
     expect(CommerceDiscountConditionFactsSchema.safeParse(discount?.providerSnapshot.conditionFacts).success).toBe(true);
-    const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string; variables: { first: number } };
+    const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string; variables: { first: number; includeShopPlan: boolean } };
     expect(request.variables.first).toBeLessThanOrEqual(10);
+    expect(request.variables.includeShopPlan).toBe(true);
     expect(request.query).toContain("products(first: 20)");
     expect(request.query).toContain("productVariants(first: 20)");
     expect(request.query).toContain("collections(first: 20)");
     expect(request.query).toContain("orderDiscounts productDiscounts shippingDiscounts");
     expect(request.query).toContain("productDiscountsWithTagsOnSameCartLine");
-    expect(request.query).toContain("shop { plan { shopifyPlus } }");
+    expect(request.query).toContain("shop @include(if: $includeShopPlan) { plan { shopifyPlus } }");
     expect(request.query.match(/discountClasses tags/g)).toHaveLength(2);
+    expect(request.query.match(/\.\.\. on DiscountMinimumSubtotal/g)).toHaveLength(2);
+    expect(request.query.match(/\.\.\. on DiscountMinimumQuantity/g)).toHaveLength(2);
     expect(request.query.match(/recurringCycleLimit/g)).toHaveLength(2);
     expect(request.query.match(/combinesWith \{/g)).toHaveLength(2);
   });
@@ -174,11 +328,11 @@ describe("ShopifyDiscountProvider", () => {
     const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      completeness: "COMPLETE", discountKind: "PERCENTAGE", discountValue: "15", discountCurrency: null,
+      completeness: "PARTIAL", discountKind: "PERCENTAGE", discountValue: "15", discountCurrency: null,
       targeting: { kind: "COLLECTIONS", includedCollectionIds: ["gid://shopify/Collection/4"] },
       minimumSubtotal: null, minimumQuantity: 3, usageCount: 11, customerScope: "ALL",
       combination: { discountClasses: ["PRODUCT"], shopifyPlus: true },
-      unrepresentedConditions: [],
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
   });
 
@@ -204,10 +358,10 @@ describe("ShopifyDiscountProvider", () => {
     const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
-      completeness: "COMPLETE", discountKind: "PERCENTAGE",
+      completeness: "PARTIAL", discountKind: "PERCENTAGE",
       targeting: { kind: "PRODUCTS", includedProductIds: ["gid://shopify/Product/42"] },
       combination: { discountClasses: ["PRODUCT"], shopifyPlus: true },
-      unrepresentedConditions: [],
+      unrepresentedConditions: ["COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS"],
     });
   });
 
@@ -370,6 +524,75 @@ describe("ShopifyDiscountProvider", () => {
       completeness: "PARTIAL", discountKind: kind, customerScope: "UNKNOWN",
       targeting: { kind: "UNKNOWN", includedProductIds: [], includedCollectionIds: [] },
       unrepresentedConditions: [reason],
+    });
+  });
+
+  it("observes the shop plan once and reuses it across discount pages", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response([], { hasNextPage: true, endCursor: "cursor-1" }, true))
+      .mockResolvedValueOnce(response([{
+        id: "gid://shopify/DiscountAutomaticNode/plan-once",
+        discount: basicDiscount(),
+      }], { hasNextPage: false, endCursor: null }, false));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const requests = fetchMock.mock.calls.map((call) => JSON.parse(call[1]?.body as string) as { variables: { includeShopPlan: boolean } });
+    const facts = discount?.providerSnapshot.conditionFacts as { combination: { shopifyPlus: boolean | null } };
+
+    expect(requests.map((request) => request.variables.includeShopPlan)).toEqual([true, false]);
+    expect(facts.combination.shopifyPlus).toBe(true);
+  });
+
+  it.each([
+    { status: 403, message: "Shopify denied discount access", code: "ACCESS_DENIED" },
+    { status: 503, message: "Shopify discount service unavailable", code: "SERVICE_UNAVAILABLE" },
+  ])("retains Shopify HTTP $status error provenance", async ({ status, message, code }) => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      errors: [{ message, extensions: { code } }],
+    }), { status, headers: { "Content-Type": "application/json", "x-request-id": `request-${status}` } })));
+
+    let caught: unknown;
+    try {
+      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ShopifyDiscountProviderError);
+    expect(getShopifyDiscountFailureLogFields(caught)).toMatchObject({
+      origin: "provider_response",
+      provider: "shopify",
+      operation: "DiscountNodes",
+      path: "/admin/api/2026-07/graphql.json",
+      httpStatus: status,
+      providerRequestId: `request-${status}`,
+      providerErrors: [{ message, code }],
+    });
+  });
+
+  it("preserves SDK transport exception name, message, and cause when no provider response exists", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    const cause = new Error("socket closed");
+    const transportError = new TypeError("fetch failed", { cause });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(transportError));
+
+    let caught: unknown;
+    try {
+      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(getShopifyDiscountFailureLogFields(caught)).toMatchObject({
+      origin: "sdk_exception",
+      errorName: "TypeError",
+      errorMessage: "fetch failed",
+      errorCause: [{ name: "Error", message: "socket closed" }],
+      redactionApplied: false,
+      truncated: false,
     });
   });
 

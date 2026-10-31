@@ -9,8 +9,8 @@ const MAX_COMBINATION_TAGS = 64;
 const MAX_COMBINATION_TAG_LENGTH = 128;
 
 const QUERY = `#graphql
-query DiscountNodes($first: Int!, $after: String) {
-  shop { plan { shopifyPlus } }
+query DiscountNodes($first: Int!, $after: String, $includeShopPlan: Boolean!) {
+  shop @include(if: $includeShopPlan) { plan { shopifyPlus } }
   discountNodes(first: $first, after: $after) {
     nodes {
       id
@@ -197,7 +197,9 @@ export function getShopifyDiscountFailureLogFields(
     } else {
       fields.origin = "provider_response";
       fields.provider = "shopify";
-      fields.operation = "discountNodes";
+      fields.operation = "DiscountNodes";
+        fields.path = `/admin/api/${API_VERSION}/graphql.json`;
+      fields.path = `/admin/api/${API_VERSION}/graphql.json`;
       fields.httpStatus = error.failure.httpStatus;
       if (error.failure.providerResponseFormat) fields.providerResponseFormat = error.failure.providerResponseFormat;
       if (error.failure.providerRequestId) fields.providerRequestId = error.failure.providerRequestId;
@@ -257,6 +259,9 @@ function redactDiagnosticText(value: string, maxLength: number): { value: string
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
     .replace(/\b(?:shpat|shpca|shppa|shpss|shpua)_[A-Za-z0-9_-]+\b/gi, "[REDACTED]")
     .replace(/\b((?:access_token|refresh_token|verify_token|client_secret|api_key|token|password)=)[^&#\s]*/gi, "$1[REDACTED]")
+    .replace(/([?&](?:discount_?)?code=)[^&#\s]*/gi, "$1[REDACTED]")
+    .replace(/\b((?:discount|customer|promo(?:tion)?)\s+code\s+)[A-Za-z0-9][A-Za-z0-9_-]{2,63}\b/gi, "$1[REDACTED]")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[REDACTED_URL]")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
     .replace(/\+?\d(?:[\s().-]*\d){9,14}/g, "[REDACTED]");
   const redacted = safe !== value;
@@ -343,6 +348,7 @@ export class ShopifyDiscountProvider {
     let after: string | null = null;
     let hasNextPage = true;
     let pageCount = 0;
+    let shopifyPlus: boolean | null = null;
 
     while (hasNextPage) {
       if (pageCount >= MAX_DISCOUNT_PAGES) {
@@ -352,7 +358,7 @@ export class ShopifyDiscountProvider {
       const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-        body: JSON.stringify({ query: QUERY, variables: { first: PAGE_SIZE, after } }),
+        body: JSON.stringify({ query: QUERY, variables: { first: PAGE_SIZE, after, includeShopPlan: pageCount === 1 } }),
       });
       if (!response.ok) {
         let errorBody: { errors?: unknown } | null = null;
@@ -383,7 +389,7 @@ export class ShopifyDiscountProvider {
       if (!connection || !Array.isArray(connection.nodes)) {
         throw new ShopifyDiscountInternalError("Shopify discount GraphQL returned an invalid response");
       }
-      const shopifyPlus = booleanValue(body.data?.shop?.plan?.shopifyPlus);
+      if (pageCount === 1) shopifyPlus = booleanValue(body.data?.shop?.plan?.shopifyPlus);
       for (const node of connection.nodes) {
         if (node.discount) records.push(normalizeDiscount(node, shopifyPlus));
       }
@@ -482,7 +488,7 @@ type RecurringCycleLimitProjection = {
   reason: string | null;
 };
 
-type NormalizedTags = { tags: string[] | null; available: boolean; complete: boolean };
+type NormalizedTags = { tags: string[] | null; issue: "UNAVAILABLE" | "INVALID" | "TRUNCATED" | null };
 
 function normalizeCombinationPolicy(
   discount: Record<string, unknown>,
@@ -499,15 +505,12 @@ function normalizeCombinationPolicy(
     reasons.add("COMBINATION_POLICY_UNAVAILABLE");
   }
 
-  const sameLineTags = normalizeCombinationTags(combinesWith?.productDiscountsWithTagsOnSameCartLine, true);
-  const discountTags = normalizeCombinationTags(discount.tags, false);
+  const sameLineTags = normalizeCombinationTags(combinesWith?.productDiscountsWithTagsOnSameCartLine);
+  const discountTags = normalizeCombinationTags(discount.tags);
   const discountClasses = normalizeDiscountClasses(discount.discountClasses);
-  if (!sameLineTags.available) reasons.add("SAME_LINE_TAG_POLICY_UNAVAILABLE");
-  if (!sameLineTags.complete) reasons.add("SAME_LINE_TAG_POLICY_TRUNCATED");
-  if (!discountTags.available) reasons.add("DISCOUNT_TAGS_UNAVAILABLE");
-  if (!discountTags.complete) reasons.add("DISCOUNT_TAGS_TRUNCATED");
-  if (!discountClasses.available) reasons.add("DISCOUNT_CLASSES_UNAVAILABLE");
-  if (!discountClasses.complete) reasons.add("DISCOUNT_CLASSES_TRUNCATED");
+  if (sameLineTags.issue) reasons.add(`SAME_LINE_TAG_POLICY_${sameLineTags.issue}`);
+  if (discountTags.issue) reasons.add(`DISCOUNT_TAGS_${discountTags.issue}`);
+  if (discountClasses.issue) reasons.add(`DISCOUNT_CLASSES_${discountClasses.issue}`);
   if (shopifyPlus === null) reasons.add("SHOPIFY_PLAN_UNAVAILABLE");
   if (shopifyPlus === true && sameLineTags.tags === null) reasons.add("SAME_LINE_TAG_POLICY_UNAVAILABLE");
 
@@ -530,32 +533,28 @@ function normalizeCombinationPolicy(
   };
 }
 
-function normalizeCombinationTags(value: unknown, nullable: boolean): NormalizedTags {
-  if (value === null && nullable) return { tags: null, available: true, complete: true };
-  if (!Array.isArray(value)) return { tags: null, available: false, complete: false };
-  const validTags = value.filter((tag): tag is string => typeof tag === "string" && tag.length > 0);
-  const complete = value.length <= MAX_COMBINATION_TAGS
-    && validTags.length === value.length
-    && validTags.every((tag) => tag.length <= MAX_COMBINATION_TAG_LENGTH);
+function normalizeCombinationTags(value: unknown): NormalizedTags {
+  if (!Array.isArray(value)) return { tags: null, issue: "UNAVAILABLE" };
+  if (value.length > MAX_COMBINATION_TAGS) return { tags: null, issue: "TRUNCATED" };
+  const valid = value.every((tag) => typeof tag === "string" && tag.length > 0 && tag.length <= MAX_COMBINATION_TAG_LENGTH);
+  if (!valid) return { tags: null, issue: "INVALID" };
   return {
-    tags: validTags.slice(0, MAX_COMBINATION_TAGS).map((tag) => tag.slice(0, MAX_COMBINATION_TAG_LENGTH)),
-    available: true,
-    complete,
+    tags: value as string[],
+    issue: null,
   };
 }
 
 function normalizeDiscountClasses(value: unknown): {
   classes: Array<"ORDER" | "PRODUCT" | "SHIPPING"> | null;
-  available: boolean;
-  complete: boolean;
+  issue: "UNAVAILABLE" | "INVALID" | "TRUNCATED" | null;
 } {
-  if (!Array.isArray(value)) return { classes: null, available: false, complete: false };
-  const validClasses = value.filter((item): item is "ORDER" | "PRODUCT" | "SHIPPING" =>
-    item === "ORDER" || item === "PRODUCT" || item === "SHIPPING");
+  if (!Array.isArray(value)) return { classes: null, issue: "UNAVAILABLE" };
+  if (value.length > 3) return { classes: null, issue: "TRUNCATED" };
+  const valid = value.every((item) => item === "ORDER" || item === "PRODUCT" || item === "SHIPPING");
+  if (!valid) return { classes: null, issue: "INVALID" };
   return {
-    classes: validClasses.slice(0, 3),
-    available: true,
-    complete: validClasses.length === value.length && value.length <= 3,
+    classes: value as Array<"ORDER" | "PRODUCT" | "SHIPPING">,
+    issue: null,
   };
 }
 
@@ -613,14 +612,11 @@ function normalizeConditionFacts(
     return { ...base, unrepresentedConditions: [...reasons] };
   }
 
-  let completeness = true;
   base.combination = combination.facts;
   for (const reason of combination.reasons) {
-    completeness = false;
     reasons.add(reason);
   }
   if (recurringCycleLimit.reason) {
-    completeness = false;
     reasons.add(recurringCycleLimit.reason);
   }
 
@@ -630,7 +626,6 @@ function normalizeConditionFacts(
   if (valueType === "DiscountPercentage") {
     const percentage = finiteNonNegative(value?.percentage);
     if (percentage === null) {
-      completeness = false;
       reasons.add("DISCOUNT_VALUE_UNAVAILABLE");
     } else {
       base.discountKind = "PERCENTAGE";
@@ -639,7 +634,6 @@ function normalizeConditionFacts(
   } else if (valueType === "DiscountAmount") {
     const money = normalizeMoney(value?.amount);
     if (!money) {
-      completeness = false;
       reasons.add("DISCOUNT_VALUE_UNAVAILABLE");
     } else {
       base.discountKind = "FIXED_AMOUNT";
@@ -647,41 +641,34 @@ function normalizeConditionFacts(
       base.discountCurrency = money.currencyCode;
     }
   } else {
-    completeness = false;
     reasons.add(valueType === "DiscountOnQuantity" ? "QUANTITY_DISCOUNT_VALUE_UNSUPPORTED" : "DISCOUNT_VALUE_UNKNOWN");
   }
 
   const target = normalizeTargeting(gets?.items);
   base.targeting = target.targeting;
   for (const reason of target.reasons) {
-    completeness = false;
     reasons.add(reason);
   }
 
   const minimum = asRecord(discount.minimumRequirement);
   if (discount.minimumRequirement === undefined) {
-    completeness = false;
     reasons.add("MINIMUM_REQUIREMENT_UNAVAILABLE");
   } else if (minimum === null && discount.minimumRequirement !== null) {
-    completeness = false;
     reasons.add("MINIMUM_REQUIREMENT_UNKNOWN");
   } else if (minimum?.__typename === "DiscountMinimumSubtotal") {
     const money = normalizeMoney(minimum.greaterThanOrEqualToSubtotal);
     if (money) {
       base.minimumSubtotal = money.amount;
     } else {
-      completeness = false;
       reasons.add("MINIMUM_SUBTOTAL_UNAVAILABLE");
     }
   } else if (minimum?.__typename === "DiscountMinimumQuantity") {
     const quantity = nonNegativeSafeInteger(minimum.greaterThanOrEqualToQuantity);
     if (quantity !== null) base.minimumQuantity = quantity;
     else {
-      completeness = false;
       reasons.add("MINIMUM_QUANTITY_UNAVAILABLE");
     }
   } else if (minimum !== null) {
-    completeness = false;
     reasons.add("MINIMUM_REQUIREMENT_UNKNOWN");
   }
 
@@ -689,17 +676,18 @@ function normalizeConditionFacts(
   if (context?.__typename === "DiscountBuyerSelectionAll") base.customerScope = "ALL";
   else if (context?.__typename === "DiscountCustomers" || context?.__typename === "DiscountCustomerSegments") {
     base.customerScope = "RESTRICTED";
+    reasons.add("CUSTOMER_RESTRICTION_NOT_REPRESENTED");
   } else if (context?.__typename === "DiscountMarkets") {
-    completeness = false;
     reasons.add("MARKET_RESTRICTION_NOT_REPRESENTED");
   } else {
-    completeness = false;
     reasons.add("CUSTOMER_SCOPE_UNKNOWN");
   }
 
+  reasons.add("COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS");
+
   return {
     ...base,
-    completeness: completeness ? "COMPLETE" : "PARTIAL",
+    completeness: reasons.size === 0 ? "COMPLETE" : "PARTIAL",
     unrepresentedConditions: [...reasons].slice(0, 24),
   };
 }
