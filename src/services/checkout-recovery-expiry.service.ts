@@ -4,7 +4,7 @@ import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runt
 const PAGE_SIZE = 100;
 const MAX_PAGES = 1_000;
 const MILLISECONDS_PER_DAY = 86_400_000n;
-const MIN_POSTGRES_TIMESTAMP_MS = -212_760_172_800_000n;
+const MIN_POSTGRES_TIMESTAMP_MS = -210_866_803_200_000n;
 const MAX_DATE_TIMESTAMP_MS = 8_640_000_000_000_000n;
 const ACTIVE_STATUSES = ["DETECTED", "MESSAGE_SENT", "ENGAGED"] as const;
 
