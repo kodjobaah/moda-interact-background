@@ -1,0 +1,402 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  CheckoutPriceReconciliationService,
+  InvalidPriceReconciliationAttemptError,
+} from "../../../../src/services/recovery-pricing/checkout-price-reconciliation.service.js";
+import { fingerprintRecoveryPricingBasket } from "../../../../src/services/recovery-pricing/price-comparison.js";
+import type {
+  PriceReconciliationInput,
+  RecoveryPricingState,
+} from "../../../../src/services/recovery-pricing/checkout-price-reconciliation.types.js";
+
+const now = new Date("2026-10-31T09:00:00.000Z");
+
+function state(
+  lineItems: unknown = [{ productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/2", quantity: 2, price: "80.00" }],
+  changes: Partial<RecoveryPricingState["recovery"]> = {},
+  attemptChanges: Partial<NonNullable<RecoveryPricingState["attempt"]>> = {},
+): RecoveryPricingState {
+  return {
+    recovery: {
+      id: "recovery-1", shopId: "shop-1", generation: 7, currency: "GBP", lineItems,
+      platform: "SHOPIFY", status: "DETECTED", ...changes,
+    },
+    attempt: {
+      id: "attempt-1", checkoutRecoveryId: "recovery-1", sequence: 1,
+      trigger: "INITIAL", status: "PENDING", initiatedBy: "AGENT", ...attemptChanges,
+    },
+  };
+}
+
+function input(snapshot = state(), signal = new AbortController().signal): PriceReconciliationInput {
+  return {
+    shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+    expectedGeneration: 7,
+    expectedBasketFingerprint: fingerprintRecoveryPricingBasket({
+      shopId: snapshot.recovery.shopId,
+      checkoutRecoveryId: snapshot.recovery.id,
+      generation: snapshot.recovery.generation,
+      currency: snapshot.recovery.currency,
+      lineItems: snapshot.recovery.lineItems,
+    }),
+    signal,
+  };
+}
+
+function productResult(input_: { productId?: string; variantId?: string | null; unitPrice?: string | null; currency?: string | null } = {}) {
+  return {
+    contractVersion: "commerce.v1",
+    status: "OK",
+    data: {
+      product: {
+        productId: input_.productId ?? "gid://shopify/Product/1",
+        variantId: input_.variantId === undefined ? "gid://shopify/ProductVariant/2" : input_.variantId,
+        title: "Observed product", url: null, available: true,
+        unitPrice: input_.unitPrice === undefined ? "90.00" : input_.unitPrice,
+        currency: input_.currency === undefined ? "GBP" : input_.currency,
+        productType: null, vendor: null, observedAt: "2026-10-31T08:59:00.000Z",
+      },
+    },
+    renderedText: "",
+  };
+}
+
+function service(options: {
+  snapshots?: RecoveryPricingState[];
+  recoveryRead?: () => Promise<RecoveryPricingState | null>;
+  productRead?: (request: Parameters<ConstructorParameters<typeof CheckoutPriceReconciliationService>[0]["productReader"]["read"]>[0]) => Promise<unknown>;
+  logger?: { error: ReturnType<typeof vi.fn> };
+  environment?: string;
+  now?: () => Date;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+} = {}) {
+  let reads = 0;
+  const snapshots = options.snapshots ?? [state()];
+  const recoveryAttemptReader = {
+    read: vi.fn(options.recoveryRead ?? (async () => snapshots[Math.min(reads++, snapshots.length - 1)] ?? null)),
+  };
+  const productReader = {
+    read: vi.fn(options.productRead ?? (async () => productResult())),
+  };
+  const logger = options.logger ?? { error: vi.fn() };
+  return {
+    instance: new CheckoutPriceReconciliationService({
+      recoveryAttemptReader, productReader, logger,
+      ...(options.environment ? { environment: options.environment } : {}),
+      now: options.now ?? (() => now),
+      ...(options.setTimer ? { setTimer: options.setTimer } : {}),
+      ...(options.clearTimer ? { clearTimer: options.clearTimer } : {}),
+    }),
+    recoveryAttemptReader,
+    productReader,
+    logger,
+  };
+}
+
+describe("CheckoutPriceReconciliationService", () => {
+  it("returns exact catalogue facts as partial and never claims a checkout price change or subtotal", async () => {
+    const harness = service();
+    const result = await harness.instance.reconcile(input());
+    expect(result.completeness).toBe("PARTIAL");
+    expect(result.currentMerchandiseSubtotal).toBeNull();
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toMatchObject({
+      lineKey: "line-0001", catalogueComparison: "DIFFERENT",
+      checkoutPriceChange: "UNVERIFIABLE", catalogueUnitPrice: "90.00",
+      catalogueCurrency: "GBP", reasonCodes: expect.arrayContaining(["CATALOGUE_PRICE_DIFFERENCE", "PRICE_CONTEXT_UNVERIFIED"]),
+    });
+    expect(harness.productReader.read).toHaveBeenCalledWith(expect.objectContaining({
+      shopId: "shop-1", productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/2",
+      toolContext: { purpose: "INITIAL_RECOVERY_OUTREACH" },
+    }));
+    expect(harness.recoveryAttemptReader.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects stale attempt lineage and fingerprints before making any exact product read", async () => {
+    const snapshot = state(undefined, {}, { sequence: 2 });
+    const harness = service({ snapshots: [snapshot] });
+    await expect(harness.instance.reconcile(input(snapshot))).rejects.toBeInstanceOf(InvalidPriceReconciliationAttemptError);
+    expect(harness.productReader.read).not.toHaveBeenCalled();
+
+    const fresh = service();
+    await expect(fresh.instance.reconcile({ ...input(), expectedBasketFingerprint: "0".repeat(64) }))
+      .rejects.toMatchObject({ reasonCode: "RECOVERY_BASKET_FINGERPRINT_MISMATCH" });
+    expect(fresh.productReader.read).not.toHaveBeenCalled();
+  });
+
+  it("rejects another shop's trusted recovery before making an exact product read", async () => {
+    const otherShop = state(undefined, { shopId: "shop-2" });
+    const harness = service({ snapshots: [otherShop] });
+    await expect(harness.instance.reconcile(input(otherShop)))
+      .rejects.toMatchObject({ reasonCode: "RECOVERY_ATTEMPT_LINEAGE_INVALID" });
+    expect(harness.productReader.read).not.toHaveBeenCalled();
+  });
+
+  it("rechecks generation and basket fingerprint after the provider read", async () => {
+    const initial = state();
+    const changed = state([{ productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/3", quantity: 2, price: "80.00" }]);
+    const harness = service({ snapshots: [initial, changed] });
+    await expect(harness.instance.reconcile(input(initial)))
+      .rejects.toMatchObject({ reasonCode: "RECOVERY_BASKET_FINGERPRINT_MISMATCH" });
+    expect(harness.productReader.read).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns invalid and oversized baskets without product reads", async () => {
+    for (const [basket, reason] of [[[], "BASKET_INVALID"], [null, "BASKET_INVALID"],
+      [Array.from({ length: 101 }, () => ({ productId: "p", variantId: "v", quantity: 1, price: "1.00" })), "BASKET_TOO_LARGE"]] as const) {
+      const snapshot = state(basket);
+      const harness = service({ snapshots: [snapshot] });
+      const result = await harness.instance.reconcile(input(snapshot));
+      expect(result).toMatchObject({ completeness: "PARTIAL", lines: [], currentMerchandiseSubtotal: null, reasonCodes: [reason] });
+      expect(harness.productReader.read).not.toHaveBeenCalled();
+      expect(harness.recoveryAttemptReader.read).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("requires Shopify variants but accepts an exact Woo simple product with a null variant", async () => {
+    const shopify = state([{ productId: "gid://shopify/Product/1", variantId: null, quantity: 1, price: "80.00" }]);
+    const shopifyHarness = service({ snapshots: [shopify] });
+    const missingVariant = await shopifyHarness.instance.reconcile(input(shopify));
+    expect(missingVariant.lines[0]).toMatchObject({ catalogueComparison: "INCOMPARABLE", reasonCodes: expect.arrayContaining(["MISSING_VARIANT_ID"]) });
+    expect(shopifyHarness.productReader.read).not.toHaveBeenCalled();
+
+    const woo = state([{ productId: "42", variantId: null, quantity: 1, price: "80.00" }], { platform: "WOOCOMMERCE" });
+    const wooHarness = service({ snapshots: [woo], productRead: async () => productResult({
+      productId: "42", variantId: null, unitPrice: "80.00", currency: "GBP",
+    }) });
+    const simpleProduct = await wooHarness.instance.reconcile(input(woo));
+    expect(wooHarness.productReader.read).toHaveBeenCalledWith(expect.objectContaining({ productId: "42", variantId: null }));
+    expect(simpleProduct.lines[0]).toMatchObject({ catalogueComparison: "EQUAL", checkoutPriceChange: "UNVERIFIABLE" });
+  });
+
+  it("deduplicates exact product/variant reads while preserving ordered line quantities", async () => {
+    const lines = [1, 3, 5].map((quantity) => ({
+      productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/2", quantity, price: "80.00",
+    }));
+    const snapshot = state(lines);
+    const harness = service({ snapshots: [snapshot] });
+    const result = await harness.instance.reconcile(input(snapshot));
+    expect(harness.productReader.read).toHaveBeenCalledTimes(1);
+    expect(result.lines.map((line) => line.quantity)).toEqual([1, 3, 5]);
+    expect(result.lines.map((line) => line.lineKey)).toEqual(["line-0001", "line-0002", "line-0003"]);
+  });
+
+  it("keeps invalid required facts incomparable and rejects provider identity mismatches", async () => {
+    const invalidQuantity = state([{ productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/2", quantity: 0, price: "80.00" }]);
+    const quantityHarness = service({ snapshots: [invalidQuantity] });
+    const invalid = await quantityHarness.instance.reconcile(input(invalidQuantity));
+    expect(invalid.lines[0]).toMatchObject({
+      catalogueComparison: "INCOMPARABLE",
+      reasonCodes: expect.arrayContaining(["SOURCE_OBSERVATION_INVALID"]),
+    });
+
+    const identityHarness = service({ productRead: async () => productResult({
+      productId: "gid://shopify/Product/other", variantId: "gid://shopify/ProductVariant/2",
+    }) });
+    const mismatch = await identityHarness.instance.reconcile(input());
+    expect(mismatch.lines[0]).toMatchObject({
+      catalogueComparison: "INCOMPARABLE", catalogueUnitPrice: null,
+      reasonCodes: expect.arrayContaining(["PROVIDER_IDENTITY_MISMATCH"]),
+    });
+
+    const wrongVariantHarness = service({ productRead: async () => productResult({
+      variantId: "gid://shopify/ProductVariant/other",
+    }) });
+    const wrongVariant = await wrongVariantHarness.instance.reconcile(input());
+    expect(wrongVariant.lines[0]).toMatchObject({
+      catalogueComparison: "INCOMPARABLE", catalogueUnitPrice: null,
+      reasonCodes: expect.arrayContaining(["PROVIDER_IDENTITY_MISMATCH"]),
+    });
+  });
+
+  it("fetches fresh observations for each retry invocation", async () => {
+    const observations = ["90.00", "95.00"];
+    const harness = service({ productRead: async () => productResult({ unitPrice: observations.shift() }) });
+    const first = await harness.instance.reconcile(input());
+    const retry = await harness.instance.reconcile(input());
+    expect(first.lines[0]?.catalogueUnitPrice).toBe("90.00");
+    expect(retry.lines[0]?.catalogueUnitPrice).toBe("95.00");
+    expect(harness.productReader.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("limits exact product reads to four concurrent calls and no more than 100", async () => {
+    const lines = Array.from({ length: 100 }, (_, index) => ({
+      productId: `gid://shopify/Product/${index + 1}`,
+      variantId: `gid://shopify/ProductVariant/${index + 1}`,
+      quantity: 1, price: "80.00",
+    }));
+    const snapshot = state(lines);
+    let active = 0;
+    let maximumActive = 0;
+    const harness = service({
+      snapshots: [snapshot],
+      productRead: async (request) => {
+        active++;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active--;
+        return productResult({ productId: request.productId, variantId: request.variantId });
+      },
+    });
+    const result = await harness.instance.reconcile(input(snapshot));
+    expect(harness.productReader.read).toHaveBeenCalledTimes(100);
+    expect(maximumActive).toBe(4);
+    expect(result.lines).toHaveLength(100);
+  });
+
+  it("marks budget-exhausted reads incomplete and aborts in-flight product calls", async () => {
+    const lines = Array.from({ length: 6 }, (_, index) => ({
+      productId: `gid://shopify/Product/${index + 1}`,
+      variantId: `gid://shopify/ProductVariant/${index + 1}`,
+      quantity: 1, price: "80.00",
+    }));
+    const snapshot = state(lines);
+    let expire: (() => void) | undefined;
+    let started = 0;
+    const clearTimer = vi.fn();
+    const harness = service({
+      snapshots: [snapshot],
+      setTimer: ((callback: TimerHandler) => { expire = () => typeof callback === "function" ? callback() : undefined; return 1 as ReturnType<typeof setTimeout>; }) as typeof setTimeout,
+      clearTimer,
+      productRead: async ({ signal }) => {
+        started++;
+        return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      },
+    });
+    const pending = harness.instance.reconcile(input(snapshot));
+    await vi.waitFor(() => expect(started).toBe(4));
+    expire?.();
+    const result = await pending;
+    expect(result.completeness).toBe("PARTIAL");
+    expect(result.lines.every((line) => line.reasonCodes.includes("BUDGET_EXHAUSTED"))).toBe(true);
+    expect(started).toBe(4);
+    expect(clearTimer).toHaveBeenCalled();
+  });
+
+  it("propagates caller cancellation and unexpected source errors without replacing them", async () => {
+    const controller = new AbortController();
+    const cancellationHarness = service({ productRead: async ({ signal }) => {
+      controller.abort(new Error("caller cancelled"));
+      signal.throwIfAborted();
+      return productResult();
+    } });
+    await expect(cancellationHarness.instance.reconcile(input(state(), controller.signal)))
+      .rejects.toThrow("caller cancelled");
+
+    const original = Object.assign(new Error(
+      "original MCP transport diagnostic for customer jane.doe@example.com at +1 (415) 555-0134; https://private.example/path?token=secret Authorization: Bearer abc123 api_key=sk_live_123; response body: {\"customerName\":\"Avery Customer\"}",
+    ), {
+      status: 502,
+      code: "ETIMEDOUT",
+      providerErrorPayload: {
+        message: "Provider rejected request for jane.doe@example.com; contact +1 (415) 555-0134",
+        type: "invalid_request",
+        request_id: "req-123",
+        authorization: "Bearer abc123",
+        checkout_url: "https://private.example/checkout?token=secret",
+        product_description: "Sensitive product description",
+        coupon_code: "SAVE20",
+        model_prompt: "private model instructions",
+        nested: "unlisted field should not appear",
+      },
+    });
+    const logger = { error: vi.fn() };
+    const failureHarness = service({ logger, productRead: async () => { throw original; } });
+    await expect(failureHarness.instance.reconcile(input())).rejects.toBe(original);
+    const productFailureLog = logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(productFailureLog).toMatchObject({
+      reasonCode: "PRODUCT_READ_FAILED", operation: "commerce_get_product", redactionApplied: true,
+      sourceError: { name: "Error", status: 502, code: "ETIMEDOUT" },
+    });
+    const productFailureText = JSON.stringify(productFailureLog);
+    expect(productFailureText).toContain("original MCP transport diagnostic");
+    expect(productFailureText).not.toContain("jane.doe@example.com");
+    expect(productFailureText).not.toContain("415");
+    expect(productFailureText).not.toContain("private.example");
+    expect(productFailureText).not.toContain("abc123");
+    expect(productFailureText).not.toContain("sk_live_123");
+    expect(productFailureText).not.toContain("Avery Customer");
+    expect(productFailureText).toContain("providerErrorPayload");
+    expect(productFailureText).toContain("invalid_request");
+    expect(productFailureText).toContain("req-123");
+    expect(productFailureText).not.toContain("authorization");
+    expect(productFailureText).not.toContain("private product description");
+    expect(productFailureText).not.toContain("Sensitive product description");
+    expect(productFailureText).not.toContain("SAVE20");
+    expect(productFailureText).not.toContain("private model instructions");
+    expect(productFailureText).not.toContain("unlisted field");
+    expect(productFailureLog).not.toHaveProperty("error");
+    expect(failureHarness.recoveryAttemptReader.read).toHaveBeenCalledTimes(2);
+
+    const productionLogger = { error: vi.fn() };
+    const productionHarness = service({
+      logger: productionLogger,
+      environment: "prod-us",
+      productRead: async () => { throw original; },
+    });
+    await expect(productionHarness.instance.reconcile(input())).rejects.toBe(original);
+    const productionFailureLog = productionLogger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(productionFailureLog).toMatchObject({
+      sourceError: { name: "Error", status: 502, code: "ETIMEDOUT" },
+    });
+    expect(productionFailureLog).not.toHaveProperty("sourceError.providerErrorPayload");
+    expect(JSON.stringify(productionFailureLog)).not.toContain("req-123");
+
+    const stateOriginal = Object.assign(new Error(
+      "trusted-state read failed for jane.doe@example.com / +1 (415) 555-0134 at https://private.example/state; password=hunter2",
+    ), { statusCode: 503, code: "ECONNRESET" });
+    const stateLogger = { error: vi.fn() };
+    const stateFailureHarness = service({
+      logger: stateLogger,
+      recoveryRead: async () => { throw stateOriginal; },
+    });
+    await expect(stateFailureHarness.instance.reconcile(input())).rejects.toBe(stateOriginal);
+    const stateFailureLog = stateLogger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(stateFailureLog).toMatchObject({
+      reasonCode: "RECOVERY_STATE_READ_FAILED", operation: "trusted_recovery_attempt_read", redactionApplied: true,
+      sourceError: { name: "Error", status: 503, code: "ECONNRESET" },
+    });
+    const stateFailureText = JSON.stringify(stateFailureLog);
+    expect(stateFailureText).toContain("trusted-state read failed");
+    expect(stateFailureText).not.toContain("jane.doe@example.com");
+    expect(stateFailureText).not.toContain("415");
+    expect(stateFailureText).not.toContain("private.example");
+    expect(stateFailureText).not.toContain("hunter2");
+    expect(stateFailureLog).not.toHaveProperty("error");
+    expect(stateFailureLog).not.toHaveProperty("sourceError.providerErrorPayload");
+  });
+
+  it("never logs successful product response payloads", async () => {
+    const logger = { error: vi.fn() };
+    const harness = service({
+      logger,
+      productRead: async () => ({
+        ...productResult(),
+        data: {
+          product: {
+            ...productResult().data.product,
+            title: "successful-response-secret@example.com",
+          },
+        },
+      }),
+    });
+    await harness.instance.reconcile(input());
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("successful-response-secret@example.com");
+  });
+
+  it("bounds provider error payload diagnostics and preserves the originating error", async () => {
+    const original = Object.assign(new Error("provider request failed"), {
+      providerErrorPayload: { message: "diagnostic detail ".repeat(500) },
+    });
+    const logger = { error: vi.fn() };
+    const harness = service({ logger, productRead: async () => { throw original; } });
+    await expect(harness.instance.reconcile(input())).rejects.toBe(original);
+    const failureLog = logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    const sourceError = failureLog.sourceError as Record<string, unknown>;
+    const serializedPayload = JSON.stringify(sourceError.providerErrorPayload);
+    expect(serializedPayload).toContain("[TRUNCATED]");
+    expect(Buffer.byteLength(serializedPayload, "utf8")).toBeLessThanOrEqual(4096);
+  });
+});
