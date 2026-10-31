@@ -205,8 +205,113 @@ describe("production Commerce model failure diagnostics", () => {
         selectionSource: "PRICING_PLAN", shopId: "shop-a",
         reasonMessage: expect.any(String), operatorAction: expect.any(String),
       });
+      expect(logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1])
+        .toMatchObject({ origin: "sdk_exception", sdkError: { message: "provider body contains [REDACTED]" }, reasonCode: reason });
       expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
     }
+  });
+
+  it("preserves original OpenRouter 400 and 429 provider response details separately from Moda reasons", async () => {
+    for (const fixture of [
+      { status: 400, reason: "PROVIDER_HTTP_ERROR", code: "invalid_request_error", message: "This model does not support tool_choice", requestId: "openrouter-400" },
+      { status: 429, reason: "PROVIDER_RATE_LIMITED", code: "rate_limit_exceeded", message: "Distinct provider quota message", requestId: "openrouter-429" },
+    ]) {
+      const deps = dependencies(["credential-A"]);
+      const logs = logger();
+      deps.createClient.mockImplementation((options: any) => ({
+        invoke: vi.fn(async () => {
+          const response = {
+            status: fixture.status,
+            headers: { "x-request-id": fixture.requestId },
+            data: { error: { code: fixture.code, message: fixture.message } },
+          };
+          const upstream = Object.assign(new Error("OpenRouter SDK wrapper"), { status: fixture.status, response });
+          options.onDiagnostic({ stage: "provider", reason: fixture.reason, statusCode: fixture.status, providerCode: fixture.code });
+          throw new CommerceModelInvocationFailure({
+            stage: "model.invoke", reasonCode: fixture.reason, providerStage: "provider", statusCode: fixture.status,
+          }, upstream);
+        }),
+      }));
+      const invoker = await createInvoker({ ...deps, logger: logs.value });
+      await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+        diagnostic: { reasonCode: fixture.reason },
+      });
+      expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+        ["commerce.model.invocation_failed", expect.objectContaining({
+          origin: "provider_response", provider: "openai", operation: "model.invoke",
+          httpStatus: fixture.status, providerRequestId: fixture.requestId,
+          providerError: { code: fixture.code, message: fixture.message },
+          reasonCode: fixture.reason, redactionApplied: false, truncated: false,
+        })],
+      ]));
+    }
+  });
+
+  it("labels SDK-only TLS failures correctly without inventing provider error fields", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation(() => ({
+      invoke: vi.fn(async () => { throw Object.assign(new Error("certificate validation failed"), { code: "CERT_HAS_EXPIRED" }); }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
+    });
+    const record = logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1];
+    expect(record).toMatchObject({
+      origin: "sdk_exception", sdkError: { name: "Error", message: "certificate validation failed" },
+      reasonCode: "MODEL_INVOCATION_FAILED",
+    });
+    expect(record).not.toHaveProperty("providerError");
+  });
+
+  it("redacts injected credential, customer email and signed URL spans from provider text", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation((options: any) => ({
+      invoke: vi.fn(async () => {
+        const upstream = Object.assign(new Error("OpenRouter request rejected"), {
+          status: 400,
+          response: { status: 400, data: { error: {
+            code: "invalid_request_error",
+            message: "credential-A customer@example.test https://storage.example/file?sig=signed-value",
+          } } },
+        });
+        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_HTTP_ERROR", statusCode: 400 });
+        throw new CommerceModelInvocationFailure({ stage: "model.invoke", reasonCode: "PROVIDER_HTTP_ERROR", statusCode: 400 }, upstream);
+      }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toMatchObject({
+      diagnostic: { reasonCode: "PROVIDER_HTTP_ERROR" },
+    });
+    const serialized = JSON.stringify(logs.warn.mock.calls);
+    expect(serialized).not.toContain("credential-A");
+    expect(serialized).not.toContain("customer@example.test");
+    expect(serialized).not.toContain("signed-value");
+    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+      ["commerce.model.invocation_failed", expect.objectContaining({
+        origin: "provider_response", httpStatus: 400, redactionApplied: true,
+        providerError: { code: "invalid_request_error", message: "[REDACTED] [REDACTED] [REDACTED_URL]" },
+      })],
+    ]));
+  });
+
+  it("preserves source status without a providerError when no upstream error body exists", async () => {
+    const deps = dependencies(["credential-A"]);
+    const logs = logger();
+    deps.createClient.mockImplementation((options: any) => ({
+      invoke: vi.fn(async () => {
+        const upstream = Object.assign(new Error("SDK HTTP error"), { status: 502 });
+        options.onDiagnostic({ stage: "provider", reason: "PROVIDER_HTTP_ERROR", statusCode: 502 });
+        throw new CommerceModelInvocationFailure({ stage: "model.invoke", reasonCode: "PROVIDER_HTTP_ERROR", statusCode: 502 }, upstream);
+      }),
+    }));
+    const invoker = await createInvoker({ ...deps, logger: logs.value });
+    await expect(invoker.invoke(request, new AbortController().signal)).rejects.toBeInstanceOf(CommerceModelInvocationFailure);
+    const record = logs.warn.mock.calls.find(([event]) => event === "commerce.model.invocation_failed")?.[1];
+    expect(record).toMatchObject({ origin: "provider_response", httpStatus: 502 });
+    expect(record).not.toHaveProperty("providerError");
   });
 
   it("reports a provider response validation failure without including the response body", async () => {
@@ -259,7 +364,7 @@ describe("production Commerce model failure diagnostics", () => {
     }
   });
 
-  it("distinguishes client construction failures without disclosing the original error", async () => {
+  it("preserves safe client construction exception wording", async () => {
     const deps = dependencies(["credential-A"]);
     const logs = logger();
     deps.createClient.mockImplementation(() => { throw new Error("secret construction detail"); });
@@ -272,7 +377,12 @@ describe("production Commerce model failure diagnostics", () => {
         reasonCode: "MODEL_ADAPTER_INITIALIZATION_FAILED",
       })],
     ]));
-    expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("secret construction detail");
+    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+      ["commerce.model.invocation_failed", expect.objectContaining({
+        origin: "internal", internalError: expect.objectContaining({ message: "secret construction detail" }),
+      })],
+    ]));
+    expect(logs.warn.mock.calls[0]?.[1]).not.toHaveProperty("providerError");
   });
 
   it("preserves outcomes when the diagnostic logger throws", async () => {
@@ -288,7 +398,7 @@ describe("production Commerce model failure diagnostics", () => {
     await expect(invoker.invoke(request, new AbortController().signal)).resolves.toBe(step);
   });
 
-  it("does not include raw provider text from unexpected exceptions", async () => {
+  it("preserves unexpected SDK text while redacting the resolved credential", async () => {
     const deps = dependencies(["credential-A"]);
     const logs = logger();
     deps.createClient.mockImplementation(() => ({
@@ -299,5 +409,10 @@ describe("production Commerce model failure diagnostics", () => {
       diagnostic: { reasonCode: "MODEL_INVOCATION_FAILED" },
     });
     expect(JSON.stringify(logs.warn.mock.calls)).not.toContain("credential-A");
+    expect(logs.warn.mock.calls).toEqual(expect.arrayContaining([
+      ["commerce.model.invocation_failed", expect.objectContaining({
+        sdkError: expect.objectContaining({ message: "secret token [REDACTED]" }), redactionApplied: true,
+      })],
+    ]));
   });
 });
