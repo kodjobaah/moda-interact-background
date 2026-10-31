@@ -94,13 +94,18 @@ const alternativeProduct = {
   collectionIds: [], imageUrl: null, saleEvidence: null, observedAt: "2026-10-31T12:00:00.000Z",
 };
 
-function fixture(choices: Array<ModelCall | ModelCall[]>, options: { alternative?: boolean; detailOverride?: unknown } = {}) {
+function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
+  alternative?: boolean;
+  detailOverride?: unknown;
+  offerOverride?: Record<string, unknown>;
+  evaluatedAt?: Date;
+} = {}) {
   const selector = {
     connect: vi.fn(async () => undefined),
     tools: vi.fn(async () => tools),
     call: vi.fn(async (name: string) => {
       if (name === "commerce_get_discount_options") return success({
-        mode: "AI_BEST_APPLICABLE", offers: [offer], cursor: null, truncated: false,
+        mode: "AI_BEST_APPLICABLE", offers: [{ ...offer, ...options.offerOverride }], cursor: null, truncated: false,
       });
       if (name === "commerce_get_discount_details") return success({ details: options.detailOverride ?? (options.alternative
         ? { ...details, facts: { ...details.facts, targeting: { ...details.facts.targeting, includedProductIds: ["product-2"] } } }
@@ -125,7 +130,8 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: { alternative
     selector: selector as never,
     modelInvoker,
     signal: new AbortController().signal,
-    startedAt: Date.now(),
+    startedAt: (options.evaluatedAt ?? new Date("2026-10-31T12:00:00.000Z")).getTime(),
+    now: () => options.evaluatedAt ?? new Date("2026-10-31T12:00:00.000Z"),
   });
   return { graph, selector, requests };
 }
@@ -225,6 +231,38 @@ describe("InitialOutreachOffer LangGraph", () => {
     expect(state.finalDecision).toMatchObject({
       kind: "ALTERNATIVE_PRODUCT_PROMOTION", productId: "product-2", variantId: "variant-2",
       product: { shopId: "shop-1", product: { url: "https://shop.example/products/scarf" } },
+    });
+  });
+
+  it.each([
+    ["expired", { endsAt: "2026-10-31T11:59:59.999Z" }, "ACTIVE", null],
+    ["not-yet-started", { startsAt: "2026-10-31T12:00:00.001Z" }, "ACTIVE", null],
+    ["disabled", {}, "DISABLED", null],
+    ["unavailable", {}, "ACTIVE", "2026-10-31T11:00:00.000Z"],
+  ] as const)("does not promote an alternative product for a %s offer", async (_label, dateOverrides, providerStatus, unavailableAt) => {
+    const offerOverride = { ...offer, ...dateOverrides };
+    const detailOverride = {
+      ...details,
+      offer: offerOverride,
+      facts: {
+        ...details.facts,
+        providerStatus,
+        unavailableAt,
+        targeting: { ...details.facts.targeting, includedProductIds: ["product-2"] },
+      },
+    };
+    const { graph } = fixture([
+      { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
+      { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
+      { name: "commerce_search_products", arguments: { query: "matching accessory" } },
+      { name: "submitInitialOutreachOffer", arguments: {
+        kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: "offer-1", productId: "product-2", variantId: "variant-2",
+      } },
+    ], { alternative: true, offerOverride: offerOverride as unknown as Record<string, unknown>, detailOverride });
+
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({
+      kind: "NO_VERIFIED_OFFER", reason: "NO_APPLICABLE_OFFER",
     });
   });
 

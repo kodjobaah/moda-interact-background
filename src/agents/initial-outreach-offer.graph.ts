@@ -267,7 +267,24 @@ function identityKey(productId: string, variantId: string | null): string {
 function productTargetMatches(
   observed: ObservedCheckoutOffer,
   product: InitialOutreachCommerceProduct,
+  evaluatedAt: Date,
 ): boolean {
+  const option = observed.offer;
+  const sourceOffer = observed.details.offer;
+  const facts = observed.details.facts;
+  if (option.offerId !== sourceOffer.offerId || option.method !== sourceOffer.method ||
+      option.code !== sourceOffer.code || option.startsAt !== sourceOffer.startsAt ||
+      option.endsAt !== sourceOffer.endsAt || option.support !== "SUPPORTED" ||
+      sourceOffer.support !== "SUPPORTED" || facts.unavailableAt !== null ||
+      !["ACTIVE", "ENABLED"].includes(facts.providerStatus.trim().toUpperCase()) ||
+      !(evaluatedAt instanceof Date) || !Number.isFinite(evaluatedAt.getTime())) return false;
+  const evaluatedMs = evaluatedAt.getTime();
+  for (const [dateValue, boundary] of [[sourceOffer.startsAt, "future"], [sourceOffer.endsAt, "expired"]] as const) {
+    if (dateValue === null) continue;
+    const timestamp = Date.parse(dateValue);
+    if (!Number.isFinite(timestamp) || boundary === "future" && timestamp > evaluatedMs ||
+        boundary === "expired" && timestamp <= evaluatedMs) return false;
+  }
   const targeting = observed.details.facts.targeting;
   const included = targeting.kind === "ALL" || [
     targeting.includedProductIds.length > 0 && targeting.includedProductIds.includes(product.productId),
@@ -280,7 +297,6 @@ function productTargetMatches(
       product.variantId !== null && targeting.excludedVariantIds.includes(product.variantId) ||
       product.categoryIds?.some((id) => targeting.excludedCategoryIds.includes(id)) ||
       product.collectionIds?.some((id) => targeting.excludedCollectionIds.includes(id))) return false;
-  const facts = observed.details.facts;
   if (facts.targeting.kind === "UNKNOWN" || facts.completeness !== "COMPLETE" ||
       observed.details.offer.support !== "SUPPORTED" || facts.unrepresentedConditions.length > 0 ||
       facts.minimumQuantity !== null || facts.minimumSubtotal !== null ||
@@ -346,7 +362,7 @@ function checkoutDecision(
   });
 }
 
-function finalResult(state: OutreachGraphStateValue): InitialOutreachAgentResult {
+function finalResult(state: OutreachGraphStateValue, evaluatedAt: Date): InitialOutreachAgentResult {
   if (state.pendingChoice?.kind === "CHECKOUT_DISCOUNT") {
     const selected = checkoutDecision(state, state.pendingChoice.offerIds);
     if (selected) return selected;
@@ -358,7 +374,7 @@ function finalResult(state: OutreachGraphStateValue): InitialOutreachAgentResult
       state.pendingChoice.variantId,
     ));
     if (candidate && exact?.exact && exact.product.productId === state.pendingChoice.productId &&
-        exact.product.variantId === state.pendingChoice.variantId && productTargetMatches(candidate, exact.product) &&
+        exact.product.variantId === state.pendingChoice.variantId && productTargetMatches(candidate, exact.product, evaluatedAt) &&
         candidate.details.providerDiscountId) {
       return InitialOutreachAgentResultSchema.parse({
         kind: "ALTERNATIVE_PRODUCT_PROMOTION",
@@ -654,7 +670,9 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
         failure,
       };
     })
-    .addNode("finalizeDecision", async (state) => ({ finalDecision: finalResult(state) }))
+    .addNode("finalizeDecision", async (state) => ({
+      finalDecision: finalResult(state, dependencies.now?.() ?? new Date()),
+    }))
     .addEdge(START, "resolveTools")
     .addEdge("resolveTools", "invokeModel")
     .addConditionalEdges("invokeModel", routeAfterModel, {
