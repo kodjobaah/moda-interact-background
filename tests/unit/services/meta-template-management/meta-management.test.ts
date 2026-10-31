@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MetaTemplateManagementService } from "../../../../src/services/meta-template-management/service.js";
-import { MetaManagementError, validatedComponents, validatedProviderComponents } from "../../../../src/services/meta-template-management/contracts.js";
+import { MetaManagementError, safeMetaError, validatedComponents, validatedProviderComponents } from "../../../../src/services/meta-template-management/contracts.js";
 import { MetaGraphTemplateAdapter } from "../../../../src/services/meta-template-management/meta-graph.adapter.js";
 
 vi.mock("../../../../src/services/platform-configuration/consumers.js", () => ({
@@ -309,6 +309,20 @@ describe("BG003 server-side Meta Graph API adapter", () => {
       const createRequest = vi.fn(async () => new Response(JSON.stringify({ id: "meta-image" })));
       const createClient = new MetaGraphTemplateAdapter(createRequest as typeof fetch);
       await expect(createClient.create({ ...claim, components: [image] }, handle)).resolves.toEqual({ id: "meta-image" });
+      const echoedHandleRequest = vi.fn(async () => new Response(JSON.stringify({ error: {
+        message: `Meta rejected sample ${handle.value}`,
+        error_data: { details: `Rejected IMAGE header handle ${handle.value}` },
+        code: 10,
+      } }), { status: 400 }));
+      const failedCreateClient = new MetaGraphTemplateAdapter(echoedHandleRequest as typeof fetch);
+      const failure = await failedCreateClient.create({ ...claim, components: [image] }, handle)
+        .catch((error: unknown) => error);
+      const logFields = safeMetaError(failure) as Record<string, unknown>;
+      expect(logFields.providerErrorMessage).toBe("Meta rejected sample [REDACTED_SAMPLE_HANDLE]");
+      expect(logFields.providerErrorDetails).toContain("[REDACTED_SAMPLE_HANDLE]");
+      expect(logFields.redactionApplied).toBe(true);
+      expect(JSON.stringify(logFields)).not.toContain(handle.value);
+      expect(JSON.stringify(failure)).not.toContain(handle.value);
       await expect(createClient.create({ ...claim, components: [image] }, { value: "4::forged" } as never))
         .rejects.toMatchObject({ code: "IMAGE_SAMPLE_HANDLE_REQUIRED" });
       expect(createRequest).toHaveBeenCalledTimes(1);

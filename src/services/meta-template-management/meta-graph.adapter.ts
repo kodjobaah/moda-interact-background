@@ -6,8 +6,13 @@ import {
 } from "./contracts.js";
 import { isTrustedMetaImageSampleHandle, MetaImageHeaderSampleUploader, type TrustedMetaImageSampleHandle } from "./image-header-sample.js";
 
-function redactSource(value: string, accessToken: string, limit: number): { value: string; redacted: boolean; truncated: boolean } {
-  let safe = value.replaceAll(accessToken, "[REDACTED]")
+function redactSource(value: string, accessToken: string, limit: number,
+  sensitiveValues: readonly string[] = []): { value: string; redacted: boolean; truncated: boolean } {
+  let safe = value;
+  for (const sensitiveValue of sensitiveValues) {
+    if (sensitiveValue) safe = safe.replaceAll(sensitiveValue, "[REDACTED_SAMPLE_HANDLE]");
+  }
+  safe = safe.replaceAll(accessToken, "[REDACTED]")
     .replace(/(Bearer|OAuth)\s+[^\s,"']+/gi, "$1 [REDACTED]")
     .replace(/(access_token|token|secret|authorization)\s*[:=]\s*[^\s,"'&}]+/gi, "$1=[REDACTED]")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_EMAIL]")
@@ -79,7 +84,8 @@ export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
     }
   }
 
-  private async call(wabaId: string, method: "GET" | "POST", query: URLSearchParams | null, body?: object) {
+  private async call(wabaId: string, method: "GET" | "POST", query: URLSearchParams | null,
+    body?: object, sensitiveValues: readonly string[] = []) {
     const config = await this.configuration(wabaId);
     const url = new URL(`${config.base}/${wabaId}/message_templates`);
     if (query) url.search = query.toString();
@@ -93,13 +99,13 @@ export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
       });
     } catch (error) {
       const cause = error instanceof Error ? error : new Error("unknown-sdk-exception");
-      const message = redactSource(cause.message, config.accessToken, 512);
+      const message = redactSource(cause.message, config.accessToken, 512, sensitiveValues);
       throw new MetaManagementError("META_TRANSPORT_UNKNOWN", "uncertain", { cause: error }, {
         origin: "sdk_exception", provider: "meta_graph", operation: method === "POST" ? "template_create" : "template_find",
         reasonCode: "META_TRANSPORT_UNKNOWN", errorName: cause.name.slice(0, 64), errorMessage: message.value,
         redactionApplied: message.redacted, truncated: message.truncated,
         ...(cause.cause instanceof Error ? { causeName: cause.cause.name.slice(0, 64),
-          causeMessage: redactSource(cause.cause.message, config.accessToken, 512).value } : {}),
+          causeMessage: redactSource(cause.cause.message, config.accessToken, 512, sensitiveValues).value } : {}),
       });
     }
     if (!response.ok) {
@@ -111,28 +117,37 @@ export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
       const source = (() => { try { return JSON.parse(rawBody) as { error?: Record<string, unknown> }; } catch { return null; } })();
       const details = source?.error;
       const sourceMessage = typeof details?.message === "string" ? details.message : !details && rawBody ? rawBody : undefined;
-      const message = sourceMessage ? redactSource(sourceMessage, config.accessToken, 512) : undefined;
-      const requestId = response.headers.get("x-fb-request-id") ?? response.headers.get("x-fb-trace-id") ??
+      const message = sourceMessage ? redactSource(sourceMessage, config.accessToken, 512, sensitiveValues) : undefined;
+      const rawRequestId = response.headers.get("x-fb-request-id") ?? response.headers.get("x-fb-trace-id") ??
         (typeof details?.fbtrace_id === "string" ? details.fbtrace_id : null);
+      const requestId = rawRequestId ? redactSource(rawRequestId, config.accessToken, 128, sensitiveValues) : null;
       const rawDetails = details?.error_data;
-      const detailsText = rawDetails === undefined ? undefined : redactSource(JSON.stringify(rawDetails), config.accessToken, 1024);
+      const detailsText = rawDetails === undefined ? undefined : redactSource(JSON.stringify(rawDetails), config.accessToken, 1024, sensitiveValues);
+      const errorCode = typeof details?.code === "string"
+        ? redactSource(details.code, config.accessToken, 128, sensitiveValues)
+        : null;
+      const errorSubcode = typeof details?.error_subcode === "string"
+        ? redactSource(details.error_subcode, config.accessToken, 128, sensitiveValues)
+        : null;
       throw new MetaManagementError(code, disposition, undefined, {
         origin: "provider_response", provider: "meta_graph", operation: method === "POST" ? "template_create" : "template_find",
         httpStatus: response.status,
-        ...(details?.code !== undefined ? { providerErrorCode: details.code } : {}),
-        ...(details?.error_subcode !== undefined ? { providerErrorSubcode: details.error_subcode } : {}),
+        ...(details?.code !== undefined ? { providerErrorCode: errorCode?.value ?? details.code } : {}),
+        ...(details?.error_subcode !== undefined ? { providerErrorSubcode: errorSubcode?.value ?? details.error_subcode } : {}),
         ...(message ? { providerErrorMessage: message.value } : {}),
         ...(detailsText ? { providerErrorDetails: detailsText.value } : {}),
         ...(!details && message ? { providerErrorBody: message.value } : {}),
-        ...(requestId ? { providerRequestId: requestId.slice(0, 128) } : {}),
-        reasonCode: code, redactionApplied: !!message?.redacted || !!detailsText?.redacted,
-        truncated: !!message?.truncated || !!detailsText?.truncated || rawBody.length > 4096,
+        ...(requestId ? { providerRequestId: requestId.value } : {}),
+        reasonCode: code, redactionApplied: !!message?.redacted || !!detailsText?.redacted ||
+          !!requestId?.redacted || !!errorCode?.redacted || !!errorSubcode?.redacted,
+        truncated: !!message?.truncated || !!detailsText?.truncated || !!requestId?.truncated ||
+          !!errorCode?.truncated || !!errorSubcode?.truncated || rawBody.length > 4096,
       });
     }
     try { return await response.json() as unknown; }
     catch (error) {
       const cause = error instanceof Error ? error : new Error("unknown-sdk-exception");
-      const message = redactSource(cause.message, config.accessToken, 512);
+      const message = redactSource(cause.message, config.accessToken, 512, sensitiveValues);
       throw new MetaManagementError("META_RESPONSE_UNKNOWN", "uncertain", { cause: error }, {
         origin: "sdk_exception", provider: "meta_graph", operation: method === "POST" ? "template_create" : "template_find",
         reasonCode: "META_RESPONSE_UNKNOWN", errorName: cause.name.slice(0, 64), errorMessage: message.value,
@@ -218,11 +233,14 @@ export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
     }
     if (!hasImage && trustedSampleHandle !== undefined) throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
     validatedProviderComponents(input.components);
+    const sensitiveValues = isTrustedMetaImageSampleHandle(trustedSampleHandle)
+      ? [trustedSampleHandle.value]
+      : [];
     const result = await this.call(input.wabaId, "POST", null, {
       name: input.name, language: input.language, category: input.category,
       // The exact Admin-prepared components, unchanged (no authoring here).
       components: input.components,
-    });
+    }, sensitiveValues);
     if (!result || typeof result !== "object" || !("id" in result) ||
         typeof result.id !== "string" || !result.id) {
       throw new MetaManagementError("META_CREATE_ACK_UNKNOWN", "uncertain");
