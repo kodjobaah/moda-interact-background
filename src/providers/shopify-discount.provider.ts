@@ -275,17 +275,13 @@ function extractGraphqlErrors(value: unknown): {
   redactionApplied: boolean;
   truncated: boolean;
 } {
-  const entries = Array.isArray(value)
-    ? value.slice(0, DIAGNOSTIC_PROVIDER_ERROR_LIMIT)
-    : typeof value === "string" || asRecord(value)
-      ? [value]
-      : [];
+  if (!Array.isArray(value)) return { errors: [], redactionApplied: false, truncated: false };
   let redactionApplied = false;
-  let truncated = Array.isArray(value) && value.length > DIAGNOSTIC_PROVIDER_ERROR_LIMIT;
-  const errors = entries.flatMap((item) => {
+  let truncated = value.length > DIAGNOSTIC_PROVIDER_ERROR_LIMIT;
+  const errors = value.slice(0, DIAGNOSTIC_PROVIDER_ERROR_LIMIT).flatMap((item) => {
     const error = asRecord(item);
     const extensions = asRecord(error?.extensions);
-    const messageValue = typeof item === "string" ? item : stringValue(error?.message);
+    const messageValue = stringValue(error?.message);
     const codeValue = stringValue(extensions?.code);
     if (messageValue === null && codeValue === null) return [];
     const safe: SafeShopifyProviderError = {};

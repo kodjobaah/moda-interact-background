@@ -573,34 +573,6 @@ describe("ShopifyDiscountProvider", () => {
     });
   });
 
-  it.each([
-    ["string", (message: string) => message],
-    ["object", (message: string) => ({ message, extensions: { code: "ACCESS_DENIED" } })],
-  ])("retains bounded, redacted Shopify HTTP errors when errors is a %s", async (_shape, makeError) => {
-    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
-    const message = `Invalid API key api_key=private-secret ${"x".repeat(1_500)}`;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      errors: makeError(message),
-    }), { status: 401, headers: { "Content-Type": "application/json" } })));
-
-    let caught: unknown;
-    try {
-      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
-    } catch (error) {
-      caught = error;
-    }
-
-    const fields = getShopifyDiscountFailureLogFields(caught);
-    const providerErrors = fields.providerErrors as Array<{ message?: string; code?: string }>;
-    expect(providerErrors).toHaveLength(1);
-    expect(providerErrors[0]?.message).toContain("Invalid API key api_key=[REDACTED]");
-    expect(providerErrors[0]?.message).toContain("[TRUNCATED]");
-    expect(providerErrors[0]?.message?.length).toBeLessThan(1_050);
-    expect(providerErrors[0]?.message).not.toContain("private-secret");
-    expect(fields).toMatchObject({ httpStatus: 401, redactionApplied: true, truncated: true });
-    if (_shape === "object") expect(providerErrors[0]?.code).toBe("ACCESS_DENIED");
-  });
-
   it("preserves SDK transport exception name, message, and cause when no provider response exists", async () => {
     mocks.getShopifyAccessToken.mockResolvedValue("token-1");
     const cause = new Error("socket closed");
