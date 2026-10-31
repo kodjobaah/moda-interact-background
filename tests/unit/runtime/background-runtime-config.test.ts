@@ -3,8 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { BackgroundRuntimeConfigService, type BackgroundRuntimeConfigSnapshot } from "../../../src/runtime/background-runtime-config.js";
 import { backgroundRuntimeConfig } from "../../helpers/background-runtime-config.js";
 
-function config(version = 1): BackgroundRuntimeConfigSnapshot {
-  return Object.freeze(backgroundRuntimeConfig({ version, createdAt: new Date(1), updatedAt: new Date(version) }));
+function config(
+  version = 1,
+  overrides: Partial<BackgroundRuntimeConfigSnapshot> = {},
+): BackgroundRuntimeConfigSnapshot {
+  return Object.freeze(backgroundRuntimeConfig({
+    version, createdAt: new Date(1), updatedAt: new Date(version), ...overrides,
+  }));
 }
 
 function database(row: BackgroundRuntimeConfigSnapshot | null) {
@@ -49,6 +54,62 @@ describe("BackgroundRuntimeConfigService", () => {
     await service.getFresh();
     await service.getFresh();
     expect(service.current().version).toBe(2);
+  });
+
+  it.each([0, 1, 21, 90, 91, 180, 365, 2_147_483_647])(
+    "accepts lifetime %i during startup and refresh",
+    async (lifetimeDays) => {
+      const startupService = new BackgroundRuntimeConfigService(database(config(1, {
+        checkoutRecoveryLifetimeDays: lifetimeDays,
+      })));
+      await startupService.start();
+      expect(startupService.current().checkoutRecoveryLifetimeDays).toBe(lifetimeDays);
+      await startupService.close();
+
+      const db = database(config(1));
+      const refreshService = new BackgroundRuntimeConfigService(db);
+      await refreshService.start();
+      db.backgroundRuntimeConfig.findUnique.mockResolvedValueOnce(config(2, {
+        checkoutRecoveryLifetimeDays: lifetimeDays,
+      }));
+      await refreshService.getFresh();
+      expect(refreshService.current().checkoutRecoveryLifetimeDays).toBe(lifetimeDays);
+      await refreshService.close();
+    },
+  );
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "21", null, {}])(
+    "rejects malformed lifetime %s at startup",
+    async (lifetimeDays) => {
+      const service = new BackgroundRuntimeConfigService(database(config(1, {
+        checkoutRecoveryLifetimeDays: lifetimeDays,
+      } as any)));
+      await expect(service.start()).rejects.toThrow(
+        "Invalid background runtime configuration: invalid checkoutRecoveryLifetimeDays.",
+      );
+      await service.close();
+    },
+  );
+
+  it("retains the last good lifetime when refresh receives an invalid value", async () => {
+    const db = database(config(1, { checkoutRecoveryLifetimeDays: 180 }));
+    const log = { warn: vi.fn() } as any;
+    const service = new BackgroundRuntimeConfigService(db, log);
+    await service.start();
+    db.backgroundRuntimeConfig.findUnique.mockResolvedValueOnce(config(2, {
+      checkoutRecoveryLifetimeDays: -1,
+    }));
+
+    await expect(service.getFresh()).resolves.toMatchObject({
+      checkoutRecoveryLifetimeDays: 180,
+      version: 1,
+    });
+    expect(log.warn).toHaveBeenCalledWith("background.runtime_config.refresh_failed", expect.objectContaining({
+      error: expect.objectContaining({
+        message: "Invalid background runtime configuration: invalid checkoutRecoveryLifetimeDays.",
+      }),
+    }));
+    await service.close();
   });
 
   it("retains the last known good row and isolates listener failures", async () => {
