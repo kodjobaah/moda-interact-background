@@ -9,7 +9,11 @@ vi.mock("../../../src/services/shopify-session.service.js", () => ({
   getShopifyAccessToken: mocks.getShopifyAccessToken,
 }));
 
-import { ShopifyDiscountProvider } from "../../../src/providers/shopify-discount.provider.js";
+import {
+  getShopifyDiscountFailureLogFields,
+  ShopifyDiscountProvider,
+  ShopifyDiscountProviderError,
+} from "../../../src/providers/shopify-discount.provider.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -47,6 +51,47 @@ const discountClasses = ["PRODUCT"];
 const discountTags = ["CAMPAIGN"];
 
 describe("ShopifyDiscountProvider", () => {
+  it("preserves redacted GraphQL error messages and codes as bounded diagnostics", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      errors: [{
+        message: "Discount lookup failed for jane@example.com, +1 415 555 1212; Bearer private-bearer-value shpat_secret-token-123456",
+        extensions: { code: "ACCESS_DENIED" },
+      }],
+      data: { privatePayload: "must never be logged" },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "x-request-id": "request-123" },
+    })));
+
+    let caught: unknown;
+    try {
+      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ShopifyDiscountProviderError);
+    const fields = getShopifyDiscountFailureLogFields(caught);
+    expect(fields).toMatchObject({
+      origin: "provider_response",
+      provider: "shopify",
+      operation: "discountNodes",
+      httpStatus: 200,
+      providerRequestId: "request-123",
+      redactionApplied: true,
+      truncated: false,
+      providerErrors: [{ code: "ACCESS_DENIED" }],
+    });
+    const providerErrors = fields.providerErrors as Array<{ message?: string }>;
+    expect(providerErrors[0]?.message).toContain("Discount lookup failed for [REDACTED], [REDACTED]");
+    expect(providerErrors[0]?.message).toContain("Bearer [REDACTED]");
+    expect(JSON.stringify(fields)).not.toContain("jane@example.com");
+    expect(JSON.stringify(fields)).not.toContain("private-bearer-value");
+    expect(JSON.stringify(fields)).not.toContain("shpat_secret-token-123456");
+    expect(JSON.stringify(fields)).not.toContain("must never be logged");
+  });
+
   it("normalizes code Basic fixed amounts, product and variant targets, subtotal minimum, and restricted customer scope", async () => {
     mocks.getShopifyAccessToken.mockResolvedValue("token-1");
     const fetchMock = vi.fn().mockResolvedValue(response([{

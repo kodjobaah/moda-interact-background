@@ -2,6 +2,7 @@ import { Worker } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { parseShopifyDiscountSyncJob, SHOPIFY_WEBHOOK_QUEUE_CONTRACTS } from "@modainteract/moda-interact-shared/shopify";
 import { connectionRedis } from "../lib/redis.js";
+import { getShopifyDiscountFailureLogFields, isShopifyDiscountProviderError } from "../providers/shopify-discount.provider.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { shopifyDiscountCatalogueService } from "../services/shopify-discount-catalogue.service.js";
 
@@ -40,12 +41,13 @@ export function createShopifyDiscountSyncWorker() {
           logger.error("shopify.discount_sync.failed", { ...fields, outcome });
         }
       } catch (error) {
-        logger.error("shopify.discount_sync.failed", {
-          ...fields,
-          ...boundedError(error),
-          errorMessage: error instanceof Error ? error.message : String(error),
-          error: error,
-        });
+        if (!isShopifyDiscountProviderError(error)) {
+          logger.error("shopify.discount_sync.failed", {
+            ...fields,
+            reasonCode: "SHOPIFY_DISCOUNT_SYNC_FAILED",
+            ...getShopifyDiscountFailureLogFields(error, "internal"),
+          });
+        }
         throw error;
       }
     },
@@ -62,25 +64,10 @@ export function createShopifyDiscountSyncWorker() {
   worker.on("error", (error) => {
     logger.error("shopify.discount_sync.worker_error", {
       queueName: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
-      ...boundedError(error),
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error: error,
+      reasonCode: "SHOPIFY_DISCOUNT_WORKER_ERROR",
+      ...getShopifyDiscountFailureLogFields(error, "sdk_exception"),
     });
   });
 
   return worker;
-}
-
-function boundedError(error: unknown): { errorName: string; errorMessage: string } {
-  if (error instanceof Error) {
-    return {
-      errorName: error.name.slice(0, 64),
-      errorMessage: error.message,
-    };
-  }
-
-  return {
-    errorName: "UnknownError",
-    errorMessage: String(error),
-  };
 }

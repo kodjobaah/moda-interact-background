@@ -39,6 +39,7 @@ vi.mock("../../../src/services/shopify-discount-catalogue.service.js", () => ({
 }));
 
 import { createShopifyDiscountSyncWorker } from "../../../src/workers/shopify-discount-sync.worker.js";
+import { ShopifyDiscountProviderError } from "../../../src/providers/shopify-discount.provider.js";
 
 createShopifyDiscountSyncWorker();
 
@@ -75,17 +76,22 @@ describe("Shopify discount sync worker logging", () => {
     });
   });
 
-  it("logs bounded worker-level errors", () => {
+  it("logs worker error stack and cause as explicit fields", () => {
     const listener = hoisted.listeners.get("error");
+    const error = new Error("Redis connection failed", { cause: new Error("Socket closed") });
 
     expect(listener).toBeTypeOf("function");
-    listener?.(new Error("Redis connection failed"));
+    listener?.(error);
 
-    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.worker_error", {
+    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.worker_error", expect.objectContaining({
       queueName: "shopify-discount-sync",
+      reasonCode: "SHOPIFY_DISCOUNT_WORKER_ERROR",
+      origin: "sdk_exception",
       errorName: "Error",
       errorMessage: "Redis connection failed",
-    });
+      errorStack: expect.stringContaining("Redis connection failed"),
+      errorCause: [expect.objectContaining({ message: "Socket closed" })],
+    }));
   });
 
   it("logs receipt and successful completion", async () => {
@@ -118,16 +124,34 @@ describe("Shopify discount sync worker logging", () => {
     }));
   });
 
-  it("logs bounded failure details and rethrows for BullMQ retry", async () => {
-    const error = new Error("Shopify discount GraphQL returned an invalid response");
+  it("logs internal failure diagnostics and rethrows for BullMQ retry", async () => {
+    const error = new Error("Discount catalogue transaction failed", { cause: new Error("Database connection refused") });
     hoisted.reconcile.mockRejectedValueOnce(error);
 
     await expect(hoisted.processor?.(job)).rejects.toBe(error);
 
     expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
       shopId: "shop-1",
+      reasonCode: "SHOPIFY_DISCOUNT_SYNC_FAILED",
+      origin: "internal",
       errorName: "Error",
-      errorMessage: "Shopify discount GraphQL returned an invalid response",
+      errorMessage: "Discount catalogue transaction failed",
+      errorStack: expect.stringContaining("Discount catalogue transaction failed"),
+      errorCause: [expect.objectContaining({ message: "Database connection refused" })],
     }));
+  });
+
+  it("does not log provider errors twice after the catalogue boundary logged them", async () => {
+    const error = new ShopifyDiscountProviderError({
+      httpStatus: 200,
+      providerErrors: [{ code: "ACCESS_DENIED", message: "Access denied" }],
+      redactionApplied: false,
+      truncated: false,
+    });
+    hoisted.reconcile.mockRejectedValueOnce(error);
+
+    await expect(hoisted.processor?.(job)).rejects.toBe(error);
+
+    expect(hoisted.error).not.toHaveBeenCalled();
   });
 });

@@ -7,7 +7,8 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: hoisted.prisma }));
-vi.mock("../../../src/providers/shopify-discount.provider.js", () => ({
+vi.mock("../../../src/providers/shopify-discount.provider.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../src/providers/shopify-discount.provider.js")>(),
   shopifyDiscountProvider: { listDiscounts: hoisted.listDiscounts },
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
@@ -18,6 +19,7 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
 }));
 
 import { ShopifyDiscountCatalogueService } from "../../../src/services/shopify-discount-catalogue.service.js";
+import { ShopifyDiscountProviderError } from "../../../src/providers/shopify-discount.provider.js";
 
 function harness(onboardingCompleted: boolean, legacyOnboardingCompleted: boolean) {
   const catalogueState: Record<string, unknown> = {
@@ -119,5 +121,70 @@ describe("ShopifyDiscountCatalogueService onboarding eligibility", () => {
     expect(test.transaction.shopifyDiscountCatalogue.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "CURRENT", activeSyncToken: null }),
     }));
+  });
+
+  it("logs safe provider diagnostics explicitly and stores a stable catalogue error code", async () => {
+    const test = harness(true, true);
+    const providerFailure = new ShopifyDiscountProviderError({
+      httpStatus: 200,
+      providerErrors: [{ code: "ACCESS_DENIED", message: "Permission denied for [REDACTED]" }],
+      redactionApplied: true,
+      truncated: false,
+    });
+    hoisted.listDiscounts.mockRejectedValueOnce(providerFailure);
+
+    await expect(test.service.reconcile("shop-1", new Date("2026-10-02T12:00:00.000Z")))
+      .rejects.toBe(providerFailure);
+
+    expect(hoisted.logger.error).toHaveBeenCalledWith("shopify.discount_sync.provider_failed", expect.objectContaining({
+      reasonCode: "SHOPIFY_DISCOUNT_PROVIDER_FAILED",
+      origin: "provider_response",
+      provider: "shopify",
+      operation: "discountNodes",
+      httpStatus: 200,
+      providerErrors: [{ code: "ACCESS_DENIED", message: "Permission denied for [REDACTED]" }],
+      errorStack: expect.stringContaining("ShopifyDiscountProviderError"),
+      redactionApplied: true,
+      truncated: false,
+    }));
+    const loggedFields = hoisted.logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(loggedFields).not.toHaveProperty("error");
+    expect(loggedFields).not.toHaveProperty("providerErrorBody");
+    expect(test.transaction.shopifyDiscountCatalogue.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "ERROR",
+        lastErrorCode: "SHOPIFY_DISCOUNT_PROVIDER_FAILED",
+      }),
+    }));
+  });
+
+  it("passes actual exception stack and cause as explicit redacted logger fields", async () => {
+    const test = harness(true, true);
+    const cause = new Error("Socket closed for customer@example.com access_token=secret-cause-token");
+    const providerFailure = new Error("Provider transport failed for customer@example.com Bearer secret-bearer-token", { cause });
+    hoisted.listDiscounts.mockRejectedValueOnce(providerFailure);
+
+    await expect(test.service.reconcile("shop-1", new Date("2026-10-02T12:00:00.000Z")))
+      .rejects.toBe(providerFailure);
+
+    expect(hoisted.logger.error).toHaveBeenCalledWith("shopify.discount_sync.provider_failed", expect.objectContaining({
+      origin: "sdk_exception",
+      errorName: "Error",
+      errorMessage: "Provider transport failed for [REDACTED] Bearer [REDACTED]",
+      errorStack: expect.stringContaining("Provider transport failed"),
+      errorCause: [expect.objectContaining({
+        name: "Error",
+        message: "Socket closed for [REDACTED] access_token=[REDACTED]",
+        stack: expect.stringContaining("Socket closed"),
+      })],
+      redactionApplied: true,
+      truncated: false,
+    }));
+    const loggedFields = hoisted.logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(loggedFields).not.toHaveProperty("providerErrors");
+    expect(loggedFields).not.toHaveProperty("error");
+    expect(JSON.stringify(loggedFields)).not.toContain("customer@example.com");
+    expect(JSON.stringify(loggedFields)).not.toContain("secret-cause-token");
+    expect(JSON.stringify(loggedFields)).not.toContain("secret-bearer-token");
   });
 });

@@ -140,6 +140,167 @@ type DiscountNode = {
   discount: Record<string, unknown> | null;
 };
 
+type SafeShopifyProviderError = { message?: string; code?: string };
+
+type ShopifyDiscountProviderFailure = {
+  httpStatus: number;
+  providerResponseFormat?: "json" | "non_json";
+  providerRequestId?: string;
+  providerErrors?: SafeShopifyProviderError[];
+  redactionApplied: boolean;
+  truncated: boolean;
+};
+
+const DIAGNOSTIC_MESSAGE_LIMIT = 1_024;
+const DIAGNOSTIC_STACK_LIMIT = 2_048;
+const DIAGNOSTIC_CAUSE_LIMIT = 3;
+const DIAGNOSTIC_PROVIDER_ERROR_LIMIT = 5;
+
+export class ShopifyDiscountProviderError extends Error {
+  readonly failure: ShopifyDiscountProviderFailure;
+
+  constructor(failure: ShopifyDiscountProviderFailure) {
+    super("Shopify discount provider returned GraphQL errors");
+    this.name = "ShopifyDiscountProviderError";
+    this.failure = failure;
+  }
+}
+
+export class ShopifyDiscountInternalError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ShopifyDiscountInternalError";
+  }
+}
+
+export function isShopifyDiscountProviderError(
+  error: unknown,
+): error is ShopifyDiscountProviderError | ShopifyDiscountInternalError {
+  return error instanceof ShopifyDiscountProviderError || error instanceof ShopifyDiscountInternalError;
+}
+
+export function getShopifyDiscountFailureLogFields(
+  error: unknown,
+  fallbackOrigin: "sdk_exception" | "internal" = "sdk_exception",
+): Record<string, unknown> {
+  const diagnostics = collectExceptionDiagnostics(error);
+  const fields: Record<string, unknown> = {
+    origin: fallbackOrigin,
+    ...diagnostics.fields,
+    redactionApplied: diagnostics.redactionApplied,
+    truncated: diagnostics.truncated,
+  };
+
+  if (isShopifyDiscountProviderError(error)) {
+    if (error instanceof ShopifyDiscountInternalError) {
+      fields.origin = "internal";
+    } else {
+      fields.origin = "provider_response";
+      fields.provider = "shopify";
+      fields.operation = "discountNodes";
+      fields.httpStatus = error.failure.httpStatus;
+      if (error.failure.providerResponseFormat) fields.providerResponseFormat = error.failure.providerResponseFormat;
+      if (error.failure.providerRequestId) fields.providerRequestId = error.failure.providerRequestId;
+      if (error.failure.providerErrors?.length) fields.providerErrors = error.failure.providerErrors;
+      fields.redactionApplied = diagnostics.redactionApplied || error.failure.redactionApplied;
+      fields.truncated = diagnostics.truncated || error.failure.truncated;
+    }
+  }
+
+  return fields;
+}
+
+function collectExceptionDiagnostics(error: unknown): {
+  fields: Record<string, unknown>;
+  redactionApplied: boolean;
+  truncated: boolean;
+} {
+  const root = error instanceof Error ? error : null;
+  const message = redactDiagnosticText(root?.message ?? (typeof error === "string" ? error : "Unknown failure"), DIAGNOSTIC_MESSAGE_LIMIT);
+  const name = redactDiagnosticText(root?.name ?? "UnknownError", 64);
+  const stack = root?.stack ? redactDiagnosticText(root.stack, DIAGNOSTIC_STACK_LIMIT) : null;
+  let redactionApplied = name.redacted || message.redacted || Boolean(stack?.redacted);
+  let truncated = name.truncated || message.truncated || Boolean(stack?.truncated);
+  const causes: Array<{ name: string; message: string; stack?: string }> = [];
+  let current: unknown = root?.cause;
+  while (current !== undefined && current !== null && causes.length < DIAGNOSTIC_CAUSE_LIMIT) {
+    const cause = current instanceof Error ? current : null;
+    const causeMessageValue = cause?.message ?? (typeof current === "string" ? current : "Non-error cause");
+    const causeName = redactDiagnosticText(cause?.name ?? "NonErrorCause", 64);
+    const causeMessage = redactDiagnosticText(causeMessageValue, DIAGNOSTIC_MESSAGE_LIMIT);
+    const causeStack = cause?.stack ? redactDiagnosticText(cause.stack, DIAGNOSTIC_STACK_LIMIT) : null;
+    redactionApplied ||= causeName.redacted || causeMessage.redacted || Boolean(causeStack?.redacted);
+    truncated ||= causeName.truncated || causeMessage.truncated || Boolean(causeStack?.truncated);
+    causes.push({
+      name: causeName.value,
+      message: causeMessage.value,
+      ...(causeStack ? { stack: causeStack.value } : {}),
+    });
+    current = cause?.cause;
+  }
+  const causesTruncated = current !== undefined && current !== null;
+  truncated ||= causesTruncated;
+  return {
+    fields: {
+      errorName: name.value,
+      errorMessage: message.value,
+      ...(stack ? { errorStack: stack.value } : {}),
+      ...(causes.length ? { errorCause: causes } : {}),
+    },
+    redactionApplied,
+    truncated,
+  };
+}
+
+function redactDiagnosticText(value: string, maxLength: number): { value: string; redacted: boolean; truncated: boolean } {
+  let safe = value
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:shpat|shpca|shppa|shpss|shpua)_[A-Za-z0-9_-]+\b/gi, "[REDACTED]")
+    .replace(/\b((?:access_token|refresh_token|verify_token|client_secret|api_key|token|password)=)[^&#\s]*/gi, "$1[REDACTED]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
+    .replace(/\+?\d(?:[\s().-]*\d){9,14}/g, "[REDACTED]");
+  const redacted = safe !== value;
+  const truncated = safe.length > maxLength;
+  if (truncated) safe = `${safe.slice(0, maxLength)}…[TRUNCATED]`;
+  return { value: safe, redacted, truncated };
+}
+
+function extractGraphqlErrors(value: unknown): {
+  errors: SafeShopifyProviderError[];
+  redactionApplied: boolean;
+  truncated: boolean;
+} {
+  if (!Array.isArray(value)) return { errors: [], redactionApplied: false, truncated: false };
+  let redactionApplied = false;
+  let truncated = value.length > DIAGNOSTIC_PROVIDER_ERROR_LIMIT;
+  const errors = value.slice(0, DIAGNOSTIC_PROVIDER_ERROR_LIMIT).flatMap((item) => {
+    const error = asRecord(item);
+    const extensions = asRecord(error?.extensions);
+    const messageValue = stringValue(error?.message);
+    const codeValue = stringValue(extensions?.code);
+    if (messageValue === null && codeValue === null) return [];
+    const safe: SafeShopifyProviderError = {};
+    if (messageValue !== null) {
+      const message = redactDiagnosticText(messageValue, DIAGNOSTIC_MESSAGE_LIMIT);
+      safe.message = message.value;
+      redactionApplied ||= message.redacted;
+      truncated ||= message.truncated;
+    }
+    if (codeValue !== null) {
+      const code = redactDiagnosticText(codeValue, 128);
+      safe.code = code.value;
+      redactionApplied ||= code.redacted;
+      truncated ||= code.truncated;
+    }
+    return [safe];
+  });
+  return { errors, redactionApplied, truncated };
+}
+
+function hasGraphqlErrors(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
 type TargetingFacts = {
   kind: "ALL" | "PRODUCTS" | "VARIANTS" | "COLLECTIONS" | "MIXED" | "UNKNOWN";
   includedProductIds: string[];
@@ -185,7 +346,7 @@ export class ShopifyDiscountProvider {
 
     while (hasNextPage) {
       if (pageCount >= MAX_DISCOUNT_PAGES) {
-        throw new Error("Shopify discount pagination exceeded the bounded page limit");
+        throw new ShopifyDiscountInternalError("Shopify discount pagination exceeded the bounded page limit");
       }
       pageCount += 1;
       const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
@@ -193,17 +354,33 @@ export class ShopifyDiscountProvider {
         headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
         body: JSON.stringify({ query: QUERY, variables: { first: PAGE_SIZE, after } }),
       });
-      if (!response.ok) throw new Error(`Shopify discount GraphQL failed: ${response.status}`);
-      const body = await response.json() as {
+      if (!response.ok) {
+        let errorBody: { errors?: unknown } | null = null;
+        let responseFormat: "json" | "non_json" = "json";
+        try {
+          errorBody = await response.json() as { errors?: unknown };
+        } catch {
+          // Keep only the HTTP status for unstructured error responses; bodies may contain sensitive data.
+          responseFormat = "non_json";
+        }
+        throw createShopifyProviderResponseError(response, errorBody?.errors, responseFormat);
+      }
+      let body: {
         data?: {
           shop?: { plan?: { shopifyPlus?: unknown } | null } | null;
           discountNodes?: { nodes: DiscountNode[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
         };
-        errors?: unknown[];
+        errors?: unknown;
       };
+      try {
+        body = await response.json() as typeof body;
+      } catch (cause) {
+        throw new ShopifyDiscountInternalError("Shopify discount GraphQL returned invalid JSON", { cause });
+      }
+      if (hasGraphqlErrors(body.errors)) throw createShopifyProviderResponseError(response, body.errors);
       const connection = body.data?.discountNodes;
-      if (body.errors?.length || !connection || !Array.isArray(connection.nodes)) {
-        throw new Error("Shopify discount GraphQL returned an invalid response");
+      if (!connection || !Array.isArray(connection.nodes)) {
+        throw new ShopifyDiscountInternalError("Shopify discount GraphQL returned an invalid response");
       }
       const shopifyPlus = booleanValue(body.data?.shop?.plan?.shopifyPlus);
       for (const node of connection.nodes) {
@@ -212,12 +389,30 @@ export class ShopifyDiscountProvider {
       hasNextPage = connection.pageInfo.hasNextPage;
       const nextCursor = connection.pageInfo.endCursor;
       if (hasNextPage && (!nextCursor || nextCursor === after)) {
-        throw new Error("Shopify discount GraphQL pagination returned no advancing cursor");
+        throw new ShopifyDiscountInternalError("Shopify discount GraphQL pagination returned no advancing cursor");
       }
       after = nextCursor;
     }
     return records;
   }
+}
+
+function createShopifyProviderResponseError(
+  response: Response,
+  rawErrors: unknown,
+  providerResponseFormat: "json" | "non_json" = "json",
+): ShopifyDiscountProviderError {
+  const providerErrors = extractGraphqlErrors(rawErrors);
+  const requestId = response.headers.get("x-request-id") ?? response.headers.get("x-shopify-request-id");
+  const safeRequestId = requestId ? redactDiagnosticText(requestId, 128) : null;
+  return new ShopifyDiscountProviderError({
+    httpStatus: response.status,
+    providerResponseFormat,
+    ...(safeRequestId ? { providerRequestId: safeRequestId.value } : {}),
+    ...(providerErrors.errors.length ? { providerErrors: providerErrors.errors } : {}),
+    redactionApplied: providerErrors.redactionApplied || Boolean(safeRequestId?.redacted),
+    truncated: providerErrors.truncated || Boolean(safeRequestId?.truncated),
+  });
 }
 
 function normalizeDiscount(node: DiscountNode, shopifyPlus: boolean | null): ShopifyDiscountRecord {
