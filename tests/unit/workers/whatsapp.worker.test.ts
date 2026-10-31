@@ -140,6 +140,7 @@ const event = {
 describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
     mocks.optOut.mockResolvedValue(false);
     mocks.reachability.mockResolvedValue("recorded");
@@ -399,6 +400,7 @@ describe("WhatsApp worker inbound execution gate", () => {
 
 it("routes ambiguous voice to guidance before downloading or recording engagement", async () => {
  mocks.abuse.admitRaw.mockResolvedValue({kind:"allowed"});
+ mocks.guidance.mockResolvedValue({kind:"sent"});
  mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"guidance",reason:"MULTIPLE_RECOVERIES"});
  mocks.audio.mockClear(); mocks.recovery.recordExternalActivity.mockClear();
  await processInboundMessage({...event,content:{type:"audio",mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}} as any);
@@ -411,7 +413,7 @@ describe("ARCH-028 inbound reachability route gate", () => {
     vi.clearAllMocks();
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
     mocks.optOut.mockResolvedValue(false);
-    mocks.guidance.mockResolvedValue(undefined);
+    mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.reachability.mockResolvedValue("recorded");
     mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: false, version: 1 });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });

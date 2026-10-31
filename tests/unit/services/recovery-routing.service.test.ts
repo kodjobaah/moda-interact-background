@@ -112,6 +112,7 @@ describe("C2 strict recovery routing", () => {
       sentAt: new Date(),
       conversation: { checkoutRecovery: { customer: { phone: "999" } } },
     },
+    { direction: "OUTBOUND", sentAt: new Date(), conversation: { checkoutRecovery: null } },
   ])("never falls back from invalid explicit reference", async (original) => {
     db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
       where.providerMessageId === "bad" ? original : null,
@@ -125,11 +126,14 @@ describe("C2 strict recovery routing", () => {
       expect(db.$queryRaw).not.toHaveBeenCalled();
     expect(active).not.toHaveBeenCalled();
   });
-  it("rejects wrong provider before database access", async () => {
+  it.each([
+    { providerAccountId: "other", providerPhoneNumberId: "phone" },
+    { providerAccountId: "waba", providerPhoneNumberId: "other" },
+  ])("rejects a wrong provider sender before database access", async (sender) => {
     expect(
       await new RecoveryRoutingService().resolveInboundMessage({
         ...event,
-        providerAccountId: "other",
+        ...sender,
       }),
     ).toEqual({ kind: "ignored" });
     expect(db.conversationMessage.findUnique).not.toHaveBeenCalled();
@@ -157,6 +161,32 @@ describe("C2 strict recovery routing", () => {
     );
     expect(await new RecoveryRoutingService().resolveInboundMessage({ ...event, contextMessageId: "old" }))
       .toMatchObject({ kind: "resolved", conversationId: "other", mode: "active" });
+  });
+  it.each([
+    { type: "text" as const, text: "Can you help?" },
+    { type: "audio" as const, mediaId: "voice-note", mimeType: "audio/ogg", sha256: null },
+  ])("routes quoted $type replies to the same provider-confirmed recovery", async (content) => {
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) =>
+      where.providerMessageId === "store-recovery-message"
+        ? {
+            direction: "OUTBOUND",
+            sentAt: new Date(),
+            conversationId: "store-one-conversation",
+            conversation: { checkoutRecovery: recovery },
+          }
+        : null,
+    );
+    expect(await new RecoveryRoutingService().resolveInboundMessage({
+      ...event,
+      contextMessageId: "store-recovery-message",
+      content,
+    })).toMatchObject({
+      kind: "resolved",
+      conversationId: "store-one-conversation",
+      checkoutRecoveryId: "r1",
+      shopId: "shop1",
+      mode: "active",
+    });
   });
   it("does not manufacture ownership from a missing recovery", async () => {
     db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);

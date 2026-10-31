@@ -66,7 +66,7 @@ beforeEach(() => {
   h.abuse.mockResolvedValue({ kind: "allowed" });
   h.route.mockResolvedValue(activeRoute);
   h.current.mockResolvedValue(true);
-  h.guidance.mockResolvedValue(undefined);
+  h.guidance.mockResolvedValue({ kind: "sent" });
   h.activity.mockResolvedValue(undefined);
   h.audioReserve.mockResolvedValue({ conversationId: activeRoute.conversationId });
   h.audioProcess.mockResolvedValue({ kind: "completed" });
@@ -178,6 +178,34 @@ describe("processRoutedInboundMessage generation safety", () => {
     expect(h.abuse).not.toHaveBeenCalled();
     expect(h.route).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("logs guidance as sent only after confirmed delivery and never downloads ambiguous audio", async () => {
+    h.route.mockResolvedValue({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
+    h.guidance.mockResolvedValue({ kind: "sent" });
+    const enqueue = vi.fn();
+    await processRoutedInboundMessage({
+      ...event,
+      content: { type: "audio", mediaId: "private-media", mimeType: "audio/ogg", sha256: null },
+    } as WhatsAppInboundEvent, {}, logger, enqueue);
+    expect(h.guidance).toHaveBeenCalledOnce();
+    expect(h.audioReserve).not.toHaveBeenCalled();
+    expect(h.audioProcess).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(logMock.info).toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.objectContaining({
+      reason: "MULTIPLE_RECOVERIES", outcome: "sent",
+    }));
+    expect(logMock.debug).not.toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.anything());
+  });
+
+  it("does not report suppressed or failed guidance as sent", async () => {
+    h.route.mockResolvedValue({ kind: "guidance", reason: "INVALID_REFERENCE" });
+    h.guidance.mockResolvedValue({ kind: "failed", reason: "PROVIDER_SEND_FAILED" });
+    await processRoutedInboundMessage(event, {}, logger, vi.fn());
+    expect(logMock.info).not.toHaveBeenCalledWith("whatsapp.inbound.guidance_sent", expect.anything());
+    expect(logMock.warn).toHaveBeenCalledWith("whatsapp.inbound.guidance_not_sent", expect.objectContaining({
+      outcome: "failed", outcomeReason: "PROVIDER_SEND_FAILED",
+    }));
   });
 
   it("logs unexpected failures with a hashed message identity and rethrows", async () => {

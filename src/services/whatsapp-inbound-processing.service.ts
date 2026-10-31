@@ -85,11 +85,21 @@ async function processRoutedInboundMessageInternal(
     return;
   }
   if (route.kind === "guidance") {
-    await sendRoutingGuidance(event, route.reason);
-    log.debug("whatsapp.inbound.guidance_sent", {
-      messageDigest,
-      reason: route.reason,
-    });
+    const outcome = await sendRoutingGuidance(event, route.reason);
+    if (outcome.kind === "sent") {
+      log.info("whatsapp.inbound.guidance_sent", {
+        messageDigest,
+        reason: route.reason,
+        outcome: outcome.kind,
+      });
+    } else {
+      log.warn("whatsapp.inbound.guidance_not_sent", {
+        messageDigest,
+        reason: route.reason,
+        outcome: outcome.kind,
+        outcomeReason: outcome.reason,
+      });
+    }
     return;
   }
 
