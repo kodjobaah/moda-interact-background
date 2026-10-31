@@ -374,8 +374,9 @@ export class ShopifyDiscountProvider {
       };
       try {
         body = await response.json() as typeof body;
-      } catch (cause) {
-        throw new ShopifyDiscountInternalError("Shopify discount GraphQL returned invalid JSON", { cause });
+      } catch {
+        // Parser diagnostics may include a response snippet, so retain only the safe classification.
+        throw new ShopifyDiscountInternalError("Shopify discount GraphQL returned invalid JSON");
       }
       if (hasGraphqlErrors(body.errors)) throw createShopifyProviderResponseError(response, body.errors);
       const connection = body.data?.discountNodes;
