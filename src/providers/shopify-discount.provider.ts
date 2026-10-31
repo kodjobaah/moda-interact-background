@@ -19,7 +19,7 @@ query DiscountNodes($first: Int!, $after: String) {
         ... on DiscountAutomaticApp { title status startsAt endsAt }
         ... on DiscountCodeApp { title status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
         ... on DiscountAutomaticBasic {
-          title summary status startsAt endsAt asyncUsageCount
+          title summary status startsAt endsAt asyncUsageCount recurringCycleLimit
           discountClasses tags
           combinesWith {
             orderDiscounts productDiscounts shippingDiscounts
@@ -66,7 +66,7 @@ query DiscountNodes($first: Int!, $after: String) {
         ... on DiscountCodeBasic {
           title summary status startsAt endsAt codesCount { count precision }
           codes(first: 2) { nodes { code } pageInfo { hasNextPage } }
-          asyncUsageCount usageLimit appliesOncePerCustomer
+          asyncUsageCount usageLimit appliesOncePerCustomer recurringCycleLimit
           discountClasses tags
           combinesWith {
             orderDiscounts productDiscounts shippingDiscounts
@@ -239,7 +239,8 @@ function normalizeDiscount(node: DiscountNode, shopifyPlus: boolean | null): Sho
     ? !providerType.includes("App")
     : !providerType.includes("App") && codeCount === 1 && singleRedeemCode !== null;
   const combinationProjection = normalizeCombinationPolicy(discount, shopifyPlus);
-  const conditionFacts = normalizeConditionFacts(discount, providerType, combinationProjection);
+  const recurringCycleLimit = normalizeRecurringCycleLimit(discount.recurringCycleLimit, providerType);
+  const conditionFacts = normalizeConditionFacts(discount, providerType, combinationProjection, recurringCycleLimit);
 
   return {
     shopifyDiscountNodeId: node.id,
@@ -258,6 +259,7 @@ function normalizeDiscount(node: DiscountNode, shopifyPlus: boolean | null): Sho
       id: node.id,
       codesCount,
       codes,
+      recurringCycleLimit: recurringCycleLimit.value,
       discountClasses: combinationProjection.facts.discountClasses,
       tags: combinationProjection.facts.discountTags,
       combinesWith: combinationProjection.providerPolicy,
@@ -277,6 +279,11 @@ type CombinationProjection = {
   facts: CommerceDiscountCombinationFacts;
   providerPolicy: ProviderCombinationPolicy | null;
   reasons: string[];
+};
+
+type RecurringCycleLimitProjection = {
+  value: number | null;
+  reason: string | null;
 };
 
 type NormalizedTags = { tags: string[] | null; available: boolean; complete: boolean };
@@ -356,10 +363,24 @@ function normalizeDiscountClasses(value: unknown): {
   };
 }
 
+function normalizeRecurringCycleLimit(value: unknown, providerType: string): RecurringCycleLimitProjection {
+  const isAutomaticBasic = providerType === "DiscountAutomaticBasic";
+  const isCodeBasic = providerType === "DiscountCodeBasic";
+  if (!isAutomaticBasic && !isCodeBasic) return { value: null, reason: null };
+
+  // Zero means the discount applies indefinitely. A missing/null value is
+  // ambiguous for subscription eligibility and must not imply completeness.
+  const limit = nonNegativeSafeInteger(value);
+  if (limit === null) return { value: null, reason: "RECURRING_CYCLE_LIMIT_UNAVAILABLE" };
+  if (limit > 0) return { value: limit, reason: "RECURRING_CYCLE_LIMIT_NOT_REPRESENTED_IN_SHARED_FACTS" };
+  return { value: limit, reason: null };
+}
+
 function normalizeConditionFacts(
   discount: Record<string, unknown>,
   providerType: string,
   combination: CombinationProjection,
+  recurringCycleLimit: RecurringCycleLimitProjection,
 ): DiscountConditionFacts {
   const reasons = new Set<string>();
   const supportedBasic = providerType === "DiscountAutomaticBasic" || providerType === "DiscountCodeBasic";
@@ -401,6 +422,10 @@ function normalizeConditionFacts(
   for (const reason of combination.reasons) {
     completeness = false;
     reasons.add(reason);
+  }
+  if (recurringCycleLimit.reason) {
+    completeness = false;
+    reasons.add(recurringCycleLimit.reason);
   }
 
   const gets = asRecord(discount.customerGets);

@@ -57,6 +57,7 @@ describe("ShopifyDiscountProvider", () => {
         codesCount: { count: 1, precision: "EXACT" },
         codes: { nodes: [{ code: "SAVE20" }], pageInfo: { hasNextPage: false } },
         asyncUsageCount: 7, usageLimit: 50, appliesOncePerCustomer: true,
+        recurringCycleLimit: 0,
         discountClasses, tags: discountTags,
         combinesWith: combinationPolicy,
         customerGets: {
@@ -102,6 +103,7 @@ describe("ShopifyDiscountProvider", () => {
     expect(request.query).toContain("productDiscountsWithTagsOnSameCartLine");
     expect(request.query).toContain("shop { plan { shopifyPlus } }");
     expect(request.query.match(/discountClasses tags/g)).toHaveLength(2);
+    expect(request.query.match(/recurringCycleLimit/g)).toHaveLength(2);
     expect(request.query.match(/combinesWith \{/g)).toHaveLength(2);
   });
 
@@ -112,6 +114,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Collection percentage", summary: "15 percent",
         status: "ACTIVE", startsAt: "2026-09-20T00:00:00.000Z", endsAt: null, asyncUsageCount: 11,
+        recurringCycleLimit: 0,
         discountClasses, tags: discountTags,
         combinesWith: combinationPolicy,
         customerGets: {
@@ -141,6 +144,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Product special", summary: "All products are on sale",
         status: "ACTIVE", startsAt: "2026-09-20T00:00:00.000Z", endsAt: null,
+        recurringCycleLimit: 0,
         discountClasses, tags: discountTags,
         combinesWith: combinationPolicy,
         customerGets: {
@@ -169,6 +173,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: {
         __typename: "DiscountAutomaticBasic", title: "Plan context unavailable", summary: "5 percent",
         status: "ACTIVE", startsAt: "2026-09-20T00:00:00.000Z", endsAt: null,
+        recurringCycleLimit: 0,
         discountClasses, tags: discountTags, combinesWith: combinationPolicy,
         customerGets: {
           items: { __typename: "AllDiscountItems" },
@@ -191,6 +196,93 @@ describe("ShopifyDiscountProvider", () => {
       orderDiscounts: false, productDiscounts: true, shippingDiscounts: true,
     } });
     expect(facts.unrepresentedConditions).toContain("SHOPIFY_PLAN_UNAVAILABLE");
+    expect(CommerceDiscountConditionFactsSchema.safeParse(facts).success).toBe(true);
+  });
+
+  it.each(["DiscountAutomaticBasic", "DiscountCodeBasic"])(
+    "retains %s recurring cycle limits and keeps unsupported subscription restrictions partial",
+    async (providerType) => {
+      mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+      const codeFields = providerType === "DiscountCodeBasic" ? {
+        codesCount: { count: 1, precision: "EXACT" },
+        codes: { nodes: [{ code: "SAVE" }], pageInfo: { hasNextPage: false } },
+        usageLimit: 10,
+        appliesOncePerCustomer: false,
+      } : {};
+      const discount = {
+        __typename: providerType,
+        title: "Subscription discount",
+        summary: "10 percent",
+        status: "ACTIVE",
+        startsAt: "2026-09-20T00:00:00.000Z",
+        endsAt: null,
+        asyncUsageCount: 0,
+        recurringCycleLimit: 3,
+        discountClasses,
+        tags: discountTags,
+        combinesWith: combinationPolicy,
+        customerGets: {
+          items: { __typename: "AllDiscountItems" },
+          value: { __typename: "DiscountPercentage", percentage: 10 },
+        },
+        minimumRequirement: null,
+        context: { __typename: "DiscountBuyerSelectionAll" },
+        ...codeFields,
+      };
+      const fetchMock = vi.fn().mockResolvedValue(response([{
+        id: "gid://shopify/DiscountNode/recurring",
+        discount,
+      }]));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const [result] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      const snapshot = result?.providerSnapshot;
+      const facts = snapshot?.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
+      const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
+
+      expect(snapshot?.recurringCycleLimit).toBe(3);
+      expect(facts.completeness).toBe("PARTIAL");
+      expect(facts.unrepresentedConditions).toContain("RECURRING_CYCLE_LIMIT_NOT_REPRESENTED_IN_SHARED_FACTS");
+      expect(CommerceDiscountConditionFactsSchema.safeParse(facts).success).toBe(true);
+      expect(request.query.match(/recurringCycleLimit/g)).toHaveLength(2);
+    },
+  );
+
+  it("does not treat a null code recurring cycle limit as complete subscription evidence", async () => {
+    mocks.getShopifyAccessToken.mockResolvedValue("token-1");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{
+      id: "gid://shopify/DiscountCodeNode/recurring-unknown",
+      discount: {
+        __typename: "DiscountCodeBasic",
+        title: "Unknown subscription limit",
+        summary: "10 percent",
+        status: "ACTIVE",
+        startsAt: "2026-09-20T00:00:00.000Z",
+        endsAt: null,
+        codesCount: { count: 1, precision: "EXACT" },
+        codes: { nodes: [{ code: "SAVE" }], pageInfo: { hasNextPage: false } },
+        asyncUsageCount: 0,
+        usageLimit: 10,
+        appliesOncePerCustomer: false,
+        recurringCycleLimit: null,
+        discountClasses,
+        tags: discountTags,
+        combinesWith: combinationPolicy,
+        customerGets: {
+          items: { __typename: "AllDiscountItems" },
+          value: { __typename: "DiscountPercentage", percentage: 10 },
+        },
+        minimumRequirement: null,
+        context: { __typename: "DiscountBuyerSelectionAll" },
+      },
+    }])));
+
+    const [result] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const facts = result?.providerSnapshot.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
+
+    expect(result?.providerSnapshot.recurringCycleLimit).toBeNull();
+    expect(facts.completeness).toBe("PARTIAL");
+    expect(facts.unrepresentedConditions).toContain("RECURRING_CYCLE_LIMIT_UNAVAILABLE");
     expect(CommerceDiscountConditionFactsSchema.safeParse(facts).success).toBe(true);
   });
 
