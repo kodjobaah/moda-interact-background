@@ -245,22 +245,24 @@ export class RecoveryInitiationService {
 
     if (admissionGate && !(await admissionGate())) return recovery;
 
-    // Only after the checkout, stored consent, STOP and capacity preflight.
-    // BG004 verifies offer eligibility; BG001 prepares immutable Admin-authored
-    // Meta bindings. Neither executes a provider send or occupies a credit.
-    const selected = await automatedRecoveryTemplateService.prepare({
-      shopId: recovery.shopId, recoveryId: recovery.id, stage: "INITIAL",
-      policy, conversationLanguageTag: null,
-      customerFirstName: event.customer.firstName,
-    });
-    if (selected.kind !== "prepared") return recovery;
-
+    // The attempt identity is required by BG016's fresh, attempt-bound price
+    // preflight. Creating this row does not reserve capacity or permit a send.
     const attempt = await recoveryOutreachAttemptService.getOrCreate({
       recoveryId: recovery.id,
       sequence: 1,
       policy,
       recipient,
     });
+
+    // Only after the checkout, stored consent, STOP and capacity preflight.
+    // Offer verification and immutable Admin-authored Meta binding still run
+    // before billing admission or any provider send.
+    const selected = await automatedRecoveryTemplateService.prepare({
+      shopId: recovery.shopId, recoveryId: recovery.id, stage: "INITIAL",
+      policy, conversationLanguageTag: null, outreachAttemptId: attempt.id,
+      customerFirstName: event.customer.firstName,
+    });
+    if (selected.kind !== "prepared") return recovery;
 
     let billing = await this.billingService.admit({
       shopId: recovery.shopId,
@@ -330,6 +332,23 @@ export class RecoveryInitiationService {
         return recovery;
       }
       billing = revalidated;
+      if (!selected.admissionToken) {
+        await this.billingService.releaseBeforeProvider(billing.admission);
+        return recovery;
+      }
+      let offerAdmissionValid: boolean;
+      try {
+        offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
+          selected.admissionToken, AbortSignal.timeout(15_000),
+        );
+      } catch (error) {
+        await this.billingService.releaseBeforeProvider(billing.admission);
+        throw error;
+      }
+      if (!offerAdmissionValid) {
+        await this.billingService.releaseBeforeProvider(billing.admission);
+        return recovery;
+      }
       result = await outboundWhatsAppAdmissionService.sendTemplate({
         shopId: recovery.shopId,
         conversationId: conversation.id,

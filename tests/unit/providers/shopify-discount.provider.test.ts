@@ -143,6 +143,7 @@ describe("ShopifyDiscountProvider", () => {
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       minimumSubtotal: string | null;
+      subtotalRequirementCurrency: string | null;
       minimumQuantity: number | null;
       unrepresentedConditions: string[];
     };
@@ -273,7 +274,8 @@ describe("ShopifyDiscountProvider", () => {
         includedVariantIds: ["gid://shopify/ProductVariant/2"], includedCollectionIds: [],
         excludedProductIds: [], excludedVariantIds: [], excludedCollectionIds: [],
       },
-      minimumSubtotal: "75.00", minimumQuantity: null,
+      minimumSubtotal: "75.00",
+      subtotalRequirementCurrency: "GBP", minimumQuantity: null,
       usageLimit: 50, usageCount: 7, perCustomerLimit: 1, customerScope: "ALL",
       combination: {
         discountClasses: ["PRODUCT"], shopifyPlus: true,

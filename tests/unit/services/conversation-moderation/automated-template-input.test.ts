@@ -39,6 +39,18 @@ describe("ARCH-040 automated template moderation input", () => {
     expect(result.providerInput.bodyParameters).toBeUndefined();
   });
 
+  it("snapshots two ordered URL button parameters without changing their indexes", () => {
+    const result = prepareAutomatedTemplateInput({ ...base, dynamicUrlButtons: [
+      { index: 0, text: "checkout-token" },
+      { index: 1, text: "product-token" },
+    ] });
+    expect(result.providerInput.dynamicUrlButtons).toEqual([
+      { index: 0, text: "checkout-token" },
+      { index: 1, text: "product-token" },
+    ]);
+    expect(JSON.parse(result.effectiveText).dynamicUrlButtons).toEqual(result.providerInput.dynamicUrlButtons);
+  });
+
   it("fails closed for unsupported image media and malformed/unbounded parameters", () => {
     expect(() => prepareAutomatedTemplateInput({ ...base, imageHeader: { link: "https://example.test/image" } }))
       .toThrow("automated_template_unsupported");

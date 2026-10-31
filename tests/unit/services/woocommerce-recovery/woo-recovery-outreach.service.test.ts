@@ -22,6 +22,9 @@ const policy = {
 const template = {
   name: "woo_checkout_recovery", languageCode: "en_GB", canonicalLanguageTag: "en-GB",
   verifiedCategory: "MARKETING" as const,
+  admissionToken: { shopId: "woo-shop", checkoutRecoveryId: "recovery", outreachAttemptId: "attempt-1",
+    generation: 1, fingerprint: "fingerprint", mode: "NONE" as const,
+    authorisedDiscountIds: [], priceReconciliation: null, sourceFence: null },
 };
 
 function makeFixture() {
@@ -76,6 +79,7 @@ function makeFixture() {
     consentRevision: snapshot.consentRevision, noContactRevision: snapshot.noContactRevision,
   }));
   const select = vi.fn(async () => ({ kind: "selected" as const, template }));
+  const validateAdmission = vi.fn(async () => true);
   const deps: WooOutreachDependencies = {
     logger: {
       child: () => ({
@@ -112,7 +116,7 @@ function makeFixture() {
     },
     consent: { evaluateStoredRecipient: consent } as unknown as WooOutreachDependencies["consent"],
     policies: { resolve: async () => policy },
-    templates: { select },
+    templates: { select, validateAdmission },
     conversations: { getOrCreate: async () => ({ id: "conversation" }) },
     billing: {
       admit, revalidateBeforeProvider, releaseBeforeProvider: release,
@@ -132,6 +136,7 @@ function makeFixture() {
     service: new WooRecoveryOutreachService(deps), deps, logs, admission, send,
     admit, revalidateBeforeProvider, release, compensate, committed,
     finalize, consent, select, enqueue, existing, markFailed, messages,
+    validateAdmission,
     hasResumedHistory, findSettleableAttempts, cancelIfPrePermit, releaseReservedCredit, reconcileRecorded,
     setSettlementOutcome(value: typeof settlementOutcome) { settlementOutcome = value; },
     get attempt() { return attempt; },
@@ -247,6 +252,7 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
       f.admission.kind = kind;
       const result = await f.service.processInitial("recovery");
       expect(result).toEqual({ kind: "sent", attemptId: "attempt-1" });
+      expect(f.select).toHaveBeenCalledWith("woo-shop", "recovery", "attempt-1", policy);
       expect(f.send).toHaveBeenCalledTimes(1);
       expect(f.send).toHaveBeenCalledWith(expect.objectContaining({
         attemptId: "attempt-1", idempotencyKey: "recovery-outreach:attempt-1",
@@ -480,13 +486,13 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("compensates a template category change after initial credit admission", async () => {
+  it("suppresses a prepared promotion when F3 source admission changes", async () => {
     const f = makeFixture();
-    f.select.mockResolvedValueOnce({ kind: "selected", template });
-    f.select.mockResolvedValueOnce({ kind: "unavailable", reason: "category-revoked" } as never);
-    expect(await f.service.processInitial("recovery")).toEqual({ kind: "suppressed", reason: "marketing-template-changed" });
+    f.validateAdmission.mockResolvedValueOnce(false);
+    expect(await f.service.processInitial("recovery")).toEqual({ kind: "suppressed", reason: "offer-source-changed" });
     expect(f.release).toHaveBeenCalledOnce();
     expect(f.send).not.toHaveBeenCalled();
+    expect(f.select).toHaveBeenCalledOnce();
   });
   it("cancels and releases only the pre-permit attempt of a resumed Woo recovery", async () => {
     const f = makeFixture();

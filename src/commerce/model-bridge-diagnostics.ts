@@ -93,8 +93,6 @@ export async function observeCommerceModelBridgePhase<T>(
           modelStatusCode: modelDiagnostic.statusCode,
           modelTransportCode: modelDiagnostic.transportCode,
         } : {}),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
       });
     } catch {
       // A broken logger cannot replace the original failure.

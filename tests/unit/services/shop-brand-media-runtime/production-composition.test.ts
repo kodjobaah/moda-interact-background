@@ -45,12 +45,12 @@ function instance(components: unknown = vector.componentsSnapshot,
     driftDetectedAt: null, lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
     submittedContentHash: contentHash, componentsSnapshot: components, parameterBindingsSnapshot: bindings,
     locale: { id: "loc-1", languageTag: "en", providerLanguageCode: "en_US", status: "REVIEWED",
-      contentHash, definition: { id: "def-1", kind: "META_RECOVERY", purpose: "INITIAL",
+      contentHash, definition: { id: "def-1", kind: "META_RECOVERY", purpose: "FOLLOW_UP",
         offerType: "NO_OFFER", status: "PUBLISHED", category: "MARKETING",
         providerTemplateName: "moda_media_header", publishedAt: now, retiredAt: null } },
   };
   const variant = { id: "variant-1", shopId: "shop-1", providerAccountId: "waba-1",
-    purpose: "INITIAL_NO_OFFER", languageTag: "en", providerLanguageCode: "en_US",
+    purpose: "FOLLOW_UP_NO_OFFER", languageTag: "en", providerLanguageCode: "en_US",
     providerTemplateName: "moda_media_header", providerTemplateId: "meta-1", status: "APPROVED",
     enabled: true, metaRegistrationId: "reg-1", metaRegistration: registration } as AssignedVariantRow;
   const readShopBrand = vi.fn(async () => null);
@@ -61,7 +61,7 @@ function instance(components: unknown = vector.componentsSnapshot,
   // No third/fourth arguments: requires the real production media adapter.
   const preparer = new RecoveryTemplatePreparer(repo, async () => "waba-1", undefined, undefined,
     () => now, logs);
-  const input = { shopId: "shop-1", senderWabaId: "waba-1", stage: "INITIAL" as const,
+  const input = { shopId: "shop-1", senderWabaId: "waba-1", stage: "FOLLOW_UP" as const,
     offerPresentation: "NO_OFFER" as const, conversationLanguageTag: null, merchantLanguageTag: "en",
     customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Example Shop" } };
   return { preparer, input, readShopBrand, logs };

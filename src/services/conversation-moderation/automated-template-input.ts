@@ -1,4 +1,16 @@
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
+import type { RecoveryOfferPromise } from "../recovery-template-integration/prepared-template-send.js";
+
+function promisedOfferPurpose(promise: RecoveryOfferPromise): "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER" | null {
+  if (promise.kind === "NO_OFFER") return "NO_OFFER";
+  if (promise.kind === "CODE_OFFER" || promise.kind === "AUTOMATIC_OFFER") return promise.kind;
+  if (promise.kind === "ALTERNATIVE_PRODUCT_PROMOTION") {
+    return promise.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
+  }
+  const methods = new Set(promise.offerSet.offers.map((offer) => offer.method));
+  if (methods.size !== 1) return null;
+  return methods.has("CODE") ? "CODE_OFFER" : "AUTOMATIC_OFFER";
+}
 
 /**
  * Moderation v1 can inspect the persisted template identity and dynamic text,
@@ -21,10 +33,13 @@ export function prepareAutomatedTemplateInput(input: SendTemplateInput): {
   if (bodyParameters.length > 32 || bodyParameters.some((value) => typeof value !== "string")) {
     throw new Error("automated_template_invalid_parameters");
   }
-  if (input.recoveryPromise && (!input.templateRegistration ||
-      input.templateRegistration.purpose !== `INITIAL_${input.recoveryPromise.kind}` &&
-      input.templateRegistration.purpose !== `FOLLOW_UP_${input.recoveryPromise.kind}`)) {
-    throw new Error("automated_template_promise_mismatch");
+  if (input.recoveryPromise) {
+    const offerPurpose = promisedOfferPurpose(input.recoveryPromise);
+    if (!input.templateRegistration || !offerPurpose ||
+        input.templateRegistration.purpose !== `INITIAL_${offerPurpose}` &&
+        input.templateRegistration.purpose !== `FOLLOW_UP_${offerPurpose}`) {
+      throw new Error("automated_template_promise_mismatch");
+    }
   }
   const header = input.textHeader;
   if (header !== undefined && (typeof header !== "string" || header.length > 200 || !header.trim() || input.imageHeader)) {
@@ -34,10 +49,17 @@ export function prepareAutomatedTemplateInput(input: SendTemplateInput): {
       new URL(input.imageHeader.link).protocol !== "https:")) {
     throw new Error("automated_template_invalid_media");
   }
-  const button = input.dynamicUrlButton;
-  if (button && (!Number.isSafeInteger(button.index) || button.index < 0 || typeof button.text !== "string")) {
+  if (input.dynamicUrlButton && input.dynamicUrlButtons) {
     throw new Error("automated_template_invalid_button");
   }
+  const buttons = input.dynamicUrlButtons ?? (input.dynamicUrlButton ? [input.dynamicUrlButton] : []);
+  if (buttons.length > 2 || buttons.some(({ index, text }, buttonIndex) =>
+      !Number.isSafeInteger(index) || index < 0 || typeof text !== "string" || !text.trim() ||
+      (buttonIndex > 0 && index <= buttons[buttonIndex - 1]!.index)) ||
+      new Set(buttons.map(({ index }) => index)).size !== buttons.length) {
+    throw new Error("automated_template_invalid_button");
+  }
+  const dynamicUrlButtons = buttons.map(({ index, text }) => ({ index, text }));
   const providerInput: SendTemplateInput = {
     to: input.to,
     templateName: input.templateName,
@@ -45,7 +67,8 @@ export function prepareAutomatedTemplateInput(input: SendTemplateInput): {
     ...(input.bodyParameters !== undefined ? { bodyParameters } : {}),
     ...(header !== undefined ? { textHeader: header } : {}),
     ...(input.imageHeader ? { imageHeader: { link: input.imageHeader.link } } : {}),
-    ...(button ? { dynamicUrlButton: { index: button.index, text: button.text } } : {}),
+    ...(input.dynamicUrlButtons ? { dynamicUrlButtons } :
+      input.dynamicUrlButton && dynamicUrlButtons[0] ? { dynamicUrlButton: dynamicUrlButtons[0] } : {}),
   };
   const effectiveText = JSON.stringify({
     contract: "moda.whatsapp.automated-template-parameters.v1",
@@ -57,7 +80,8 @@ export function prepareAutomatedTemplateInput(input: SendTemplateInput): {
     // media URLs out of the moderation text and durable message body.
     imageHeader: input.imageHeader ? "READY_DERIVATIVE" : null,
     ...(input.recoveryPromise ? { recoveryPromise: input.recoveryPromise } : {}),
-    dynamicUrlButton: button ? { index: button.index, text: button.text } : null,
+    dynamicUrlButton: input.dynamicUrlButton ? dynamicUrlButtons[0] : null,
+    ...(input.dynamicUrlButtons ? { dynamicUrlButtons } : {}),
   });
   if (Buffer.byteLength(effectiveText, "utf8") > 16_384) {
     throw new Error("automated_template_input_too_large");
