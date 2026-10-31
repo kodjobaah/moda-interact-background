@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { id?: string; data: unknown }) => Promise<unknown>),
   listeners: new Map<string, (...args: unknown[]) => void>(),
+  parseJob: vi.fn((data: unknown) => data),
   reconcile: vi.fn(),
   info: vi.fn(),
   warn: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock("@modainteract/moda-interact-shared/shopify", () => ({
   SHOPIFY_WEBHOOK_QUEUE_CONTRACTS: {
     SHOPIFY_DISCOUNT_SYNC: { queueName: "shopify-discount-sync" },
   },
-  parseShopifyDiscountSyncJob: (data: unknown) => data,
+  parseShopifyDiscountSyncJob: hoisted.parseJob,
 }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/runtime/deployment-environment.js", () => ({
@@ -58,6 +59,8 @@ const job = {
 
 describe("Shopify discount sync worker logging", () => {
   beforeEach(() => {
+    hoisted.parseJob.mockReset();
+    hoisted.parseJob.mockImplementation((data: unknown) => data);
     hoisted.reconcile.mockReset();
     hoisted.info.mockReset();
     hoisted.warn.mockReset();
@@ -111,6 +114,57 @@ describe("Shopify discount sync worker logging", () => {
     }));
     expect(hoisted.warn).not.toHaveBeenCalled();
     expect(hoisted.error).not.toHaveBeenCalled();
+  });
+
+  it("logs malformed jobs with safe diagnostics and rejects without logging job data", async () => {
+    const parseError = new Error("Invalid job for customer@example.com access_token=secret-value", {
+      cause: new Error("Required shopId is missing"),
+    });
+    hoisted.parseJob.mockImplementationOnce(() => { throw parseError; });
+    const malformedJob = {
+      id: "bad-job-id",
+      data: { customer: "private customer record", token: "private-token" },
+    };
+
+    await expect(hoisted.processor?.(malformedJob)).rejects.toBe(parseError);
+
+    expect(hoisted.reconcile).not.toHaveBeenCalled();
+    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
+      reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
+      origin: "internal",
+      errorName: "Error",
+      errorMessage: "Invalid job for [REDACTED] access_token=[REDACTED]",
+      errorStack: expect.stringContaining("Invalid job for"),
+      errorCause: [expect.objectContaining({ message: "Required shopId is missing" })],
+      redactionApplied: true,
+    }));
+    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(loggedFields).not.toHaveProperty("jobId");
+    expect(loggedFields).not.toHaveProperty("shopId");
+    expect(JSON.stringify(loggedFields)).not.toContain("private customer record");
+    expect(JSON.stringify(loggedFields)).not.toContain("private-token");
+  });
+
+  it("logs invalid requestedAt and rejects for BullMQ without logging untrusted job fields", async () => {
+    const invalidTimestampJob = {
+      id: "bad-timestamp-job",
+      data: { ...job.data, requestedAt: "not-a-date", customer: "private customer record" },
+    };
+
+    await expect(hoisted.processor?.(invalidTimestampJob)).rejects.toThrow("Invalid Shopify discount sync requestedAt");
+
+    expect(hoisted.reconcile).not.toHaveBeenCalled();
+    expect(hoisted.error).toHaveBeenCalledWith("shopify.discount_sync.failed", expect.objectContaining({
+      reasonCode: "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
+      origin: "internal",
+      errorName: "Error",
+      errorMessage: "Invalid Shopify discount sync requestedAt",
+      errorStack: expect.stringContaining("Invalid Shopify discount sync requestedAt"),
+    }));
+    const loggedFields = hoisted.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(loggedFields).not.toHaveProperty("jobId");
+    expect(loggedFields).not.toHaveProperty("shopId");
+    expect(JSON.stringify(loggedFields)).not.toContain("private customer record");
   });
 
   it("logs unavailable catalogue outcomes as warnings", async () => {

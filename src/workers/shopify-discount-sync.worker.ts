@@ -15,21 +15,28 @@ export function createShopifyDiscountSyncWorker() {
   const worker = new Worker(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.SHOPIFY_DISCOUNT_SYNC.queueName,
     async (job) => {
-      const payload = parseShopifyDiscountSyncJob(job.data);
-      const requestedAt = new Date(payload.requestedAt);
-      if (Number.isNaN(requestedAt.getTime())) throw new Error("Invalid Shopify discount sync requestedAt");
-
-      const fields = {
-        jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
-        shopId: payload.shopId,
-        reason: payload.reason,
-        requestedAt: payload.requestedAt,
-        webhookTopic: payload.webhookTopic,
-      };
-
-      logger.info("shopify.discount_sync.job_received", fields);
-
+      let fields: {
+        jobId: string | number | null;
+        shopId: string | null;
+        reason: string;
+        requestedAt: string;
+        webhookTopic: string | null;
+      } | undefined;
       try {
+        const payload = parseShopifyDiscountSyncJob(job.data);
+        const requestedAt = new Date(payload.requestedAt);
+        if (Number.isNaN(requestedAt.getTime())) throw new Error("Invalid Shopify discount sync requestedAt");
+
+        fields = {
+          jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
+          shopId: payload.shopId,
+          reason: payload.reason,
+          requestedAt: payload.requestedAt,
+          webhookTopic: payload.webhookTopic,
+        };
+
+        logger.info("shopify.discount_sync.job_received", fields);
+
         const outcome = await shopifyDiscountCatalogueService.reconcile(payload.shopId, requestedAt);
         if (outcome === "current") {
           logger.info("shopify.discount_sync.completed", { ...fields, outcome });
@@ -43,8 +50,8 @@ export function createShopifyDiscountSyncWorker() {
       } catch (error) {
         if (!isShopifyDiscountProviderError(error)) {
           logger.error("shopify.discount_sync.failed", {
-            ...fields,
-            reasonCode: "SHOPIFY_DISCOUNT_SYNC_FAILED",
+            ...(fields ?? {}),
+            reasonCode: fields ? "SHOPIFY_DISCOUNT_SYNC_FAILED" : "SHOPIFY_DISCOUNT_SYNC_JOB_INVALID",
             ...getShopifyDiscountFailureLogFields(error, "internal"),
           });
         }
