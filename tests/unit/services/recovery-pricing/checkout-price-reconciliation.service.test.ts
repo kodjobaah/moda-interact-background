@@ -66,6 +66,7 @@ function service(options: {
   recoveryRead?: () => Promise<RecoveryPricingState | null>;
   productRead?: (request: Parameters<ConstructorParameters<typeof CheckoutPriceReconciliationService>[0]["productReader"]["read"]>[0]) => Promise<unknown>;
   logger?: { error: ReturnType<typeof vi.fn> };
+  environment?: string;
   now?: () => Date;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
@@ -82,6 +83,7 @@ function service(options: {
   return {
     instance: new CheckoutPriceReconciliationService({
       recoveryAttemptReader, productReader, logger,
+      ...(options.environment ? { environment: options.environment } : {}),
       now: options.now ?? (() => now),
       ...(options.setTimer ? { setTimer: options.setTimer } : {}),
       ...(options.clearTimer ? { clearTimer: options.clearTimer } : {}),
@@ -284,7 +286,21 @@ describe("CheckoutPriceReconciliationService", () => {
 
     const original = Object.assign(new Error(
       "original MCP transport diagnostic for customer jane.doe@example.com at +1 (415) 555-0134; https://private.example/path?token=secret Authorization: Bearer abc123 api_key=sk_live_123; response body: {\"customerName\":\"Avery Customer\"}",
-    ), { status: 502, code: "ETIMEDOUT" });
+    ), {
+      status: 502,
+      code: "ETIMEDOUT",
+      providerErrorPayload: {
+        message: "Provider rejected request for jane.doe@example.com; contact +1 (415) 555-0134",
+        type: "invalid_request",
+        request_id: "req-123",
+        authorization: "Bearer abc123",
+        checkout_url: "https://private.example/checkout?token=secret",
+        product_description: "Sensitive product description",
+        coupon_code: "SAVE20",
+        model_prompt: "private model instructions",
+        nested: "unlisted field should not appear",
+      },
+    });
     const logger = { error: vi.fn() };
     const failureHarness = service({ logger, productRead: async () => { throw original; } });
     await expect(failureHarness.instance.reconcile(input())).rejects.toBe(original);
@@ -301,8 +317,31 @@ describe("CheckoutPriceReconciliationService", () => {
     expect(productFailureText).not.toContain("abc123");
     expect(productFailureText).not.toContain("sk_live_123");
     expect(productFailureText).not.toContain("Avery Customer");
+    expect(productFailureText).toContain("providerErrorPayload");
+    expect(productFailureText).toContain("invalid_request");
+    expect(productFailureText).toContain("req-123");
+    expect(productFailureText).not.toContain("authorization");
+    expect(productFailureText).not.toContain("private product description");
+    expect(productFailureText).not.toContain("Sensitive product description");
+    expect(productFailureText).not.toContain("SAVE20");
+    expect(productFailureText).not.toContain("private model instructions");
+    expect(productFailureText).not.toContain("unlisted field");
     expect(productFailureLog).not.toHaveProperty("error");
     expect(failureHarness.recoveryAttemptReader.read).toHaveBeenCalledTimes(2);
+
+    const productionLogger = { error: vi.fn() };
+    const productionHarness = service({
+      logger: productionLogger,
+      environment: "prod-us",
+      productRead: async () => { throw original; },
+    });
+    await expect(productionHarness.instance.reconcile(input())).rejects.toBe(original);
+    const productionFailureLog = productionLogger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(productionFailureLog).toMatchObject({
+      sourceError: { name: "Error", status: 502, code: "ETIMEDOUT" },
+    });
+    expect(productionFailureLog).not.toHaveProperty("sourceError.providerErrorPayload");
+    expect(JSON.stringify(productionFailureLog)).not.toContain("req-123");
 
     const stateOriginal = Object.assign(new Error(
       "trusted-state read failed for jane.doe@example.com / +1 (415) 555-0134 at https://private.example/state; password=hunter2",
@@ -325,5 +364,39 @@ describe("CheckoutPriceReconciliationService", () => {
     expect(stateFailureText).not.toContain("private.example");
     expect(stateFailureText).not.toContain("hunter2");
     expect(stateFailureLog).not.toHaveProperty("error");
+    expect(stateFailureLog).not.toHaveProperty("sourceError.providerErrorPayload");
+  });
+
+  it("never logs successful product response payloads", async () => {
+    const logger = { error: vi.fn() };
+    const harness = service({
+      logger,
+      productRead: async () => ({
+        ...productResult(),
+        data: {
+          product: {
+            ...productResult().data.product,
+            title: "successful-response-secret@example.com",
+          },
+        },
+      }),
+    });
+    await harness.instance.reconcile(input());
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("successful-response-secret@example.com");
+  });
+
+  it("bounds provider error payload diagnostics and preserves the originating error", async () => {
+    const original = Object.assign(new Error("provider request failed"), {
+      providerErrorPayload: { message: "diagnostic detail ".repeat(500) },
+    });
+    const logger = { error: vi.fn() };
+    const harness = service({ logger, productRead: async () => { throw original; } });
+    await expect(harness.instance.reconcile(input())).rejects.toBe(original);
+    const failureLog = logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    const sourceError = failureLog.sourceError as Record<string, unknown>;
+    const serializedPayload = JSON.stringify(sourceError.providerErrorPayload);
+    expect(serializedPayload).toContain("[TRUNCATED]");
+    expect(Buffer.byteLength(serializedPayload, "utf8")).toBeLessThanOrEqual(4096);
   });
 });

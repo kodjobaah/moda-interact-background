@@ -23,8 +23,19 @@ const MAX_LINES = 100;
 const MAX_CONCURRENCY = 4;
 const READ_BUDGET_MS = 20_000;
 const MAX_SOURCE_ERROR_TEXT_LENGTH = 512;
+const MAX_PROVIDER_ERROR_PAYLOAD_BYTES = 4096;
+const MAX_PROVIDER_ERROR_PAYLOAD_NODES = 32;
+const MAX_PROVIDER_ERROR_PAYLOAD_DEPTH = 4;
+const MAX_PROVIDER_ERROR_PAYLOAD_ITEMS = 8;
+const MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH = 192;
 const ACTIVE_RECOVERY_STATUSES = new Set(["DETECTED"]);
 const ACTIVE_ATTEMPT_STATUSES = new Set(["PENDING", "CAPACITY_BLOCKED"]);
+const PROVIDER_ERROR_PAYLOAD_KEYS = new Set([
+  "message", "code", "type", "error_subcode", "subcode", "status", "status_code",
+  "error_data", "details", "errors", "error", "reason", "field", "fields",
+  "request_id", "trace_id", "fbtrace_id", "provider_request_id", "error_user_title",
+  "error_user_msg", "user_title", "user_msg", "category", "retryable",
+]);
 
 type PriceReconciliationLogger = Pick<StructuredLogger, "error">;
 type Product = NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>;
@@ -66,6 +77,7 @@ export class InvalidPriceReconciliationAttemptError extends Error {
 export type CheckoutPriceReconciliationServiceDependencies = Readonly<{
   recoveryAttemptReader: TrustedRecoveryAttemptReader;
   productReader: ExactProductReader;
+  environment?: string;
   now?: () => Date;
   logger?: PriceReconciliationLogger;
   setTimer?: typeof setTimeout;
@@ -130,7 +142,69 @@ function redactSourceErrorText(value: string): Readonly<{
   };
 }
 
-function safeSourceErrorDiagnostic(error: unknown): Readonly<{
+type PayloadSanitizationState = { remainingNodes: number; redactionApplied: boolean; truncated: boolean };
+
+function sanitizeProviderErrorPayload(
+  value: unknown,
+  state: PayloadSanitizationState,
+  depth = 0,
+): unknown {
+  if (state.remainingNodes <= 0 || depth > MAX_PROVIDER_ERROR_PAYLOAD_DEPTH) {
+    state.truncated = true;
+    return "[TRUNCATED]";
+  }
+  state.remainingNodes--;
+  if (typeof value === "string") {
+    const safeText = redactSourceErrorText(value);
+    const truncated = safeText.value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH;
+    state.redactionApplied ||= safeText.redactionApplied;
+    state.truncated ||= safeText.truncated || truncated;
+    return truncated
+      ? `${safeText.value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH)}[TRUNCATED]`
+      : safeText.value;
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : "[REDACTED]";
+  if (typeof value === "boolean" || value === null) return value;
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_ITEMS);
+    if (value.length > items.length) state.truncated = true;
+    return items.map((item) => sanitizeProviderErrorPayload(item, state, depth + 1));
+  }
+  const object = objectRecord(value);
+  if (!object) {
+    state.redactionApplied = true;
+    return "[REDACTED]";
+  }
+  const result: Record<string, unknown> = {};
+  const entries = Object.entries(object);
+  for (const [key, item] of entries) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!PROVIDER_ERROR_PAYLOAD_KEYS.has(key.toLowerCase()) ||
+        /email|phone|address|customer|recipient|token|secret|password|authorization|cookie|url|description|coupon|prompt|header|body|success/.test(normalizedKey)) {
+      state.redactionApplied = true;
+      continue;
+    }
+    if (Object.keys(result).length >= MAX_PROVIDER_ERROR_PAYLOAD_ITEMS) {
+      state.truncated = true;
+      break;
+    }
+    result[key] = sanitizeProviderErrorPayload(item, state, depth + 1);
+  }
+  return result;
+}
+
+function sourceErrorPayload(error: unknown): unknown {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+  const source = error as Record<string, unknown>;
+  return source.providerErrorPayload ?? source.providerError ?? source.error_data ?? source.errorData ??
+    source.error ?? source.details ?? source.responseBody ?? source.body ?? source.payload;
+}
+
+function isProductionEnvironment(environment: string): boolean {
+  return /^(?:prod(?:uction)?|live)(?:$|[-_.])/.test(environment);
+}
+
+function safeSourceErrorDiagnostic(error: unknown, includePayload: boolean): Readonly<{
   diagnostic: Readonly<Record<string, unknown>>;
   redactionApplied: boolean;
   truncated: boolean;
@@ -164,6 +238,26 @@ function safeSourceErrorDiagnostic(error: unknown): Readonly<{
     redactionApplied ||= safeCode.redactionApplied;
     truncated ||= safeCode.truncated || safeCode.value.length > 128;
   }
+  if (includePayload) {
+    const payload = sourceErrorPayload(error);
+    if (payload !== undefined) {
+      const state: PayloadSanitizationState = {
+        remainingNodes: MAX_PROVIDER_ERROR_PAYLOAD_NODES,
+        redactionApplied: false,
+        truncated: false,
+      };
+      const sanitizedPayload = sanitizeProviderErrorPayload(payload, state);
+      const serialized = JSON.stringify(sanitizedPayload);
+      if (Buffer.byteLength(serialized, "utf8") <= MAX_PROVIDER_ERROR_PAYLOAD_BYTES) {
+        diagnostic.providerErrorPayload = sanitizedPayload;
+      } else {
+        diagnostic.providerErrorPayload = "[TRUNCATED]";
+        state.truncated = true;
+      }
+      redactionApplied ||= state.redactionApplied;
+      truncated ||= state.truncated;
+    }
+  }
   return { diagnostic, redactionApplied, truncated };
 }
 
@@ -190,12 +284,14 @@ class ReadBudgetExceededError extends Error {
 export class CheckoutPriceReconciliationService {
   private readonly now: () => Date;
   private readonly logger: PriceReconciliationLogger;
+  private readonly environment: string;
   private readonly setTimer: typeof setTimeout;
   private readonly clearTimer: typeof clearTimeout;
 
   constructor(private readonly dependencies: CheckoutPriceReconciliationServiceDependencies) {
     this.now = dependencies.now ?? (() => new Date());
     this.logger = dependencies.logger ?? defaultLogger;
+    this.environment = (dependencies.environment ?? resolveDeploymentEnvironmentName()).trim().toLowerCase();
     this.setTimer = dependencies.setTimer ?? setTimeout;
     this.clearTimer = dependencies.clearTimer ?? clearTimeout;
   }
@@ -568,7 +664,7 @@ export class CheckoutPriceReconciliationService {
         ...(details.lineKey ? { lineKey: details.lineKey } : {}),
         ...(details.sourceCode ? { sourceCode: details.sourceCode } : {}),
         ...(details.error === undefined ? {} : (() => {
-          const safeError = safeSourceErrorDiagnostic(details.error);
+          const safeError = safeSourceErrorDiagnostic(details.error, !isProductionEnvironment(this.environment));
           return {
             sourceError: safeError.diagnostic,
             redactionApplied: safeError.redactionApplied,
