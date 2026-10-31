@@ -13,6 +13,7 @@ import {
   ConversationTurnProcessor,
   type ConversationTurnJob,
 } from "../../src/services/conversation-turn-processor.service.js";
+import { recordProcessableInbound } from "../../src/services/conversation-ai-delay/pending-turn-repository.js";
 
 const redisUrl = process.env.TEST_REDIS_URL;
 const integrationIt = redisUrl ? it : it.skip;
@@ -83,6 +84,147 @@ async function seedStandaloneConversation() {
 
   return { conversationId, customerId, shopId };
 }
+
+async function seedRecoveryConversation(delayMinutes = 7) {
+  const suffix = randomUUID();
+  const shopId = `shop-${suffix}`;
+  const recoveryId = `recovery-${suffix}`;
+  const conversationId = `conversation-${suffix}`;
+  await prisma.shop.create({
+    data: {
+      id: shopId,
+      domain: `arch054-${suffix}.myshopify.com`,
+      status: "ACTIVE",
+    },
+  });
+  await prisma.checkoutRecovery.create({
+    data: {
+      id: recoveryId,
+      shopId,
+      checkoutToken: `checkout-${suffix}`,
+      status: "MESSAGE_SENT",
+      lastExternalActivityAt: new Date(),
+    },
+  });
+  await prisma.shopSettings.create({
+    data: { shopId, aiResponseDelayMinutes: delayMinutes },
+  });
+  await prisma.conversation.create({
+    data: {
+      id: conversationId,
+      type: "RECOVERY",
+      checkoutRecoveryId: recoveryId,
+      controlRevision: 3,
+    },
+  });
+  return { conversationId, recoveryId, shopId };
+}
+
+describe("ARCH-054 pending AI deadline PostgreSQL transaction", () => {
+  it("serializes concurrent first text messages and freezes the winner's settings snapshot", async () => {
+    const seeded = await seedRecoveryConversation(1);
+    const conversation = new ConversationService();
+    const [first, second] = await Promise.all([
+      conversation.receiveMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `first-${randomUUID()}`,
+        inReplyToProviderId: null,
+        content: "first fragment",
+      }),
+      conversation.receiveMessage({
+        conversationId: seeded.conversationId,
+        providerMessageId: `second-${randomUUID()}`,
+        inReplyToProviderId: null,
+        content: "second fragment",
+      }),
+    ]);
+    const winner = await prisma.conversation.findUniqueOrThrow({
+      where: { id: seeded.conversationId },
+      select: {
+        inboundVersion: true,
+        pendingTurnStartedAt: true,
+        pendingAiNotBeforeAt: true,
+        pendingAiDelayMinutes: true,
+        pendingAiControlRevision: true,
+      },
+    });
+    expect([first.version, second.version].sort()).toEqual([1, 2]);
+    expect(winner.inboundVersion).toBe(2);
+    expect(winner.pendingTurnStartedAt).not.toBeNull();
+    expect(winner.pendingAiNotBeforeAt?.getTime()).toBe(
+      winner.pendingTurnStartedAt!.getTime() + 60_000,
+    );
+    expect(winner).toMatchObject({
+      pendingAiDelayMinutes: 1,
+      pendingAiControlRevision: 3,
+    });
+
+    await prisma.shopSettings.update({
+      where: { shopId: seeded.shopId },
+      data: { aiResponseDelayMinutes: 30 },
+    });
+    await conversation.receiveMessage({
+      conversationId: seeded.conversationId,
+      providerMessageId: `third-${randomUUID()}`,
+      inReplyToProviderId: null,
+      content: "later fragment",
+    });
+    const afterSettingsChange = await prisma.conversation.findUniqueOrThrow({
+      where: { id: seeded.conversationId },
+      select: {
+        pendingTurnStartedAt: true,
+        pendingAiNotBeforeAt: true,
+        pendingAiDelayMinutes: true,
+        pendingAiControlRevision: true,
+      },
+    });
+    expect(afterSettingsChange).toEqual({
+      pendingTurnStartedAt: winner.pendingTurnStartedAt,
+      pendingAiNotBeforeAt: winner.pendingAiNotBeforeAt,
+      pendingAiDelayMinutes: 1,
+      pendingAiControlRevision: 3,
+    });
+  });
+
+  it("rolls back the inbound message and frozen snapshot together on transaction failure", async () => {
+    const seeded = await seedRecoveryConversation(7);
+    const providerMessageId = `rollback-${randomUUID()}`;
+    await expect(prisma.$transaction(async (tx) => {
+      await tx.conversationMessage.create({
+        data: {
+          conversationId: seeded.conversationId,
+          providerMessageId,
+          direction: "INBOUND",
+          senderType: "CUSTOMER",
+          status: "DELIVERED",
+          content: "must roll back",
+        },
+      });
+      await recordProcessableInbound(tx, seeded.conversationId, new Date());
+      throw new Error("ARCH054_INJECTED_TRANSACTION_FAILURE");
+    })).rejects.toThrow("ARCH054_INJECTED_TRANSACTION_FAILURE");
+
+    expect(await prisma.conversationMessage.findUnique({
+      where: { providerMessageId },
+    })).toBeNull();
+    expect(await prisma.conversation.findUniqueOrThrow({
+      where: { id: seeded.conversationId },
+      select: {
+        inboundVersion: true,
+        pendingTurnStartedAt: true,
+        pendingAiNotBeforeAt: true,
+        pendingAiDelayMinutes: true,
+        pendingAiControlRevision: true,
+      },
+    })).toEqual({
+      inboundVersion: 0,
+      pendingTurnStartedAt: null,
+      pendingAiNotBeforeAt: null,
+      pendingAiDelayMinutes: null,
+      pendingAiControlRevision: null,
+    });
+  });
+});
 
 async function createTurnBoundary({ failFirstSchedule = false } = {}) {
   const queueName = `arch007-b010-${randomUUID()}`;
