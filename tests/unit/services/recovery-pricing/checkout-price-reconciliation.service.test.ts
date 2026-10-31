@@ -122,6 +122,14 @@ describe("CheckoutPriceReconciliationService", () => {
     expect(fresh.productReader.read).not.toHaveBeenCalled();
   });
 
+  it("rejects another shop's trusted recovery before making an exact product read", async () => {
+    const otherShop = state(undefined, { shopId: "shop-2" });
+    const harness = service({ snapshots: [otherShop] });
+    await expect(harness.instance.reconcile(input(otherShop)))
+      .rejects.toMatchObject({ reasonCode: "RECOVERY_ATTEMPT_LINEAGE_INVALID" });
+    expect(harness.productReader.read).not.toHaveBeenCalled();
+  });
+
   it("rechecks generation and basket fingerprint after the provider read", async () => {
     const initial = state();
     const changed = state([{ productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/3", quantity: 2, price: "80.00" }]);
@@ -185,6 +193,15 @@ describe("CheckoutPriceReconciliationService", () => {
     }) });
     const mismatch = await identityHarness.instance.reconcile(input());
     expect(mismatch.lines[0]).toMatchObject({
+      catalogueComparison: "INCOMPARABLE", catalogueUnitPrice: null,
+      reasonCodes: expect.arrayContaining(["PROVIDER_IDENTITY_MISMATCH"]),
+    });
+
+    const wrongVariantHarness = service({ productRead: async () => productResult({
+      variantId: "gid://shopify/ProductVariant/other",
+    }) });
+    const wrongVariant = await wrongVariantHarness.instance.reconcile(input());
+    expect(wrongVariant.lines[0]).toMatchObject({
       catalogueComparison: "INCOMPARABLE", catalogueUnitPrice: null,
       reasonCodes: expect.arrayContaining(["PROVIDER_IDENTITY_MISMATCH"]),
     });
