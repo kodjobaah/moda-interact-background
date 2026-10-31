@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../lib/db.js";
-import { shopifyDiscountProvider, type ShopifyDiscountRecord } from "../providers/shopify-discount.provider.js";
+import {
+  getShopifyDiscountFailureLogFields,
+  shopifyDiscountProvider,
+  type ShopifyDiscountRecord,
+} from "../providers/shopify-discount.provider.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 const ACTIVE = ["ACTIVE", "TRIALING"] as const;
@@ -76,14 +80,19 @@ export class ShopifyDiscountCatalogueService {
       logger.error("shopify.discount_sync.provider_failed", {
         shopId,
         generation: claimed.generation,
-        ...boundedError(error),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
+        reasonCode: "SHOPIFY_DISCOUNT_PROVIDER_FAILED",
+        ...getShopifyDiscountFailureLogFields(error),
       });
       await prisma.$transaction(async (transaction) => {
         const catalogue = await this.lockCatalogue(transaction, shopId);
         if (catalogue?.activeSyncToken !== claimed.activeSyncToken) return;
-        await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: { status: "ERROR", activeSyncToken: null, syncStartedAt: null, lastErrorAt: new Date(), lastErrorCode: error instanceof Error ? error.message.slice(0, 128) : "provider-error" } });
+        await transaction.shopifyDiscountCatalogue.update({ where: { shopId }, data: {
+          status: "ERROR",
+          activeSyncToken: null,
+          syncStartedAt: null,
+          lastErrorAt: new Date(),
+          lastErrorCode: "SHOPIFY_DISCOUNT_PROVIDER_FAILED",
+        } });
       });
       throw error;
     }
@@ -132,20 +141,6 @@ export class ShopifyDiscountCatalogueService {
     await transaction.shopifyDiscountCatalogue.upsert({ where: { shopId }, create: { shopId, status: "UNAVAILABLE", unavailableAt: now, ...(syncRequestedAt ? { syncRequestedAt } : {}) }, update: { status: "UNAVAILABLE", activeSyncToken: null, syncStartedAt: null, unavailableAt: unavailableAt ?? now, ...(syncRequestedAt ? { syncRequestedAt } : {}) } });
     await transaction.shopifyDiscount.updateMany({ where: { shopId, unavailableAt: null }, data: { unavailableAt: now } });
   }
-}
-
-function boundedError(error: unknown): { errorName: string; errorMessage: string } {
-  if (error instanceof Error) {
-    return {
-      errorName: error.name.slice(0, 64),
-      errorMessage: error.message,
-    };
-  }
-
-  return {
-    errorName: "UnknownError",
-    errorMessage: String(error),
-  };
 }
 
 function maxDate(left: Date | null, right: Date): Date {
