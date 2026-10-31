@@ -6,7 +6,9 @@ export type RecoveryTemplatePurpose =
   | "FOLLOW_UP_NO_OFFER" | "FOLLOW_UP_CODE_OFFER" | "FOLLOW_UP_AUTOMATIC_OFFER";
 
 export type SelectionSource = "exact" | "base" | "merchant-fallback" | "platform-fallback";
-export type BrandMediaRole = "logoUrl" | "squareLogoUrl" | "coverImageUrl" | "headerImage";
+export type BrandMediaRole = "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE";
+/** For isolated tests use a fixed list; production resolves the active platform policy per preparation. */
+export type MediaApprovedHosts = readonly string[] | (() => Promise<readonly string[]>);
 
 /** A separate asset-owning architecture must implement this port. No original URLs. */
 export type ReadyBrandMedia = Readonly<{

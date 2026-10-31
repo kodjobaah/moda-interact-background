@@ -1,13 +1,20 @@
 import { createHash } from "node:crypto";
 import { BindingUnavailable, isSemanticKey, type SemanticKey, RecoveryVariableResolver } from "./recovery-template-brand.js";
 import type {
-  PreparedMetaComponent, RegistrationRow, TextParameter,
+  BrandMediaRole, PreparedMetaComponent, RegistrationRow, TextParameter,
 } from "./recovery-template.types.js";
 
 type JsonObject = Record<string, unknown>;
 type TextBinding = { position: number; variable: SemanticKey };
 type ButtonBinding = { index: number; subType: "url"; variable: "checkout.url" };
-type FrozenBindings = { header: TextBinding[]; body: TextBinding[]; buttons: ButtonBinding[] };
+type FrozenBindings = {
+  schemaVersion?: 1;
+  headerMediaRole?: BrandMediaRole;
+  header: TextBinding[];
+  body: TextBinding[];
+  buttons: ButtonBinding[];
+};
+const MEDIA_ROLES: readonly BrandMediaRole[] = ["LOGO", "SQUARE_LOGO", "COVER_IMAGE"];
 
 const obj = (value: unknown): value is JsonObject =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -28,10 +35,14 @@ function parseTextBindings(value: unknown, max: number): TextBinding[] {
 
 function parseFrozenBindings(raw: unknown): FrozenBindings {
   if (!obj(raw)) return invalid();
-  // Admin saves the positional projection, not the authoring AST.
-  // An optional schemaVersion is accepted for explicit future persistence.
+  // Admin owns the immutable projection. Keep optional schemaVersion in the
+  // digest only when it was actually stored: older TEXT snapshots omit it.
   if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1) return invalid();
-  if (Object.keys(raw).some((key) => !["schemaVersion", "header", "body", "buttons"].includes(key))) return invalid();
+  if (Object.keys(raw).some((key) =>
+      !["schemaVersion", "headerMediaRole", "header", "body", "buttons"].includes(key))) return invalid();
+  if (raw.headerMediaRole !== undefined &&
+      (raw.schemaVersion !== 1 || !MEDIA_ROLES.includes(raw.headerMediaRole as BrandMediaRole) ||
+       !Array.isArray(raw.header) || raw.header.length !== 0)) return invalid();
   if (!Array.isArray(raw.buttons) || raw.buttons.length > 1) return invalid();
   const buttons: ButtonBinding[] = [];
   for (const entry of raw.buttons) {
@@ -41,6 +52,8 @@ function parseFrozenBindings(raw: unknown): FrozenBindings {
     buttons.push({ index: 0, subType: "url", variable: "checkout.url" });
   }
   return {
+    ...(raw.schemaVersion === 1 ? { schemaVersion: 1 as const } : {}),
+    ...(raw.headerMediaRole !== undefined ? { headerMediaRole: raw.headerMediaRole as BrandMediaRole } : {}),
     header: parseTextBindings(raw.header ?? [], 1),
     body: parseTextBindings(raw.body, 10),
     buttons,
@@ -101,6 +114,12 @@ export async function prepareFrozenComponents(input: {
   const { registration, variables } = input;
   const approved = strictComponents(registration.componentsSnapshot);
   const frozen = parseFrozenBindings(registration.parameterBindingsSnapshot);
+  const header = approved.find((component) => component.type === "HEADER");
+  // Structural mismatches (including legacy headerImage with no frozen role)
+  // fail before hashing, without inferring a role from text or image URLs.
+  if (header?.format === "IMAGE") {
+    if (!frozen.headerMediaRole || frozen.header.length !== 0) return invalid();
+  } else if (frozen.headerMediaRole) return invalid();
   // A missing/mismatched stored digest is a hard integrity failure; do not
   // reconstruct a new projection from the AST or assume content is intact.
   const compiled = {
@@ -133,8 +152,8 @@ export async function prepareFrozenComponents(input: {
           result.push({ type: "header", parameters: [{ type: "text", text }] });
         }
       } else if (component.format === "IMAGE") {
-        if (frozen.header.length) return invalid();
-        const url = await variables.imageHeader();
+        if (frozen.header.length || !frozen.headerMediaRole) return invalid();
+        const url = await variables.imageHeader(frozen.headerMediaRole);
         result.push({ type: "header", parameters: [{ type: "image", image: { link: url } }] });
       } else return invalid();
     } else if (component.type === "BODY") {
