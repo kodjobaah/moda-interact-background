@@ -215,7 +215,7 @@ export class TranslationReconciliationService {
           errorMessage: error instanceof Error ? error.message : String(error), error,
         });
       } catch { /* Logging must not affect credential enforcement. */ }
-      throw new Error(UNAVAILABLE_CREDENTIAL);
+      throw new Error(UNAVAILABLE_CREDENTIAL, { cause: error });
     }
     const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
     const submittedAfter = batch.submissionStartedAt
