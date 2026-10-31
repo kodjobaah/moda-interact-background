@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MetaTemplateManagementService } from "../../../../src/services/meta-template-management/service.js";
-import { MetaManagementError, validatedComponents } from "../../../../src/services/meta-template-management/contracts.js";
+import { MetaManagementError, safeMetaError, validatedComponents, validatedProviderComponents } from "../../../../src/services/meta-template-management/contracts.js";
 import { MetaGraphTemplateAdapter } from "../../../../src/services/meta-template-management/meta-graph.adapter.js";
 
 vi.mock("../../../../src/services/platform-configuration/consumers.js", () => ({
@@ -35,6 +35,7 @@ function fixture() {
   const provider = {
     verifyWaba: vi.fn(async () => {}),
     find: vi.fn(async () => ({ kind: "absent" as const })),
+    uploadImageHeaderSample: vi.fn(async () => ({ value: "4::trusted-sample-handle" } as never)),
     create: vi.fn(async (_input: unknown) => ({ id: "meta-1" })),
   };
   const reporting = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -52,10 +53,57 @@ describe("BG003 Meta template management", () => {
     expect(provider.create).toHaveBeenCalledTimes(1);
     expect(repository.recordPostIntent).toHaveBeenCalledWith(claim);
     expect(repository.recordPostIntent.mock.invocationCallOrder[0]!).toBeLessThan(provider.create.mock.invocationCallOrder[0]!);
-    expect(provider.create).toHaveBeenCalledWith({ ...claim });
+    expect(provider.create).toHaveBeenCalledWith({ ...claim }, undefined);
     const posted = provider.create.mock.calls[0]?.[0] as { components: unknown } | undefined;
     expect(posted?.components).toBe(compiled);
     expect(repository.finishSubmission).toHaveBeenCalledWith(claim, { kind: "submitted", providerId: "meta-1" });
+  });
+
+  it("uploads a trusted sample before claim and sends only a copied IMAGE CREATE payload", async () => {
+    const f = fixture();
+    const frozen = [{ type: "HEADER", format: "IMAGE" }, ...compiled];
+    const imageClaim = { ...claim, components: frozen };
+    f.repository.load.mockResolvedValueOnce({ ...record, componentsSnapshot: frozen } as never);
+    f.repository.claim.mockResolvedValueOnce(imageClaim as never);
+    await expect(f.service.submitPreparedRegistration("reg-1"))
+      .resolves.toEqual({ kind: "submitted", providerId: "meta-1" });
+    expect(f.provider.uploadImageHeaderSample).toHaveBeenCalledWith(record.wabaId);
+    expect(f.provider.uploadImageHeaderSample.mock.invocationCallOrder[0]!)
+      .toBeLessThan(f.repository.claim.mock.invocationCallOrder[0]!);
+    expect(f.provider.create).toHaveBeenCalledWith(expect.objectContaining({
+      components: [{ type: "HEADER", format: "IMAGE", example: { header_handle: ["4::trusted-sample-handle"] } }, ...compiled],
+    }), { value: "4::trusted-sample-handle" });
+    expect(f.repository.claim).toHaveBeenCalledWith(record.id, record.wabaId);
+    expect(f.repository.recordPostIntent).toHaveBeenCalledWith(imageClaim);
+    expect(f.repository.claim.mock.calls[0]).toEqual([record.id, record.wabaId]);
+    expect(frozen).toEqual([{ type: "HEADER", format: "IMAGE" }, ...compiled]);
+  });
+
+  it("does not claim or create when trusted sample upload fails, and TEXT does not upload", async () => {
+    const f = fixture();
+    f.repository.load.mockResolvedValueOnce({ ...record, componentsSnapshot: [{ type: "HEADER", format: "IMAGE" }] } as never);
+    const temporary = new MetaManagementError("META_SAMPLE_UPLOAD_TRANSIENT", "uncertain");
+    f.provider.uploadImageHeaderSample.mockRejectedValueOnce(temporary);
+    await expect(f.service.submitPreparedRegistration("reg-1")).rejects.toBe(temporary);
+    expect(f.repository.claim).not.toHaveBeenCalled();
+    expect(f.repository.recordPostIntent).not.toHaveBeenCalled();
+    expect(f.provider.create).not.toHaveBeenCalled();
+
+    const text = fixture();
+    await text.service.submitPreparedRegistration("reg-1");
+    expect(text.provider.uploadImageHeaderSample).not.toHaveBeenCalled();
+  });
+
+  it("blocks without provider I/O if the frozen registration changes between read and claim", async () => {
+    const f = fixture();
+    f.repository.claim.mockResolvedValueOnce({ ...claim, components: [{ type: "BODY", text: "changed" }] } as never);
+    await expect(f.service.submitPreparedRegistration("reg-1"))
+      .resolves.toEqual({ kind: "blocked", code: "FROZEN_SNAPSHOT_CHANGED_BEFORE_CLAIM" });
+    expect(f.provider.find).not.toHaveBeenCalled();
+    expect(f.provider.create).not.toHaveBeenCalled();
+    expect(f.repository.finishSubmission).toHaveBeenCalledWith(expect.anything(), {
+      kind: "blocked", code: "FROZEN_SNAPSHOT_CHANGED_BEFORE_CLAIM",
+    });
   });
 
   it("does not POST twice for a provider-confirmed registration", async () => {
@@ -64,6 +112,7 @@ describe("BG003 Meta template management", () => {
     await expect(f.service.submitPreparedRegistration("reg-1"))
       .resolves.toEqual({ kind: "already-submitted", providerId: "meta-1" });
     expect(f.provider.create).not.toHaveBeenCalled();
+    expect(f.provider.uploadImageHeaderSample).not.toHaveBeenCalled();
   });
 
   it("never adopts an external name collision on a new Admin registration", async () => {
@@ -134,20 +183,25 @@ describe("BG003 Meta template management", () => {
     f.repository.load.mockResolvedValueOnce({ ...record, componentsSnapshot: [{ type: "HEADER",
       format: "IMAGE", example: { header_handle: ["https://merchant.example/original.png"] } }] } as never);
     await expect(f.service.submitPreparedRegistration("reg-1"))
-      .resolves.toEqual({ kind: "blocked", code: "IMAGE_SAMPLE_HANDLE_REQUIRED" });
-    expect(f.repository.blockReadyRegistration).toHaveBeenCalledWith("reg-1", "IMAGE_SAMPLE_HANDLE_REQUIRED");
+      .resolves.toEqual({ kind: "blocked", code: "UNTRUSTED_IMAGE_SAMPLE_HANDLE" });
+    expect(f.repository.blockReadyRegistration).toHaveBeenCalledWith("reg-1", "UNTRUSTED_IMAGE_SAMPLE_HANDLE");
     expect(f.provider.create).not.toHaveBeenCalled();
   });
 
-  it("fails closed on an invalid IMAGE submission handle, but permits text URLs", () => {
+  it("allows frozen IMAGE without a handle but rejects untrusted handles; final provider validation requires a handle", () => {
     expect(() => validatedComponents([{ type: "HEADER", format: "IMAGE", example: {
       header_handle: ["https://merchant.example/image.png"],
-    } }])).toThrowError("IMAGE_SAMPLE_HANDLE_REQUIRED");
-    expect(() => validatedComponents([{ type: "HEADER", format: "IMAGE" }])).toThrowError("IMAGE_SAMPLE_HANDLE_REQUIRED");
+    } }])).toThrowError("UNTRUSTED_IMAGE_SAMPLE_HANDLE");
+    expect(validatedComponents([{ type: "HEADER", format: "IMAGE" }])).toHaveLength(1);
+    expect(() => validatedComponents([{ type: "HEADER", format: "IMAGE", example: {
+      header_handle: ["arbitrary-handle"] } }])).toThrowError("UNTRUSTED_IMAGE_SAMPLE_HANDLE");
     expect(() => validatedComponents([{ type: "HEADER", format: "IMAGE", example: {
       header_handle: ["data:image/png;base64,abc"],
-    } }])).toThrowError("IMAGE_SAMPLE_HANDLE_REQUIRED");
-    expect(validatedComponents([{ type: "HEADER", format: "IMAGE", example: { header_handle: ["4::opaque-sample-handle"] } }])).toHaveLength(1);
+    } }])).toThrowError("UNTRUSTED_IMAGE_SAMPLE_HANDLE");
+    expect(() => validatedComponents([{ type: "HEADER", format: "IMAGE", example: { header_handle: ["4::opaque-sample-handle"] } }]))
+      .toThrowError("UNTRUSTED_IMAGE_SAMPLE_HANDLE");
+    expect(validatedProviderComponents([{ type: "HEADER", format: "IMAGE", example: { header_handle: ["4::opaque-sample-handle"] } }]))
+      .toHaveLength(1);
     expect(validatedComponents([{ type: "BODY", text: "See https://merchant.example/logo" }])).toHaveLength(1);
   });
 
@@ -227,6 +281,57 @@ describe("BG003 server-side Meta Graph API adapter", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("requires the configured Meta App ID and authenticates the trusted uploader with the current WABA token", async () => {
+    const originalAppId = process.env.META_APP_ID;
+    delete process.env.META_APP_ID;
+    try {
+      const request = vi.fn();
+      const client = new MetaGraphTemplateAdapter(request as typeof fetch);
+      await expect(client.uploadImageHeaderSample("123456")).rejects.toMatchObject({ code: "META_APP_ID_MISSING_OR_INVALID" });
+      await expect(client.uploadImageHeaderSample("987654")).rejects.toMatchObject({ code: "WABA_MISMATCH" });
+      expect(request).not.toHaveBeenCalled();
+      process.env.META_APP_ID = "777888999";
+      const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      const uploaderRequest = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ h: "4::Meta-issued-handle" })));
+      const { MetaImageHeaderSampleUploader } = await import("../../../../src/services/meta-template-management/image-header-sample.js");
+      const uploadClient = new MetaGraphTemplateAdapter(request as typeof fetch, new MetaImageHeaderSampleUploader(
+        uploaderRequest as typeof fetch, { fetch: vi.fn(async () => ({ bytes, declaredContentType: "image/jpeg" })) },
+      ));
+      const handle = await uploadClient.uploadImageHeaderSample("123456");
+      expect(uploaderRequest.mock.calls[0]?.[0]).toMatchObject({
+        pathname: "/v25.0/777888999/uploads",
+      });
+      expect((uploaderRequest.mock.calls[0]?.[1] as RequestInit).headers)
+        .toEqual({ Authorization: "OAuth test-only-token" });
+      const image = { type: "HEADER", format: "IMAGE", example: { header_handle: [handle.value] } };
+      const createRequest = vi.fn(async () => new Response(JSON.stringify({ id: "meta-image" })));
+      const createClient = new MetaGraphTemplateAdapter(createRequest as typeof fetch);
+      await expect(createClient.create({ ...claim, components: [image] }, handle)).resolves.toEqual({ id: "meta-image" });
+      const echoedHandleRequest = vi.fn(async () => new Response(JSON.stringify({ error: {
+        message: `Meta rejected sample ${handle.value}`,
+        error_data: { details: `Rejected IMAGE header handle ${handle.value}` },
+        code: 10,
+      } }), { status: 400 }));
+      const failedCreateClient = new MetaGraphTemplateAdapter(echoedHandleRequest as typeof fetch);
+      const failure = await failedCreateClient.create({ ...claim, components: [image] }, handle)
+        .catch((error: unknown) => error);
+      const logFields = safeMetaError(failure) as Record<string, unknown>;
+      expect(logFields.providerErrorMessage).toBe("Meta rejected sample [REDACTED_SAMPLE_HANDLE]");
+      expect(logFields.providerErrorDetails).toContain("[REDACTED_SAMPLE_HANDLE]");
+      expect(logFields.redactionApplied).toBe(true);
+      expect(JSON.stringify(logFields)).not.toContain(handle.value);
+      expect(JSON.stringify(failure)).not.toContain(handle.value);
+      await expect(createClient.create({ ...claim, components: [image] }, { value: "4::forged" } as never))
+        .rejects.toMatchObject({ code: "IMAGE_SAMPLE_HANDLE_REQUIRED" });
+      expect(createRequest).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalAppId === undefined) delete process.env.META_APP_ID;
+      else process.env.META_APP_ID = originalAppId;
+    }
+  });
+
   it("does not trust a truncated Meta template-list response", async () => {
     const request = vi.fn(async () => new Response(JSON.stringify({ data: [], paging: { next: "other-page" } })));
     const client = new MetaGraphTemplateAdapter(request as typeof fetch);
@@ -249,11 +354,22 @@ describe("BG003 server-side Meta Graph API adapter", () => {
   });
 
   it("classifies Meta HTTP 400 validation rejection as definitive, not uncertain", async () => {
-    const request = vi.fn(async () => new Response("private-validation-details", { status: 400 }));
+    const request = vi.fn(async () => new Response(JSON.stringify({ error: {
+      message: "App 12345 is not authorized; token test-only-token must be renewed",
+      code: 10, error_subcode: 2018001, error_data: { detail: "Authorization: Bearer test-only-token" },
+    } }), { status: 400, headers: { "x-fb-request-id": "meta-request-123" } }));
     const client = new MetaGraphTemplateAdapter(request as typeof fetch);
-    await expect(client.create(claim)).rejects.toMatchObject({
+    const failure = await client.create(claim).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
       code: "META_HTTP_400", disposition: "definitive",
+      diagnostics: expect.objectContaining({
+        origin: "provider_response", operation: "template_create", httpStatus: 400,
+        providerErrorCode: 10, providerErrorSubcode: 2018001,
+        providerErrorMessage: "App 12345 is not authorized; token [REDACTED] must be renewed",
+        providerRequestId: "meta-request-123", redactionApplied: true,
+      }),
     });
+    expect(JSON.stringify(failure)).not.toContain("test-only-token");
     expect(request).toHaveBeenCalledTimes(1);
   });
 

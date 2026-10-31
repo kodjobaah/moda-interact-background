@@ -41,6 +41,9 @@ export type PinnedImageHttpRequest = (input: PinnedImageRequest, signal: AbortSi
 export interface SafeImageFetcherOptions {
   resolveAll?: MerchantKnowledgeResolver;
   request?: PinnedImageHttpRequest;
+  /** Narrow deployments can prohibit redirects and lower the byte ceiling. */
+  maxRedirects?: number;
+  maxBytes?: number;
 }
 
 function safeUrl(input: string): URL {
@@ -136,9 +139,9 @@ function pinnedHttpsRequest(input: PinnedImageRequest, signal: AbortSignal): Pro
   });
 }
 
-async function boundedBody(response: ImageHttpResponse, signal: AbortSignal): Promise<Buffer> {
+async function boundedBody(response: ImageHttpResponse, signal: AbortSignal, maxBytes: number): Promise<Buffer> {
   const rawSize = header(response.headers, "content-length");
-  if (rawSize !== undefined && (!/^\d+$/.test(rawSize) || Number(rawSize) > SHOP_BRAND_MAX_SOURCE_BYTES)) {
+  if (rawSize !== undefined && (!/^\d+$/.test(rawSize) || Number(rawSize) > maxBytes)) {
     response.body.destroy();
     throw new ShopBrandMediaError("SOURCE_TOO_LARGE");
   }
@@ -157,7 +160,7 @@ async function boundedBody(response: ImageHttpResponse, signal: AbortSignal): Pr
       if (signal.aborted) throw cancelled(signal);
       const bytes: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
       length += bytes.length;
-      if (length > SHOP_BRAND_MAX_SOURCE_BYTES) {
+      if (length > maxBytes) {
         response.body.destroy();
         throw new ShopBrandMediaError("SOURCE_TOO_LARGE");
       }
@@ -177,6 +180,8 @@ async function boundedBody(response: ImageHttpResponse, signal: AbortSignal): Pr
 export function createSafeImageFetcher(options: SafeImageFetcherOptions = {}): SafeFetcher {
   const resolveAll = options.resolveAll ?? resolveAllDnsAnswers;
   const request = options.request ?? pinnedHttpsRequest;
+  const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
+  const maxBytes = options.maxBytes ?? SHOP_BRAND_MAX_SOURCE_BYTES;
   return {
     async fetch(sourceUrl: string): Promise<FetchedBrandSource> {
       const controller = new AbortController();
@@ -202,7 +207,7 @@ export function createSafeImageFetcher(options: SafeImageFetcherOptions = {}): S
           }
           if (REDIRECTS.has(response.statusCode)) {
             response.body.destroy();
-            if (redirects >= MAX_REDIRECTS) throw new ShopBrandMediaError("UNSAFE_SOURCE");
+            if (redirects >= maxRedirects) throw new ShopBrandMediaError("UNSAFE_SOURCE");
             const location = header(response.headers, "location");
             if (!location) throw new ShopBrandMediaError("UNSAFE_SOURCE");
             try { next = safeUrl(new URL(location, next).toString()); }
@@ -214,7 +219,7 @@ export function createSafeImageFetcher(options: SafeImageFetcherOptions = {}): S
             throw new ShopBrandMediaError(TRANSIENT_HTTP.has(response.statusCode)
               ? "SOURCE_UNAVAILABLE" : "SOURCE_HTTP_FAILURE", TRANSIENT_HTTP.has(response.statusCode));
           }
-          const bytes = await boundedBody(response, controller.signal);
+          const bytes = await boundedBody(response, controller.signal, maxBytes);
           if (!bytes.length) throw new ShopBrandMediaError("INVALID_IMAGE");
           const declaredContentType = header(response.headers, "content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? null;
           return { bytes, declaredContentType };
