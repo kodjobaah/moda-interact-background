@@ -99,6 +99,8 @@ export class HumanPreparedCommandService {
     } catch (error) {
       logger.error("arch047.human_prepared.freeze_failed", {
         commandId: command.id, errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

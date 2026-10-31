@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { Prisma } from "@prisma/client";
 import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import type { WooBasketEvidence, WooPendingCandidate } from "./contracts.js";
+import type { WooActivityWatermark } from "./woo-activity-watermark.store.js";
 
 type AdmissionFenceRow = {
   customerId: string;
@@ -16,6 +18,8 @@ type AdmissionFenceRow = {
   installationStatus: string;
   revokedAt: Date | null;
   credentialVersion: number;
+  canonicalSiteUrl: string;
+  shopDomain: string;
   phoneVerifiedAt: Date | null;
   consentPurpose: string;
   consentDecision: string;
@@ -67,13 +71,31 @@ export function validBasket(basket: WooBasketEvidence): basket is Extract<WooBas
 }
 
 export function sameAcceptedCandidate(expected: WooPendingCandidate, current: WooPendingCandidate): boolean {
-  // BG001 owns the accepted event watermark. Comparing only timestamps is not
-  // enough for same-second conflicts. Evidence must be identical as well.
+  // Comparing only timestamps is not enough for same-second conflicts.
   return current.source === "woocommerce" &&
     current.shopId === expected.shopId && current.checkoutToken === expected.checkoutToken &&
+    Number.isSafeInteger(expected.generation) && expected.generation! > 0 &&
+    current.generation === expected.generation &&
     current.lastEventId === expected.lastEventId &&
     current.lastActivityAt === expected.lastActivityAt &&
-    JSON.stringify(current.basket) === JSON.stringify(expected.basket);
+    isDeepStrictEqual(current.basket, expected.basket);
+}
+
+/** The activity watermark is the accepted event fence; the queue/index alone is
+ * not sufficient evidence when stale or partially-written Redis state exists. */
+export function matchesAcceptedWatermark(
+  candidate: WooPendingCandidate,
+  watermark: WooActivityWatermark | null,
+): boolean {
+  if (!watermark || !Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) return false;
+  const state = candidate.basket.kind === "nonempty" ? "nonempty" : candidate.basket.kind;
+  const digest = candidate.basket.kind === "nonempty"
+    ? createHash("sha256").update(JSON.stringify(candidate.basket.checkout)).digest("hex")
+    : "0".repeat(64);
+  return watermark.generation === candidate.generation &&
+    watermark.lastEventId === candidate.lastEventId &&
+    watermark.lastActivityAt === candidate.lastActivityAt &&
+    watermark.checkoutDigest === digest && watermark.state === state;
 }
 
 export function emailConflicts(observed: string | undefined, stored: string | null): boolean {
@@ -84,11 +106,14 @@ function currentConsentStillValid(
   row: AdmissionFenceRow | undefined,
   expected: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
+  expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): boolean {
   if (!row || row.customerId !== expected.customerId || row.customerPhoneId !== expected.customerPhoneId ||
     row.customerShopId !== expected.shopId || row.shopStatus !== "ACTIVE" || row.shopPlatform !== "WOOCOMMERCE" ||
     row.installationId !== expected.installationId || row.installationStatus !== "ACTIVE" || row.revokedAt ||
-    row.credentialVersion !== expected.credentialVersion || row.endedAt ||
+    row.credentialVersion !== expected.credentialVersion ||
+    (expectedSite && (row.canonicalSiteUrl !== expectedSite.canonicalSiteUrl ||
+      row.shopDomain !== expectedSite.shopDomain)) || row.endedAt ||
     row.canonicalPhone !== expected.canonicalRecipient || emailConflicts(observedEmail, row.customerEmail) ||
     row.noContact || row.noContactReason !== null || row.noContactRevision !== expected.noContactRevision ||
     row.consentRevision !== expected.consentRevision || row.decisionSequence !== expected.consentDecisionSequence ||
@@ -109,13 +134,15 @@ export async function confirmCurrentWooConsent(
   shopId: string,
   snapshot: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
+  expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): Promise<boolean> {
   const fences = await tx.$queryRaw<AdmissionFenceRow[]>(Prisma.sql`
           SELECT cp."id" AS "customerPhoneId", cp."customerId", c."shopId" AS "customerShopId",
             c."email" AS "customerEmail", cp."whatsappCanonicalPhone" AS "canonicalPhone", cp."endedAt",
             s."status"::text AS "shopStatus", s."platform"::text AS "shopPlatform",
             i."id" AS "installationId", i."status"::text AS "installationStatus",
-            i."revokedAt", i."credentialVersion",
+            i."revokedAt", i."credentialVersion", i."canonicalSiteUrl",
+            s."domain" AS "shopDomain",
             cp."whatsappPhoneVerifiedAt" AS "phoneVerifiedAt",
             cp."whatsappConsentPurpose"::text AS "consentPurpose",
             cp."whatsappConsentDecision"::text AS "consentDecision",
@@ -135,5 +162,5 @@ export async function confirmCurrentWooConsent(
             AND s."id" = ${shopId}
           FOR SHARE OF cp, c, s, i
   `);
-  return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail);
+  return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail, expectedSite);
 }

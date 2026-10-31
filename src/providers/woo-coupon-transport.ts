@@ -12,13 +12,43 @@ import { signLocalWooCouponPath } from "./woo-coupon-local-oauth.js";
 import type { WooCouponPage } from "./woo-coupon-pages.js";
 import { defaultWooCouponSyncConfig, type WooCouponSyncConfig } from "../services/woo-coupon-sync-config.js";
 
+// Human-readable descriptions for failures where no upstream provider response exists.
+// `code` remains the stable business/retry classification.
+const wooCouponReadDescriptions = {
+  grant_configuration: "WooCommerce coupon credentials or connection configuration is invalid",
+  shop_unavailable: "The WooCommerce shop is inactive or unavailable for coupon synchronization",
+  grant_missing: "The WooCommerce shop has no current authorized coupon read grant",
+  grant_unavailable: "The WooCommerce coupon read credentials cannot be loaded",
+  grant_changed: "The WooCommerce coupon read grant changed while the scan was running",
+  unsafe_target: "The WooCommerce shop URL or resolved IP address failed network safety validation",
+  provider_unavailable: "The WooCommerce coupon API could not be reached or returned an unexpected response",
+  unauthorized: "WooCommerce rejected the coupon read credentials",
+  invalid_page: "WooCommerce returned an invalid coupon page or pagination metadata",
+  unstable_pages: "WooCommerce coupon pagination changed during the scan",
+  incomplete_pages: "WooCommerce coupon pagination did not return the expected number of records",
+  too_many_pages: "The WooCommerce coupon scan exceeded its configured page limit",
+  invalid_coupon: "WooCommerce returned an invalid coupon record",
+  provider_identity_invalid: "WooCommerce returned an invalid coupon identifier",
+} as const;
+
 export class WooCouponReadError extends Error {
+  readonly stage: "dns" | "http" | "response" | undefined;
+  readonly httpStatus: number | undefined;
+  readonly providerResponseBody: string | undefined;
+  readonly redirectLocation: string | undefined;
+
   constructor(readonly code:
     "grant_configuration" | "shop_unavailable" | "grant_missing" | "grant_unavailable" | "grant_changed" |
     "unsafe_target" | "provider_unavailable" | "unauthorized" | "invalid_page" | "unstable_pages" |
-    "incomplete_pages" | "too_many_pages" | "invalid_coupon" | "provider_identity_invalid") {
-    super(code);
+    "incomplete_pages" | "too_many_pages" | "invalid_coupon" | "provider_identity_invalid",
+    options: { cause?: unknown; stage?: "dns" | "http" | "response"; httpStatus?: number;
+      message?: string; providerResponseBody?: string; redirectLocation?: string } = {}) {
+    super(`${code}: ${options.message ?? (options.cause instanceof Error ? options.cause.message : wooCouponReadDescriptions[code])}`, { cause: options.cause });
     this.name = "WooCouponReadError";
+    this.stage = options.stage;
+    this.httpStatus = options.httpStatus;
+    this.providerResponseBody = options.providerResponseBody;
+    this.redirectLocation = options.redirectLocation;
   }
 }
 
@@ -91,10 +121,15 @@ export class WooCouponPageTransport {
       answers = await Promise.race([
         this.resolve(hostname),
         new Promise<never>((_, reject) => {
-          dnsTimer = setTimeout(() => reject(new WooCouponReadError("provider_unavailable")), 1500);
+          dnsTimer = setTimeout(() => reject(new Error(`DNS lookup for ${hostname} timed out after 1500ms`)), 1500);
         }),
       ]);
-    } catch { throw new WooCouponReadError("provider_unavailable"); }
+    } catch (error) {
+      throw new WooCouponReadError("provider_unavailable", {
+        cause: error, stage: "dns",
+        message: `DNS lookup for ${hostname} failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
     finally { if (dnsTimer) clearTimeout(dnsTimer); }
     assertApprovedAddresses(answers);
     const allPublic = answers.every((entry) => isPublicIpAddress(entry.address));
@@ -116,7 +151,11 @@ export class WooCouponPageTransport {
 
 function numericHeader(headers: IncomingHttpHeaders, name: string): number {
   const raw = headers[name];
-  if (typeof raw !== "string" || !/^\d{1,8}$/.test(raw)) throw new WooCouponReadError("invalid_page");
+  if (typeof raw !== "string" || !/^\d{1,8}$/.test(raw)) {
+    throw new WooCouponReadError("invalid_page", {
+      message: `WooCommerce returned missing or invalid pagination header ${name}: ${String(raw)}`, stage: "response",
+    });
+  }
   return Number(raw);
 }
 
@@ -146,11 +185,57 @@ function requestPage(
       } : {}),
     }, (response) => {
       const status = response.statusCode ?? 0;
-      if (status === 401 || status === 403) {
-        response.destroy(); reject(new WooCouponReadError("unauthorized")); return;
-      }
       if (status !== 200) {
-        response.destroy(); reject(new WooCouponReadError("provider_unavailable")); return;
+        // WooCommerce REST failures normally include a JSON `message` and `code`.
+        // Read the body before rejecting so an operator can see the provider's
+        // explanation rather than the unhelpful `provider_unavailable` code alone.
+        // Bound memory even when a misconfigured server returns a large HTML page.
+        const maximumErrorBytes = Math.min(limits.maxResponseBytes, 16 * 1024);
+        const buffers: Buffer[] = [];
+        let size = 0;
+        let truncated = false;
+        response.on("data", (chunk: Buffer | string) => {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          const remaining = Math.max(0, maximumErrorBytes - size);
+          if (bytes.length > remaining) truncated = true;
+          if (remaining) {
+            buffers.push(bytes.subarray(0, remaining));
+            size += Math.min(remaining, bytes.length);
+          }
+        });
+        response.once("error", (error) => reject(new WooCouponReadError(
+          status === 401 || status === 403 ? "unauthorized" : "provider_unavailable", {
+            cause: error, stage: "response", httpStatus: status,
+            message: `HTTP ${status} from WooCommerce; error response stream failed: ${error.message}`,
+          },
+        )));
+        response.once("end", () => {
+          const responseBody = Buffer.concat(buffers).toString("utf8") + (truncated ? " [response truncated]" : "");
+          let providerMessage: string | undefined;
+          let providerCode: string | undefined;
+          try {
+            const parsed: unknown = JSON.parse(responseBody);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              const fields = parsed as Record<string, unknown>;
+              if (typeof fields.message === "string") providerMessage = fields.message;
+              if (typeof fields.code === "string") providerCode = fields.code;
+            }
+          } catch { /* HTML/plaintext errors are preserved as the response body. */ }
+          const redirectLocation = typeof response.headers.location === "string" ? response.headers.location : undefined;
+          const details = [
+            `WooCommerce coupon API returned HTTP ${status}`,
+            ...(providerCode ? [`code: ${providerCode}`] : []),
+            ...(providerMessage ? [`message: ${providerMessage}`] : []),
+            ...(responseBody ? [`response: ${responseBody}`] : []),
+            ...(redirectLocation ? [`redirect: ${redirectLocation}`] : []),
+          ];
+          reject(new WooCouponReadError(status === 401 || status === 403 ? "unauthorized" : "provider_unavailable", {
+            stage: "http", httpStatus: status, message: details.join("; "),
+            providerResponseBody: responseBody,
+            ...(redirectLocation !== undefined ? { redirectLocation } : {}),
+          }));
+        });
+        return;
       }
       const contentType = response.headers["content-type"];
       const encoding = response.headers["content-encoding"];
@@ -159,35 +244,50 @@ function requestPage(
       if (typeof contentType !== "string" || contentType.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
           encoding !== undefined && encoding !== "identity" || !Number.isInteger(length) ||
           length < 0 || length > limits.maxResponseBytes) {
-        response.destroy(); reject(new WooCouponReadError("invalid_page")); return;
+        response.destroy(); reject(new WooCouponReadError("invalid_page", {
+          stage: "response",
+          message: `Unexpected WooCommerce response headers: content-type=${String(contentType)}, content-encoding=${String(encoding)}, content-length=${String(lengthRaw)}`,
+        })); return;
       }
       let total: number, totalPages: number;
       try {
         total = numericHeader(response.headers, "x-wp-total");
         totalPages = numericHeader(response.headers, "x-wp-totalpages");
-      } catch {
-        response.destroy(); reject(new WooCouponReadError("invalid_page")); return;
+      } catch (error) {
+        response.destroy(); reject(error); return;
       }
       const buffers: Buffer[] = [];
       let size = 0;
       response.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += bytes.length;
-        if (size > limits.maxResponseBytes) response.destroy(new WooCouponReadError("invalid_page"));
+        if (size > limits.maxResponseBytes) response.destroy(new WooCouponReadError("invalid_page", {
+          stage: "response", message: `WooCommerce coupon response exceeded ${limits.maxResponseBytes} bytes`,
+        }));
         else buffers.push(bytes);
       });
-      response.once("error", () => reject(new WooCouponReadError("invalid_page")));
+      response.once("error", (error) => reject(new WooCouponReadError("invalid_page", { cause: error, stage: "response" })));
       response.once("end", () => {
         try {
           const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(buffers))) as unknown;
           resolve({ coupons: payload, total, totalPages });
-        } catch { reject(new WooCouponReadError("invalid_page")); }
+        } catch (error) {
+          reject(new WooCouponReadError("invalid_page", {
+            stage: "response", cause: error,
+            message: `WooCommerce coupon response contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+          }));
+        }
       });
     });
-    const timeout = setTimeout(() => req.destroy(new WooCouponReadError("provider_unavailable")), limits.requestTimeoutMs);
+    const timeout = setTimeout(() => req.destroy(new WooCouponReadError("provider_unavailable", {
+      stage: "http", message: `WooCommerce coupon GET ${hostname} timed out after ${limits.requestTimeoutMs}ms`,
+    })), limits.requestTimeoutMs);
     req.once("close", () => clearTimeout(timeout));
     req.once("error", (error: unknown) => reject(error instanceof WooCouponReadError
-      ? error : new WooCouponReadError("provider_unavailable")));
+      ? error : new WooCouponReadError("provider_unavailable", {
+        cause: error, stage: "http",
+        message: `WooCommerce coupon GET ${hostname} failed: ${error instanceof Error ? error.message : String(error)}`,
+      })));
     req.once("socket", (socket) => {
       socket.once(url.protocol === "https:" ? "secureConnect" : "connect", () => {
         const peer = socket.remoteAddress ? normalizeIpAddress(socket.remoteAddress) : null;

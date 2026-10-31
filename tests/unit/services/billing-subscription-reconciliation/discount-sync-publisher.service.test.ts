@@ -83,6 +83,7 @@ describe("DiscountSyncPublisherService", () => {
       shopId: "shop-1",
       reason: "SUBSCRIPTION_ACTIVATED",
       errorMessage: "catalogue unavailable",
+      error: expect.objectContaining({ message: "catalogue unavailable" }),
     });
   });
 });

@@ -30,6 +30,12 @@ export type TrustedCheckout = Readonly<{
   approvedHosts: readonly string[];
 }>;
 
+/** Persisted checkout lines are untrusted JSON and remain bound to their shop. */
+export type TrustedCheckoutItems = Readonly<{
+  shopId: string;
+  lineItems: unknown;
+}>;
+
 export type TrustedOffer = Readonly<{
   shopId: string;
   kind: VerifiedOfferPresentation;
@@ -53,6 +59,7 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   customerFirstName?: string | null;
   shopName?: Readonly<{ shopId: string; value: string }> | null;
   checkout?: TrustedCheckout | null;
+  checkoutItems?: TrustedCheckoutItems | null;
   verifiedOffer?: TrustedOffer | null;
 }>;
 
@@ -179,4 +186,8 @@ export interface RecoveryTemplateRepository {
   readCatalogue(input: { shopId: string; senderWabaId: string; purpose: RecoveryTemplatePurpose }):
     Promise<{ shop: ShopSelectionRow | null; variants: readonly AssignedVariantRow[] }>;
   readShopBrand(shopId: string): Promise<ShopBrandRow | null>;
+  /** Resolve only the sending shop's ACTIVE taxonomy-backed Moda category.
+   * A non-English language needs an approved/published category translation.
+   * Null means the binding is unavailable; never borrow another tenant's category. */
+  readShopCategory(shopId: string, languageTag: string): Promise<string | null>;
 }

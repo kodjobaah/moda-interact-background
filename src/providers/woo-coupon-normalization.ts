@@ -75,6 +75,20 @@ function optionalBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
+function restrictionPresence(
+  coupon: Record<string, unknown>, field: string, isValidItem: ((item: unknown) => boolean) | null,
+  report: (field: string, reason: WooCouponIssueReason) => void,
+): boolean | null {
+  if (!Object.prototype.hasOwnProperty.call(coupon, field) || coupon[field] === undefined) return null;
+  const value = coupon[field];
+  if (!Array.isArray(value) || value.length > MAX_RESTRICTION_IDS ||
+      (isValidItem !== null && value.some((item: unknown) => !isValidItem(item)))) {
+    report(field, "optional_field_ignored");
+    return null;
+  }
+  return value.length > 0;
+}
+
 /** Never infer Woo's store timezone from the local-time date_expires field. */
 function utcExpiry(value: unknown): Date | null {
   if (typeof value !== "string" ||
@@ -115,6 +129,10 @@ function normalise(
   const excludedProductCategories = optional("excluded_product_categories", optionalIds);
   const individualUse = optional("individual_use", optionalBoolean);
   const excludeSaleItems = optional("exclude_sale_items", optionalBoolean);
+  const emailRestrictionsPresent = restrictionPresence(
+    coupon, "email_restrictions", (item) => typeof item === "string", report,
+  );
+  const uninspectedMetadataPresent = restrictionPresence(coupon, "meta_data", null, report);
 
   // Fixed internal marker fits VARCHAR(128). Retain the real provider-defined
   // discount type in the bounded, explicit snapshot instead of an allowlist.
@@ -124,6 +142,7 @@ function normalise(
     usageLimit, usageCount, usageLimitPerUser, maximumUsageItems,
     productIds, excludedProductIds, productCategories, excludedProductCategories,
     individualUse, excludeSaleItems, minimumAmount, maximumAmount,
+    emailRestrictionsPresent, uninspectedMetadataPresent,
     dateExpiresGmt: endsAt?.toISOString() ?? null,
     expiryUnverified: endsAt === null && (coupon.date_expires_gmt != null || coupon.date_expires != null),
     codeDeliverable: code !== null,

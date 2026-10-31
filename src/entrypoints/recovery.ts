@@ -73,7 +73,9 @@ void startReadyWorkerProcess({
         await recoveryCapacityResumeService.repair(runtimeConfig);
       },
       onError: (error) => {
-        console.error("Recovery capacity repair failed", error);
+        wooDispatchLogger.error("recovery.capacity_repair.failed", {
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
       },
     });
     const stopExpiryScheduler = await startDynamicLeasedScheduler({
@@ -86,7 +88,9 @@ void startReadyWorkerProcess({
         await checkoutRecoveryExpiryService.expireInactive(runtimeConfig);
       },
       onError: (error) => {
-        console.error("Checkout recovery expiry failed", error);
+        wooDispatchLogger.error("recovery.expiry.failed", {
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
       },
     });
 
@@ -103,9 +107,12 @@ void startReadyWorkerProcess({
         const cycle = await readWooCouponPolicy();
         await new WooCouponDispatcherService(prisma, wooCouponSyncQueue, cycle).dispatch(cycle.dispatchBatchSize);
       },
-      onError: () => {
-        // Do not log arbitrary provider or database error messages.
-        try { wooDispatchLogger.error("woo.coupon_sync.dispatch_failed", { reason: "dispatch_error" }); } catch { /* telemetry isolation */ }
+      onError: (error) => {
+        wooDispatchLogger.error("woo.coupon_sync.dispatch_failed", {
+          reason: "dispatch_error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        });
       },
     });
 
@@ -158,9 +165,7 @@ void startReadyWorkerProcess({
 }).catch(reportReadinessFailure);
 
 async function reportReadinessFailure(error: unknown): Promise<void> {
-  console.error(
-    error instanceof Error ? error.message : "worker readiness failed",
-  );
+  console.error("worker readiness failed", error);
   await closeWorkerObservability();
   process.exitCode = 1;
 }

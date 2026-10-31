@@ -67,6 +67,7 @@ export class TemplateTranslationCoordinator {
       logger.error("background.template_translation.execute_exception", {
         runId, error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
         errorCode: error instanceof Error ? error.name === "TemplateTranslationValidationError" ? "INVALID_SNAPSHOT" : "EXECUTION_FAILED" : "EXECUTION_FAILED",
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
@@ -124,6 +125,7 @@ export class TemplateTranslationCoordinator {
     } catch (error) {
       logger.error("background.template_translation.reconcile_exception", {
         error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
@@ -196,6 +198,7 @@ export class TemplateTranslationCoordinator {
     } catch (error) {
       logger.error("background.template_translation.correlation_exception", {
         batchId, runId: batch.id, error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }

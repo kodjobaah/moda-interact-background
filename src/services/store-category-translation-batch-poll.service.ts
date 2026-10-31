@@ -164,7 +164,8 @@ export class StoreCategoryTranslationBatchPollService {
           batchId: batch.id,
           pollSequence: schedule.pollSequence,
           nextPollAt: schedule.nextPollAt?.toISOString() ?? null,
-          errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+          errorMessage: error instanceof Error ? error.message : "unknown failure",
+          error: error,
         });
         return { status: "rescheduled", batchId: batch.id, pollSequence: schedule.pollSequence };
       },
@@ -384,7 +385,8 @@ export class StoreCategoryTranslationBatchPollService {
       logger.warn("background.store_category_translation.poll_enqueue_failed", {
         batchId,
         pollSequence,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }
@@ -401,7 +403,8 @@ export class StoreCategoryTranslationBatchPollService {
     } catch (error) {
       logger.warn("background.store_category_translation.results_enqueue_failed", {
         batchId,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

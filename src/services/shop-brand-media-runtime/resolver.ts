@@ -1,4 +1,5 @@
 import { readShopBrandPublicMediaConfiguration } from "../platform-configuration/consumers.js";
+import { normalizeShopBrandDomain } from "../shop-brand-media/contracts.js";
 import type {
   BrandMediaResolver, ReadyBrandMedia,
 } from "../recovery-template-preparation/recovery-template.types.js";
@@ -38,10 +39,12 @@ export function verifiedPublicMediaOrigin(value: unknown): URL {
  * This function is pure: it does no provider, HEAD, image or R2 operations.
  */
 export function verifiedReadyMedia(input: {
-  shopId: string; role: ShopBrandMediaRole; whatsAppMedia: unknown; publicOrigin: URL;
+  shopId: string; domain: string; role: ShopBrandMediaRole; whatsAppMedia: unknown; publicOrigin: URL;
 }): ReadyBrandMedia | null {
-  const { shopId, role, whatsAppMedia, publicOrigin } = input;
+  const { shopId, domain, role, whatsAppMedia, publicOrigin } = input;
+  const domainSegment = normalizeShopBrandDomain(domain);
   if (!SHOP_ID.test(shopId) || !isShopBrandMediaRole(role) ||
+      !domainSegment ||
       publicOrigin.protocol !== "https:" || publicOrigin.pathname !== "/" ||
       publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash ||
       !isRecord(whatsAppMedia) || whatsAppMedia.schemaVersion !== 1 ||
@@ -62,7 +65,7 @@ export function verifiedReadyMedia(input: {
       typeof ready.verifiedAt !== "string" || !Number.isFinite(Date.parse(ready.verifiedAt))) return null;
 
   const extension = ready.contentType === "image/jpeg" ? "jpg" : "png";
-  const objectKey = `shop-brands/${shopId}/${role.toLowerCase()}/sha256-${ready.contentSha256}.${extension}`;
+  const objectKey = `shop-brands/${domainSegment}/${role.toLowerCase()}/sha256-${ready.contentSha256}.${extension}`;
   if (ready.objectKey !== objectKey) return null;
   // Exact key, not URL interpolation from merchant fields; cannot escape publicOrigin.
   const url = new URL(objectKey, publicOrigin);
@@ -93,8 +96,9 @@ export class ShopBrandReadyMediaAdapter {
     if (!SHOP_ID.test(shopId) || !isShopBrandMediaRole(role)) return null;
     const origin = await this.origin();
     const brand = await this.repository.readForShop(shopId);
-    if (!brand || brand.shopId !== shopId) return null;
-    return verifiedReadyMedia({ shopId, role, whatsAppMedia: brand.whatsAppMedia, publicOrigin: origin });
+    if (!brand || brand.shopId !== shopId || typeof brand.domain !== "string") return null;
+    return verifiedReadyMedia({ shopId, domain: brand.domain, role,
+      whatsAppMedia: brand.whatsAppMedia, publicOrigin: origin });
   };
 
   /** Hosts come exclusively from Admin's validated policy, never merchant input. */

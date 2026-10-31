@@ -30,7 +30,7 @@ function shopMedia() {
     source: { url: "https://merchant.example/original.jpg", fingerprint: sourceFingerprint, generation: 1 },
     work: { status: "READY" },
     ready: { sourceGeneration: 1, sourceFingerprint,
-      objectKey: `shop-brands/shop-1/logo/sha256-${digest}.jpg`,
+      objectKey: `shop-brands/shop.example/logo/sha256-${digest}.jpg`,
       contentType: "image/jpeg", width: 1125, height: 600, sizeBytes: 12000,
       contentSha256: digest, verifiedAt: now.toISOString() },
   } } };
@@ -72,7 +72,8 @@ beforeEach(() => {
   // preparation must not leave an unused media-config mock for the next test.
   vi.resetAllMocks();
   mocks.readSettings.mockResolvedValue({ publicOrigin: "https://shop-brands.modainteract.com/", bucketName: "brand-bucket" });
-  mocks.findUnique.mockResolvedValue({ shopId: "shop-1", whatsAppMedia: shopMedia() });
+  mocks.findUnique.mockResolvedValue({ shopId: "shop-1", shop: { domain: "shop.example" },
+    whatsAppMedia: shopMedia() });
 });
 
 describe("ARCH-049-BACKGROUND-004 production RecoveryTemplatePreparer wiring", () => {
@@ -81,16 +82,16 @@ describe("ARCH-049-BACKGROUND-004 production RecoveryTemplatePreparer wiring", (
     const outcome = await preparer.prepare(input);
     expect(outcome).toMatchObject({ outcome: "prepared", template: { components: [
       { type: "header", parameters: [{ type: "image", image: { link:
-        `https://shop-brands.modainteract.com/shop-brands/shop-1/logo/sha256-${digest}.jpg` } }] },
+        `https://shop-brands.modainteract.com/shop-brands/shop.example/logo/sha256-${digest}.jpg` } }] },
       { type: "body", parameters: [
         { type: "text", text: "Alex" },
         { type: "text", text: "Example Shop" },
       ] },
     ] } });
     expect(mocks.findUnique).toHaveBeenCalledWith({ where: { shopId: "shop-1" },
-      select: { shopId: true, whatsAppMedia: true } });
+      select: { shopId: true, whatsAppMedia: true, shop: { select: { domain: true } } } });
     expect(mocks.readSettings).toHaveBeenCalled();
-    expect(readShopBrand).not.toHaveBeenCalled();
+    expect(readShopBrand).toHaveBeenCalledWith("shop-1");
   });
 
   it("does not access media config or media database for TEXT-only templates", async () => {
@@ -116,7 +117,8 @@ describe("ARCH-049-BACKGROUND-004 production RecoveryTemplatePreparer wiring", (
 
   it("returns MEDIA_NOT_READY for missing current role and logs unexpected config failures without leaking details", async () => {
     const { preparer, input, logs } = instance();
-    mocks.findUnique.mockResolvedValueOnce({ shopId: "shop-1", whatsAppMedia: {} });
+    mocks.findUnique.mockResolvedValueOnce({ shopId: "shop-1", shop: { domain: "shop.example" },
+      whatsAppMedia: {} });
     expect(await preparer.prepare(input)).toMatchObject({ outcome: "unavailable", reason: "MEDIA_NOT_READY" });
     const sensitiveError = new Error("secret with checkout URL and token");
     mocks.readSettings.mockRejectedValueOnce(sensitiveError);

@@ -6,12 +6,14 @@ import {
 import { claimRole, completeClaim, parseBrandDocument, updateObservedSource } from "../../../../src/services/shop-brand-media-orchestration/state.js";
 import type { BrandDocument, BrandClaim, BrandRole } from "../../../../src/services/shop-brand-media-orchestration/contracts.js";
 import { ShopBrandMediaError } from "../../../../src/services/shop-brand-media/contracts.js";
+import { normalizeShopBrandDomain } from "../../../../src/services/shop-brand-media/contracts.js";
 
 const NOW = new Date("2026-10-20T00:00:00.000Z");
 const F = `sha256:${"a".repeat(64)}`;
 const D = "b".repeat(64);
-const media = (shop: string) => ({ sourceGeneration: 1, sourceFingerprint: F,
-  objectKey: `shop-brands/${shop}/logo/sha256-${D}.jpg`, contentType: "image/jpeg" as const,
+const domainFor = (shopId: string) => `${shopId.replace(/[^a-z0-9-]/g, "-")}.myshopify.com`;
+const media = (domain: string) => ({ sourceGeneration: 1, sourceFingerprint: F,
+  objectKey: `shop-brands/${normalizeShopBrandDomain(domain)}/logo/sha256-${D}.jpg`, contentType: "image/jpeg" as const,
   contentSha256: D, width: 1125, height: 600, sizeBytes: 1000 });
 
 function fixture(count: number) {
@@ -28,10 +30,10 @@ function fixture(count: number) {
     async listPage(cursor: string | null, limit: number) {
       pageCalls.push({ cursor, limit });
       return [...rows.entries()].filter(([shopId]) => !cursor || shopId > cursor)
-        .slice(0, limit).map(([shopId, whatsAppMedia]) => ({ shopId, whatsAppMedia }));
+        .slice(0, limit).map(([shopId, whatsAppMedia]) => ({ shopId, domain: domainFor(shopId), whatsAppMedia }));
     },
     async claim(shopId: string, role: BrandRole, at = NOW): Promise<BrandClaim | null> {
-      const { document, claim } = claimRole(rows.get(shopId)!, shopId, role, randomUUID(), at);
+      const { document, claim } = claimRole(rows.get(shopId)!, shopId, domainFor(shopId), role, randomUUID(), at);
       rows.set(shopId, document);
       return claim;
     },
@@ -53,7 +55,7 @@ function fixture(count: number) {
 describe("ARCH-049 media scanner and worker", () => {
   it("advances a bounded keyset cursor through hot shops and eventually finds later work without a wake", async () => {
     const { repository, rows, pageCalls } = fixture(18);
-    const processor = { process: vi.fn(async ({ shopId }: { shopId: string }) => media(shopId)) };
+    const processor = { process: vi.fn(async ({ domain }: { domain: string }) => media(domain)) };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new ShopBrandMediaReconciliationService({ repository, processor, logger,
       now: () => NOW, pageSize: 5, maxRowsPerSweep: 7, maxClaimsPerSweep: 3, concurrency: 2 });
@@ -67,7 +69,7 @@ describe("ARCH-049 media scanner and worker", () => {
   it("does not restart at the beginning when the final page was only partly consumed", async () => {
     const { repository } = fixture(4);
     const service = new ShopBrandMediaReconciliationService({ repository,
-      processor: { process: async ({ shopId }) => media(shopId) }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      processor: { process: async ({ domain }) => media(domain) }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       now: () => NOW, pageSize: 50, maxRowsPerSweep: 100, maxClaimsPerSweep: 1 });
     expect((await service.reconcileOnce()).cursor).toBe("shop_0000");
     expect((await service.reconcileOnce()).cursor).toBe("shop_0001");
@@ -75,7 +77,7 @@ describe("ARCH-049 media scanner and worker", () => {
     expect((await service.reconcileOnce()).cursor).toBeNull();
   });
 
-  it("logs only safe failure codes and records retry without surfacing source URL", async () => {
+  it("logs the original processing error and records retry", async () => {
     const { repository, rows } = fixture(1);
     const error = { message: "https://private.example/?secret=abc" };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -85,8 +87,8 @@ describe("ARCH-049 media scanner and worker", () => {
     expect(rows.get("shop_0000")!.roles.LOGO!.work).toMatchObject({ status: "FAILED", attempts: 1,
       failureCode: "UNEXPECTED_FAILURE" });
     const emitted = JSON.stringify(logger.error.mock.calls);
-    expect(emitted).not.toContain("secret=abc");
-    expect(emitted).not.toContain("private.example");
+    expect(emitted).toContain("secret=abc");
+    expect(emitted).toContain("private.example");
   });
 
   it("logs a scanner page exception and rethrows it for scheduler visibility", async () => {
@@ -95,11 +97,11 @@ describe("ARCH-049 media scanner and worker", () => {
     repository.listPage = vi.fn().mockRejectedValue(error);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new ShopBrandMediaReconciliationService({ repository,
-      processor: { process: async ({ shopId }) => media(shopId) }, logger, now: () => NOW });
+      processor: { process: async ({ domain }) => media(domain) }, logger, now: () => NOW });
     await expect(service.reconcileOnce()).rejects.toBe(error);
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.scan_page_failed",
       expect.objectContaining({ reasonCode: "PAGE_READ_FAILURE", pageSize: 50 }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("logs an individual claim completion exception before reporting a partial sweep failure", async () => {
@@ -108,12 +110,12 @@ describe("ARCH-049 media scanner and worker", () => {
     repository.complete = vi.fn().mockRejectedValue(failure);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new ShopBrandMediaReconciliationService({ repository,
-      processor: { process: async ({ shopId }) => media(shopId) }, logger, now: () => NOW });
+      processor: { process: async ({ domain }) => media(domain) }, logger, now: () => NOW });
     await expect(service.reconcileOnce()).rejects.toBeInstanceOf(AggregateError);
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.claim_failed",
       expect.objectContaining({ shopId: "shop_0000", role: "LOGO",
         reasonCode: "CLAIM_OPERATION_FAILED", exceptionType: "Error" }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("logs a bad ShopBrand role without preventing other shops from progressing", async () => {
@@ -135,12 +137,12 @@ describe("ARCH-049 media scanner and worker", () => {
     repository.claim = vi.fn().mockRejectedValue(failure);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new ShopBrandMediaReconciliationService({ repository,
-      processor: { process: async ({ shopId }) => media(shopId) }, logger, now: () => NOW });
+      processor: { process: async ({ domain }) => media(domain) }, logger, now: () => NOW });
     await expect(service.reconcileShop("shop_0000")).rejects.toBe(failure);
     expect(logger.error).toHaveBeenCalledWith("shop_brand.media.local_wake_failed",
       expect.objectContaining({ shopId: "shop_0000", role: "LOGO",
         reasonCode: "LOCAL_WAKE_FAILURE" }));
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("private.example");
+    expect(JSON.stringify(logger.error.mock.calls)).toContain("private.example");
   });
 
   it("keeps permanent processor errors terminal and retries recognised transient codes", async () => {

@@ -1,4 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
+import { buildWooRecoveryUrl, generateWooRecoveryToken, prepareWooRecoveryLink,
+  type WooRecoveryLinkOmissionReason, type WooRecoveryLinkPlan } from "./woo-recovery-link-issuer.js";
 import {
   createLogger,
   type StructuredLogger,
@@ -27,6 +29,7 @@ import type {
   WooPendingCandidate,
   WooRecoveryAdmissionEvaluator,
 } from "./contracts.js";
+import { WooActivityWatermarkStore, type WooActivityWatermarkPort } from "./woo-activity-watermark.store.js";
 
 import {
   anonymousId,
@@ -37,6 +40,7 @@ import {
   SOURCE_ID,
   validActivity,
   validBasket,
+  matchesAcceptedWatermark,
 } from "./woo-recovery-admission-evidence.js";
 
 const defaultLogger = createLogger({
@@ -84,8 +88,62 @@ export type WooRecoveryAdmissionDependencies = Readonly<{
   /** Awaited, after the decision/transaction; a failed hook rejects the job. */
   onDeniedAdmission?: (denial: WooDeniedAdmission) => Promise<void>;
   logger?: StructuredLogger;
+  watermarks?: Pick<WooActivityWatermarkPort, "read">;
   now?: () => Date;
 }>;
+
+type AdmissionHistory = { reason: string | null; source: string | null; toStatus: string; fromStatus: string | null; metadata: unknown };
+type AdmissionRow = {
+  id: string; status: string; generation: number; lastExternalActivityAt: Date;
+  statusHistory: AdmissionHistory[];
+};
+
+function historyMetadata(history: AdmissionHistory): Record<string, unknown> | null {
+  return history.metadata !== null && typeof history.metadata === "object" && !Array.isArray(history.metadata)
+    ? history.metadata as Record<string, unknown> : null;
+}
+
+function admissionOrigin(row: AdmissionRow, candidate: WooPendingCandidate): boolean {
+  return row.statusHistory.some((history) => {
+    const metadata = historyMetadata(history);
+    return history.fromStatus === null && history.toStatus === "DETECTED" &&
+      history.source === "WOOCOMMERCE" &&
+      (history.reason === "FIRST_MATURE_CHECKOUT_ADMISSION" || history.reason === "MATURE_CHECKOUT_REENTRY_ADMISSION") &&
+      metadata?.generation === candidate.generation && metadata?.lastEventId === candidate.lastEventId;
+  });
+}
+
+function resumedInto(row: AdmissionRow, generation: number): boolean {
+  return row.status === "CANCELLED" && row.statusHistory.some((history) => {
+    const metadata = historyMetadata(history);
+    return history.reason === "CHECKOUT_RESUMED" && history.source === "woocommerce.checkout" &&
+      Number.isSafeInteger(metadata?.nextGeneration) && metadata?.nextGeneration === generation;
+  });
+}
+
+function isOrderLinked(row: AdmissionRow): boolean {
+  return row.statusHistory.some((history) => history.source === "woocommerce.order");
+}
+
+function validateHistoryEvidence(row: AdmissionRow): void {
+  for (const history of row.statusHistory) {
+    if (history.reason === "CHECKOUT_RESUMED" && history.source === "woocommerce.checkout") {
+      const metadata = historyMetadata(history);
+      if (!metadata || !SOURCE_ID.test(String(metadata.eventId ?? "")) ||
+        !Number.isSafeInteger(metadata.nextGeneration) || Number(metadata.nextGeneration) < 1) {
+        throw new Error("Corrupt Woo checkout-resumption history metadata");
+      }
+    }
+    if (history.source === "woocommerce.order") {
+      const metadata = historyMetadata(history);
+      if (!metadata || !SOURCE_ID.test(String(metadata.orderId ?? "")) ||
+        !SOURCE_ID.test(String(metadata.eventId ?? "")) ||
+        !["order-placed", "order-paid", "order-cancelled"].includes(String(metadata.orderKind))) {
+        throw new Error("Corrupt Woo order history metadata");
+      }
+    }
+  }
+}
 
 function consentReason(reason: string): WooAdmissionDenialReason {
   switch (reason) {
@@ -123,6 +181,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
   private readonly policy: Pick<RecoveryPolicyService, "resolve">;
   private readonly consent: Pick<WooRecoveryConsentReaderPort, "evaluateRecipient">;
   private readonly logger: StructuredLogger;
+  private readonly watermarks: Pick<WooActivityWatermarkPort, "read">;
   private readonly now: () => Date;
 
   constructor(private readonly deps: WooRecoveryAdmissionDependencies) {
@@ -131,6 +190,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
     this.policy = deps.policy ?? recoveryPolicyService;
     this.consent = deps.consent ?? wooRecoveryConsentReader;
     this.logger = deps.logger ?? defaultLogger;
+    this.watermarks = deps.watermarks ?? new WooActivityWatermarkStore();
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -143,6 +203,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
       ...(typeof candidate?.shopId === "string" && SHOP_ID.test(candidate.shopId)
         ? { shopId: candidate.shopId } : {}),
       ...(typeof candidate?.lastEventId === "string" ? { eventIdHash: anonymousId(candidate.lastEventId) } : {}),
+      ...(Number.isSafeInteger(candidate?.generation) ? { generation: candidate.generation } : {}),
       ...(context.jobId ? { jobIdHash: anonymousId(context.jobId) } : {}),
     };
     try {
@@ -159,7 +220,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
         }
       }
       const logFields = {
-        ...fields, outcome: result.kind,
+        ...fields, stage: "evaluation", decision: result.kind, outcome: result.kind,
         ...(result.kind === "created" || result.kind === "already-exists"
           ? { recoveryId: result.recoveryId } : { reason: result.reason }),
       };
@@ -171,7 +232,7 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
       return result;
     } catch (error) {
       this.logger.error("woocommerce.recovery.admission.failed", {
-        ...fields, outcome: "failed", reason: "unexpected_error",
+        ...fields, stage: "evaluation", decision: "retryable_error", outcome: "failed", reason: "unexpected_error",
         errorType: error instanceof Prisma.PrismaClientKnownRequestError
           ? "PrismaClientKnownRequestError" : error instanceof Error ? "Error" : "UnknownError",
       });
@@ -184,19 +245,27 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
   ): Promise<WooAdmissionOutcome> {
     if (!candidate || candidate.source !== "woocommerce" ||
       !SHOP_ID.test(candidate.shopId) || !SOURCE_ID.test(candidate.checkoutToken) ||
-      !SOURCE_ID.test(candidate.lastEventId) || !validActivity(candidate.lastActivityAt)) {
+      !SOURCE_ID.test(candidate.lastEventId) || !validActivity(candidate.lastActivityAt) ||
+      !Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) {
       return { kind: "denied", reason: "INVALID_CANDIDATE" };
+    }
+    const generation = candidate.generation!;
+    if (candidate.basket?.kind === "empty") return { kind: "denied", reason: "BASKET_EMPTY" };
+    if (!validBasket(candidate.basket)) {
+      return candidate.basket?.kind === "unknown"
+        ? { kind: "deferred", reason: "BASKET_EVIDENCE_UNKNOWN" }
+        : { kind: "denied", reason: "BASKET_INVALID" };
     }
     const ref: WooCheckoutRef = { shopId: candidate.shopId, checkoutToken: candidate.checkoutToken };
     return this.deps.coordinator.withCheckoutLock<WooAdmissionOutcome>(ref, async (): Promise<WooAdmissionOutcome> => {
       const [shop, installation, eligibility] = await Promise.all([
         this.database.shop.findUnique({
           where: { id: ref.shopId },
-          select: { id: true, platform: true, status: true, onboardingCompleted: true, defaultCountryCode: true },
+          select: { id: true, domain: true, platform: true, status: true, onboardingCompleted: true, defaultCountryCode: true },
         }),
         this.database.wooCommerceInstallation.findUnique({
           where: { shopId: ref.shopId },
-          select: { id: true, status: true, revokedAt: true, credentialVersion: true },
+          select: { id: true, status: true, revokedAt: true, credentialVersion: true, canonicalSiteUrl: true },
         }),
         this.execution.evaluate(ref.shopId, undefined, "recovery"),
       ]);
@@ -208,19 +277,23 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
         return { kind: "denied", reason: "INSTALLATION_INACTIVE" };
       }
 
-      // A completed/removed BullMQ job is never evidence of no recovery.
-      // Check all generations BEFORE consulting transient candidates; validate
-      // the Woo tenant/installation first to prevent cross-platform reentry.
-      const prior = await this.database.checkoutRecovery.findFirst({
-        where: ref, orderBy: [{ generation: "desc" }, { id: "desc" }],
-        select: { id: true, status: true },
-      });
-      if (prior) return { kind: "already-exists", recoveryId: prior.id, status: prior.status };
+      // A removed job/index is not evidence of no recovery. Exact admission
+      // history is the only basis for repairing the INSERT→enqueue gap.
+      const prior = await this.findLatest(ref);
+      if (prior) {
+        const classification = this.classifyPrior(prior, candidate);
+        if (classification) return classification;
+      } else if (generation !== 1) {
+        return { kind: "superseded", reason: "GENERATION_GAP" };
+      }
 
-      const latest = await this.deps.candidates.getPending(ref);
+      const latest = await this.deps.candidates.getPending(ref, generation);
       if (!latest) return { kind: "deferred", reason: "CANDIDATE_NOT_AVAILABLE" };
       if (!sameAcceptedCandidate(candidate, latest)) {
         return { kind: "superseded", reason: "EVENT_WATERMARK_CHANGED" };
+      }
+      if (!matchesAcceptedWatermark(candidate, await this.watermarks.read(ref))) {
+        return { kind: "superseded", reason: "ACTIVITY_WATERMARK_CHANGED" };
       }
 
       const policy = await this.policy.resolve(ref.shopId, this.now());
@@ -285,12 +358,28 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
         return { kind: "denied", reason: "RECIPIENT_IDENTITY_MISMATCH" };
       }
 
+      let linkPlan: WooRecoveryLinkPlan;
+      let linkOmissionReason: WooRecoveryLinkOmissionReason | null = null;
+      if (!checkout.restoration) {
+        linkOmissionReason = "RESTORE_SNAPSHOT_ABSENT";
+        linkPlan = { kind: "omitted", reason: linkOmissionReason };
+      } else if (checkout.restoration.kind !== "supported") {
+        linkOmissionReason = "RESTORE_SNAPSHOT_UNSUPPORTED";
+        linkPlan = { kind: "omitted", reason: linkOmissionReason };
+      } else {
+        linkPlan = prepareWooRecoveryLink(installation.canonicalSiteUrl, shop.domain);
+        if (linkPlan.kind === "omitted") linkOmissionReason = linkPlan.reason;
+      }
+
       // No Redis/network operation inside this transaction. The shared checkout
       // lock excludes BG001/002, while PostgreSQL's unique key handles competing
       // or expired leases. A SHARE row lock fences concurrent STOP/revocation.
-      const stillLatest = await this.deps.candidates.getPending(ref);
+      const stillLatest = await this.deps.candidates.getPending(ref, generation);
       if (!stillLatest || !sameAcceptedCandidate(candidate, stillLatest)) {
         return { kind: "superseded", reason: "EVENT_WATERMARK_CHANGED" };
+      }
+      if (!matchesAcceptedWatermark(candidate, await this.watermarks.read(ref))) {
+        return { kind: "superseded", reason: "ACTIVITY_WATERMARK_CHANGED" };
       }
       const terminalNow = await this.deps.orders.read(ref);
       if (terminalNow.kind === "ambiguous") return { kind: "deferred", reason: "ORDER_EVIDENCE_AMBIGUOUS" };
@@ -300,27 +389,48 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
 
       const result: WooAdmissionOutcome = await this.database.$transaction(
         async (tx): Promise<WooAdmissionOutcome> => {
-        const existing = await tx.checkoutRecovery.findFirst({
-          where: ref, orderBy: [{ generation: "desc" }, { id: "desc" }],
-          select: { id: true, status: true },
-        });
-        if (existing) return { kind: "already-exists", recoveryId: existing.id, status: existing.status };
+        await tx.$queryRaw(Prisma.sql`
+          SELECT "id" FROM "commerce"."CheckoutRecovery"
+          WHERE "shopId" = ${ref.shopId} AND "checkoutToken" = ${ref.checkoutToken}
+          ORDER BY "generation" DESC, "id" DESC LIMIT 1 FOR UPDATE
+        `);
+        const existing = await this.findLatest(tx, ref);
+        if (existing) {
+          const classification = this.classifyPrior(existing, candidate);
+          if (classification) return classification;
+        } else if (generation !== 1) {
+          return { kind: "superseded", reason: "GENERATION_GAP" };
+        }
 
-        if (!await confirmCurrentWooConsent(tx, ref.shopId, snapshot, checkout.contact?.email)) {
+        if (!await confirmCurrentWooConsent(tx, ref.shopId, snapshot, checkout.contact?.email, {
+          canonicalSiteUrl: installation.canonicalSiteUrl,
+          shopDomain: shop.domain,
+        })) {
           return { kind: "denied", reason: "CONSENT_CHANGED" };
         }
+
+        // Only mint entropy after this transaction has proved that no recovery
+        // already exists. An entropy failure aborts before any row is inserted.
+        const linkToken = linkPlan.kind === "ready" ? generateWooRecoveryToken() : null;
 
         const recovery = await tx.checkoutRecovery.create({
           data: {
             shopId: ref.shopId,
             checkoutToken: ref.checkoutToken,
-            generation: 1,
+            generation,
             status: "DETECTED",
             cartToken: null,
             customerId: snapshot.customerId,
             currency: checkout.currency,
             totalPrice: new Prisma.Decimal(checkout.total),
-            checkoutUrl: null, // No Woo restore URL in the authenticated wire contract.
+            checkoutUrl: null,
+            // Keep the canonical restoration contract separate from lineItems,
+            // which remains the historical display projection. Prisma.DbNull
+            // records absent evidence as SQL NULL; unsupported evidence remains
+            // an explicit JSON object and is therefore distinguishable.
+            wooRestoreSnapshot: checkout.restoration === undefined
+              ? Prisma.DbNull
+              : checkout.restoration as Prisma.InputJsonValue,
             lineItems: checkout.items.map((item) => ({
               productId: item.productId ?? null,
               variantId: item.variationId ?? null,
@@ -335,17 +445,29 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
           },
           select: { id: true },
         });
+        if (linkPlan.kind === "ready" && linkToken) {
+          await tx.checkoutRecovery.update({
+            where: { id: recovery.id },
+            data: { checkoutUrl: buildWooRecoveryUrl(linkPlan, recovery.id, linkToken) },
+          });
+        }
         await tx.checkoutRecoveryStatusHistory.create({
           data: {
             checkoutRecoveryId: recovery.id,
             fromStatus: null,
             toStatus: "DETECTED",
             source: "WOOCOMMERCE",
-            reason: "FIRST_MATURE_CHECKOUT_ADMISSION",
+            reason: generation === 1 ? "FIRST_MATURE_CHECKOUT_ADMISSION" : "MATURE_CHECKOUT_REENTRY_ADMISSION",
+            metadata: {
+              generation,
+              lastEventId: candidate.lastEventId,
+              checkoutUrlDisposition: linkPlan.kind === "ready" ? "ISSUED" : "OMITTED",
+              ...(linkOmissionReason ? { checkoutUrlOmissionReason: linkOmissionReason } : {}),
+            },
             occurredAt: clock,
           },
         });
-        return { kind: "created", recoveryId: recovery.id };
+        return { kind: "created", recoveryId: recovery.id, generation };
         },
       );
       return result;
@@ -353,12 +475,61 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
       if (!isUniqueConflict(error)) throw error;
       // Recover ONLY a proven CheckoutRecovery unique collision. A different
       // P2002 target remains a real failure, not a fabricated success.
-      const raced = await this.database.checkoutRecovery.findFirst({
-        where: ref, orderBy: [{ generation: "desc" }, { id: "desc" }],
-        select: { id: true, status: true },
-      });
+      const raced = await this.findLatest(ref);
       if (!raced) throw error;
-      return { kind: "already-exists", recoveryId: raced.id, status: raced.status } as const;
+      const classified = this.classifyPrior(raced, candidate);
+      if (!classified || classified.kind !== "already-exists") throw error;
+      return classified;
     });
+  }
+
+  private async findLatest(
+    database: Pick<PrismaClient, "checkoutRecovery"> | Prisma.TransactionClient,
+    ref: WooCheckoutRef,
+  ): Promise<AdmissionRow | null>;
+  private async findLatest(ref: WooCheckoutRef): Promise<AdmissionRow | null>;
+  private async findLatest(
+    databaseOrRef: Pick<PrismaClient, "checkoutRecovery"> | Prisma.TransactionClient | WooCheckoutRef,
+    maybeRef?: WooCheckoutRef,
+  ): Promise<AdmissionRow | null> {
+    const database = maybeRef ? databaseOrRef as Pick<PrismaClient, "checkoutRecovery"> | Prisma.TransactionClient : this.database;
+    const ref = maybeRef ?? databaseOrRef as WooCheckoutRef;
+    return database.checkoutRecovery.findFirst({
+      where: { shopId: ref.shopId, checkoutToken: ref.checkoutToken },
+      orderBy: [{ generation: "desc" }, { id: "desc" }],
+      select: { id: true, status: true, generation: true, lastExternalActivityAt: true,
+        statusHistory: { where: { OR: [
+          { toStatus: "DETECTED" }, { reason: "CHECKOUT_RESUMED", source: "woocommerce.checkout" },
+          { source: "woocommerce.order" },
+        ] }, select: { fromStatus: true, toStatus: true, source: true, reason: true, metadata: true },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 32 },
+      },
+    }) as Promise<AdmissionRow | null>;
+  }
+
+  private classifyPrior(row: AdmissionRow, candidate: WooPendingCandidate): WooAdmissionOutcome | null {
+    const generation = candidate.generation!;
+    validateHistoryEvidence(row);
+    if (generation < row.generation) return { kind: "superseded", reason: "GENERATION_SUPERSEDED" };
+    if (generation === row.generation) {
+      if (!admissionOrigin(row, candidate)) return { kind: "superseded", reason: "ADMISSION_PROVENANCE_MISMATCH" };
+      if (row.status === "DETECTED") {
+        return { kind: "already-exists", recoveryId: row.id, status: row.status,
+          generation, repairInitial: true };
+      }
+      if (row.status === "MESSAGE_SENT" || row.status === "ENGAGED") {
+        return { kind: "already-exists", recoveryId: row.id, status: row.status,
+          generation, repairInitial: false };
+      }
+      return { kind: "superseded", reason: "GENERATION_TERMINAL" };
+    }
+    if (generation !== row.generation + 1) return { kind: "superseded", reason: "GENERATION_GAP" };
+    if (row.status === "CANCELLED" && resumedInto(row, generation)) return null;
+    const activity = validActivity(candidate.lastActivityAt)!;
+    if (row.status === "EXPIRED" && !isOrderLinked(row) && activity > row.lastExternalActivityAt) return null;
+    if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(row.status)) {
+      return { kind: "deferred", reason: "PRIOR_GENERATION_ACTIVE" };
+    }
+    return { kind: "superseded", reason: "PRIOR_GENERATION_NOT_REENTERABLE" };
   }
 }

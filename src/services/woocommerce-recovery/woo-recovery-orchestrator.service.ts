@@ -43,13 +43,21 @@ export class WooRecoveryOrchestratorService {
   async onCheckout(event: WooCheckoutCapture): Promise<WooCheckoutActivityOutcome> {
     await this.deps.assertWooShop(event.shopId);
     const outcome = await this.deps.checkout.handleCheckout(event);
-    if (outcome.kind === "existing-recovery") {
-      // Also repairs an INSERT→enqueue interruption. BG004 examines the
-      // committed sequence-one attempt and never issues a second first send.
+    if (outcome.kind === "resumed") {
+      // Settlement must finish before acknowledging the checkout event. A
+      // replay remains pinned to this previous recovery by BG001 provenance.
+      await this.deps.outreach.settleResumed(outcome.previousRecoveryId);
+    } else if (outcome.kind === "repair-existing-initial") {
+      // BG001 proves this exact event created the generation; BG004 rechecks
+      // the DETECTED recovery and sequence-one attempt before enqueueing.
       const enqueue = await this.deps.outreach.enqueueInitial(outcome.recoveryId);
       retryIfNecessary("checkout-resume", enqueue);
     }
-    this.log.info("woocommerce.recovery.checkout.handled", { shopId: event.shopId, outcome: outcome.kind });
+    this.log.info("woocommerce.recovery.checkout.handled", {
+      shopId: event.shopId, outcome: outcome.kind,
+      ...(outcome.kind === "resumed" ? { recoveryId: outcome.previousRecoveryId, generation: outcome.nextGeneration } : {}),
+      ...(outcome.kind === "repair-existing-initial" ? { recoveryId: outcome.recoveryId, generation: outcome.generation } : {}),
+    });
     return outcome;
   }
 
@@ -66,7 +74,14 @@ export class WooRecoveryOrchestratorService {
   ): Promise<WooAdmissionOutcome> {
     await this.deps.assertWooShop(candidate.shopId);
     const outcome = await this.deps.admission.evaluateMatured(candidate, context);
-    if (outcome.kind === "created" || outcome.kind === "already-exists") {
+    if (outcome.kind === "created") {
+      if (outcome.generation !== candidate.generation) {
+        throw new Error("WOO_ADMISSION_GENERATION_MISMATCH");
+      }
+      const enqueue = await this.deps.outreach.enqueueInitial(outcome.recoveryId);
+      retryIfNecessary("enqueue-initial", enqueue);
+    } else if (outcome.kind === "already-exists" && outcome.repairInitial &&
+      outcome.generation === candidate.generation) {
       const enqueue = await this.deps.outreach.enqueueInitial(outcome.recoveryId);
       retryIfNecessary("enqueue-initial", enqueue);
     } else {
@@ -76,7 +91,8 @@ export class WooRecoveryOrchestratorService {
     // previously committed CheckoutRecovery and republish its first attempt.
     await this.deps.clearMatured(candidate, context.jobId);
     this.log.info("woocommerce.recovery.maturity.handled", {
-      shopId: candidate.shopId, outcome: outcome.kind,
+      shopId: candidate.shopId, recoveryId: "recoveryId" in outcome ? outcome.recoveryId : undefined,
+      generation: candidate.generation, outcome: outcome.kind,
     });
     return outcome;
   }

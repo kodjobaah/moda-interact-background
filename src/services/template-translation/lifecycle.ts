@@ -101,6 +101,7 @@ export class TemplateTranslationBatchLifecycle {
         logger.error("background.template_translation.batch_submission_failed", {
           runId: batch.id, batchId, classification: submission.classification,
           phase: submission.phase, error: submission.error, ...boundedError(submission.error),
+          errorMessage: submission.error instanceof Error ? submission.error.message : String(submission.error),
         });
         if (submission.classification === "AMBIGUOUS_CREATE") {
           await this.recordSubmissionUnknown(batchId);
@@ -124,7 +125,9 @@ export class TemplateTranslationBatchLifecycle {
       if (error instanceof TemplateTranslationValidationError || error instanceof Error && error.message === "STALE_TEMPLATE_DEFINITION_HASH") {
         await this.repository.markBatchTerminal(batch, "INVALID_TEMPLATE_BATCH_SOURCE", { maxRetries: 0, retrySeconds: 0 });
       }
-      logger.error("background.template_translation.submit_exception", { runId: batch.id, batchId, error, ...boundedError(error) });
+      logger.error("background.template_translation.submit_exception", { runId: batch.id, batchId, error, ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       // Explicit transient/unknown provider failures must bubble to BullMQ. Reconciliation
       // will correlate the unknown provider Batch rather than submitting a duplicate.
       throw error;
@@ -190,7 +193,9 @@ export class TemplateTranslationBatchLifecycle {
       return await pollTranslationProviderBatch({
         retrieve: async () => (await this.resolveProvider(batch)).retrieveBatch(batch.providerBatchId!),
         onReadFailure: async (error) => {
-          logger.error("background.template_translation.provider_poll_exception", { runId: batch.id, batchId, error, ...boundedError(error) });
+          logger.error("background.template_translation.provider_poll_exception", { runId: batch.id, batchId, error, ...boundedError(error),
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
           return schedule(true);
         },
         onNonterminal: async () => schedule(false),
@@ -225,7 +230,9 @@ export class TemplateTranslationBatchLifecycle {
         },
       });
     } catch (error) {
-      logger.error("background.template_translation.poll_exception", { runId: batch.id, batchId, error, ...boundedError(error) });
+      logger.error("background.template_translation.poll_exception", { runId: batch.id, batchId, error, ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
@@ -270,6 +277,7 @@ export class TemplateTranslationBatchLifecycle {
             if (!(error instanceof TemplateTranslationValidationError)) throw error;
             logger.warn("background.template_translation.item_validation_failed", {
               runId: batch.id, batchId, error, ...boundedError(error),
+              errorMessage: error instanceof Error ? error.message : String(error),
             });
             return this.repository.setResult({
               batchId, providerCustomId: result.providerCustomId, translated: null,
@@ -289,7 +297,9 @@ export class TemplateTranslationBatchLifecycle {
       if (batch.submittedAt && Date.now() - batch.submittedAt.getTime() > 48 * 60 * 60_000) {
         await this.repository.markBatchTerminal(batch, "PROVIDER_RESULTS_UNRESOLVED", { maxRetries: 0, retrySeconds: 0 });
       }
-      logger.error("background.template_translation.results_exception", { runId: batch.id, batchId, error, ...boundedError(error) });
+      logger.error("background.template_translation.results_exception", { runId: batch.id, batchId, error, ...boundedError(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }

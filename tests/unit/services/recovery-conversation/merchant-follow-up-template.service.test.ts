@@ -186,8 +186,8 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     expect(f.templates.prepare).not.toHaveBeenCalled();
     expect(f.log.error).toHaveBeenCalledWith("arch047.merchant_follow_up.prepare_failed", {
       commandId: command.id, shopId: command.shopId, errorType: "Error",
+      errorMessage: failure.message, error: failure,
     });
-    expect(JSON.stringify(f.log.error.mock.calls)).not.toContain(failure.message);
   });
 
   it("preserves a frozen text header with its original checkout suffix", async () => {
@@ -210,7 +210,7 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     await expect(f.resolver.resolve(command, "recovery1")).rejects.toBe(failure);
     expect(f.log.error).toHaveBeenCalledWith("arch047.merchant_follow_up.prepare_failed", {
       commandId: "cmd1", shopId: "shop-1", errorType: "Error",
+      errorMessage: failure.message, error: failure,
     });
-    expect(JSON.stringify(f.log.error.mock.calls)).not.toContain("secret provider body");
   });
 });

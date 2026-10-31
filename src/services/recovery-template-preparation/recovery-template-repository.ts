@@ -10,7 +10,7 @@ import type {
 /** All reads are tenant-scoped. No provider API or mutable catalogue cache. */
 export class PrismaRecoveryTemplateRepository implements RecoveryTemplateRepository {
   constructor(private readonly database: Pick<PrismaClient,
-    "shop" | "whatsAppTemplateVariant" | "shopBrand"> = prisma) {}
+    "shop" | "whatsAppTemplateVariant" | "shopBrand" | "commerceShopProfile"> = prisma) {}
 
   async readCatalogue(input: {
     shopId: string;
@@ -58,6 +58,22 @@ export class PrismaRecoveryTemplateRepository implements RecoveryTemplateReposit
       },
     });
     return { shop, variants };
+  }
+
+  async readShopCategory(shopId: string, languageTag: string): Promise<string | null> {
+    // The active category is the Moda Store Category mapped onto the Shopify
+    // reference taxonomy. Never use a pending category or another tenant's data.
+    const profile = await this.database.commerceShopProfile.findUnique({
+      where: { shopId },
+      select: { activeCategory: { select: {
+        enabled: true, displayName: true,
+        translations: { where: { locale: languageTag }, select: { displayName: true }, take: 1 },
+      } } },
+    });
+    const category = profile?.activeCategory;
+    if (!category?.enabled) return null;
+    // Avoid mixing English labels into a reviewed Meta template in another language.
+    return languageTag === "en" ? category.displayName : category.translations[0]?.displayName ?? null;
   }
 
   async readShopBrand(shopId: string): Promise<ShopBrandRow | null> {

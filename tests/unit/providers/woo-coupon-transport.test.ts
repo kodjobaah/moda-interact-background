@@ -1,7 +1,7 @@
 import { createServer, type RequestListener } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WooCouponPageTransport } from "../../../src/providers/woo-coupon-transport.js";
+import { WooCouponPageTransport, WooCouponReadError } from "../../../src/providers/woo-coupon-transport.js";
 import { signLocalWooCouponPath } from "../../../src/providers/woo-coupon-local-oauth.js";
 
 const credential = { consumerKey: "ck_example", consumerSecret: "cs_example" };
@@ -21,6 +21,89 @@ async function localServer(handler: RequestListener) {
 const localDns = async () => [{ address: "127.0.0.1", family: 4 as const }];
 
 describe("ARCH-036 Woo coupon HTTP read", () => {
+  it("preserves safe DNS failure cause metadata for worker diagnostics", async () => {
+    const dnsFailure = Object.assign(new Error("getaddrinfo EAI_AGAIN private.example"), {
+      code: "EAI_AGAIN", syscall: "getaddrinfo",
+    });
+    const transport = new WooCouponPageTransport(async () => { throw dnsFailure; });
+    await expect(transport.readPage(
+      { canonicalSiteUrl: "https://private.example", mode: "public" }, credential, 1, 100,
+    )).rejects.toMatchObject({
+      code: "provider_unavailable", stage: "dns", cause: dnsFailure,
+    });
+  });
+
+  it("records the bounded HTTP status for provider failures", async () => {
+    const url = await localServer((_req, res) => {
+      res.writeHead(503); res.end();
+    });
+    const transport = new WooCouponPageTransport(localDns);
+    await expect(transport.readPage(
+      { canonicalSiteUrl: url, mode: "local-development" }, credential, 1, 100,
+    )).rejects.toMatchObject({
+      code: "provider_unavailable", stage: "http", httpStatus: 503,
+    });
+  });
+
+  it("keeps WooCommerce's actual JSON error message and response body for HTTP 503", async () => {
+    const body = JSON.stringify({ code: "woocommerce_rest_cannot_view", message: "The store is in maintenance mode", data: { status: 503 } });
+    const url = await localServer((_req, res) => {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(body);
+    });
+    const transport = new WooCouponPageTransport(localDns);
+    const failure = await transport.readPage(
+      { canonicalSiteUrl: url, mode: "local-development" }, credential, 1, 100,
+    ).catch((error: unknown) => error) as WooCouponReadError;
+    expect(failure).toBeInstanceOf(WooCouponReadError);
+    expect(failure).toMatchObject({
+      code: "provider_unavailable", httpStatus: 503, stage: "http", providerResponseBody: body,
+    });
+    expect(failure.message).toContain("HTTP 503");
+    expect(failure.message).toContain("The store is in maintenance mode");
+    expect(failure.message).toContain("woocommerce_rest_cannot_view");
+  });
+
+  it("includes WooCommerce's actual 401 message without changing authorization classification", async () => {
+    const body = JSON.stringify({ code: "woocommerce_rest_cannot_view", message: "You cannot list resources", data: { status: 401 } });
+    const url = await localServer((_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(body);
+    });
+    const transport = new WooCouponPageTransport(localDns);
+    const failure = await transport.readPage(
+      { canonicalSiteUrl: url, mode: "local-development" }, credential, 1, 100,
+    ).catch((error: unknown) => error) as WooCouponReadError;
+    expect(failure).toMatchObject({ code: "unauthorized", httpStatus: 401, providerResponseBody: body });
+    expect(failure.message).toContain("You cannot list resources");
+  });
+
+  it("preserves unexpected HTML/plaintext HTTP bodies and redirect destinations", async () => {
+    const url = await localServer((_req, res) => {
+      res.writeHead(302, { location: "https://somewhere.example/login", "content-type": "text/html" });
+      res.end("<h1>Login required</h1>");
+    });
+    const transport = new WooCouponPageTransport(localDns);
+    const failure = await transport.readPage(
+      { canonicalSiteUrl: url, mode: "local-development" }, credential, 1, 100,
+    ).catch((error: unknown) => error) as WooCouponReadError;
+    expect(failure).toMatchObject({ code: "provider_unavailable", httpStatus: 302,
+      redirectLocation: "https://somewhere.example/login", providerResponseBody: "<h1>Login required</h1>",
+    });
+    expect(failure.message).toContain("Login required");
+  });
+
+  it("keeps the DNS lookup's original failure explanation", async () => {
+    const failure = new Error("getaddrinfo ENOTFOUND merchant-shop.test");
+    const transport = new WooCouponPageTransport(async () => { throw failure; });
+    await expect(transport.readPage(
+      { canonicalSiteUrl: "https://merchant-shop.test", mode: "public" }, credential, 1, 100,
+    )).rejects.toMatchObject({
+      code: "provider_unavailable", stage: "dns", cause: failure,
+      message: expect.stringContaining("getaddrinfo ENOTFOUND merchant-shop.test"),
+    });
+  });
+
   it("constructs bounded pagination and signs local HTTP without Basic credentials", async () => {
     const received: string[] = [];
     const url = await localServer((req, res) => {

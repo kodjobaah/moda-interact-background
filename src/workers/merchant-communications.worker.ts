@@ -99,12 +99,14 @@ export function createMerchantCommunicationsWorker() {
     logger.error("background.merchant_communications.job_failed", {
       jobId: job?.id ?? null, jobName: job?.name ?? null,
       error, errorName: error.name.slice(0, 128),
+      errorMessage: error instanceof Error ? error.message : String(error),
     });
   });
 
   worker.on("error", (error) => {
     logger.error("background.merchant_communications.worker_exception", {
       error, errorName: error.name.slice(0, 128),
+      errorMessage: error instanceof Error ? error.message : String(error),
     });
   });
   return worker;

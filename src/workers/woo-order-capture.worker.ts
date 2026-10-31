@@ -60,6 +60,8 @@ export function createWooOrderCaptureWorker(
           ...fields, ...(shopId ? { shopId } : {}), ...(eventId ? { eventId } : {}), stage,
           reason: error instanceof InvalidWooOrderCaptureJob ? error.reason : "processing_failure",
           errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error: error,
         });
         throw error;
       }
@@ -69,6 +71,8 @@ export function createWooOrderCaptureWorker(
   }));
   worker.on("error", (error) => logger.error("woocommerce.order_capture.worker_error", {
     queueName: WOO_ORDER_CAPTURE_QUEUE, errorName: error.name.slice(0, 64),
-  }));
+    errorMessage: error instanceof Error ? error.message : String(error),
+    error: error,
+}));
   return worker;
 }

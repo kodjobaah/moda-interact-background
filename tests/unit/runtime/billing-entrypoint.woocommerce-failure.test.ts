@@ -80,7 +80,8 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       leaseGeneration: 12,
       configVersion: 7,
       errorName: "Woo".repeat(30).slice(0, 64),
-      errorMessage: "w".repeat(256),
+      errorMessage: "w".repeat(300),
+      error: failure,
     });
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.subscription_receipts.completed",
@@ -158,8 +159,10 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       return { subscriptionsScanned: 5 };
     });
     mocks.reconcileBatch.mockResolvedValueOnce({ claimed: 0, processed: 0, failed: 0 });
-    mocks.reconcileChargeBatch.mockRejectedValueOnce(new Error("database unavailable"));
-    mocks.reconcileChargeRefundBatch.mockRejectedValueOnce(new Error("refund database unavailable"));
+    const chargeFailure = new Error("database unavailable");
+    const refundFailure = new Error("refund database unavailable");
+    mocks.reconcileChargeBatch.mockRejectedValueOnce(chargeFailure);
+    mocks.reconcileChargeRefundBatch.mockRejectedValueOnce(refundFailure);
 
     await expect(reconcileWooReceiptsAndGlobalBillingScan(runtimeConfig, leaseHandle, globalScan))
       .resolves.toEqual({ subscriptionsScanned: 5 });
@@ -168,6 +171,15 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       leaseGeneration: 14,
       configVersion: 9,
       outcome: "failed",
+      errorMessage: "database unavailable",
+      error: chargeFailure,
+    });
+    expect(mocks.logger.error).toHaveBeenCalledWith("billing.woocommerce.charge_refund_receipts.failed", {
+      leaseGeneration: 14,
+      configVersion: 9,
+      outcome: "failed",
+      errorMessage: "refund database unavailable",
+      error: refundFailure,
     });
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.charge_receipts.completed",
@@ -204,7 +216,8 @@ describe("billing entrypoint Woo receipt failure boundary", () => {
       leaseGeneration: 14,
       configVersion: 9,
       errorName: "Entitlement".repeat(10).slice(0, 64),
-      errorMessage: "e".repeat(256),
+      errorMessage: "e".repeat(300),
+      error: failure,
     });
     expect(mocks.logger.info).not.toHaveBeenCalledWith(
       "billing.woocommerce.paid_entitlement.reconciliation_completed",

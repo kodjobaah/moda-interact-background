@@ -66,6 +66,8 @@ export class HumanWrapperPreparationService {
       this.logger.error("arch047.human_wrapper.prepare_failed", {
         commandId: command.id,
         errorType: error instanceof Error ? error.name : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error: error,
       });
       throw error;
     }

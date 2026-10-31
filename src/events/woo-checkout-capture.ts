@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Job } from "bullmq";
+import { WooCartRestoreSnapshotV1Schema } from "@modainteract/moda-interact-shared/woocommerce";
 import { z } from "zod";
 
 /** API-008 owns this wire format. This is the strict Background queue-boundary
@@ -41,6 +42,7 @@ const event = z.strictObject({
     total: money,
     items: z.array(item).max(50).optional(),
     contact: contact.optional(),
+    restoration: WooCartRestoreSnapshotV1Schema.optional(),
   }),
 });
 const jobData = event.extend({

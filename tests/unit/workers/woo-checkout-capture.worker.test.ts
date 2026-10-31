@@ -6,7 +6,7 @@ const mocked = vi.hoisted(() => ({
   worker: null as null | { queue: string; processor: (job: any) => Promise<void>; options: any },
   listeners: new Map<string, (...args: any[]) => void>(),
   info: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  checkout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-25T00:30:00.000Z" })),
+  checkout: vi.fn(async () => ({ kind: "scheduled" as const, dueAt: "2026-10-25T00:30:00.000Z", generation: 1 })),
   metric: vi.fn(async (_definition, _job, fn) => fn()),
 }));
 vi.mock("bullmq", () => ({
@@ -89,7 +89,9 @@ describe("ARCH-048 Woo checkout worker orchestration", () => {
     mocked.checkout.mockRejectedValueOnce(error);
     await expect(execute(good())).rejects.toBe(error);
     expect(mocked.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("private@example.test");
+    expect(mocked.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
+      errorMessage: "checkout DB: private@example.test", error,
+    }));
   });
 
   it("does not implement billing or recovery rules inside the capture worker", async () => {
@@ -98,12 +100,13 @@ describe("ARCH-048 Woo checkout worker orchestration", () => {
     expect(code).not.toMatch(/checkoutRecoveryService|\bprisma\b|reserveRecoveryCredit|sendTemplate/);
   });
 
-  it("reports worker infrastructure errors without leaking Redis messages", () => {
+  it("reports worker infrastructure errors with the original Redis message", () => {
     mocked.listeners.get("ready")?.();
-    mocked.listeners.get("error")?.(new Error("redis secret"));
+    const error = new Error("redis secret");
+    mocked.listeners.get("error")?.(error);
     expect(mocked.error).toHaveBeenCalledWith("woocommerce.checkout_capture.worker_error", {
       queueName: "woo-checkout-capture-v1", errorName: "Error",
+      errorMessage: "redis secret", error,
     });
-    expect(JSON.stringify(mocked.error.mock.calls)).not.toContain("redis secret");
   });
 });

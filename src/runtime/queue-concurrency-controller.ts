@@ -87,7 +87,9 @@ export async function startQueueConcurrencyController(
           const actual = await queue.getGlobalConcurrency();
           if (actual !== desired) throw new Error(`expected ${desired}, got ${actual}`);
         } catch (error) {
-          log.error("background.queue_concurrency.reconcile_failed", { queue: queueName, error });
+          log.error("background.queue_concurrency.reconcile_failed", { queue: queueName, error,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
           throw error;
         }
       }

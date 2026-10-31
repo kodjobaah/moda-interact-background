@@ -88,7 +88,7 @@ describe("ARCH-049 Admin frozen-image projection and BG006 pass-through", () => 
         { type: "text", text: "Example Shop" }] },
     ]);
     expect(resolveMedia).toHaveBeenCalledWith("shop-1", role);
-    expect(readShopBrand).not.toHaveBeenCalled();
+    expect(readShopBrand).toHaveBeenCalledWith("shop-1");
     const sent = templateSendFields(prepared, { kind: "NO_OFFER" });
     const boundary = prepareAutomatedTemplateInput({ ...sent, to: "+447400123456" });
     expect(boundary.providerInput.imageHeader).toEqual({ link });
@@ -140,5 +140,23 @@ describe("ARCH-049 Admin frozen-image projection and BG006 pass-through", () => 
     expect(await text.preparer.prepare(text.input)).toMatchObject({
       outcome: "unavailable", reason: "BINDINGS_INVALID",
     });
+  });
+
+  it("preserves a correctly frozen TEXT header and does not resolve image media", async () => {
+    const components = [
+      { type: "HEADER", format: "TEXT", text: "Hello {{1}}" },
+      { type: "BODY", text: "Welcome {{1}}" },
+    ];
+    const bindings = { schemaVersion: 1,
+      header: [{ position: 1, variable: "shop.name" }],
+      body: [{ position: 1, variable: "customer.firstName" }], buttons: [] };
+    const { preparer, input, resolveMedia } = setup("LOGO", { components, bindings });
+    expect(await preparer.prepare(input)).toMatchObject({ outcome: "prepared", template: {
+      components: [
+        { type: "header", parameters: [{ type: "text", text: "Example Shop" }] },
+        { type: "body", parameters: [{ type: "text", text: "Alex" }] },
+      ],
+    } });
+    expect(resolveMedia).not.toHaveBeenCalled();
   });
 });

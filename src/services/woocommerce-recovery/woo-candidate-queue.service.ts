@@ -29,7 +29,7 @@ export type WooCandidateQueuePort = {
 
 export type WooCandidateIndexPort = Pick<
   PendingRecoveryCandidateIndexStore,
-  "findByCheckout" | "upsert" | "remove"
+  "findByCheckout" | "upsert" | "remove" | "compareAndRemoveCheckout"
 >;
 
 export interface WooCandidateScheduler extends WooCandidateManager {
@@ -49,9 +49,10 @@ export class WooCandidateMutationBlocked extends Error {
 
 /** A separate deterministic namespace keeps Woo candidate jobs away from the
  * existing Shopify job IDs, while sharing the approved candidate queue/index. */
-export function wooCandidateJobId(ref: WooCheckoutRef): string {
+export function wooCandidateJobId(ref: WooCheckoutRef, generation: number): string {
+  if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Invalid Woo candidate generation");
   const digest = createHash("sha256")
-    .update(ref.shopId).update("\0").update(ref.checkoutToken).digest("hex");
+    .update(ref.shopId).update("\0").update(ref.checkoutToken).update("\0").update(String(generation)).digest("hex");
   return `woo-candidate-${digest}`;
 }
 
@@ -89,30 +90,37 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     if (candidate.shopId !== ref.shopId || candidate.checkoutToken !== ref.checkoutToken) {
       throw new WooCandidateMutationBlocked("job_identity_conflict");
     }
+    if (!Number.isSafeInteger(candidate.generation) || (candidate.generation ?? 0) < 1) {
+      throw new WooCandidateMutationBlocked("job_identity_conflict");
+    }
   }
 
-  private async resolve(ref: WooCheckoutRef): Promise<{
+  private async resolve(ref: WooCheckoutRef, expectedGeneration?: number): Promise<{
     jobId: string;
     job: WooCandidateJobPort;
   } | null> {
     const indexedId = await this.index.findByCheckout(ref);
-    const baseId = wooCandidateJobId(ref);
+    const baseId = wooCandidateJobId(ref, expectedGeneration ?? 1);
     const jobId = indexedId ?? baseId;
     const job = await this.queue.getJob(jobId);
     if (job) {
       this.verify(ref, job.data);
+      if (expectedGeneration !== undefined && job.data.generation !== expectedGeneration) return null;
       return { jobId, job };
     }
     if (indexedId && indexedId !== baseId) {
-      // A dangling index is not evidence of a Woo job. Do not overwrite a
-      // foreign namespace or silently discard its correlation key.
-      throw new WooCandidateMutationBlocked("job_identity_conflict");
+      // A dangling Woo job pointer can be retired only through ownership CAS.
+      // Shopify/unknown IDs remain untouched and fail closed.
+      if (!indexedId.startsWith("woo-candidate-")) {
+        throw new WooCandidateMutationBlocked("job_identity_conflict");
+      }
+      await this.index.compareAndRemoveCheckout(ref, indexedId);
     }
     return null;
   }
 
-  async getPending(ref: WooCheckoutRef): Promise<WooPendingCandidate | null> {
-    const found = await this.resolve(ref);
+  async getPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<WooPendingCandidate | null> {
+    const found = await this.resolve(ref, expectedGeneration);
     if (!found) return null;
     const state = await found.job.getState();
     if (["delayed", "waiting", "active"].includes(state)) return found.job.data;
@@ -120,13 +128,13 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     throw new WooCandidateMutationBlocked("job_not_mutable");
   }
 
-  async cancelPending(ref: WooCheckoutRef): Promise<"cancelled" | "absent"> {
-    const found = await this.resolve(ref);
+  async cancelPending(ref: WooCheckoutRef, expectedGeneration?: number): Promise<"cancelled" | "absent"> {
+    const found = await this.resolve(ref, expectedGeneration);
     if (!found) {
       // Remove a stale Woo index (e.g. removeOnComplete) without touching jobs.
       const indexed = await this.index.findByCheckout(ref);
-      if (indexed === wooCandidateJobId(ref)) {
-        await this.index.remove(ref, indexed);
+      if (indexed === wooCandidateJobId(ref, expectedGeneration ?? 1)) {
+        await this.index.compareAndRemoveCheckout(ref, indexed);
       }
       return "absent";
     }
@@ -135,7 +143,7 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
       throw new WooCandidateMutationBlocked("job_not_mutable");
     }
     await found.job.remove();
-    await this.index.remove(ref, found.jobId);
+    await this.index.compareAndRemoveCheckout(ref, found.jobId);
     return "cancelled";
   }
 
@@ -148,9 +156,10 @@ export class WooPendingCandidateQueueService implements WooCandidateScheduler {
     const { candidate, delayMinutes, dueAtMs, retentionMs } = input;
     const ref = { shopId: candidate.shopId, checkoutToken: candidate.checkoutToken };
     this.verify(ref, candidate); // Reject malformed source before any queue mutation.
-    const found = await this.resolve(ref);
+    const generation = candidate.generation!;
+    const found = await this.resolve(ref, generation);
     const delay = Math.max(0, dueAtMs - this.now());
-    const jobId = found?.jobId ?? wooCandidateJobId(ref);
+    const jobId = found?.jobId ?? wooCandidateJobId(ref, generation);
 
     if (found) {
       if (await found.job.getState() !== "delayed") {

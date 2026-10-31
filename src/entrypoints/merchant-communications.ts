@@ -68,6 +68,7 @@ void startReadyWorkerProcess({
       },
       onError: (error) => logger.error("background.merchant_communications.reconciliation_failed", {
         error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+        errorMessage: error instanceof Error ? error.message : String(error),
       }),
     });
 
@@ -98,6 +99,7 @@ void startReadyWorkerProcess({
 async function reportReadinessFailure(error: unknown): Promise<void> {
   logger.error("background.merchant_communications.readiness_failed", {
     error, errorName: error instanceof Error ? error.name.slice(0, 128) : "unknown",
+    errorMessage: error instanceof Error ? error.message : String(error),
   });
   await closeWorkerObservability();
   process.exitCode = 1;

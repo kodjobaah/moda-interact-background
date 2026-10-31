@@ -7,9 +7,10 @@ export class PrismaShopBrandMediaReader implements ShopBrandMediaReader {
   constructor(private readonly database: Pick<PrismaClient, "shopBrand"> = prisma) {}
 
   async readForShop(shopId: string) {
-    return this.database.shopBrand.findUnique({
+    const brand = await this.database.shopBrand.findUnique({
       where: { shopId },
-      select: { shopId: true, whatsAppMedia: true },
+      select: { shopId: true, whatsAppMedia: true, shop: { select: { domain: true } } },
     });
+    return brand ? { shopId: brand.shopId, domain: brand.shop.domain, whatsAppMedia: brand.whatsAppMedia } : null;
   }
 }

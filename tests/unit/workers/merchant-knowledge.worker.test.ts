@@ -6,6 +6,8 @@ const hoisted = vi.hoisted(() => ({
   options: undefined as any,
   observe: vi.fn(async (_definition: unknown, _job: unknown, work: () => Promise<unknown>) => work()),
   telemetry: { name: "telemetry" },
+  listeners: new Map<string, (...args: any[]) => void>(),
+  errorLog: vi.fn(),
 }));
 
 vi.mock("bullmq", () => ({
@@ -15,7 +17,17 @@ vi.mock("bullmq", () => ({
       hoisted.processor = processor ?? undefined;
       hoisted.options = options;
     }
+    on(event: string, listener: (...args: any[]) => void) {
+      hoisted.listeners.set(event, listener);
+      return this;
+    }
   },
+}));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: () => ({ error: hoisted.errorLog }),
+}));
+vi.mock("../../../src/runtime/deployment-environment.js", () => ({
+  resolveDeploymentEnvironmentName: () => "test",
 }));
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => hoisted.telemetry),
@@ -64,6 +76,8 @@ describe("Merchant Knowledge worker", () => {
     hoisted.queueName = undefined;
     hoisted.options = undefined;
     hoisted.observe.mockClear();
+    hoisted.errorLog.mockClear();
+    hoisted.listeners.clear();
   });
 
   it("uses the dedicated queue, shared Redis connection and BullMQ telemetry", async () => {
@@ -120,6 +134,16 @@ describe("Merchant Knowledge worker", () => {
       failureCode: "Acquisition_Failure___secret",
     });
     expect(JSON.stringify(markTerminalFailure.mock.calls)).not.toContain("sensitive source content");
+  });
+
+  it("logs the actual BullMQ failure message and context", () => {
+    createHarness({ processJob: vi.fn() });
+    const original = new Error("R2 returned HTTP 503 while retrieving source");
+    hoisted.listeners.get("failed")?.(createJob(), original);
+    expect(hoisted.errorLog).toHaveBeenCalledWith("merchant_knowledge.job.failed", expect.objectContaining({
+      shopId: "shop-1", sourceRevisionId: "revision-1",
+      errorMessage: "R2 returned HTTP 503 while retrieving source", error: original,
+    }));
   });
 
   it("does not mark a retryable failure as terminal", async () => {

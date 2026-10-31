@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
     receiveMessage: vi.fn(),
     getTurnState: vi.fn(),
   },
-  routing: { resolveInboundMessage: vi.fn() },
+  routing: { resolveInboundMessage: vi.fn(), isCurrentActiveRoute: vi.fn() },
   recovery: { recordExternalActivity: vi.fn() },
   processor: { enqueue: vi.fn() },
   database: { conversation: { findUniqueOrThrow: vi.fn() } },
@@ -140,6 +140,7 @@ const event = {
 describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
     mocks.optOut.mockResolvedValue(false);
     mocks.reachability.mockResolvedValue("recorded");
@@ -153,6 +154,7 @@ describe("WhatsApp worker inbound execution gate", () => {
     });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
     mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
+    mocks.routing.isCurrentActiveRoute.mockResolvedValue(true);
   });
 
   it("B011-03 performs raw admission before routing and persistence", async () => {
@@ -161,6 +163,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       conversationId: "conversation-1",
       checkoutRecoveryId: "recovery-1",
       shopId: "shop-1",
+      mode: "active",
     });
 
     await processInboundMessage(event);
@@ -234,6 +237,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       conversationId: "conversation-1",
       checkoutRecoveryId: "recovery-1",
       shopId: "shop-1",
+      mode: "active",
     });
 
     await processInboundJobData(event);
@@ -262,6 +266,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       conversationId: "conversation-1",
       checkoutRecoveryId: "recovery-1",
       shopId: "shop-1",
+      mode: "active",
     });
 
     await processInboundJobData(event);
@@ -280,6 +285,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       conversationId: "conversation-1",
       checkoutRecoveryId: "recovery-1",
       shopId: "shop-1",
+      mode: "active",
     });
     mocks.conversation.receiveMessage.mockResolvedValue({
       duplicate: true,
@@ -294,7 +300,7 @@ describe("WhatsApp worker inbound execution gate", () => {
       "whatsapp.inbound.duplicate_repair_requested",
       expect.objectContaining({
         conversationId: "conversation-1",
-        providerMessageId: event.providerMessageId,
+        messageDigest: expect.any(String),
         observedVersion: 4,
       }),
     );
@@ -394,6 +400,7 @@ describe("WhatsApp worker inbound execution gate", () => {
 
 it("routes ambiguous voice to guidance before downloading or recording engagement", async () => {
  mocks.abuse.admitRaw.mockResolvedValue({kind:"allowed"});
+ mocks.guidance.mockResolvedValue({kind:"sent"});
  mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"guidance",reason:"MULTIPLE_RECOVERIES"});
  mocks.audio.mockClear(); mocks.recovery.recordExternalActivity.mockClear();
  await processInboundMessage({...event,content:{type:"audio",mediaId:"media",mimeType:"audio/ogg",sha256:null,voice:true}} as any);
@@ -406,7 +413,7 @@ describe("ARCH-028 inbound reachability route gate", () => {
     vi.clearAllMocks();
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
     mocks.optOut.mockResolvedValue(false);
-    mocks.guidance.mockResolvedValue(undefined);
+    mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.reachability.mockResolvedValue("recorded");
     mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: false, version: 1 });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
@@ -424,7 +431,7 @@ describe("ARCH-028 inbound reachability route gate", () => {
   it("retries clearing after a persisted inbound duplicate", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
       kind: "resolved", conversationId: "conversation-2",
-      checkoutRecoveryId: "recovery-2", shopId: "shop-2",
+      checkoutRecoveryId: "recovery-2", shopId: "shop-2", mode: "active",
     });
     mocks.conversation.receiveMessage.mockResolvedValue({ duplicate: true, version: 1 });
     await processInboundMessage(event);
@@ -436,7 +443,7 @@ describe("ARCH-028 inbound reachability route gate", () => {
   it("never clears on failed inbound persistence", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
       kind: "resolved", conversationId: "conversation-2",
-      checkoutRecoveryId: "recovery-2", shopId: "shop-2",
+      checkoutRecoveryId: "recovery-2", shopId: "shop-2", mode: "active",
     });
     mocks.conversation.receiveMessage.mockRejectedValueOnce(new Error("database unavailable"));
     await expect(processInboundMessage(event)).rejects.toThrow("database unavailable");

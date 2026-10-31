@@ -38,7 +38,11 @@ export function startMetaTemplateDuePoller({
         const result = await processDue(25);
         log.info("meta.template.due.cycle_completed", { result: typeof result === "object" ? "processed" : "completed" });
       } catch (error) {
-        log.error("meta.template.due.cycle_failed", safeMetaError(error));
+        log.error("meta.template.due.cycle_failed", {
+          ...safeMetaError(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        });
       }
     })();
     try { await running; }

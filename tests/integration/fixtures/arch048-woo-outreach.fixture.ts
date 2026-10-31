@@ -14,6 +14,8 @@ import type {
   WooObservedOrderStateReader,
   WooTerminalObservation,
 } from "../../../src/services/woocommerce-recovery/contracts.js";
+import { WooCheckoutCoordinatorService } from "../../../src/services/woocommerce-recovery/woo-order-reconciliation.service.js";
+import { WooCheckoutLeaseGuard } from "../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
 /**
  * BG004's disposable Postgres/BullMQ harness. BG002's production checkout
@@ -98,15 +100,18 @@ export async function createWooOutreachFixture() {
     } });
     const reader = new WooRecoveryConsentReader(db);
 
-    const coordinator: WooCheckoutCoordinator = {
+    const redisCoordinator = new WooCheckoutCoordinatorService(new WooCheckoutLeaseGuard(redis));
+    const advisoryCoordinator: WooCheckoutCoordinator = {
       async withCheckoutLock<T>(ref: { shopId: string; checkoutToken: string }, run: () => Promise<T>): Promise<T> {
         return db.$transaction(async (tx) => {
-          // Two separate Prisma connections contend on exactly the same key.
-          // Return an integer so Prisma never has to deserialize a Postgres void.
           await tx.$queryRaw`SELECT 1 AS acquired FROM (SELECT pg_advisory_xact_lock(hashtext(${ref.shopId}), hashtext(${ref.checkoutToken}))) held`;
           return run();
         }, { maxWait: 15_000, timeout: 60_000 });
       },
+    };
+    let activeCoordinator: WooCheckoutCoordinator = advisoryCoordinator;
+    const coordinator: WooCheckoutCoordinator = {
+      withCheckoutLock: (ref, run) => activeCoordinator.withCheckoutLock(ref, run),
     };
     const orders: WooObservedOrderStateReader = {
       async read(): Promise<WooTerminalObservation> {
@@ -157,7 +162,7 @@ export async function createWooOutreachFixture() {
           providerDispatchKey: input.idempotencyKey,
           providerDispatchAdmittedAt: admittedAt,
           providerDispatchControlRevision: control.controlRevision,
-          providerMessageId: `wamid-arch048-${runId}`,
+          providerMessageId: `wamid-arch048-${runId}-${providerRequests + 1}`,
         } });
         ++providerRequests;
         return { kind: "admitted" };
@@ -176,7 +181,8 @@ export async function createWooOutreachFixture() {
     return {
       db, redis, queue, shopId, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
       guardedSender: sender,
-      phoneId: phone.id, service,
+      phoneId: phone.id, service, coordinator,
+      useRedisCheckoutCoordinator() { activeCoordinator = redisCoordinator; },
       get providerRequests() { return providerRequests; },
       setBeforePermit(run: (() => Promise<void>) | undefined) { beforePermit = run; },
       async setObservedOrder(kind: "placed" | "paid" | "cancelled" | "ambiguous") {
@@ -187,6 +193,21 @@ export async function createWooOutreachFixture() {
           whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
           whatsappNoContactAt: new Date(), whatsappNoContactRevision: { increment: 1 },
         } });
+      },
+      async resumePreviousRecovery() {
+        const current = await db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovery.id } });
+        await db.$transaction(async (tx) => {
+          const closed = await tx.checkoutRecovery.updateMany({
+            where: { id: recovery.id, shopId, checkoutToken, status: current.status },
+            data: { status: "CANCELLED" },
+          });
+          if (closed.count !== 1) throw new Error("ARCH048_RESUMPTION_FIXTURE_CLOSE_CONFLICT");
+          await tx.checkoutRecoveryStatusHistory.create({ data: {
+            checkoutRecoveryId: recovery.id, fromStatus: current.status, toStatus: "CANCELLED",
+            source: "woocommerce.checkout", reason: "CHECKOUT_RESUMED",
+            metadata: { eventId: `arch048-resume-${runId}`, nextGeneration: 2 },
+          } });
+        });
       },
       async cleanup() {
         await queue.obliterate({ force: true });

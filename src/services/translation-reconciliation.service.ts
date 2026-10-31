@@ -208,15 +208,14 @@ export class TranslationReconciliationService {
     try {
       apiKey = await this.credentialReader(batch.provider);
       if (!apiKey.trim()) throw new Error(UNAVAILABLE_CREDENTIAL);
-    } catch {
-      // The shared logger receives bounded metadata only, never provider exceptions,
-      // credential text, ciphertext or untrusted environment contents.
+    } catch (error) {
       try {
         logger.warn("background.support_translation.reconciliation_credential_unavailable", {
           batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
+          errorMessage: error instanceof Error ? error.message : String(error), error,
         });
       } catch { /* Logging must not affect credential enforcement. */ }
-      throw new Error(UNAVAILABLE_CREDENTIAL);
+      throw new Error(UNAVAILABLE_CREDENTIAL, { cause: error });
     }
     const provider = this.providerFactory({ provider: batch.provider, model: batch.model, apiKey });
     const submittedAfter = batch.submissionStartedAt

@@ -335,7 +335,8 @@ export class StoreCategoryTranslationBatchSubmitService {
       logger.warn("background.store_category_translation.poll_enqueue_failed", {
         batchId,
         pollSequence,
-        errorMessage: error instanceof Error ? error.message.slice(0, 256) : "unknown failure",
+        errorMessage: error instanceof Error ? error.message : "unknown failure",
+        error: error,
       });
     }
   }

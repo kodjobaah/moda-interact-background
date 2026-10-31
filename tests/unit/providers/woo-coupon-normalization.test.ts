@@ -26,6 +26,7 @@ describe("Woo coupon normalisation: mirror, do not validate provider business ru
       provider: "WOOCOMMERCE", couponId: 42, code: "SAVE15",
       discountType: "percent", amount: "15.00", usageLimit: 100,
       productIds: [123], individualUse: true,
+      emailRestrictionsPresent: true, uninspectedMetadataPresent: true,
     });
     const serialized = JSON.stringify(result);
     for (const forbidden of ["customer@example.com", "someone@example.com", "never"]) {
@@ -81,6 +82,57 @@ describe("Woo coupon normalisation: mirror, do not validate provider business ru
     const diagnostic = JSON.stringify(scan.issues);
     expect(diagnostic).not.toContain("SAVE15");
     expect(diagnostic).not.toContain("customer@example.com");
+  });
+
+  it("preserves restriction presence facts without retaining sensitive source values", () => {
+    const empty = normalizeWooCouponBatch([coupon({ email_restrictions: [], meta_data: [] })], NOW);
+    expect(empty.observed[0]?.providerSnapshot).toMatchObject({
+      emailRestrictionsPresent: false, uninspectedMetadataPresent: false,
+    });
+    expect(empty.issues).toEqual([]);
+
+    const populated = normalizeWooCouponBatch([coupon({
+      email_restrictions: ["synthetic-email@invalid"],
+      meta_data: [{ key: "synthetic-metadata-key", value: "synthetic-metadata-value" }],
+    })], NOW);
+    expect(populated.observed[0]?.providerSnapshot).toMatchObject({
+      emailRestrictionsPresent: true, uninspectedMetadataPresent: true,
+    });
+    const serialized = JSON.stringify({ snapshot: populated.observed[0]?.providerSnapshot, issues: populated.issues });
+    for (const forbidden of [
+      "synthetic-email@invalid", "synthetic-metadata-key", "synthetic-metadata-value",
+    ]) expect(serialized).not.toContain(forbidden);
+
+    const missingCoupon = coupon();
+    delete (missingCoupon as Record<string, unknown>).email_restrictions;
+    delete (missingCoupon as Record<string, unknown>).meta_data;
+    const missing = normalizeWooCouponBatch([missingCoupon], NOW);
+    expect(missing.observed[0]?.providerSnapshot).toMatchObject({
+      emailRestrictionsPresent: null, uninspectedMetadataPresent: null,
+    });
+    expect(missing.issues).toEqual([]);
+
+    const malformed = normalizeWooCouponBatch([coupon({
+      email_restrictions: ["synthetic-email@invalid", 7], meta_data: { value: "secret" },
+    })], NOW);
+    expect(malformed.observed[0]?.providerSnapshot).toMatchObject({
+      emailRestrictionsPresent: null, uninspectedMetadataPresent: null,
+    });
+    expect(malformed.issues.map(({ field }) => field)).toEqual(["email_restrictions", "meta_data"]);
+    expect(JSON.stringify(malformed.issues)).not.toContain("synthetic-email@invalid");
+    expect(JSON.stringify(malformed.issues)).not.toContain("secret");
+
+    const oversized = normalizeWooCouponBatch([coupon({
+      email_restrictions: Array.from({ length: 1001 }, () => "synthetic-email@invalid"),
+      meta_data: Array.from({ length: 1001 }, () => ({ value: "secret" })),
+    })], NOW);
+    expect(oversized.observed[0]?.providerSnapshot).toMatchObject({
+      emailRestrictionsPresent: null, uninspectedMetadataPresent: null,
+    });
+    expect(oversized.issues.map(({ field }) => field)).toEqual(["email_restrictions", "meta_data"]);
+    const diagnostics = JSON.stringify(oversized.issues);
+    expect(diagnostics).not.toContain("synthetic-email@invalid");
+    expect(diagnostics).not.toContain("secret");
   });
 
   it("retains a code-unusable provider ID without inventing an outbound code", () => {

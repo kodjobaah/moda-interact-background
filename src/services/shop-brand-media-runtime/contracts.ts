@@ -8,6 +8,7 @@ export function isShopBrandMediaRole(value: unknown): value is ShopBrandMediaRol
 
 export type ShopBrandMediaRecord = Readonly<{
   shopId: string;
+  domain: string;
   whatsAppMedia: unknown;
 }>;
 
