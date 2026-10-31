@@ -22,6 +22,7 @@ const recovered = {
   id: "recovery-1", shopId: "shop-1", checkoutUrl: "https://shop.test/checkouts/abc",
   lineItems: [{ title: "Shoes", variantTitle: "Blue", quantity: 2 }],
   updatedAt: new Date("2026-10-26T08:59:00Z"), status: "DETECTED",
+  lastExternalActivityAt: new Date(now.getTime() - 60_000), expiredAt: null,
   customer: { firstName: "Alice" },
   shop: { id: "shop-1", domain: "shop.test", status: "ACTIVE", defaultLanguageTag: "en-GB" },
   outreachAttempts: [{ sentAt: now, outboundMessageId: "message-1" }],
@@ -34,6 +35,7 @@ function fixture(recovery = recovered) {
   const preparer = { prepare: vi.fn(async () => basePrepared) };
   const database = {
     checkoutRecovery: { findUnique: vi.fn(async () => recovery) },
+    backgroundRuntimeConfig: { findUnique: vi.fn(async () => ({ checkoutRecoveryLifetimeDays: 21 })) },
     conversationMessage: { findUnique: vi.fn(async () => ({
       content: storedPromise({ kind: "NO_OFFER" }), status: "SENT", providerMessageId: "wamid-1",
       senderType: "AUTOMATION", direction: "OUTBOUND",
@@ -61,9 +63,13 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       stage: "INITIAL", offerPresentation: "NO_OFFER", conversationLanguageTag: null,
       merchantLanguageTag: "en-GB", senderWabaId: "waba-1", customerFirstName: "Alice",
-      checkout: expect.objectContaining({ shopId: "shop-1", approvedHosts: ["shop.test"] }),
+      checkout: expect.objectContaining({ shopId: "shop-1", approvedHosts: ["shop.test"],
+        lastExternalActivityAt: recovered.lastExternalActivityAt, checkoutRecoveryLifetimeDays: 21,
+        expiresAt: null }),
       checkoutItems: { shopId: "shop-1", lineItems: recovered.lineItems },
     }));
+    expect(f.database.backgroundRuntimeConfig.findUnique).toHaveBeenCalledWith({ where: { id: "default" },
+      select: { checkoutRecoveryLifetimeDays: true } });
   });
 
   it.each([
@@ -144,6 +150,63 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: policy as never, conversationLanguageTag: null }))
       .toEqual({ kind: "unavailable", reason: "MEDIA_NOT_READY" });
+  });
+
+  it("uses real activity and the fresh persisted policy, never updatedAt, to prepare checkout URLs", async () => {
+    for (const ageMs of [6 * 60_000, 8 * 86_400_000]) {
+      const lastExternalActivityAt = new Date(now.getTime() - ageMs);
+      const f = fixture({ ...recovered, lastExternalActivityAt, updatedAt: now });
+      expect((await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+        stage: "INITIAL", policy: policy as never, conversationLanguageTag: null })).kind)
+        .toBe("prepared");
+      expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
+        checkout: expect.objectContaining({ lastExternalActivityAt, checkoutRecoveryLifetimeDays: 21 }),
+      }));
+    }
+
+    const exactCutoff = fixture({ ...recovered,
+      lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000), updatedAt: now });
+    expect(await exactCutoff.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: policy as never, conversationLanguageTag: null }))
+      .toEqual({ kind: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+    expect(exactCutoff.preparer.prepare).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for missing or invalid policy and propagates unexpected policy read failures", async () => {
+    const missing = fixture();
+    missing.database.backgroundRuntimeConfig.findUnique.mockResolvedValueOnce(null as never);
+    expect(await missing.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: policy as never, conversationLanguageTag: null }))
+      .toEqual({ kind: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+    expect(missing.preparer.prepare).not.toHaveBeenCalled();
+
+    const invalid = fixture();
+    invalid.database.backgroundRuntimeConfig.findUnique.mockResolvedValueOnce({
+      checkoutRecoveryLifetimeDays: -1,
+    } as never);
+    expect(await invalid.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: policy as never, conversationLanguageTag: null }))
+      .toEqual({ kind: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+
+    const failure = new Error("database unavailable");
+    const unavailable = fixture();
+    unavailable.database.backgroundRuntimeConfig.findUnique.mockRejectedValueOnce(failure);
+    await expect(unavailable.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: policy as never, conversationLanguageTag: null })).rejects.toBe(failure);
+    expect(unavailable.logger.error).toHaveBeenCalledWith("recovery_template.integration.failed",
+      expect.objectContaining({ shopId: "shop-1", recoveryId: "recovery-1", error: failure }));
+  });
+
+  it("applies a shortened persisted lifetime on the next preparation", async () => {
+    const f = fixture({ ...recovered, lastExternalActivityAt: new Date(now.getTime() - 86_400_000) });
+    f.database.backgroundRuntimeConfig.findUnique
+      .mockResolvedValueOnce({ checkoutRecoveryLifetimeDays: 21 })
+      .mockResolvedValueOnce({ checkoutRecoveryLifetimeDays: 1 });
+    const request = { shopId: "shop-1", recoveryId: "recovery-1", stage: "INITIAL" as const,
+      policy: policy as never, conversationLanguageTag: null };
+    expect((await f.service.prepare(request)).kind).toBe("prepared");
+    expect(await f.service.prepare(request)).toEqual({ kind: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+    expect(f.database.backgroundRuntimeConfig.findUnique).toHaveBeenCalledTimes(2);
   });
 
   it("logs bounded exception details through the shared logger and rethrows", async () => {

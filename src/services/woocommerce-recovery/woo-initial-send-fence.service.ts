@@ -7,6 +7,10 @@ import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent
 import { canonicalWhatsAppSender, matchesRegisteredPhone } from "../whatsapp-contact-opt-out/phone.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { confirmCurrentWooConsent } from "./woo-recovery-admission-evidence.js";
+import {
+  isCheckoutRecoveryWithinLifetime,
+  parseCheckoutRecoveryLifetimeDays,
+} from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import prisma from "../../lib/db.js";
 import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
   type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
@@ -43,7 +47,7 @@ const defaultLogger = createLogger({
 type LockedShop = { status: string; platform: string };
 type LockedRecovery = {
   shopId: string; checkoutToken: string; customerId: string | null;
-  status: string; completedAt: Date | null; expiredAt: Date | null;
+  status: string; completedAt: Date | null; expiredAt: Date | null; lastExternalActivityAt: Date;
 };
 type LockedConversation = {
   shopId: string | null; checkoutRecoveryId: string | null;
@@ -75,6 +79,7 @@ export class WooInitialSendFenceService {
     private readonly noContact: typeof hasLocalNoContact = hasLocalNoContact,
     private readonly logger: StructuredLogger = defaultLogger,
     private readonly checkTemplate: FinalTemplateEligibility = checkFinalTemplateRegistration,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   async admitFinalSend(input: WooInitialFinalPermitInput): Promise<WooInitialFinalPermit> {
@@ -115,7 +120,8 @@ export class WooInitialSendFenceService {
         return { kind: "suppressed", reason: "woo-conversation-mismatch" };
 
       const recoveries = await tx.$queryRawUnsafe<LockedRecovery[]>(`
-        SELECT "shopId","checkoutToken","customerId","status"::text,"completedAt","expiredAt"
+        SELECT "shopId","checkoutToken","customerId","status"::text,"completedAt","expiredAt",
+          "lastExternalActivityAt"
         FROM "commerce"."CheckoutRecovery" WHERE "id"=$1 FOR UPDATE`, input.recoveryId);
       const recovery = recoveries[0];
       if (!recovery || recovery.shopId !== input.shopId ||
@@ -205,6 +211,31 @@ export class WooInitialSendFenceService {
       if (message.content !== input.expectedContent)
         return { kind: "suppressed", reason: "woo-prepared-content-changed" };
 
+      const policyRows = await tx.$queryRawUnsafe<Array<{ checkoutRecoveryLifetimeDays: unknown }>>(`
+        SELECT "checkoutRecoveryLifetimeDays"
+        FROM public."BackgroundRuntimeConfig"
+        WHERE "id"='default' FOR SHARE`);
+      if (policyRows.length !== 1) {
+        this.logger.warn("woocommerce.recovery.initial.lifetime_policy.unavailable", {
+          shopId: input.shopId, recoveryId: input.recoveryId, reason: "missing",
+        });
+        return { kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" };
+      }
+      let checkoutRecoveryLifetimeDays: number;
+      try {
+        checkoutRecoveryLifetimeDays = parseCheckoutRecoveryLifetimeDays(policyRows[0]!.checkoutRecoveryLifetimeDays);
+      } catch {
+        this.logger.warn("woocommerce.recovery.initial.lifetime_policy.unavailable", {
+          shopId: input.shopId, recoveryId: input.recoveryId, reason: "invalid",
+        });
+        return { kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" };
+      }
+      if (!isCheckoutRecoveryWithinLifetime({
+        lastExternalActivityAt: recovery.lastExternalActivityAt,
+        now: this.clock(),
+        checkoutRecoveryLifetimeDays,
+      })) return { kind: "suppressed", reason: "woo-recovery-lifetime-elapsed" };
+
       const registration = input.templateRegistration;
       if (!registration || registration.shopId !== input.shopId ||
           registration.providerTemplateName !== input.templateName ||
@@ -239,8 +270,7 @@ export class WooInitialSendFenceService {
         : { kind: "suppressed", reason: "already-admitted-or-sent" };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     } catch (error) {
-      // Preserve the failure signal through the shared Error serializer without
-      // exposing arbitrary SQL/provider messages or customer payloads.
+      // The shared Error serializer keeps the original dependency failure bounded.
       this.logger.error("woocommerce.recovery.initial.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
         errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
@@ -250,7 +280,7 @@ export class WooInitialSendFenceService {
           typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
             ? { errorCode: error.code } : {}
         ),
-        error: new Error("PERSISTENCE_FAILURE"),
+        error,
       });
       throw error;
     }

@@ -1,9 +1,22 @@
 import type { PrismaClient } from "@prisma/client";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
+import {
+  CheckoutRecoveryLifetimePolicyUnavailableError,
+  isCheckoutRecoveryWithinLifetime,
+  PersistedCheckoutRecoveryLifetimeReader,
+  type CheckoutRecoveryLifetimeReader,
+} from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import type { VerifiedWrapperContext, WrapperReadPort, WrapperSlot, WrapperVariable } from "./contracts.js";
 
 export type WrapperReadDatabase = Pick<PrismaClient,
-  "conversation" | "whatsAppConversationWrapperActiveSlot">;
+  "conversation" | "whatsAppConversationWrapperActiveSlot" | "backgroundRuntimeConfig">;
+
+const defaultLogger = createLogger({
+  serviceName: "moda-messaging-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 const SHOP_BRAND_FIELDS = [
   "brandName", "logoUrl", "logoAltText", "logoWidth", "logoHeight",
@@ -40,7 +53,8 @@ export class PrismaConversationWrapperReadRepository implements WrapperReadPort 
   constructor(
     private readonly db: WrapperReadDatabase = prisma,
     private readonly now: () => Date = () => new Date(),
-    private readonly maxCheckoutAgeMs = 7 * 24 * 60 * 60_000,
+    private readonly lifetimeReader: CheckoutRecoveryLifetimeReader = new PersistedCheckoutRecoveryLifetimeReader(db),
+    private readonly logger: StructuredLogger = defaultLogger,
   ) {}
 
   async loadContext(conversationId: string): Promise<VerifiedWrapperContext | "TENANT_MISMATCH" | null> {
@@ -58,7 +72,7 @@ export class PrismaConversationWrapperReadRepository implements WrapperReadPort 
         id: true, shopId: true, customerId: true, languageTag: true,
         shop: { select: shopFields }, customer: { select: customerFields },
         checkoutRecovery: { select: {
-          shopId: true, customerId: true, checkoutUrl: true, status: true,
+          id: true, shopId: true, customerId: true, checkoutUrl: true, status: true,
           expiredAt: true, lastExternalActivityAt: true,
           shop: { select: shopFields }, customer: { select: customerFields },
         } },
@@ -89,13 +103,32 @@ export class PrismaConversationWrapperReadRepository implements WrapperReadPort 
       variables[`shopBrand.${key}` as WrapperVariable] = String(value);
     }
     const current = this.now();
-    const checkoutActive = Boolean(recovery && ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(recovery.status) &&
+    const checkoutCandidate = Boolean(recovery && ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(recovery.status) &&
       (!recovery.expiredAt || recovery.expiredAt > current) &&
-      recovery.lastExternalActivityAt <= current &&
-      recovery.lastExternalActivityAt.getTime() >= current.getTime() - this.maxCheckoutAgeMs &&
       // A linked conversation is scoped to exactly this recovery; if both have
       // customer identity, they must match (checked above).
       (!conversation.customerId || conversation.customerId === recovery.customerId));
+    let checkoutRecoveryLifetimeDays: number | null = null;
+    if (checkoutCandidate) {
+      try {
+        checkoutRecoveryLifetimeDays = await this.lifetimeReader.read();
+      } catch (error) {
+        if (error instanceof CheckoutRecoveryLifetimePolicyUnavailableError) {
+          this.logger.warn("conversation_wrapper.checkout_lifetime.unavailable", {
+            conversationId, shopId: shop.id, recoveryId: recovery!.id, reason: error.reason,
+          });
+        } else {
+          this.logger.error("conversation_wrapper.checkout_lifetime.read_failed", {
+            conversationId, shopId: shop.id, recoveryId: recovery!.id,
+            errorType: error instanceof Error ? error.name : "unknown", error,
+          });
+          throw error;
+        }
+      }
+    }
+    const checkoutActive = Boolean(checkoutCandidate && checkoutRecoveryLifetimeDays !== null &&
+      isCheckoutRecoveryWithinLifetime({ lastExternalActivityAt: recovery!.lastExternalActivityAt,
+        now: current, checkoutRecoveryLifetimeDays }));
     const checkoutUrl = checkoutActive ? trustedHttpsUrl(recovery?.checkoutUrl, shop.domain) : null;
     if (checkoutUrl) variables["checkout.url"] = checkoutUrl;
     return {
