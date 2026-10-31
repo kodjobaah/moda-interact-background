@@ -28,7 +28,6 @@ const NUMERIC_BOUNDS: Record<string, readonly [number, number]> = {
   turnSenderLimitPerTenMinutes: [1, 100000], turnConversationLimitPerMinute: [1, 10000], turnConversationLimitPerTenMinutes: [1, 100000],
   turnShopLimitPerMinute: [1, 100000], turnGlobalLimitPerMinute: [1, 1000000], discoverySenderLimitPerMinute: [1, 10000],
   discoverySenderLimitPerTenMinutes: [1, 100000], discoveryConversationLimitPerMinute: [1, 10000], discoveryConversationLimitPerTenMinutes: [1, 100000],
-  checkoutRecoveryLifetimeDays: [1, 90],
 };
 const CROSS_FIELD_RULES: readonly [string, string, string, "gte" | "lte"][] = [
   ["conversationMaxSettleWindowMs", "conversationQuietWindowMs", "must be at least the quiet window", "gte"],
@@ -102,6 +101,10 @@ function validateConfig(row: unknown): BackgroundRuntimeConfigSnapshot {
     if (!Number.isSafeInteger(value[field]) || (value[field] as number) < minimum || (value[field] as number) > maximum) {
       throw new Error(`Invalid background runtime configuration: invalid ${field}.`);
     }
+  }
+  const lifetimeDays = value.checkoutRecoveryLifetimeDays;
+  if (!Number.isSafeInteger(lifetimeDays) || (lifetimeDays as number) < 0) {
+    throw new Error("Invalid background runtime configuration: invalid checkoutRecoveryLifetimeDays.");
   }
   for (const field of ["createdAt", "updatedAt"] as const) {
     if (!(value[field] instanceof Date) || Number.isNaN(value[field].getTime())) {
