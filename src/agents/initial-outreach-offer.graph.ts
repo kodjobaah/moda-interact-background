@@ -513,6 +513,16 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
           if (!firstMcpCallSeen && call.name !== "commerce_get_discount_options") {
             throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
           }
+          if (call.name === "commerce_search_products" && productSearches >= MAX_PRODUCT_SEARCHES) {
+            failure = { code: "BUDGET_EXHAUSTED", reasonCode: "PRODUCT_SEARCH_BUDGET_EXHAUSTED" };
+            catalogueIncomplete = true;
+            break;
+          }
+          if (call.name === "commerce_get_product" && productDetailReads >= MAX_PRODUCT_DETAIL_READS) {
+            failure = { code: "BUDGET_EXHAUSTED", reasonCode: "PRODUCT_DETAIL_READ_BUDGET_EXHAUSTED" };
+            catalogueIncomplete = true;
+            break;
+          }
           const callSignature = JSON.stringify([call.name, call.arguments]);
           if (seenToolCalls.has(callSignature)) throw new Error("OUTREACH_DUPLICATE_TOOL_CALL");
           seenToolCalls.add(callSignature);
