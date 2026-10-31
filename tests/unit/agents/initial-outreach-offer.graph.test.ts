@@ -94,7 +94,7 @@ const alternativeProduct = {
   collectionIds: [], imageUrl: null, saleEvidence: null, observedAt: "2026-10-31T12:00:00.000Z",
 };
 
-function fixture(choices: Array<ModelCall | ModelCall[]>, options: { alternative?: boolean } = {}) {
+function fixture(choices: Array<ModelCall | ModelCall[]>, options: { alternative?: boolean; detailOverride?: unknown } = {}) {
   const selector = {
     connect: vi.fn(async () => undefined),
     tools: vi.fn(async () => tools),
@@ -102,9 +102,9 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: { alternative
       if (name === "commerce_get_discount_options") return success({
         mode: "AI_BEST_APPLICABLE", offers: [offer], cursor: null, truncated: false,
       });
-      if (name === "commerce_get_discount_details") return success({ details: options.alternative
+      if (name === "commerce_get_discount_details") return success({ details: options.detailOverride ?? (options.alternative
         ? { ...details, facts: { ...details.facts, targeting: { ...details.facts.targeting, includedProductIds: ["product-2"] } } }
-        : details });
+        : details) });
       if (name === "commerce_search_products") return success({ products: [alternativeProduct], cursor: null, truncated: false });
       if (name === "commerce_get_product") return success({ product: alternativeProduct });
       throw new Error("unexpected tool");
@@ -166,6 +166,36 @@ describe("InitialOutreachOffer LangGraph", () => {
 
     const state = await graph.invoke();
     expect(state.finalDecision).toMatchObject({ kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [{ offerId: "offer-1" }] } });
+  });
+
+  it("rejects model-authored coupon codes and provider IDs, retaining only source-bound values", async () => {
+    const { graph } = fixture([
+      { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
+      { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
+      { name: "submitInitialOutreachOffer", arguments: {
+        kind: "CHECKOUT_DISCOUNT", offerIds: ["offer-1"], code: "INVENTED", providerDiscountId: "invented-provider-id",
+      } },
+    ]);
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({
+      kind: "CHECKOUT_DISCOUNT",
+      offerSet: { offers: [{ offerId: "offer-1", providerDiscountId: "provider-discount-1", code: "SAVE10" }] },
+    });
+  });
+
+  it("rejects discount details that do not match the observed option identity", async () => {
+    const foreignDetails = { ...details, offer: { ...offer, offerId: "different-shop-offer" } };
+    const { graph, selector } = fixture([
+      { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
+      { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
+    ], { detailOverride: foreignDetails });
+    const state = await graph.invoke();
+    expect(selector.call.mock.calls.map(([name]) => name)).toEqual([
+      "commerce_get_discount_options", "commerce_get_discount_details",
+    ]);
+    expect(state.finalDecision).toMatchObject({
+      kind: "FAILURE", reasonCode: "DISCOUNT_DETAILS_SOURCE_IDENTITY_MISMATCH",
+    });
   });
 
   it("blocks final decisions before the mandatory initial discount-options call", async () => {

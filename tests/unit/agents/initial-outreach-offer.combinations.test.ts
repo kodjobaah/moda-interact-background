@@ -87,6 +87,34 @@ describe("selectCompatibleCheckoutOffers", () => {
     expect(selectCompatibleCheckoutOffers({ candidates: [falsePermission, product], proposedOfferIds: ["false", "product"] }).offerIds).toEqual(["false"]);
   });
 
+  it("checks reciprocal PRODUCT and SHIPPING permissions and distinguishes false from unknown", () => {
+    const base = sourceFacts("SHOPIFY").combination;
+    const product = candidate("product", "SHOPIFY", { combination: { ...base, discountClasses: ["PRODUCT"] } });
+    const shipping = candidate("shipping", "SHOPIFY", { combination: { ...base, discountClasses: ["SHIPPING"] } });
+    expect(selectCompatibleCheckoutOffers({ candidates: [product, shipping], proposedOfferIds: ["product", "shipping"] }))
+      .toMatchObject({ verdict: "SUPPORTED", offerIds: ["product", "shipping"] });
+
+    const falsePermission = candidate("false-shipping", "SHOPIFY", { combination: { ...base,
+      discountClasses: ["SHIPPING"], combinesWith: { ...base.combinesWith!, productDiscounts: false } } });
+    expect(selectCompatibleCheckoutOffers({ candidates: [product, falsePermission], proposedOfferIds: ["product", "false-shipping"] }).offerIds)
+      .toEqual(["product"]);
+    const unknownPermission = candidate("unknown-shipping", "SHOPIFY", { combination: { ...base,
+      discountClasses: ["SHIPPING"], combinesWith: { ...base.combinesWith!, productDiscounts: null } } });
+    expect(selectCompatibleCheckoutOffers({ candidates: [product, unknownPermission], proposedOfferIds: ["product", "unknown-shipping"] }).offerIds)
+      .toEqual(["product"]);
+  });
+
+  it("falls back to a singleton when same-line PRODUCT overlap is unknown", () => {
+    const a = candidate("a");
+    const b = candidate("b");
+    const unknownOverlap = {
+      ...b,
+      eligibility: { ...b.eligibility, eligibleLineKeys: [] },
+    };
+    expect(selectCompatibleCheckoutOffers({ candidates: [a, unknownOverlap], proposedOfferIds: ["a", "b"] }))
+      .toMatchObject({ verdict: "SUPPORTED", offerIds: ["a"], reasonCodes: ["SINGLETON_REQUIRES_NATIVE_CHECKOUT_VALIDATION"] });
+  });
+
   it("supports Woo core pairs only when both individualUse values are false", () => {
     const a = candidate("a", "WOOCOMMERCE");
     const b = candidate("b", "WOOCOMMERCE");

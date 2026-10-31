@@ -99,6 +99,14 @@ describe("evaluateCheckoutDiscount", () => {
     expect(evaluate({ detail: details(offer(), source) })).toMatchObject({ verdict: "NOT_APPLICABLE", reasonCodes: ["NO_MATCHING_CHECKOUT_LINES"] });
   });
 
+  it("rejects an explicitly excluded product even when that product is included", () => {
+    const source = facts({ targeting: { ...facts().targeting,
+      includedProductIds: ["product-1"], excludedProductIds: ["product-1"] } });
+    expect(evaluate({ detail: details(offer(), source) })).toMatchObject({
+      verdict: "NOT_APPLICABLE", eligibleLineKeys: [], reasonCodes: ["NO_MATCHING_CHECKOUT_LINES"],
+    });
+  });
+
   it("preserves distinct line keys for duplicate product entries", () => {
     const basket = context({ basket: { ...context().basket, items: [
       context().basket.items[0], { ...context().basket.items[0], lineKey: "line-0002" },
@@ -131,6 +139,15 @@ describe("evaluateCheckoutDiscount", () => {
     } })) }).verdict).toBe("UNVERIFIABLE");
   });
 
+  it("abstains when provider target pagination or exclusion coverage is incomplete", () => {
+    const hasNextPage = facts({ unrepresentedConditions: ["TARGET_LIST_HAS_NEXT_PAGE"] });
+    expect(evaluate({ detail: details(offer(), hasNextPage) })).toMatchObject({
+      verdict: "UNVERIFIABLE", reasonCodes: ["TARGETING_INCOMPLETE"],
+    });
+    const incompleteExclusions = facts({ unrepresentedConditions: ["EXCLUSION_LIST_INCOMPLETE"] });
+    expect(evaluate({ detail: details(offer(), incompleteExclusions) }).verdict).toBe("UNVERIFIABLE");
+  });
+
   it("uses only matching complete BG016 subtotal evidence for inclusive thresholds", () => {
     const thresholdFacts = facts({ minimumSubtotal: "80.00", subtotalRequirementCurrency: "GBP" });
     expect(evaluate({ detail: details(offer(), thresholdFacts), price: report() }).verdict).toBe("SUPPORTED");
@@ -143,6 +160,10 @@ describe("evaluateCheckoutDiscount", () => {
     const minimum = facts({ minimumSubtotal: "100.00", subtotalRequirementCurrency: "GBP" });
     const lowSubtotal = report({ currentMerchandiseSubtotal: { amountDecimal: "80.00", currency: "GBP" } });
     expect(evaluate({ detail: details(offer(), minimum), price: lowSubtotal }).verdict).toBe("NOT_APPLICABLE");
+    const highOrderTotal = context({ basket: { ...context().basket, totalMinor: 100_000 } });
+    expect(evaluate({ context: highOrderTotal, detail: details(offer(), minimum), price: lowSubtotal })).toMatchObject({
+      verdict: "NOT_APPLICABLE", reasonCodes: ["MINIMUM_SUBTOTAL_NOT_MET"],
+    });
     expect(evaluate({ detail: details(offer(), facts({ minimumSubtotal: "1.00", subtotalRequirementCurrency: null })), price: report() }).verdict).toBe("UNVERIFIABLE");
   });
 
@@ -165,6 +186,20 @@ describe("evaluateCheckoutDiscount", () => {
     expect(evaluate({ context: context({ mode: "NONE" }) }).reasonCodes).toContain("POLICY_NONE");
   });
 
+  it("abstains on invalid provider dates and unknown provider status", () => {
+    const invalidDate = offer({ startsAt: "not-a-date" });
+    expect(evaluate({ option: invalidDate, detail: details(invalidDate) })).toMatchObject({
+      verdict: "UNVERIFIABLE", reasonCodes: ["PROVIDER_DATE_INVALID"],
+    });
+    expect(evaluate({ detail: details(offer(), facts({ providerStatus: "PENDING_REVIEW" })) })).toMatchObject({
+      verdict: "UNVERIFIABLE", reasonCodes: ["PROVIDER_STATUS_UNKNOWN"],
+    });
+    const missingCode = offer({ code: null });
+    expect(evaluate({ option: missingCode, detail: details(missingCode) })).toMatchObject({
+      verdict: "UNVERIFIABLE", reasonCodes: ["DELIVERABLE_CODE_UNVERIFIED"],
+    });
+  });
+
   it("classifies a known unselected FIXED offer as not applicable", () => {
     expect(evaluate({ context: context({ mode: "FIXED", authorisedDiscountIds: ["other-offer"] }) }))
       .toMatchObject({ verdict: "NOT_APPLICABLE", reasonCodes: ["OFFER_NOT_SELECTED"] });
@@ -177,6 +212,7 @@ describe("evaluateCheckoutDiscount", () => {
     expect(evaluate({ context: saleUnknown, detail: details(offer(), facts({ excludesSaleItems: true })) }).verdict).toBe("UNVERIFIABLE");
     expect(evaluate({ detail: details(offer(), facts({ unrepresentedConditions: ["EXPIRY_UNVERIFIED"] })) }).verdict).toBe("UNVERIFIABLE");
     expect(evaluate({ detail: details(offer(), facts({ perCustomerLimit: null })) }).verdict).toBe("UNVERIFIABLE");
+    expect(evaluate({ detail: details(offer(), facts({ unrepresentedConditions: ["WOO_EXPIRY_UNVERIFIED"] })) }).verdict).toBe("UNVERIFIABLE");
   });
 
   it("returns no checkout line identities for source-proven order or shipping discounts", () => {
