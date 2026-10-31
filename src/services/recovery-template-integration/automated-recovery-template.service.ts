@@ -11,6 +11,12 @@ import type {
 } from "../recovery-template-preparation/recovery-template.types.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
+import {
+  CheckoutRecoveryLifetimePolicyUnavailableError,
+  isCheckoutRecoveryWithinLifetime,
+  PersistedCheckoutRecoveryLifetimeReader,
+  type CheckoutRecoveryLifetimeReader,
+} from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import { templateSendFields, type RecoveryOfferPromise } from "./prepared-template-send.js";
 
 export type AutomatedTemplateResult =
@@ -87,14 +93,19 @@ function authorisedHosts(domain: string): string[] {
 
 /** A narrow coordinator: no sends, no reservation and no mutable discount state. */
 export class AutomatedRecoveryTemplateService {
+  private readonly lifetimeReader: CheckoutRecoveryLifetimeReader;
+
   constructor(
     private readonly offers: Pick<typeof recoveryOfferResolver, "resolve"> = recoveryOfferResolver,
     private readonly preparer: Pick<typeof recoveryTemplatePreparer, "prepare"> = recoveryTemplatePreparer,
-    private readonly database: Pick<typeof prisma, "checkoutRecovery" | "conversationMessage"> = prisma,
+    private readonly database: Pick<typeof prisma, "checkoutRecovery" | "conversationMessage" | "backgroundRuntimeConfig"> = prisma,
     private readonly senderWaba: () => Promise<string> = () => outboundWhatsAppAdmissionService.getProviderAccountId(),
     private readonly clock: () => Date = () => new Date(),
     private readonly log: Pick<StructuredLogger, "warn" | "error"> = logger,
-  ) {}
+    lifetimeReader?: CheckoutRecoveryLifetimeReader,
+  ) {
+    this.lifetimeReader = lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
+  }
 
   async prepare(input: AutomatedTemplateInput): Promise<AutomatedTemplateResult> {
     const unavailable = (reason: string): AutomatedTemplateResult => {
@@ -107,7 +118,8 @@ export class AutomatedRecoveryTemplateService {
       const recovery = await this.database.checkoutRecovery.findUnique({
         where: { id: input.recoveryId },
         select: {
-          id: true, shopId: true, status: true, checkoutUrl: true, lineItems: true, updatedAt: true,
+          id: true, shopId: true, status: true, checkoutUrl: true, lineItems: true,
+          lastExternalActivityAt: true, expiredAt: true,
           customer: { select: { firstName: true } },
           shop: { select: { id: true, domain: true, status: true, defaultLanguageTag: true } },
           outreachAttempts: { where: { sequence: 1 }, select: { sentAt: true, outboundMessageId: true } },
@@ -117,6 +129,29 @@ export class AutomatedRecoveryTemplateService {
           recovery.shop.status !== "ACTIVE" ||
           !["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(recovery.status)) {
         return unavailable("RECOVERY_UNAVAILABLE");
+      }
+      const now = this.clock();
+      if (!(recovery.lastExternalActivityAt instanceof Date) ||
+          !Number.isSafeInteger(recovery.lastExternalActivityAt.getTime()) ||
+          (recovery.expiredAt !== null && (!(recovery.expiredAt instanceof Date) ||
+            !Number.isSafeInteger(recovery.expiredAt.getTime()) || recovery.expiredAt <= now))) {
+        return unavailable("RECOVERY_UNAVAILABLE");
+      }
+      let checkoutRecoveryLifetimeDays: number | null = null;
+      if (recovery.checkoutUrl) {
+        try {
+          checkoutRecoveryLifetimeDays = await this.lifetimeReader.read();
+        } catch (error) {
+          if (error instanceof CheckoutRecoveryLifetimePolicyUnavailableError) {
+            return unavailable("CHECKOUT_UNAVAILABLE");
+          }
+          throw error;
+        }
+        if (!isCheckoutRecoveryWithinLifetime({
+          lastExternalActivityAt: recovery.lastExternalActivityAt,
+          now,
+          checkoutRecoveryLifetimeDays,
+        })) return unavailable("CHECKOUT_UNAVAILABLE");
       }
       let prior: PreviouslyPromisedOffer | undefined;
       if (input.stage === "FOLLOW_UP") {
@@ -133,7 +168,6 @@ export class AutomatedRecoveryTemplateService {
         if (!parsed) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         prior = parsed;
       }
-      const now = this.clock();
       const offerInput: ResolveRecoveryOfferInput = {
         shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
         stage: input.stage, policy: input.policy, now,
@@ -170,7 +204,9 @@ export class AutomatedRecoveryTemplateService {
         checkoutItems: { shopId: input.shopId, lineItems: recovery.lineItems },
         checkout: recovery.checkoutUrl ? {
           shopId: input.shopId, url: recovery.checkoutUrl,
-          observedAt: recovery.updatedAt, expiresAt: null,
+          lastExternalActivityAt: recovery.lastExternalActivityAt,
+          checkoutRecoveryLifetimeDays: checkoutRecoveryLifetimeDays!,
+          expiresAt: recovery.expiredAt,
           approvedHosts: authorisedHosts(recovery.shop.domain),
         } : null,
         ...(offer.kind !== "NO_OFFER" ? { verifiedOffer: {
