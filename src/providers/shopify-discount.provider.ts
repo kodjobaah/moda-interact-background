@@ -1,14 +1,16 @@
+import type { CommerceDiscountCombinationFacts } from "@modainteract/moda-interact-shared/commerce";
 import { getShopifyAccessToken } from "../services/shopify-session.service.js";
 
 const API_VERSION = "2026-07";
 const PAGE_SIZE = 10;
 const MAX_DISCOUNT_PAGES = 1_000;
 const TARGET_PAGE_SIZE = 20;
-const MAX_COMBINATION_TAGS = 24;
+const MAX_COMBINATION_TAGS = 64;
 const MAX_COMBINATION_TAG_LENGTH = 128;
 
 const QUERY = `#graphql
 query DiscountNodes($first: Int!, $after: String) {
+  shop { plan { shopifyPlus } }
   discountNodes(first: $first, after: $after) {
     nodes {
       id
@@ -18,6 +20,7 @@ query DiscountNodes($first: Int!, $after: String) {
         ... on DiscountCodeApp { title status startsAt endsAt codesCount { count precision } codes(first: 2) { nodes { code } pageInfo { hasNextPage } } }
         ... on DiscountAutomaticBasic {
           title summary status startsAt endsAt asyncUsageCount
+          discountClasses tags
           combinesWith {
             orderDiscounts productDiscounts shippingDiscounts
             productDiscountsWithTagsOnSameCartLine
@@ -64,6 +67,7 @@ query DiscountNodes($first: Int!, $after: String) {
           title summary status startsAt endsAt codesCount { count precision }
           codes(first: 2) { nodes { code } pageInfo { hasNextPage } }
           asyncUsageCount usageLimit appliesOncePerCustomer
+          discountClasses tags
           combinesWith {
             orderDiscounts productDiscounts shippingDiscounts
             productDiscountsWithTagsOnSameCartLine
@@ -167,6 +171,7 @@ type DiscountConditionFacts = {
   customerScope: "ALL" | "RESTRICTED" | "UNKNOWN";
   excludesSaleItems: boolean | null;
   individualUse: boolean | null;
+  combination: CommerceDiscountCombinationFacts;
   unrepresentedConditions: string[];
 };
 
@@ -190,15 +195,19 @@ export class ShopifyDiscountProvider {
       });
       if (!response.ok) throw new Error(`Shopify discount GraphQL failed: ${response.status}`);
       const body = await response.json() as {
-        data?: { discountNodes?: { nodes: DiscountNode[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } };
+        data?: {
+          shop?: { plan?: { shopifyPlus?: unknown } | null } | null;
+          discountNodes?: { nodes: DiscountNode[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+        };
         errors?: unknown[];
       };
       const connection = body.data?.discountNodes;
       if (body.errors?.length || !connection || !Array.isArray(connection.nodes)) {
         throw new Error("Shopify discount GraphQL returned an invalid response");
       }
+      const shopifyPlus = booleanValue(body.data?.shop?.plan?.shopifyPlus);
       for (const node of connection.nodes) {
-        if (node.discount) records.push(normalizeDiscount(node));
+        if (node.discount) records.push(normalizeDiscount(node, shopifyPlus));
       }
       hasNextPage = connection.pageInfo.hasNextPage;
       const nextCursor = connection.pageInfo.endCursor;
@@ -211,7 +220,7 @@ export class ShopifyDiscountProvider {
   }
 }
 
-function normalizeDiscount(node: DiscountNode): ShopifyDiscountRecord {
+function normalizeDiscount(node: DiscountNode, shopifyPlus: boolean | null): ShopifyDiscountRecord {
   const discount = node.discount!;
   const providerType = stringValue(discount.__typename) ?? "UNKNOWN";
   const method = providerType.startsWith("DiscountAutomatic") ? "AUTOMATIC" : "CODE";
@@ -229,8 +238,8 @@ function normalizeDiscount(node: DiscountNode): ShopifyDiscountRecord {
   const fixedSelectable = method === "AUTOMATIC"
     ? !providerType.includes("App")
     : !providerType.includes("App") && codeCount === 1 && singleRedeemCode !== null;
-  const conditionFacts = normalizeConditionFacts(discount, providerType);
-  const combinationPolicy = normalizeCombinationPolicy(discount.combinesWith);
+  const combinationProjection = normalizeCombinationPolicy(discount, shopifyPlus);
+  const conditionFacts = normalizeConditionFacts(discount, providerType, combinationProjection);
 
   return {
     shopifyDiscountNodeId: node.id,
@@ -244,33 +253,114 @@ function normalizeDiscount(node: DiscountNode): ShopifyDiscountRecord {
     codeCount,
     singleRedeemCode,
     fixedSelectable,
-    providerSnapshot: { ...discount, id: node.id, codesCount, codes, combinesWith: combinationPolicy, conditionFacts },
+    providerSnapshot: {
+      ...discount,
+      id: node.id,
+      codesCount,
+      codes,
+      discountClasses: combinationProjection.facts.discountClasses,
+      tags: combinationProjection.facts.discountTags,
+      combinesWith: combinationProjection.providerPolicy,
+      conditionFacts,
+    },
   };
 }
 
-type CombinationPolicy = {
+type ProviderCombinationPolicy = {
   orderDiscounts: boolean | null;
   productDiscounts: boolean | null;
   shippingDiscounts: boolean | null;
   productDiscountsWithTagsOnSameCartLine: string[] | null;
 };
 
-function normalizeCombinationPolicy(value: unknown): CombinationPolicy {
-  const combinesWith = asRecord(value);
-  const tags = combinesWith?.productDiscountsWithTagsOnSameCartLine;
-  const tagList = Array.isArray(tags)
-    ? tags.filter((tag): tag is string => typeof tag === "string").slice(0, MAX_COMBINATION_TAGS)
-      .map((tag) => tag.slice(0, MAX_COMBINATION_TAG_LENGTH))
-    : null;
+type CombinationProjection = {
+  facts: CommerceDiscountCombinationFacts;
+  providerPolicy: ProviderCombinationPolicy | null;
+  reasons: string[];
+};
+
+type NormalizedTags = { tags: string[] | null; available: boolean; complete: boolean };
+
+function normalizeCombinationPolicy(
+  discount: Record<string, unknown>,
+  shopifyPlus: boolean | null,
+): CombinationProjection {
+  const reasons = new Set<string>();
+  const combinesWith = asRecord(discount.combinesWith);
+  const combinationFlags = combinesWith ? {
+    orderDiscounts: booleanValue(combinesWith.orderDiscounts),
+    productDiscounts: booleanValue(combinesWith.productDiscounts),
+    shippingDiscounts: booleanValue(combinesWith.shippingDiscounts),
+  } : null;
+  if (!combinationFlags || Object.values(combinationFlags).some((flag) => flag === null)) {
+    reasons.add("COMBINATION_POLICY_UNAVAILABLE");
+  }
+
+  const sameLineTags = normalizeCombinationTags(combinesWith?.productDiscountsWithTagsOnSameCartLine, true);
+  const discountTags = normalizeCombinationTags(discount.tags, false);
+  const discountClasses = normalizeDiscountClasses(discount.discountClasses);
+  if (!sameLineTags.available) reasons.add("SAME_LINE_TAG_POLICY_UNAVAILABLE");
+  if (!sameLineTags.complete) reasons.add("SAME_LINE_TAG_POLICY_TRUNCATED");
+  if (!discountTags.available) reasons.add("DISCOUNT_TAGS_UNAVAILABLE");
+  if (!discountTags.complete) reasons.add("DISCOUNT_TAGS_TRUNCATED");
+  if (!discountClasses.available) reasons.add("DISCOUNT_CLASSES_UNAVAILABLE");
+  if (!discountClasses.complete) reasons.add("DISCOUNT_CLASSES_TRUNCATED");
+  if (shopifyPlus === null) reasons.add("SHOPIFY_PLAN_UNAVAILABLE");
+  if (shopifyPlus === true && sameLineTags.tags === null) reasons.add("SAME_LINE_TAG_POLICY_UNAVAILABLE");
+
+  const providerPolicy: ProviderCombinationPolicy | null = combinesWith ? {
+    orderDiscounts: combinationFlags?.orderDiscounts ?? null,
+    productDiscounts: combinationFlags?.productDiscounts ?? null,
+    shippingDiscounts: combinationFlags?.shippingDiscounts ?? null,
+    productDiscountsWithTagsOnSameCartLine: sameLineTags.tags,
+  } : null;
   return {
-    orderDiscounts: booleanValue(combinesWith?.orderDiscounts),
-    productDiscounts: booleanValue(combinesWith?.productDiscounts),
-    shippingDiscounts: booleanValue(combinesWith?.shippingDiscounts),
-    productDiscountsWithTagsOnSameCartLine: tagList,
+    facts: {
+      discountClasses: discountClasses.classes,
+      shopifyPlus,
+      combinesWith: combinationFlags,
+      discountTags: discountTags.tags,
+      allowedSameLineProductTags: sameLineTags.tags,
+    },
+    providerPolicy,
+    reasons: [...reasons],
   };
 }
 
-function normalizeConditionFacts(discount: Record<string, unknown>, providerType: string): DiscountConditionFacts {
+function normalizeCombinationTags(value: unknown, nullable: boolean): NormalizedTags {
+  if (value === null && nullable) return { tags: null, available: true, complete: true };
+  if (!Array.isArray(value)) return { tags: null, available: false, complete: false };
+  const validTags = value.filter((tag): tag is string => typeof tag === "string" && tag.length > 0);
+  const complete = value.length <= MAX_COMBINATION_TAGS
+    && validTags.length === value.length
+    && validTags.every((tag) => tag.length <= MAX_COMBINATION_TAG_LENGTH);
+  return {
+    tags: validTags.slice(0, MAX_COMBINATION_TAGS).map((tag) => tag.slice(0, MAX_COMBINATION_TAG_LENGTH)),
+    available: true,
+    complete,
+  };
+}
+
+function normalizeDiscountClasses(value: unknown): {
+  classes: Array<"ORDER" | "PRODUCT" | "SHIPPING"> | null;
+  available: boolean;
+  complete: boolean;
+} {
+  if (!Array.isArray(value)) return { classes: null, available: false, complete: false };
+  const validClasses = value.filter((item): item is "ORDER" | "PRODUCT" | "SHIPPING" =>
+    item === "ORDER" || item === "PRODUCT" || item === "SHIPPING");
+  return {
+    classes: validClasses.slice(0, 3),
+    available: true,
+    complete: validClasses.length === value.length && value.length <= 3,
+  };
+}
+
+function normalizeConditionFacts(
+  discount: Record<string, unknown>,
+  providerType: string,
+  combination: CombinationProjection,
+): DiscountConditionFacts {
   const reasons = new Set<string>();
   const supportedBasic = providerType === "DiscountAutomaticBasic" || providerType === "DiscountCodeBasic";
   const base: DiscountConditionFacts = {
@@ -292,6 +382,13 @@ function normalizeConditionFacts(discount: Record<string, unknown>, providerType
     customerScope: "UNKNOWN",
     excludesSaleItems: null,
     individualUse: null,
+    combination: {
+      discountClasses: null,
+      shopifyPlus: combination.facts.shopifyPlus,
+      combinesWith: null,
+      discountTags: null,
+      allowedSameLineProductTags: null,
+    },
     unrepresentedConditions: [],
   };
   if (!supportedBasic) {
@@ -299,26 +396,12 @@ function normalizeConditionFacts(discount: Record<string, unknown>, providerType
     return { ...base, unrepresentedConditions: [...reasons] };
   }
 
-  let completeness = false;
-  const combinationPolicy = asRecord(discount.combinesWith);
-  const hasCombinationPolicy = combinationPolicy !== null
-    && typeof combinationPolicy.orderDiscounts === "boolean"
-    && typeof combinationPolicy.productDiscounts === "boolean"
-    && typeof combinationPolicy.shippingDiscounts === "boolean"
-    && (combinationPolicy.productDiscountsWithTagsOnSameCartLine === null
-      || Array.isArray(combinationPolicy.productDiscountsWithTagsOnSameCartLine));
-  if (!hasCombinationPolicy) {
-    reasons.add("COMBINATION_POLICY_UNAVAILABLE");
+  let completeness = true;
+  base.combination = combination.facts;
+  for (const reason of combination.reasons) {
+    completeness = false;
+    reasons.add(reason);
   }
-  const combinationTags = combinationPolicy?.productDiscountsWithTagsOnSameCartLine;
-  if (Array.isArray(combinationTags) && (combinationTags.length > MAX_COMBINATION_TAGS
-    || combinationTags.some((tag) => typeof tag !== "string" || tag.length > MAX_COMBINATION_TAG_LENGTH))) {
-    reasons.add("COMBINATION_TAGS_TRUNCATED");
-  }
-  // SHARED-010's facts schema has no fields for Shopify's discount-class or
-  // same-line tag policy. Keep the observed policy in providerSnapshot, but
-  // never project the facts as complete until that contract can represent it.
-  reasons.add("COMBINATION_POLICY_NOT_REPRESENTED_IN_SHARED_FACTS");
 
   const gets = asRecord(discount.customerGets);
   const value = asRecord(gets?.value);
