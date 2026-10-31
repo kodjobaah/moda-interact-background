@@ -155,7 +155,11 @@ function sanitizeProviderErrorPayload(
   }
   state.remainingNodes--;
   if (typeof value === "string") {
-    const safeText = redactSourceErrorText(value);
+    const boundedInput = value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4
+      ? value.slice(0, MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH * 4)
+      : value;
+    if (boundedInput.length < value.length) state.truncated = true;
+    const safeText = redactSourceErrorText(boundedInput);
     const truncated = safeText.value.length > MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH;
     state.redactionApplied ||= safeText.redactionApplied;
     state.truncated ||= safeText.truncated || truncated;
@@ -176,8 +180,19 @@ function sanitizeProviderErrorPayload(
     return "[REDACTED]";
   }
   const result: Record<string, unknown> = {};
-  const entries = Object.entries(object);
-  for (const [key, item] of entries) {
+  let scannedKeys = 0;
+  for (const key in object) {
+    if (!Object.hasOwn(object, key)) continue;
+    if (scannedKeys >= MAX_PROVIDER_ERROR_PAYLOAD_ITEMS) {
+      state.truncated = true;
+      break;
+    }
+    scannedKeys++;
+    if (key.length > 64) {
+      state.redactionApplied = true;
+      continue;
+    }
+    const item = object[key];
     const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (!PROVIDER_ERROR_PAYLOAD_KEYS.has(key.toLowerCase()) ||
         /email|phone|address|customer|recipient|token|secret|password|authorization|cookie|url|description|coupon|prompt|header|body|success/.test(normalizedKey)) {
