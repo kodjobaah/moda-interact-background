@@ -9,7 +9,8 @@ import type {
 const now = new Date("2026-10-25T13:30:00.000Z");
 const sourceUrl = "https://shop.example/checkout/checkout-1";
 const checkout = { shopId: "shop-1", url: sourceUrl,
-  observedAt: new Date(now.getTime() - 15_000), expiresAt: new Date(now.getTime() + 60_000),
+  lastExternalActivityAt: new Date(now.getTime() - 15_000), checkoutRecoveryLifetimeDays: 21,
+  expiresAt: new Date(now.getTime() + 60_000),
   approvedHosts: ["shop.example"] };
 const input = (override: Partial<RecoveryTemplatePreparationInput> = {}): RecoveryTemplatePreparationInput => ({
   shopId: "shop-1", senderWabaId: "waba-1", stage: "INITIAL", offerPresentation: "NO_OFFER",
@@ -208,6 +209,21 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       template: { components: [{ type: "body", parameters: [{ text: sourceUrl }] },
         { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] }] },
     });
+    expect(await service.prepare(input({ checkout: { ...checkout,
+      lastExternalActivityAt: new Date(now.getTime() - 8 * 86_400_000) } })))
+      .toMatchObject({ outcome: "prepared" });
+    expect(await service.prepare(input({ checkout: { ...checkout,
+      lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000) } })))
+      .toMatchObject({ outcome: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+    expect(await service.prepare(input({ checkout: { ...checkout,
+      lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000 + 1) } })))
+      .toMatchObject({ outcome: "prepared" });
+    expect(await service.prepare(input({ checkout: { ...checkout,
+      lastExternalActivityAt: new Date(now.getTime() + 1) } })))
+      .toMatchObject({ outcome: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
+    expect(await service.prepare(input({ checkout: { ...checkout,
+      checkoutRecoveryLifetimeDays: 0, lastExternalActivityAt: now } })))
+      .toMatchObject({ outcome: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
     await unavailable(service, "CHECKOUT_UNAVAILABLE", input({ checkout: null }));
     await unavailable(service, "CHECKOUT_UNTRUSTED", input({ checkout: {
       ...checkout, url: "https://shop.example.evil/checkout/1" } }));

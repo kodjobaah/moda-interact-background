@@ -2,6 +2,7 @@ import type {
   BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
   ShopBrandRow, TemplateUnavailableReason,
 } from "./recovery-template.types.js";
+import { isCheckoutRecoveryWithinLifetime } from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import { formatCheckoutItemsSummary } from "./recovery-template-items-summary.js";
 
 export class BindingUnavailable extends Error {
@@ -75,7 +76,6 @@ export class RecoveryVariableResolver {
     private readonly clock: () => Date,
     private readonly readCategory: (shopId: string, languageTag: string) => Promise<string | null>,
     private readonly languageTag: string,
-    private readonly maxCheckoutAgeMs: number = 5 * 60_000,
   ) {}
 
   private brand(): Promise<ShopBrandRow | null> {
@@ -85,12 +85,15 @@ export class RecoveryVariableResolver {
 
   checkout(): string {
     const checkout = this.input.checkout;
-    const now = this.clock().getTime();
+    const now = this.clock();
     if (!checkout || !checkout.url || checkout.shopId !== this.input.shopId ||
-        !(checkout.observedAt instanceof Date) || !Number.isFinite(checkout.observedAt.getTime()) ||
-        now < checkout.observedAt.getTime() || now - checkout.observedAt.getTime() > this.maxCheckoutAgeMs ||
+        !isCheckoutRecoveryWithinLifetime({
+          lastExternalActivityAt: checkout.lastExternalActivityAt,
+          now,
+          checkoutRecoveryLifetimeDays: checkout.checkoutRecoveryLifetimeDays,
+        }) ||
         (checkout.expiresAt !== null &&
-          (!(checkout.expiresAt instanceof Date) || checkout.expiresAt.getTime() <= now))) {
+          (!(checkout.expiresAt instanceof Date) || checkout.expiresAt.getTime() <= now.getTime()))) {
       throw new BindingUnavailable("CHECKOUT_UNAVAILABLE");
     }
     const allowed = checkout.approvedHosts;

@@ -24,7 +24,8 @@ export type BrandMediaResolver = (shopId: string, role: BrandMediaRole) =>
 export type TrustedCheckout = Readonly<{
   shopId: string;
   url: string;
-  observedAt: Date;
+  lastExternalActivityAt: Date;
+  checkoutRecoveryLifetimeDays: number;
   expiresAt: Date | null;
   /** Hosts established by the owning, authenticated commerce checkout reader. */
   approvedHosts: readonly string[];

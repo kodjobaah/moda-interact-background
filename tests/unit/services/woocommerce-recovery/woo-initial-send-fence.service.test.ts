@@ -4,6 +4,7 @@ import { WooInitialSendFenceService } from "../../../../src/services/woocommerce
 
 const attemptId = "attempt-1";
 const key = `recovery-outreach:${attemptId}`;
+const now = new Date("2026-10-31T12:00:00.000Z");
 const scope = {
   shopId: "shop-1", recoveryId: "recovery-1", checkoutToken: "checkout-1", customerId: "customer-1",
   conversationId: "conversation-1", attemptId, messageId: "message-1",
@@ -30,7 +31,9 @@ function harness() {
     'FROM "whatsapp"."Conversation"': [{ shopId: "shop-1", checkoutRecoveryId: "recovery-1",
       type: "RECOVERY", controlMode: "AI", controlRevision: 0 }],
     'FROM "commerce"."CheckoutRecovery"': [{ shopId: "shop-1", checkoutToken: "checkout-1",
-      customerId: "customer-1", status: "DETECTED", completedAt: null, expiredAt: null }],
+      customerId: "customer-1", status: "DETECTED", completedAt: null, expiredAt: null,
+      lastExternalActivityAt: new Date(now.getTime() - 60_000) }],
+    'FROM public."BackgroundRuntimeConfig"': [{ checkoutRecoveryLifetimeDays: 21 }],
     'FROM "commerce"."CheckoutRecoveryStatusHistory"': [],
     'FROM "commerce"."RecoveryOutreachAttempt"': [{ checkoutRecoveryId: "recovery-1",
       sequence: 1, status: "PENDING", recipient: "+447400123456", sentAt: null,
@@ -57,10 +60,10 @@ function harness() {
   const transaction = vi.fn(async (fn: (arg: typeof tx) => Promise<unknown>) => fn(tx));
   const confirm = vi.fn(async () => true);
   const noContact = vi.fn(async () => false);
-  const logger = { error: vi.fn(), child() { return this; } };
+  const logger = { warn: vi.fn(), error: vi.fn(), child() { return this; } };
   const checkTemplate = vi.fn(async () => null as string | null);
   const fence = new WooInitialSendFenceService({ $transaction: transaction } as never,
-    confirm as never, noContact as never, logger as never, checkTemplate as never);
+    confirm as never, noContact as never, logger as never, checkTemplate as never, () => now);
   return { fence, outcomes, queries, transaction, confirm, noContact, logger, checkTemplate };
 }
 
@@ -72,6 +75,9 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     expect(f.queries[0]).toContain("FOR UPDATE");
     expect(f.queries.findIndex((s) => s.includes('"Shop"')))
       .toBeLessThan(f.queries.findIndex((s) => s.includes('"RecoveryOutreachAttempt"')));
+    expect(f.queries.findIndex((s) => s.includes('BackgroundRuntimeConfig')))
+      .toBeGreaterThan(f.queries.findIndex((s) => s.includes('"ConversationMessage"') && s.includes("FOR UPDATE")));
+    expect(f.queries.find((s) => s.includes("BackgroundRuntimeConfig"))).toContain("FOR SHARE");
     expect(f.confirm).toHaveBeenCalledWith(expect.anything(), "shop-1", scope.consent, undefined);
     expect(f.noContact).toHaveBeenCalledWith(expect.anything(), {
       shopId: "shop-1", recipient: scope.recipient,
@@ -101,6 +107,42 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     expect(await f.fence.admitFinalSend(scope)).toEqual({ kind: "suppressed", reason: "woo-consent-changed" });
     const g = harness(); g.noContact.mockResolvedValueOnce(true);
     expect(await g.fence.admitFinalSend(scope)).toEqual({ kind: "suppressed", reason: "woo-local-no-contact" });
+  });
+
+  it("denies the exact inactivity cutoff and admits one millisecond before it", async () => {
+    const exact = harness();
+    exact.outcomes['FROM "commerce"."CheckoutRecovery"'] = [{ shopId: "shop-1",
+      checkoutToken: "checkout-1", customerId: "customer-1", status: "DETECTED",
+      completedAt: null, expiredAt: null, lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000) }];
+    expect(await exact.fence.admitFinalSend(scope))
+      .toEqual({ kind: "suppressed", reason: "woo-recovery-lifetime-elapsed" });
+    expect(exact.queries.some((sql) => sql.includes('SET "providerDispatchKey"'))).toBe(false);
+
+    const recent = harness();
+    recent.outcomes['FROM "commerce"."CheckoutRecovery"'] = [{ shopId: "shop-1",
+      checkoutToken: "checkout-1", customerId: "customer-1", status: "DETECTED",
+      completedAt: null, expiredAt: null, lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000 + 1) }];
+    expect(await recent.fence.admitFinalSend(scope)).toEqual({ kind: "admitted" });
+
+    const future = harness();
+    future.outcomes['FROM "commerce"."CheckoutRecovery"'] = [{ shopId: "shop-1",
+      checkoutToken: "checkout-1", customerId: "customer-1", status: "DETECTED",
+      completedAt: null, expiredAt: null, lastExternalActivityAt: new Date(now.getTime() + 1) }];
+    expect(await future.fence.admitFinalSend(scope))
+      .toEqual({ kind: "suppressed", reason: "woo-recovery-lifetime-elapsed" });
+  });
+
+  it("fails closed and warns when the locked persisted policy is missing or invalid", async () => {
+    for (const policy of [[], [{ checkoutRecoveryLifetimeDays: -1 }]]) {
+      const f = harness();
+      f.outcomes['FROM public."BackgroundRuntimeConfig"'] = policy;
+      expect(await f.fence.admitFinalSend(scope))
+        .toEqual({ kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" });
+      expect(f.queries.some((sql) => sql.includes('SET "providerDispatchKey"'))).toBe(false);
+      expect(f.logger.warn).toHaveBeenCalledWith(
+        "woocommerce.recovery.initial.lifetime_policy.unavailable",
+        expect.objectContaining({ shopId: "shop-1", recoveryId: "recovery-1" }));
+    }
   });
 
   it.each(["TEMPLATE_REGISTRATION_UNAVAILABLE", "TEMPLATE_PROVIDER_STATUS_UNRESOLVED",
@@ -147,8 +189,7 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     await expect(f.fence.admitFinalSend(scope)).rejects.toBe(failure);
     expect(f.logger.error).toHaveBeenCalledWith("woocommerce.recovery.initial.sql_permit.failed", {
       shopId: "shop-1", recoveryId: "recovery-1", attemptId: "attempt-1",
-      errorName: "Error", errorCode: "P1001",
-      errorMessage: failure.message, error: failure,
+      errorName: "Error", errorCode: "P1001", error: failure,
     });
   });
 });

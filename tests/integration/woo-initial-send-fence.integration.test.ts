@@ -64,6 +64,29 @@ withDatabase("ARCH-046 Woo initial permit: real PostgreSQL", () => {
     expect(counter).toMatchObject({ grantedQuantity: 1, reservedQuantity: 1, committedQuantity: 0 });
   }, 45_000);
 
+  it("suppresses a recovery at the configured inactivity cutoff without an expiry sweep", async () => {
+    const db = client();
+    const { input } = await seed(db);
+    const config = await db.backgroundRuntimeConfig.findUniqueOrThrow({
+      where: { id: "default" }, select: { checkoutRecoveryLifetimeDays: true },
+    });
+    expect(config.checkoutRecoveryLifetimeDays).toBe(21);
+    const now = new Date();
+    await db.checkoutRecovery.update({ where: { id: input.recoveryId }, data: {
+      lastExternalActivityAt: new Date(now.getTime() - config.checkoutRecoveryLifetimeDays * 86_400_000),
+    } });
+
+    const result = await new WooInitialSendFenceService(db, undefined, undefined, undefined, undefined,
+      () => now).admitFinalSend(input);
+    expect(result).toEqual({ kind: "suppressed", reason: "woo-recovery-lifetime-elapsed" });
+    const recovery = await db.checkoutRecovery.findUniqueOrThrow({ where: { id: input.recoveryId },
+      select: { status: true, expiredAt: true } });
+    expect(recovery).toEqual({ status: "DETECTED", expiredAt: null });
+    const message = await db.conversationMessage.findUniqueOrThrow({ where: { id: input.messageId },
+      select: { providerDispatchKey: true } });
+    expect(message.providerDispatchKey).toBeNull();
+  }, 45_000);
+
   it("a previously committed STOP blocks the permit, including a later local grant", async () => {
     const db = client();
     const { input, shopId } = await seed(db);
