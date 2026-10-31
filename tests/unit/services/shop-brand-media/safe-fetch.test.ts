@@ -80,6 +80,17 @@ describe("ARCH-049 brand source DNS-pinned HTTPS fetch", () => {
     expect(request).toHaveBeenCalledTimes(4);
   });
 
+  it("supports exact-source callers that prohibit every redirect and set a lower byte ceiling", async () => {
+    const request = vi.fn(async () => response({ statusCode: 302, location: "/moved" }));
+    const strict = open({ request, maxRedirects: 0, maxBytes: 5_000_000 });
+    await expect(strict.fetch("https://www.modainteract.com/assets/whatsup-sample.jpeg"))
+      .rejects.toMatchObject({ code: "UNSAFE_SOURCE" });
+    expect(request).toHaveBeenCalledTimes(1);
+    await expect(open({ request: async () => response({ headers: { "content-length": "5000001" } }), maxBytes: 5_000_000 })
+      .fetch("https://www.modainteract.com/assets/whatsup-sample.jpeg"))
+      .rejects.toMatchObject({ code: "SOURCE_TOO_LARGE" });
+  });
+
   it("rejects a peer address different from its pinned DNS answer", async () => {
     await expect(open({ request: async () => response({ peerAddress: "1.1.1.1" }) })
       .fetch("https://cdn.shop.test/logo")).rejects.toMatchObject({ code: "UNSAFE_SOURCE" });

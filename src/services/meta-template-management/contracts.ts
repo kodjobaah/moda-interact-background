@@ -45,6 +45,7 @@ export class MetaManagementError extends Error {
     readonly code: string,
     readonly disposition: "blocked" | "definitive" | "uncertain",
     options?: ErrorOptions,
+    readonly diagnostics?: Readonly<Record<string, unknown>>,
   ) {
     super(code, options);
     this.name = "MetaManagementError";
@@ -89,18 +90,49 @@ export function validatedComponents(value: unknown): MetaComponent[] {
   }
   const components = value as MetaComponent[];
   for (const component of components) {
-    if (component.type !== "HEADER" || component.format !== "IMAGE") continue;
+    if (component.type !== "HEADER") continue;
     const example = component.example;
-    const handles = example && typeof example === "object" && !Array.isArray(example)
-      ? (example as Record<string, unknown>).header_handle : null;
-    if (!Array.isArray(handles) || handles.length !== 1 || typeof handles[0] !== "string" ||
-        handles[0].length < 5 || handles[0].length > 4096 ||
-        /^(?:https?:\/\/|data:|file:)/i.test(handles[0]) ||
-        !/^[A-Za-z0-9+/_:.=-]+$/.test(handles[0])) {
-      throw new MetaManagementError("IMAGE_SAMPLE_HANDLE_REQUIRED", "blocked");
+    const imageExample = example && typeof example === "object" && !Array.isArray(example)
+      ? example as Record<string, unknown> : undefined;
+    if (component.format === "IMAGE" && example !== undefined && example !== null &&
+        (typeof example !== "object" || Array.isArray(example))) {
+      throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
+    }
+    if (component.format === "IMAGE" && imageExample && Object.keys(imageExample).length > 0) {
+      throw new MetaManagementError(Object.hasOwn(imageExample, "header_handle")
+        ? "UNTRUSTED_IMAGE_SAMPLE_HANDLE" : "INVALID_COMPILED_COMPONENTS", "blocked");
+    }
+    const hasHandle = !!imageExample && Object.hasOwn(imageExample, "header_handle");
+    if (component.format !== "IMAGE" && hasHandle) {
+      throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
     }
   }
   return components;
+}
+
+/** Final provider boundary. IMAGE examples are accepted only after the trusted
+ * uploader has produced a handle and the service has copied it into the payload. */
+export function validatedProviderComponents(value: unknown): MetaComponent[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20 ||
+      value.some((c) => !c || Array.isArray(c) || typeof c !== "object")) {
+    throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
+  }
+  for (const component of value as MetaComponent[]) {
+    if (component.type !== "HEADER") continue;
+    const example = component.example;
+    const handles = example && typeof example === "object" && !Array.isArray(example)
+      ? (example as Record<string, unknown>).header_handle : undefined;
+    if (component.format === "IMAGE" && (!Array.isArray(handles) || handles.length !== 1 ||
+        typeof handles[0] !== "string" || handles[0].length < 5 || handles[0].length > 4096 ||
+        /^(?:https?:\/\/|data:|file:)/i.test(handles[0]) ||
+        !/^[A-Za-z0-9+/_:.=-]+$/.test(handles[0]))) {
+      throw new MetaManagementError("IMAGE_SAMPLE_HANDLE_REQUIRED", "blocked");
+    }
+    if (component.format !== "IMAGE" && handles !== undefined) {
+      throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
+    }
+  }
+  return value as MetaComponent[];
 }
 
 export function parseProviderStatus(value: string): ProviderStatus {
@@ -109,6 +141,11 @@ export function parseProviderStatus(value: string): ProviderStatus {
 
 export function safeMetaError(error: unknown): { code: string; name: string } {
   // Provider responses, URLs, credentials, payloads and customer content never enter logs.
-  return { code: error instanceof MetaManagementError ? error.code : "UNEXPECTED_ERROR",
-    name: error instanceof Error ? error.name.slice(0, 64) : "UnknownError" };
+  if (error instanceof MetaManagementError) return {
+    code: error.code,
+    name: error.name.slice(0, 64),
+    ...(error.diagnostics ?? {}),
+  };
+  return { code: "UNEXPECTED_ERROR", name: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+    ...(error instanceof Error ? { origin: "sdk_exception" } : {}) };
 }

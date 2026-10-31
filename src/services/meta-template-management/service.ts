@@ -1,10 +1,11 @@
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import { MetaManagementError, observedContentHash, parseProviderStatus,
+import { MetaManagementError, fingerprint, observedContentHash, parseProviderStatus,
   safeMetaError, validatedComponents, type AuthenticatedTemplateObservation,
   type ReconcileOutcome, type SubmissionOutcome } from "./contracts.js";
 import { MetaGraphTemplateAdapter, type MetaTemplateProvider } from "./meta-graph.adapter.js";
 import { MetaTemplateRepository } from "./repository.js";
+import type { TrustedMetaImageSampleHandle } from "./image-header-sample.js";
 
 const logger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() });
 
@@ -39,14 +40,43 @@ export class MetaTemplateManagementService {
         return { kind: "busy", code: "NOT_READY_TO_SUBMIT" };
       }
 
-      // Validate frozen provider transport + sample before any create. The Admin
+      // Validate the immutable Admin provider transport shape before any create. The Admin
       // digest relationship and confirmed reviewer are checked during SQL claim.
-      validatedComponents(row.componentsSnapshot);
+      const frozenComponents = validatedComponents(row.componentsSnapshot);
       if (!["MARKETING", "UTILITY", "AUTHENTICATION"].includes(row.category)) {
         throw new MetaManagementError("INVALID_CATEGORY", "blocked");
       }
+      const imageHeaders = frozenComponents.filter((component) =>
+        component.type === "HEADER" && component.format === "IMAGE");
+      if (imageHeaders.length > 1) throw new MetaManagementError("INVALID_COMPILED_COMPONENTS", "blocked");
+      let trustedSampleHandle: TrustedMetaImageSampleHandle | undefined;
+      if (imageHeaders.length === 1) {
+        // Upload before the durable CREATE claim: upload retries are safe and a
+        // transient sample failure must not strand an uncertain template create.
+        if (!this.provider.uploadImageHeaderSample) {
+          throw new MetaManagementError("META_SAMPLE_UPLOADER_UNAVAILABLE", "blocked");
+        }
+        const handle = await this.provider.uploadImageHeaderSample(row.wabaId);
+        trustedSampleHandle = handle;
+      }
       claim = await this.repository.claim(registrationId, row.wabaId);
       if (!claim) return { kind: "busy", code: "CONCURRENT_OR_NOT_DUE" };
+      const claimedComponents = validatedComponents(claim.components);
+      if (fingerprint(claimedComponents) !== fingerprint(frozenComponents)) {
+        throw new MetaManagementError("FROZEN_SNAPSHOT_CHANGED_BEFORE_CLAIM", "blocked");
+      }
+      const claimedImageHeaders = claimedComponents.filter((component) =>
+        component.type === "HEADER" && component.format === "IMAGE");
+      let providerComponents = claimedComponents;
+      if (claimedImageHeaders.length === 1 && trustedSampleHandle) {
+        providerComponents = claimedComponents.map((component) => component === claimedImageHeaders[0]
+          ? { ...component, example: { ...((component.example && typeof component.example === "object" &&
+            !Array.isArray(component.example)) ? component.example as Record<string, unknown> : {}),
+            header_handle: [trustedSampleHandle.value] } }
+          : component);
+      } else if (claimedImageHeaders.length !== 0 || trustedSampleHandle !== undefined) {
+        throw new MetaManagementError("FROZEN_SNAPSHOT_CHANGED_BEFORE_CLAIM", "blocked");
+      }
       // Protect against a name already existing before our durable create intent.
       // A coincident provider record must never be adopted as Moda-authored.
       // The registered name must be unique and new, even on first POST.
@@ -58,7 +88,8 @@ export class MetaTemplateManagementService {
         return { kind: "blocked", code: "PROVIDER_NAME_COLLISION" };
       }
       await this.repository.recordPostIntent(claim);
-      const created = await this.provider.create(claim);
+      const created = await this.provider.create({ ...claim, components: providerComponents },
+        trustedSampleHandle);
       const persisted = await this.repository.finishSubmission(claim, { kind: "submitted", providerId: created.id });
       if (!persisted) {
         throw new MetaManagementError("CREATE_ACK_CAS_LOST", "uncertain");
@@ -70,8 +101,10 @@ export class MetaTemplateManagementService {
       this.reporting.error("meta.template.create.error", { registrationId, ...details });
       if (!claim) {
         if (error instanceof MetaManagementError && error.disposition === "blocked") {
-          if (["INVALID_COMPILED_COMPONENTS", "IMAGE_SAMPLE_HANDLE_REQUIRED", "INVALID_CATEGORY",
-            "FROZEN_SNAPSHOT_NOT_CONFIRMED"].includes(error.code)) {
+          if (["INVALID_COMPILED_COMPONENTS", "IMAGE_SAMPLE_HANDLE_REQUIRED", "UNTRUSTED_IMAGE_SAMPLE_HANDLE",
+            "INVALID_CATEGORY", "FROZEN_SNAPSHOT_NOT_CONFIRMED", "META_APP_ID_MISSING_OR_INVALID",
+            "META_APP_CONFIGURATION_INVALID", "META_SAMPLE_UPLOADER_UNAVAILABLE", "META_SAMPLE_INVALID", "META_SAMPLE_SESSION_REJECTED",
+            "META_SAMPLE_UPLOAD_REJECTED", "FROZEN_SNAPSHOT_CHANGED_BEFORE_CLAIM"].includes(error.code) || error.code.startsWith("META_SAMPLE_FETCH_")) {
             let recordError: unknown;
             try { await this.repository.blockReadyRegistration(registrationId, error.code); }
             catch (persistenceError) {
