@@ -73,6 +73,7 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
     const customerIds = [randomUUID(), randomUUID()];
     const recoveryIds = [randomUUID(), randomUUID()];
     const conversationIds = [randomUUID(), randomUUID()];
+    const outboundIds = [randomUUID(), randomUUID()];
     const unsentRecoveryId = randomUUID();
     const unsentConversationId = randomUUID();
     try {
@@ -87,8 +88,8 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
       await db.conversation.createMany({ data: conversationIds.map((id, i) => ({
         id, type: "RECOVERY", checkoutRecoveryId: recoveryIds[i]!,
       })) });
-      await db.conversationMessage.createMany({ data: conversationIds.map((conversationId) => ({
-        conversationId, providerMessageId: `outbound-${randomUUID()}`, direction: "OUTBOUND",
+      await db.conversationMessage.createMany({ data: conversationIds.map((conversationId, index) => ({
+        conversationId, providerMessageId: outboundIds[index]!, direction: "OUTBOUND",
         senderType: "AUTOMATION", status: "SENT", content: "Basket", sentAt: new Date(),
       })) });
       const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
@@ -96,6 +97,15 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
       });
       expect(await service.resolveInboundMessage(event(`ambiguous-${randomUUID()}`))).toEqual({
         kind: "guidance", reason: "MULTIPLE_RECOVERIES",
+      });
+      expect(await service.resolveInboundMessage(event(`quoted-text-${randomUUID()}`, outboundIds[0]!))).toMatchObject({
+        kind: "resolved", conversationId: conversationIds[0], checkoutRecoveryId: recoveryIds[0],
+      });
+      expect(await service.resolveInboundMessage({
+        ...event(`quoted-audio-${randomUUID()}`, outboundIds[1]!),
+        content: { type: "audio", mediaId: "voice-note", mimeType: "audio/ogg", sha256: null },
+      })).toMatchObject({
+        kind: "resolved", conversationId: conversationIds[1], checkoutRecoveryId: recoveryIds[1],
       });
 
       await db.checkoutRecovery.updateMany({ where: { id: { in: recoveryIds } }, data: { status: "CANCELLED" } });
