@@ -63,6 +63,7 @@ function productResult(input_: { productId?: string; variantId?: string | null; 
 
 function service(options: {
   snapshots?: RecoveryPricingState[];
+  recoveryRead?: () => Promise<RecoveryPricingState | null>;
   productRead?: (request: Parameters<ConstructorParameters<typeof CheckoutPriceReconciliationService>[0]["productReader"]["read"]>[0]) => Promise<unknown>;
   logger?: { error: ReturnType<typeof vi.fn> };
   now?: () => Date;
@@ -72,7 +73,7 @@ function service(options: {
   let reads = 0;
   const snapshots = options.snapshots ?? [state()];
   const recoveryAttemptReader = {
-    read: vi.fn(async () => snapshots[Math.min(reads++, snapshots.length - 1)] ?? null),
+    read: vi.fn(options.recoveryRead ?? (async () => snapshots[Math.min(reads++, snapshots.length - 1)] ?? null)),
   };
   const productReader = {
     read: vi.fn(options.productRead ?? (async () => productResult())),
@@ -281,13 +282,48 @@ describe("CheckoutPriceReconciliationService", () => {
     await expect(cancellationHarness.instance.reconcile(input(state(), controller.signal)))
       .rejects.toThrow("caller cancelled");
 
-    const original = new Error("original MCP transport diagnostic");
+    const original = Object.assign(new Error(
+      "original MCP transport diagnostic for customer jane.doe@example.com at +1 (415) 555-0134; https://private.example/path?token=secret Authorization: Bearer abc123 api_key=sk_live_123; response body: {\"customerName\":\"Avery Customer\"}",
+    ), { status: 502, code: "ETIMEDOUT" });
     const logger = { error: vi.fn() };
     const failureHarness = service({ logger, productRead: async () => { throw original; } });
     await expect(failureHarness.instance.reconcile(input())).rejects.toBe(original);
-    expect(logger.error).toHaveBeenCalledWith("recovery.price_reconciliation.source_failed", expect.objectContaining({
-      reasonCode: "PRODUCT_READ_FAILED", error: original, operation: "commerce_get_product",
-    }));
+    const productFailureLog = logger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(productFailureLog).toMatchObject({
+      reasonCode: "PRODUCT_READ_FAILED", operation: "commerce_get_product", redactionApplied: true,
+      sourceError: { name: "Error", status: 502, code: "ETIMEDOUT" },
+    });
+    const productFailureText = JSON.stringify(productFailureLog);
+    expect(productFailureText).toContain("original MCP transport diagnostic");
+    expect(productFailureText).not.toContain("jane.doe@example.com");
+    expect(productFailureText).not.toContain("415");
+    expect(productFailureText).not.toContain("private.example");
+    expect(productFailureText).not.toContain("abc123");
+    expect(productFailureText).not.toContain("sk_live_123");
+    expect(productFailureText).not.toContain("Avery Customer");
+    expect(productFailureLog).not.toHaveProperty("error");
     expect(failureHarness.recoveryAttemptReader.read).toHaveBeenCalledTimes(2);
+
+    const stateOriginal = Object.assign(new Error(
+      "trusted-state read failed for jane.doe@example.com / +1 (415) 555-0134 at https://private.example/state; password=hunter2",
+    ), { statusCode: 503, code: "ECONNRESET" });
+    const stateLogger = { error: vi.fn() };
+    const stateFailureHarness = service({
+      logger: stateLogger,
+      recoveryRead: async () => { throw stateOriginal; },
+    });
+    await expect(stateFailureHarness.instance.reconcile(input())).rejects.toBe(stateOriginal);
+    const stateFailureLog = stateLogger.error.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(stateFailureLog).toMatchObject({
+      reasonCode: "RECOVERY_STATE_READ_FAILED", operation: "trusted_recovery_attempt_read", redactionApplied: true,
+      sourceError: { name: "Error", status: 503, code: "ECONNRESET" },
+    });
+    const stateFailureText = JSON.stringify(stateFailureLog);
+    expect(stateFailureText).toContain("trusted-state read failed");
+    expect(stateFailureText).not.toContain("jane.doe@example.com");
+    expect(stateFailureText).not.toContain("415");
+    expect(stateFailureText).not.toContain("private.example");
+    expect(stateFailureText).not.toContain("hunter2");
+    expect(stateFailureLog).not.toHaveProperty("error");
   });
 });

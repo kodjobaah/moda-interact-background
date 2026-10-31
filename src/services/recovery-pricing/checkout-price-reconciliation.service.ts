@@ -22,6 +22,7 @@ import type {
 const MAX_LINES = 100;
 const MAX_CONCURRENCY = 4;
 const READ_BUDGET_MS = 20_000;
+const MAX_SOURCE_ERROR_TEXT_LENGTH = 512;
 const ACTIVE_RECOVERY_STATUSES = new Set(["DETECTED"]);
 const ACTIVE_ATTEMPT_STATUSES = new Set(["PENDING", "CAPACITY_BLOCKED"]);
 
@@ -93,6 +94,77 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
 
 function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new Error("Price reconciliation was cancelled");
+}
+
+function redactSourceErrorText(value: string): Readonly<{
+  value: string;
+  redactionApplied: boolean;
+  truncated: boolean;
+}> {
+  if (/^\s*(?:\{|\[|<html\b|<!doctype\s+html)/i.test(value)) {
+    return { value: "[REDACTED_PAYLOAD]", redactionApplied: true, truncated: false };
+  }
+  const payloadMarker = /\b(?:response|error)?\s*(?:body|payload)\s*[:=]\s*/i.exec(value);
+  const objectPayload = /\s+\{(?=["'][^"']+["']\s*:)/.exec(value);
+  const payloadStart = payloadMarker?.index ?? objectPayload?.index;
+  const withoutPayload = payloadStart === undefined
+    ? value
+    : `${value.slice(0, payloadStart)} [REDACTED_PAYLOAD]`;
+  const scrubbed = withoutPayload
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
+    .replace(/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi, "[REDACTED_URL]")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(authorization|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret|password|passwd|secret|token)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[REDACTED]")
+    .replace(/(?<![A-Za-z0-9])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9])/g, (candidate) => {
+      const digitCount = candidate.replace(/\D/g, "").length;
+      return digitCount >= 7 && digitCount <= 15 ? "[REDACTED]" : candidate;
+    });
+  const truncated = scrubbed.length > MAX_SOURCE_ERROR_TEXT_LENGTH;
+  return {
+    value: truncated
+      ? `${scrubbed.slice(0, MAX_SOURCE_ERROR_TEXT_LENGTH)}[TRUNCATED]`
+      : scrubbed,
+    redactionApplied: scrubbed !== value,
+    truncated,
+  };
+}
+
+function safeSourceErrorDiagnostic(error: unknown): Readonly<{
+  diagnostic: Readonly<Record<string, unknown>>;
+  redactionApplied: boolean;
+  truncated: boolean;
+}> {
+  const source = error !== null && (typeof error === "object" || typeof error === "function")
+    ? error as Record<string, unknown>
+    : null;
+  const name = error instanceof Error
+    ? error.name
+    : typeof source?.name === "string" ? source.name : "NonErrorThrown";
+  const message = error instanceof Error
+    ? error.message
+    : typeof source?.message === "string" ? source.message
+      : typeof error === "string" ? error : "[NonErrorSourceFailure]";
+  const safeName = redactSourceErrorText(name);
+  const safeMessage = redactSourceErrorText(message);
+  const diagnostic: Record<string, unknown> = {
+    name: safeName.value.slice(0, 128),
+    message: safeMessage.value,
+  };
+  let redactionApplied = safeName.redactionApplied || safeMessage.redactionApplied;
+  let truncated = safeName.truncated || safeMessage.truncated || safeName.value.length > 128;
+  const status = source?.status ?? source?.statusCode ?? source?.httpStatus;
+  if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+    diagnostic.status = status;
+  }
+  const code = source?.code ?? source?.errorCode;
+  if (typeof code === "string" || typeof code === "number") {
+    const safeCode = redactSourceErrorText(String(code));
+    diagnostic.code = safeCode.value.slice(0, 128);
+    redactionApplied ||= safeCode.redactionApplied;
+    truncated ||= safeCode.truncated || safeCode.value.length > 128;
+  }
+  return { diagnostic, redactionApplied, truncated };
 }
 
 function waitForAbort(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
@@ -495,7 +567,14 @@ export class CheckoutPriceReconciliationService {
         affectedLineCount: details.affectedLineCount,
         ...(details.lineKey ? { lineKey: details.lineKey } : {}),
         ...(details.sourceCode ? { sourceCode: details.sourceCode } : {}),
-        ...(details.error === undefined ? {} : { error: details.error }),
+        ...(details.error === undefined ? {} : (() => {
+          const safeError = safeSourceErrorDiagnostic(details.error);
+          return {
+            sourceError: safeError.diagnostic,
+            redactionApplied: safeError.redactionApplied,
+            ...(safeError.truncated ? { truncated: true } : {}),
+          };
+        })()),
       });
     } catch {
       // Logging must not alter source failures or reconciliation results.
