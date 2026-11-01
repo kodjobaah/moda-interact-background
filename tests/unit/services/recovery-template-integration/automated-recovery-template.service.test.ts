@@ -23,8 +23,9 @@ const basePrepared: PreparedRecoveryTemplate = {
   variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
   providerTemplateId: "meta-1", providerTemplateName: "moda_template",
   providerLanguageCode: "en_GB", submittedContentHash: hash, bindingFingerprint: hash,
+  initialCheckoutItemsBodyPosition: 1,
   template: { name: "moda_template", language: { code: "en_GB" }, components: [
-    { type: "body", parameters: [{ type: "text", text: "Alice" }] },
+    { type: "body", parameters: [{ type: "text", text: "2 × Shoes (Blue)" }] },
   ] },
 };
 const policy = { recoveryOfferMode: "NONE" as const,
@@ -131,9 +132,10 @@ function stableJson(value: unknown): string {
 function approvedCodeVariant(binding: "offer.code" | "offer.codes"): AssignedVariantRow {
   const suffix = binding === "offer.code" ? "single" : "plural";
   const providerTemplateName = `approved_${suffix}_code`;
-  const components = [{ type: "BODY", text: "Use {{1}} from {{2}}" }];
+  const components = [{ type: "BODY", text: "Use {{1}} from {{2}} with {{3}}" }];
   const parameterBindings = { promotionTarget: "CHECKOUT", header: [], body: [
     { position: 1, variable: binding }, { position: 2, variable: "shop.name" },
+    { position: 3, variable: "checkout.itemsSummary" },
   ], buttons: [] };
   const contentHash = createHash("sha256").update(stableJson({ schemaVersion: 1,
     family: "META_RECOVERY", category: "MARKETING", components,
@@ -177,7 +179,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "INITIAL", policy: policy as never, conversationLanguageTag: "fr-CA" });
     expect(result.kind).toBe("prepared");
     if (result.kind !== "prepared") throw new Error("missing preparation");
-    expect(result.send).toMatchObject({ bodyParameters: ["Alice"], recoveryPromise: { kind: "NO_OFFER" },
+    expect(result.send).toMatchObject({ bodyParameters: ["2 × Shoes (Blue)"], recoveryPromise: { kind: "NO_OFFER" },
       templateRegistration: { variantId: "variant-1", shopId: "shop-1" } });
     expect(f.offers.resolve).not.toHaveBeenCalled();
     expect(f.initialOffers.resolve).not.toHaveBeenCalled();
@@ -317,13 +319,13 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       expect(result.kind).toBe("prepared");
       if (result.kind !== "prepared") throw new Error("missing prepared trimmed offer set");
       expect(result.prepared.variantId).toBe(variantId);
-      expect(result.send.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      expect(result.send.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test", "2 × Shoes (Blue)"]);
       const receipt = JSON.parse(prepareAutomatedTemplateInput({
         ...result.send, to: "15551234567",
       }).effectiveText) as { bodyParameters: string[]; recoveryPromise: {
         promotionTarget: string; offerSet: { offers: unknown[] };
       } };
-      expect(receipt.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      expect(receipt.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test", "2 × Shoes (Blue)"]);
       expect(receipt.recoveryPromise.promotionTarget).toBe("CHECKOUT");
       expect(receipt.recoveryPromise.offerSet.offers).toEqual(surviving);
       expect(receipt.recoveryPromise.offerSet.offers).not.toContainEqual(

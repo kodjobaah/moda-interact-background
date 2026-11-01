@@ -17,25 +17,26 @@ function stableJson(value: unknown): string {
 }
 
 export async function seedApprovedInitialWooTemplateRegistration(
-  db: PrismaClient, shopId: string, shopUrl: string,
+  db: PrismaClient, shopId: string, shopUrl: string, includeCheckoutItemsBinding = true,
 ): Promise<FinalTemplateIdentity> {
-  const suffix = randomUUID().replaceAll("-", "");
-  const name = `moda_woo_${suffix}`;
-  const providerId = BigInt(`0x${suffix}`).toString(10);
   const components = [
-    { type: "BODY", text: "{{1}}: {{2}}. Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." },
+    { type: "BODY", text: includeCheckoutItemsBinding
+      ? "{{1}}: {{2}}. Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)."
+      : "{{1}}: Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." },
     { type: "BUTTONS", buttons: [{ type: "URL", text: "Resume checkout", url: `${shopUrl}/checkout?url={{1}}` }] },
   ];
   const bindings = {
     schemaVersion: 1,
     promotionTarget: "CHECKOUT",
     header: [],
-    body: [
-      { position: 1, variable: "shop.name" },
-      { position: 2, variable: "checkout.itemsSummary" },
-    ],
+    body: includeCheckoutItemsBinding
+      ? [{ position: 1, variable: "shop.name" }, { position: 2, variable: "checkout.itemsSummary" }]
+      : [{ position: 1, variable: "shop.name" }],
     buttons: [{ index: 0, subType: "url", variable: "checkout.url" }],
   };
+  const suffix = randomUUID().replaceAll("-", "");
+  const name = `moda_woo_${suffix}`;
+  const providerId = BigInt(`0x${suffix}`).toString(10);
   const contentHash = createHash("sha256").update(stableJson({
     schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING",
     components, parameterBindings: bindings,
