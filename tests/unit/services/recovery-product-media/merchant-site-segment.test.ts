@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeOutreachMerchantSite } from "../../../../src/services/recovery-product-media/merchant-site-segment.js";
+import {
+  isOutreachMerchantSiteSegment,
+  normalizeOutreachMerchantSite,
+} from "../../../../src/services/recovery-product-media/merchant-site-segment.js";
 
 describe("normalizeOutreachMerchantSite", () => {
   it.each([
@@ -23,6 +26,15 @@ describe("normalizeOutreachMerchantSite", () => {
     );
     expect(normalizeOutreachMerchantSite("https://myshop.com/a%252Fb")).toBe("myshop.com-a~252Fb");
     expect(normalizeOutreachMerchantSite("https://myshop.com/a b")).toBe("myshop.com-a~20b");
+  });
+
+  it("accepts canonical uppercase and escaped path suffixes while rejecting malformed escapes and dot segments", () => {
+    expect(isOutreachMerchantSiteSegment(normalizeOutreachMerchantSite("https://myshop.com/A")!)).toBe(true);
+    expect(isOutreachMerchantSiteSegment(normalizeOutreachMerchantSite("https://myshop.com/store-")!)).toBe(true);
+    expect(isOutreachMerchantSiteSegment("myshop.com-store~2d")).toBe(false);
+    expect(isOutreachMerchantSiteSegment("myshop.com-store~GG")).toBe(false);
+    expect(isOutreachMerchantSiteSegment("myshop.com-.")).toBe(false);
+    expect(isOutreachMerchantSiteSegment("myshop.com-~2E~2E")).toBe(false);
   });
 
   it.each([

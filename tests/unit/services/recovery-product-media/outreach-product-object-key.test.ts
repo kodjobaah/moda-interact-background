@@ -4,6 +4,7 @@ import {
   buildOutreachProductObjectKey,
   isOutreachProductObjectKey,
 } from "../../../../src/services/recovery-product-media/outreach-product-object-key.js";
+import { normalizeOutreachMerchantSite } from "../../../../src/services/recovery-product-media/merchant-site-segment.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const base = {
@@ -28,13 +29,24 @@ describe("outreach product object key", () => {
     expect(buildOutreachProductObjectKey(base)).toBe(buildOutreachProductObjectKey({ ...base }));
     expect(buildOutreachProductObjectKey({ ...base, platform: "SHOPIFY" }))
       .not.toBe(buildOutreachProductObjectKey(base));
-    expect(buildOutreachProductObjectKey({ ...base, merchantSite: "other.example" }))
+    expect(buildOutreachProductObjectKey({ ...base, merchantSite: "other.com" }))
       .not.toBe(buildOutreachProductObjectKey(base));
     expect(buildOutreachProductObjectKey({ ...base, outreachAttemptId: "attempt_2" }))
       .not.toBe(buildOutreachProductObjectKey(base));
     expect(buildOutreachProductObjectKey({ ...base, providerVariantId: null })).toContain("/v-none/");
     expect(buildOutreachProductObjectKey({ ...base,
       preparedAt: new Date("2024-03-01T00:00:00.000Z") })).toContain("/2024/03/01/");
+  });
+
+  it.each([
+    ["https://myshop.com/A", "myshop.com-A"],
+    ["https://myshop.com/store-", "myshop.com-store~2D"],
+  ])("accepts normalized merchant namespace %s through the key builder and independent guard", (site, expected) => {
+    const merchantSite = normalizeOutreachMerchantSite(site);
+    expect(merchantSite).toBe(expected);
+    const key = buildOutreachProductObjectKey({ ...base, merchantSite: merchantSite! });
+    expect(key.split("/")[2]).toBe(expected);
+    expect(isOutreachProductObjectKey(key)).toBe(true);
   });
 
   it.each([

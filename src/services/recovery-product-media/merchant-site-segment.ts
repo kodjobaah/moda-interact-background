@@ -83,7 +83,50 @@ export function normalizeOutreachMerchantSite(site: string): string | null {
 
 /** Used by strict object-key validation; this validates the canonical slug alphabet and bounds. */
 export function isOutreachMerchantSiteSegment(value: string): boolean {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_RESULT_BYTES &&
-    /^[a-z0-9](?:[a-z0-9.-]|~[A-F0-9]{2})*[a-z0-9]$/.test(value) &&
-    !value.includes("..") && !value.startsWith(".") && !value.endsWith(".");
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_RESULT_BYTES ||
+      !/^[A-Za-z0-9._~-]+$/.test(value)) return false;
+  if (publicHostname(value)) return true;
+
+  // The normalized hostname is lowercase ASCII; the suffix consists of encoded
+  // path segments, whose case and final ~XX token must be preserved verbatim.
+  for (let separator = value.indexOf("-"); separator >= 0;
+    separator = value.indexOf("-", separator + 1)) {
+    const hostname = value.slice(0, separator);
+    const encodedPath = value.slice(separator + 1);
+    if (publicHostname(hostname) && isCanonicalEncodedPath(encodedPath)) return true;
+  }
+  return false;
+}
+
+function isCanonicalEncodedPath(value: string): boolean {
+  if (!value) return false;
+  return value.split("-").every((segment) => {
+    if (!segment) return false;
+    const bytes: number[] = [];
+    for (let index = 0; index < segment.length; index += 1) {
+      const character = segment[index]!;
+      if (character === "~") {
+        const escape = segment.slice(index + 1, index + 3);
+        if (!/^[A-F0-9]{2}$/.test(escape)) return false;
+        const byte = Number.parseInt(escape, 16);
+        const isLiteralByte = (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) ||
+          (byte >= 0x30 && byte <= 0x39) || byte === 0x2e || byte === 0x5f;
+        if (isLiteralByte) return false;
+        bytes.push(byte);
+        index += 2;
+      } else {
+        const byte = character.charCodeAt(0);
+        const allowed = (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) ||
+          (byte >= 0x30 && byte <= 0x39) || byte === 0x2e || byte === 0x5f;
+        if (!allowed) return false;
+        bytes.push(byte);
+      }
+    }
+    if (bytes.length > MAX_PATH_SEGMENT_BYTES) return false;
+    let decoded: string;
+    try { decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes)); }
+    catch { return false; }
+    return decoded !== "." && decoded !== ".." && !decoded.includes("/") &&
+      !decoded.includes("\\") && !hasControlCharacters(decoded);
+  });
 }
