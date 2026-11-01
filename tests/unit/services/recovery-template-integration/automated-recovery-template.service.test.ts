@@ -590,6 +590,11 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F1_CANCELLED", retryable: true },
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F1_INVALID_INPUT", retryable: true },
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "CURRENT_CONTEXT_CHANGED_DURING_SOURCE_READ", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "CURRENT_SOURCE_READ_CANCELLED", retryable: false },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F2_CONTEXT_UNAVAILABLE", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F2_CANCELLED", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F2_INVALID_INPUT", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F2_READ_FAILED", retryable: true },
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F9_UNKNOWN", retryable: true },
   ] as const)("does not classify non-optional failure %j as fallback", async (result) => {
     const f = fixture();

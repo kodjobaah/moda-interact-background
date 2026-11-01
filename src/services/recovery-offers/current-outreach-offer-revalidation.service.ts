@@ -57,6 +57,7 @@ export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   readFence?: (input: {
     shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; signal: AbortSignal;
   }) => Promise<DiscountSourceFenceResult>;
+  readBudgetMs?: number;
   clock?: () => Date;
   logger?: Pick<StructuredLogger, "warn" | "error">;
 }>;
@@ -182,12 +183,14 @@ function expectedSourceIds(proposed: InitialOutreachAgentResult): readonly strin
 export class CurrentOutreachOfferRevalidationService {
   private readonly createSelector: NonNullable<CurrentOutreachOfferRevalidationDependencies["createSelector"]>;
   private readonly readFence: NonNullable<CurrentOutreachOfferRevalidationDependencies["readFence"]>;
+  private readonly readBudgetMs: number;
   private readonly clock: () => Date;
   private readonly log: Pick<StructuredLogger, "warn" | "error">;
 
   constructor(private readonly dependencies: CurrentOutreachOfferRevalidationDependencies) {
     this.createSelector = dependencies.createSelector ?? ((input) => new RecoveryOutreachMcpSelectorService(input));
     this.readFence = dependencies.readFence ?? readCurrentDiscountSourceFence;
+    this.readBudgetMs = dependencies.readBudgetMs ?? MCP_READ_BUDGET_MS;
     this.clock = dependencies.clock ?? (() => new Date());
     this.log = dependencies.logger ?? logger;
   }
@@ -233,7 +236,7 @@ export class CurrentOutreachOfferRevalidationService {
       });
       return { kind: "FAILURE", reasonCode: `SOURCE_FENCE_F1_${first.reasonCode}`, retryable: true };
     }
-    const deadline = AbortSignal.timeout(MCP_READ_BUDGET_MS);
+    const deadline = AbortSignal.timeout(this.readBudgetMs);
     const signal = AbortSignal.any([input.signal, deadline]);
     const selector = this.createSelector({ shopId: input.shopId, signal });
     let primaryError: unknown;
@@ -317,17 +320,27 @@ export class CurrentOutreachOfferRevalidationService {
       });
       throw closeError;
     }
-    if (deadline.aborted || input.signal.aborted) {
+    if (input.signal.aborted) {
+      return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_CANCELLED", retryable: false };
+    }
+    if (deadline.aborted) {
       return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true };
     }
     const second = await this.readFence({ ...input, selectedOfferIds: ids });
-    if (second.kind !== "AVAILABLE" || !fenceMatches(first.fence, second.fence)) {
+    if (second.kind !== "AVAILABLE") {
+      this.log.warn("recovery_offer.current_source.fence_unavailable", {
+        shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId, stage: "F2", reasonCode: second.reasonCode,
+      });
+      return { kind: "FAILURE", reasonCode: `SOURCE_FENCE_F2_${second.reasonCode}`, retryable: true };
+    }
+    if (!fenceMatches(first.fence, second.fence)) {
       this.log.warn("recovery_offer.current_source.fence_changed", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
         attemptId: input.outreachAttemptId, stage: "F2",
         firstDigestPrefix: first.fence.snapshotDigest.slice(0, 12),
-        secondDigestPrefix: second.kind === "AVAILABLE" ? second.fence.snapshotDigest.slice(0, 12) : null,
-        reasonCode: second.kind === "AVAILABLE" ? "SOURCE_CHANGED" : second.reasonCode,
+        secondDigestPrefix: second.fence.snapshotDigest.slice(0, 12),
+        reasonCode: "SOURCE_CHANGED",
       });
       return { kind: "FAILURE", reasonCode: "SOURCE_FENCE_F2_CHANGED", retryable: true };
     }
