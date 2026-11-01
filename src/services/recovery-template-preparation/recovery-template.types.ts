@@ -8,6 +8,7 @@ export type RecoveryTemplatePurpose =
 
 export type SelectionSource = "exact" | "base" | "merchant-fallback" | "platform-fallback";
 export type BrandMediaRole = "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE";
+export type RecoveryTemplateHeaderMediaRole = BrandMediaRole | "CHECKOUT_PRODUCT";
 /** For isolated tests use a fixed list; production resolves the active platform policy per preparation. */
 export type MediaApprovedHosts = readonly string[] | (() => Promise<readonly string[]>);
 
@@ -77,6 +78,8 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   checkoutItems?: TrustedCheckoutItems | null;
   verifiedOffer?: TrustedOffer | null;
   promotionalProduct?: SourceBoundPromotionalProduct | null;
+  /** Trusted current attempt and selected product identity for optional CHECKOUT_PRODUCT IMAGE. */
+  productImage?: import("../../services/recovery-product-media/recovery-product-image-resolver.js").OutreachProductImageRequest | null;
 }>;
 
 export type TemplateUnavailableReason =

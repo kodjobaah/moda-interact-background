@@ -653,6 +653,20 @@ describe("RecoveryInitiationService", () => {
   });
 
   it("releases billing and skips Meta when F3 offer admission detects source churn", async () => {
+    // The IMAGE preparation completed and produced a verified immutable URL,
+    // but current price admission is stale. Prepared media is not send authority.
+    mocks.automated.prepare.mockResolvedValueOnce({
+      kind: "prepared",
+      admissionToken: { shopId: "shop-1", checkoutRecoveryId: "recovery-1",
+        outreachAttemptId: "attempt-1", generation: 1, fingerprint: "fingerprint",
+        mode: "FIXED", authorisedDiscountIds: ["discount-1"], priceReconciliation: null, sourceFence: null },
+      prepared: { purpose: "INITIAL_CODE_OFFER", providerTemplateName: "checkout_recovery",
+        canonicalLanguageTag: "en-US", providerLanguageCode: "en_US" },
+      send: { templateName: "checkout_recovery", languageCode: "en_US",
+        imageHeader: { link: "https://media.modainteract.com/outreach-products/shopify/shop/2026/10/31/attempt-1/p-abc/v-none/sha256-def.jpg" },
+        templateRegistration: { shopId: "shop-1", purpose: "INITIAL_CODE_OFFER" },
+        recoveryPromise: { kind: "CODE_OFFER", providerDiscountId: "discount-1", code: "SAVE10" } },
+    } as never);
     mocks.automated.validateAdmission.mockResolvedValueOnce(false);
     const { service, billing } = createInitiation();
 
@@ -661,6 +675,10 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.automated.validateAdmission).toHaveBeenCalledOnce();
     expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    expect(billing.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).not.toHaveBeenCalled();
+    expect(mocks.prisma.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(mocks.attempt.markWaitingAfterConfirmedSend).not.toHaveBeenCalled();
     expect(billing.handleProviderFailure).not.toHaveBeenCalled();
   });
 

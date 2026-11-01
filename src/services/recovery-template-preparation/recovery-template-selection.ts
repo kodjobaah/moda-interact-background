@@ -67,6 +67,7 @@ export function selectRecoveryAssignment(input: {
   merchantLanguageTag: string | null;
   platformFallbackEnabled: boolean;
   platformFallbackLanguageTag: string | null;
+  headerFormat?: "TEXT" | "IMAGE";
   logger: Pick<StructuredLogger, "warn">;
 }): AssignmentSelection {
   const customer = language(input.conversationLanguageTag, input.logger, "conversation");
@@ -100,6 +101,7 @@ export function selectRecoveryAssignment(input: {
       !Array.isArray(component) && (component as Record<string, unknown>).type === "HEADER") as
       Record<string, unknown> | undefined;
     const headerKind = header?.format === undefined ? "TEXT" : header.format;
+    const parameterBindings = bindings as Record<string, unknown>;
     const bodyBindings = Array.isArray((bindings as Record<string, unknown>).body)
       ? (bindings as Record<string, unknown>).body as unknown[] : [];
     const identifiesShop = bodyBindings.some((entry) => entry && typeof entry === "object" &&
@@ -113,8 +115,12 @@ export function selectRecoveryAssignment(input: {
       input.offer === "NO_OFFER" || (input.offer === "CODE_OFFER"
         ? (input.offerCount ?? 1) > 1 ? hasMultipleCodes && !hasSingleCode : hasSingleCode && !hasMultipleCodes
         : !hasSingleCode && !hasMultipleCodes);
-    return (bindings as Record<string, unknown>).promotionTarget === input.promotionTarget &&
-      headerKind === "TEXT" && identifiesShop && checkoutOfferBindingMatches;
+    const mediaRole = parameterBindings.headerMediaRole;
+    const headerMatches = (input.headerFormat ?? "TEXT") === "IMAGE"
+      ? headerKind === "IMAGE" && mediaRole === "CHECKOUT_PRODUCT"
+      : headerKind === "TEXT" && mediaRole === undefined;
+    return parameterBindings.promotionTarget === input.promotionTarget &&
+      headerMatches && identifiesShop && checkoutOfferBindingMatches;
   });
   if (input.stage === "INITIAL" && !input.promotionTarget) {
     return { outcome: "unavailable", reason: "DEFINITION_UNAVAILABLE" };

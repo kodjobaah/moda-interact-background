@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { BindingUnavailable, isSemanticKey, type SemanticKey, RecoveryVariableResolver } from "./recovery-template-brand.js";
 import type {
-  BrandMediaRole, PreparedMetaComponent, RegistrationRow, TextParameter,
+  RecoveryTemplateHeaderMediaRole, PreparedMetaComponent, RegistrationRow, TextParameter,
 } from "./recovery-template.types.js";
 
 type JsonObject = Record<string, unknown>;
@@ -10,12 +10,12 @@ type ButtonBinding = { index: number; subType: "url"; variable: "checkout.url" |
 type FrozenBindings = {
   schemaVersion?: 1;
   promotionTarget?: "CHECKOUT" | "ALTERNATIVE_PRODUCT";
-  headerMediaRole?: BrandMediaRole;
+  headerMediaRole?: RecoveryTemplateHeaderMediaRole;
   header: TextBinding[];
   body: TextBinding[];
   buttons: ButtonBinding[];
 };
-const MEDIA_ROLES: readonly BrandMediaRole[] = ["LOGO", "SQUARE_LOGO", "COVER_IMAGE"];
+const MEDIA_ROLES: readonly RecoveryTemplateHeaderMediaRole[] = ["LOGO", "SQUARE_LOGO", "COVER_IMAGE", "CHECKOUT_PRODUCT"];
 
 const obj = (value: unknown): value is JsonObject =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -42,7 +42,7 @@ function parseFrozenBindings(raw: unknown): FrozenBindings {
     if (Object.keys(raw).some((key) =>
       !["schemaVersion", "promotionTarget", "headerMediaRole", "header", "body", "buttons"].includes(key))) return invalid();
   if (raw.headerMediaRole !== undefined &&
-      (raw.schemaVersion !== 1 || !MEDIA_ROLES.includes(raw.headerMediaRole as BrandMediaRole) ||
+      (raw.schemaVersion !== 1 || !MEDIA_ROLES.includes(raw.headerMediaRole as RecoveryTemplateHeaderMediaRole) ||
        !Array.isArray(raw.header) || raw.header.length !== 0)) return invalid();
   if (raw.promotionTarget !== undefined && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(raw.promotionTarget))) return invalid();
   if (!Array.isArray(raw.buttons) || raw.buttons.length > 2) return invalid();
@@ -61,7 +61,7 @@ function parseFrozenBindings(raw: unknown): FrozenBindings {
   return {
     ...(raw.schemaVersion === 1 ? { schemaVersion: 1 as const } : {}),
     ...(raw.promotionTarget !== undefined ? { promotionTarget: raw.promotionTarget as "CHECKOUT" | "ALTERNATIVE_PRODUCT" } : {}),
-    ...(raw.headerMediaRole !== undefined ? { headerMediaRole: raw.headerMediaRole as BrandMediaRole } : {}),
+    ...(raw.headerMediaRole !== undefined ? { headerMediaRole: raw.headerMediaRole as RecoveryTemplateHeaderMediaRole } : {}),
     header: parseTextBindings(raw.header ?? [], 1),
     body: parseTextBindings(raw.body, 10),
     buttons,

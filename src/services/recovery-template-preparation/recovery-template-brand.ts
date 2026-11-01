@@ -1,5 +1,6 @@
 import type {
   BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
+  RecoveryTemplateHeaderMediaRole,
   ShopBrandRow, SourceBoundPromotionalProduct, TemplateUnavailableReason,
 } from "./recovery-template.types.js";
 import { isIP } from "node:net";
@@ -80,6 +81,8 @@ export class RecoveryVariableResolver {
     private readonly clock: () => Date,
     private readonly readCategory: (shopId: string, languageTag: string) => Promise<string | null>,
     private readonly languageTag: string,
+    private readonly readyProductImageUrl?: string,
+    private readonly validateProductImageBeforeBinding?: () => Promise<boolean>,
   ) {}
 
   private brand(): Promise<ShopBrandRow | null> {
@@ -141,9 +144,16 @@ export class RecoveryVariableResolver {
     return promise;
   }
 
-  async imageHeader(role: BrandMediaRole): Promise<string> {
+  async imageHeader(role: RecoveryTemplateHeaderMediaRole): Promise<string> {
     // The role is frozen by Admin in parameterBindingsSnapshot, not guessed
     // from an original merchant URL, another field or caller preference.
+    if (role === "CHECKOUT_PRODUCT") {
+      if (!this.readyProductImageUrl || !this.validateProductImageBeforeBinding ||
+          !(await this.validateProductImageBeforeBinding())) {
+        throw new BindingUnavailable("MEDIA_NOT_READY");
+      }
+      return this.readyProductImageUrl;
+    }
     return this.readyMedia(role);
   }
 

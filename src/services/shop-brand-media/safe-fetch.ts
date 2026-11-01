@@ -8,7 +8,7 @@ import {
   type MerchantKnowledgeResolvedAddress, type MerchantKnowledgeResolver,
 } from "../merchant-knowledge-network-policy.js";
 import {
-  SHOP_BRAND_MAX_SOURCE_BYTES, ShopBrandMediaError,
+  SHOP_BRAND_MAX_SOURCE_BYTES, ShopBrandMediaError, boundedMediaProviderMessage,
   type FetchedBrandSource, type SafeFetcher,
 } from "./contracts.js";
 
@@ -72,12 +72,13 @@ function networkCode(error: unknown): string | undefined {
 function sanitiseNetworkError(error: unknown): ShopBrandMediaError {
   if (error instanceof ShopBrandMediaError) return error;
   if (error instanceof MerchantKnowledgeAcquisitionError) {
-    if (error.code === "DENIED_DESTINATION") return new ShopBrandMediaError("UNSAFE_SOURCE");
-    if (error.code === "DNS_TEMPORARY_FAILURE") return new ShopBrandMediaError("DNS_TEMPORARY_FAILURE", true);
-    return new ShopBrandMediaError("DNS_FAILURE", error.retryable);
+    if (error.code === "DENIED_DESTINATION") return new ShopBrandMediaError("UNSAFE_SOURCE", false, error.code);
+    if (error.code === "DNS_TEMPORARY_FAILURE") return new ShopBrandMediaError("DNS_TEMPORARY_FAILURE", true, error.code);
+    return new ShopBrandMediaError("DNS_FAILURE", error.retryable, error.code);
   }
   const code = networkCode(error);
-  return new ShopBrandMediaError("SOURCE_UNAVAILABLE", TRANSIENT_NETWORK.has(code ?? ""));
+  return new ShopBrandMediaError("SOURCE_UNAVAILABLE", TRANSIENT_NETWORK.has(code ?? ""),
+    boundedMediaProviderMessage(error));
 }
 function cancelled(signal: AbortSignal): ShopBrandMediaError {
   return signal.reason instanceof ShopBrandMediaError
@@ -183,8 +184,11 @@ export function createSafeImageFetcher(options: SafeImageFetcherOptions = {}): S
   const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
   const maxBytes = options.maxBytes ?? SHOP_BRAND_MAX_SOURCE_BYTES;
   return {
-    async fetch(sourceUrl: string): Promise<FetchedBrandSource> {
+    async fetch(sourceUrl: string, externalSignal?: AbortSignal): Promise<FetchedBrandSource> {
       const controller = new AbortController();
+      const abortFromCaller = () => controller.abort(externalSignal?.reason);
+      if (externalSignal?.aborted) abortFromCaller();
+      else externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
       const timer = setTimeout(() => controller.abort(new ShopBrandMediaError("SOURCE_TIMEOUT", true)), DEADLINE_MS);
       try {
         let next = safeUrl(sourceUrl);
@@ -230,6 +234,7 @@ export function createSafeImageFetcher(options: SafeImageFetcherOptions = {}): S
         throw sanitiseNetworkError(error);
       } finally {
         clearTimeout(timer);
+        externalSignal?.removeEventListener("abort", abortFromCaller);
       }
     },
   };
