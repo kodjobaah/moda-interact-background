@@ -76,5 +76,8 @@ describe("ARCH-047 compiled template component pass-through", () => {
     expect(() => prepareAutomatedTemplateInput({ ...templateSendFields(base, { kind: "NO_OFFER" }),
       to: "+447400123456", recoveryPromise: { kind: "CODE_OFFER", providerDiscountId: "coupon-1" } }))
       .toThrow("automated_template_promise_mismatch");
+    expect(() => templateSendFields(base, {
+      kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: "provider-1", code: "SAVE10",
+    }, "ALTERNATIVE_PRODUCT")).toThrow("PREPARED_TEMPLATE_PROMOTION_TARGET_MISMATCH");
   });
 });

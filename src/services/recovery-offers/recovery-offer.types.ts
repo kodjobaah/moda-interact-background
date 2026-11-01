@@ -16,7 +16,8 @@ export type RecoveryOfferPolicy = Readonly<Pick<
  * mutable merchant selection or an outreach policy snapshot. */
 export type PreviouslyPromisedOffer = Readonly<
   | { kind: "NO_OFFER" }
-  | { kind: OfferKind; providerDiscountId: string; code?: string }
+  | { kind: OfferKind; providerDiscountId: string; code?: string;
+      promotionTarget?: "CHECKOUT" | "ALTERNATIVE_PRODUCT" }
 >;
 
 export type ResolveRecoveryOfferInput = Readonly<{

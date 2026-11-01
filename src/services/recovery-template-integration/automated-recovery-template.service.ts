@@ -61,15 +61,20 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
     if (!promise || typeof promise !== "object" || Array.isArray(promise)) return null;
     const evidence = promise as Record<string, unknown>;
     if (evidence.kind === "NO_OFFER" && Object.keys(evidence).length === 1) return { kind: "NO_OFFER" };
-    if ((evidence.kind === "CODE_OFFER" || evidence.kind === "AUTOMATIC_OFFER") &&
+    const parsedTarget = evidence.promotionTarget;
+    const targetIsValid = parsedTarget === undefined || parsedTarget === "CHECKOUT" ||
+      parsedTarget === "ALTERNATIVE_PRODUCT";
+    if ((evidence.kind === "CODE_OFFER" || evidence.kind === "AUTOMATIC_OFFER") && targetIsValid &&
         typeof evidence.providerDiscountId === "string" && evidence.providerDiscountId.length > 0 &&
         evidence.providerDiscountId.length <= 191 &&
         (evidence.kind !== "CODE_OFFER" || (typeof evidence.code === "string" &&
           evidence.code.length > 0 && evidence.code.length <= 100))) {
       return { kind: evidence.kind, providerDiscountId: evidence.providerDiscountId,
-        ...(evidence.kind === "CODE_OFFER" ? { code: evidence.code as string } : {}) };
+        ...(evidence.kind === "CODE_OFFER" ? { code: evidence.code as string } : {}),
+        ...(parsedTarget ? { promotionTarget: parsedTarget } : {}) };
     }
     if (evidence.kind === "CHECKOUT_DISCOUNT" && evidence.offerSet &&
+        (parsedTarget === undefined || parsedTarget === "CHECKOUT") &&
         typeof evidence.offerSet === "object" && !Array.isArray(evidence.offerSet)) {
       const offerSet = evidence.offerSet as Record<string, unknown>;
       const offers = offerSet.offers;
@@ -80,13 +85,30 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
         if (typeof offer.providerDiscountId === "string" && offer.providerDiscountId.length > 0 &&
             offer.providerDiscountId.length <= 191 && offer.method === "CODE" &&
             typeof offer.code === "string" && offer.code.length > 0 && offer.code.length <= 100) {
-          return { kind: "CODE_OFFER", providerDiscountId: offer.providerDiscountId, code: offer.code };
+          return { kind: "CODE_OFFER", providerDiscountId: offer.providerDiscountId, code: offer.code,
+            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}) };
         }
         if (typeof offer.providerDiscountId === "string" && offer.providerDiscountId.length > 0 &&
             offer.providerDiscountId.length <= 191 && offer.method === "AUTOMATIC" && offer.code === null) {
-          return { kind: "AUTOMATIC_OFFER", providerDiscountId: offer.providerDiscountId };
+          return { kind: "AUTOMATIC_OFFER", providerDiscountId: offer.providerDiscountId,
+            ...(parsedTarget ? { promotionTarget: "CHECKOUT" as const } : {}) };
         }
       }
+    }
+    if (evidence.kind === "ALTERNATIVE_PRODUCT_PROMOTION" &&
+        (parsedTarget === undefined || parsedTarget === "ALTERNATIVE_PRODUCT") &&
+        typeof evidence.providerDiscountId === "string" && evidence.providerDiscountId.length > 0 &&
+        evidence.providerDiscountId.length <= 191 &&
+        (evidence.method === "CODE" && typeof evidence.code === "string" &&
+          evidence.code.length > 0 && evidence.code.length <= 100 ||
+         evidence.method === "AUTOMATIC" &&
+          (!Object.hasOwn(evidence, "code") || evidence.code === null))) {
+      return {
+        kind: evidence.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER",
+        providerDiscountId: evidence.providerDiscountId,
+        ...(evidence.method === "CODE" ? { code: evidence.code as string } : {}),
+        ...(parsedTarget ? { promotionTarget: "ALTERNATIVE_PRODUCT" as const } : {}),
+      };
     }
     return null;
   } catch (error) {
@@ -101,10 +123,12 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
 }
 
 function promiseFor(offer: RecoveryOfferDecision): RecoveryOfferPromise {
-  return offer.kind === "NO_OFFER" ? { kind: "NO_OFFER" } : {
-    kind: offer.kind, providerDiscountId: offer.providerDiscountId,
-    ...(offer.kind === "CODE_OFFER" ? { code: offer.parameters.code! } : {}),
+  if (offer.kind === "NO_OFFER") return { kind: "NO_OFFER" };
+  if (offer.kind === "CODE_OFFER") return {
+    kind: "CODE_OFFER", promotionTarget: "CHECKOUT",
+    providerDiscountId: offer.providerDiscountId, code: offer.parameters.code!,
   };
+  return { kind: "AUTOMATIC_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: offer.providerDiscountId };
 }
 
 function currentBasketFingerprint(recovery: {
@@ -238,6 +262,9 @@ export class AutomatedRecoveryTemplateService {
         const parsed = previousPromise(message.content);
         if (!parsed) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         prior = parsed;
+        if (prior.kind !== "NO_OFFER" && prior.promotionTarget === undefined) {
+          return unavailable("PREVIOUS_OFFER_UNKNOWN");
+        }
       }
       let offerPresentation: RecoveryTemplatePreparationInput["offerPresentation"];
       let promotionTarget: RecoveryPromotionTarget = "CHECKOUT";
@@ -311,7 +338,7 @@ export class AutomatedRecoveryTemplateService {
             ...(offerPresentation === "CODE_OFFER" ? { code: codes[0]!, codes: codes as string[] } : {}),
             description,
           };
-          recoveryPromise = { kind: "CHECKOUT_DISCOUNT", offerSet };
+          recoveryPromise = { kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet };
         } else {
           if (result.shopId !== input.shopId || result.checkoutRecoveryId !== input.recoveryId ||
               result.outreachAttemptId !== input.outreachAttemptId || result.generation !== recovery.generation ||
@@ -340,10 +367,10 @@ export class AutomatedRecoveryTemplateService {
               title: product.title, url: product.url },
           };
           recoveryPromise = {
-            kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: result.offerId,
-            providerDiscountId: result.providerDiscountId, method: result.method, code: result.code,
-            productId: result.productId, variantId: result.variantId,
-            productTitle: result.product.product.title,
+            kind: "ALTERNATIVE_PRODUCT_PROMOTION", promotionTarget: "ALTERNATIVE_PRODUCT",
+            offerId: result.offerId, providerDiscountId: result.providerDiscountId,
+            ...(result.method === "CODE" ? { method: "CODE", code: result.code! } : { method: "AUTOMATIC" }),
+            productId: result.productId, variantId: result.variantId, productTitle: result.product.product.title,
           };
         }
       } else {
@@ -364,6 +391,10 @@ export class AutomatedRecoveryTemplateService {
               reason: "CHECKOUT_RULE_READER_UNAVAILABLE",
             });
           }
+        }
+        if (offer.kind !== "NO_OFFER" && prior && prior.kind !== "NO_OFFER" &&
+          prior.promotionTarget === "ALTERNATIVE_PRODUCT") {
+          return unavailable("FOLLOW_UP_OFFER_CHANGED");
         }
         if (offer.kind !== "NO_OFFER" &&
             (!prior || prior.kind !== offer.kind || prior.providerDiscountId !== offer.providerDiscountId ||
@@ -404,7 +435,7 @@ export class AutomatedRecoveryTemplateService {
       };
       const prepared = await this.preparer.prepare(prep);
       if (prepared.outcome !== "prepared") return unavailable(prepared.reason);
-      return { kind: "prepared", prepared, send: templateSendFields(prepared, recoveryPromise),
+      return { kind: "prepared", prepared, send: templateSendFields(prepared, recoveryPromise, promotionTarget),
         ...(admissionToken ? { admissionToken } : {}) };
     } catch (error) {
       this.log.error("recovery_template.integration.failed", {
