@@ -23,7 +23,7 @@ import { WooCheckoutLeaseGuard } from "../../../src/services/pending-recovery-ca
  * this snapshot. Their ports are backed by Postgres advisory locks and a
  * persisted test sender here; BG005/system testing must verify the real wiring.
  */
-export async function createWooOutreachFixture() {
+export async function createWooOutreachFixture(options: { includeCheckoutItemsBinding?: boolean } = {}) {
   const db = new PrismaClient({ datasourceUrl: process.env.TEST_DATABASE_URL! });
   const redis = new Redis(process.env.TEST_REDIS_URL!, { maxRetriesPerRequest: null });
   const runId = randomUUID();
@@ -76,7 +76,7 @@ export async function createWooOutreachFixture() {
     await db.shopEntitlementCounter.create({ data: {
       shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1,
     } });
-    await seedApprovedInitialWooTemplateRegistration(db, shopId);
+    await seedApprovedInitialWooTemplateRegistration(db, shopId, options.includeCheckoutItemsBinding ?? true);
     let platformPrompt = await db.commerceAgentPrompt.findFirst({
       where: { scope: "PLATFORM", shopId: null },
       select: { id: true },
