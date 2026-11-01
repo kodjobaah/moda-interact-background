@@ -101,7 +101,8 @@ export function previousPromise(content: string): PreviouslyPromisedOffer | null
         evidence.providerDiscountId.length <= 191 &&
         (evidence.method === "CODE" && typeof evidence.code === "string" &&
           evidence.code.length > 0 && evidence.code.length <= 100 ||
-         evidence.method === "AUTOMATIC" && evidence.code === null)) {
+         evidence.method === "AUTOMATIC" &&
+          (!Object.hasOwn(evidence, "code") || evidence.code === null))) {
       return {
         kind: evidence.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER",
         providerDiscountId: evidence.providerDiscountId,

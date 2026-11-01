@@ -433,6 +433,16 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       kind: "AUTOMATIC_OFFER", promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-2",
     });
     expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
+      promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-3", method: "AUTOMATIC" })))
+      .toEqual({ kind: "AUTOMATIC_OFFER", promotionTarget: "ALTERNATIVE_PRODUCT",
+        providerDiscountId: "provider-3" });
+    expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
+      promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-4",
+      method: "AUTOMATIC", code: "CONTRADICTORY" }))).toBeNull();
+    expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
+      promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-5",
+      method: "AUTOMATIC", code: { malformed: true } }))).toBeNull();
+    expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
       providerDiscountId: "legacy-provider-2", method: "AUTOMATIC", code: null }))).toEqual({
       kind: "AUTOMATIC_OFFER", providerDiscountId: "legacy-provider-2",
     });
