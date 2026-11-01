@@ -19,6 +19,7 @@ function preparedTemplate(
     providerTemplateName: name, providerLanguageCode: "en_GB", canonicalLanguageTag: "en",
     selectionSource: "exact", submittedContentHash: "a".repeat(64),
     bindingFingerprint: "a".repeat(64),
+    initialCheckoutItemsBodyPosition: purpose.startsWith("INITIAL_") ? 2 : null,
     template: { name, language: { code: "en_GB" }, components },
   };
 }
@@ -33,7 +34,8 @@ const cases: ReadonlyArray<Readonly<{
   {
     name: "no-offer",
     prepared: preparedTemplate("arch052_no_offer", "INITIAL_NO_OFFER", [
-      { type: "body", parameters: [{ type: "text", text: "Alex" }, { type: "text", text: "Example Shop" }] },
+      { type: "body", parameters: [{ type: "text", text: "Alex" },
+        { type: "text", text: "2 × Shoes" }] },
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
     ]),
     promise: { kind: "NO_OFFER" },
@@ -43,7 +45,8 @@ const cases: ReadonlyArray<Readonly<{
   {
     name: "checkout-code",
     prepared: preparedTemplate("arch052_checkout", "INITIAL_CODE_OFFER", [
-      { type: "body", parameters: [{ type: "text", text: "Alex" }, { type: "text", text: "Example Shop" },
+      { type: "body", parameters: [{ type: "text", text: "Alex" },
+        { type: "text", text: "2 × Shoes" }, { type: "text", text: "Example Shop" },
         { type: "text", text: "SAVE10" }] },
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
     ]),
@@ -56,7 +59,8 @@ const cases: ReadonlyArray<Readonly<{
   {
     name: "alternative-product",
     prepared: preparedTemplate("arch052_alternative", "INITIAL_CODE_OFFER", [
-      { type: "body", parameters: [{ type: "text", text: "Alex" }, { type: "text", text: "Example Shop" },
+      { type: "body", parameters: [{ type: "text", text: "Alex" },
+        { type: "text", text: "2 × Shoes" }, { type: "text", text: "Example Shop" },
         { type: "text", text: "Scarf" }, { type: "text", text: "SAVE10" }] },
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
       { type: "button", sub_type: "url", index: "1", parameters: [{ type: "text", text: "product-suffix" }] },

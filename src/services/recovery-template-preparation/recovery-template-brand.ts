@@ -38,6 +38,23 @@ export function isSemanticKey(value: unknown): value is SemanticKey {
   );
 }
 
+function checkoutLineItemsAreSafe(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return false;
+  const safeTitle = (candidate: unknown) => {
+    if (typeof candidate !== "string") return false;
+    const text = candidate.normalize("NFC").trim().replace(/\s+/gu, " ");
+    if (!text || text.length > 160 || /[\p{Cc}\p{Cf}{}]/u.test(text)) return false;
+    try { encodeURIComponent(text); return true; } catch { return false; }
+  };
+  return value.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const item = entry as Record<string, unknown>;
+    return safeTitle(item.title) && typeof item.quantity === "number" &&
+      Number.isSafeInteger(item.quantity) && item.quantity >= 1 && item.quantity <= 99999 &&
+      (item.variantTitle == null || safeTitle(item.variantTitle));
+  });
+}
+
 function hasForbiddenControls(value: string): boolean {
   return Array.from(value).some((character) => {
     const codePoint = character.codePointAt(0);
@@ -206,6 +223,9 @@ export class RecoveryVariableResolver {
       case "checkout.itemsSummary": {
         const items = this.input.checkoutItems;
         if (!items || items.shopId !== this.input.shopId) {
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        }
+        if (!checkoutLineItemsAreSafe(items.lineItems)) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
         return boundedText(formatCheckoutItemsSummary(items.lineItems, this.languageTag), 500);

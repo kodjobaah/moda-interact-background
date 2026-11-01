@@ -124,6 +124,8 @@ export type PreparedRecoveryTemplate = Readonly<{
   submittedContentHash: string;
   /** Verification digest for the frozen compiled projection. */
   bindingFingerprint: string;
+  /** Verified 1-based BODY slot for the required INITIAL checkout summary. */
+  initialCheckoutItemsBodyPosition: number | null;
   /** Prepared Meta request; never a send/admission permit. */
   template: Readonly<{
     name: string;

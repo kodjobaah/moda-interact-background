@@ -9,6 +9,7 @@ import {
   type RecoveryProductImageResolver,
 } from "../recovery-product-media/recovery-product-image-resolver.js";
 import { prepareFrozenComponents } from "./recovery-template-bindings.js";
+import { decideInitialCheckoutItemsBinding } from "./initial-checkout-items-policy.js";
 import { PrismaRecoveryTemplateRepository } from "./recovery-template-repository.js";
 import { purposeFor, selectRecoveryAssignment } from "./recovery-template-selection.js";
 import type {
@@ -118,6 +119,10 @@ export class RecoveryTemplatePreparer {
 
       let selectedAssignment = selected.value;
       let registration = selectedAssignment.variant.metaRegistration!;
+      let checkoutItemsDecision = decideInitialCheckoutItemsBinding({
+        stage: input.stage, parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
+      });
+      if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
       // Lazy operation-scoped adapter: TEXT-only messages never read publicMedia,
       // and no platform config is cached across separate preparations.
       const productionMedia = !this.resolveReadyShopBrandMedia || !this.approvedMediaHosts
@@ -142,6 +147,10 @@ export class RecoveryTemplatePreparer {
         selectedAssignment = textFallback.value;
         selectedFormat = "TEXT";
         registration = selectedAssignment.variant.metaRegistration!;
+        checkoutItemsDecision = decideInitialCheckoutItemsBinding({
+          stage: input.stage, parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
+        });
+        if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
         preparedBindings = await prepareFrozenComponents({ registration, variables: variablesFor(undefined) });
       }
       return {
@@ -155,6 +164,7 @@ export class RecoveryTemplatePreparer {
         selectionSource: selectedAssignment.selectionSource,
         submittedContentHash: registration.submittedContentHash,
         bindingFingerprint: preparedBindings.bindingFingerprint,
+        initialCheckoutItemsBodyPosition: checkoutItemsDecision.bodyPosition,
         template: {
           name: registration.providerTemplateName,
           language: { code: registration.providerLanguageCode },

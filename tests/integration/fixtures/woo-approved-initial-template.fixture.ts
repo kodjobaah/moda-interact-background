@@ -9,15 +9,6 @@ import type { FinalTemplateIdentity } from
  */
 export const WOO_TEST_SENDER_WABA = "987654321";
 
-const components = [{ type: "BODY", text: "{{1}}: Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." }];
-const bindings = {
-  schemaVersion: 1,
-  promotionTarget: "CHECKOUT",
-  header: [],
-  body: [{ position: 1, variable: "shop.name" }],
-  buttons: [],
-};
-
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -25,14 +16,25 @@ function stableJson(value: unknown): string {
     .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}`;
 }
 
-const contentHash = createHash("sha256").update(stableJson({
-  schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING",
-  components, parameterBindings: bindings,
-})).digest("hex");
-
 export async function seedApprovedInitialWooTemplateRegistration(
-  db: PrismaClient, shopId: string,
+  db: PrismaClient, shopId: string, includeCheckoutItemsBinding = true,
 ): Promise<FinalTemplateIdentity> {
+  const components = [{ type: "BODY", text: includeCheckoutItemsBinding
+    ? "{{1}}: Your checkout with {{2}} is waiting. Reply to this message with text or a voice note (up to two minutes)."
+    : "{{1}}: Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." }];
+  const bindings = {
+    schemaVersion: 1,
+    promotionTarget: "CHECKOUT",
+    header: [],
+    body: includeCheckoutItemsBinding
+      ? [{ position: 1, variable: "shop.name" }, { position: 2, variable: "checkout.itemsSummary" }]
+      : [{ position: 1, variable: "shop.name" }],
+    buttons: [],
+  };
+  const contentHash = createHash("sha256").update(stableJson({
+    schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING",
+    components, parameterBindings: bindings,
+  })).digest("hex");
   const suffix = randomUUID().replaceAll("-", "");
   const name = `moda_woo_${suffix}`;
   const providerId = BigInt(`0x${suffix}`).toString(10);

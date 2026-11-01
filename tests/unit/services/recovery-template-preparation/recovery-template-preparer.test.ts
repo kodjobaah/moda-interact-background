@@ -17,6 +17,7 @@ const input = (override: Partial<RecoveryTemplatePreparationInput> = {}): Recove
   promotionTarget: "CHECKOUT",
   conversationLanguageTag: "en-US", merchantLanguageTag: "en",
   customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Merchant" }, checkout,
+  checkoutItems: { shopId: "shop-1", lineItems: [{ title: "Saved item", quantity: 1 }] },
   ...override,
 });
 
@@ -45,12 +46,30 @@ function fixture(overrides: {
   language?: string; languageCode?: string; stage?: string; offer?: string;
   components?: unknown; bindings?: unknown; variant?: Record<string, unknown>;
   registration?: Record<string, unknown>; definition?: Record<string, unknown>;
-  locale?: Record<string, unknown>;
+  locale?: Record<string, unknown>; preserveBindings?: boolean;
 } = {}): AssignedVariantRow {
   const language = overrides.language ?? "en";
   const languageCode = overrides.languageCode ?? "en_US";
-  const components = overrides.components ?? standardComponents;
-  const rawBindings = overrides.bindings ?? standardBindings;
+  const components = structuredClone(overrides.components ?? standardComponents);
+  const rawBindings = structuredClone(overrides.bindings ?? standardBindings);
+  const initial = (overrides.stage ?? "INITIAL") === "INITIAL";
+  const hasItemsSummary = initial && rawBindings && typeof rawBindings === "object" &&
+    !Array.isArray(rawBindings) && Array.isArray((rawBindings as Record<string, unknown>).body) &&
+    ((rawBindings as Record<string, unknown>).body as unknown[]).some((binding) => binding &&
+      typeof binding === "object" && (binding as Record<string, unknown>).variable === "checkout.itemsSummary");
+  if (initial && !overrides.preserveBindings && !hasItemsSummary && rawBindings && typeof rawBindings === "object" &&
+      !Array.isArray(rawBindings) && Array.isArray((rawBindings as Record<string, unknown>).body)) {
+    const body = (rawBindings as Record<string, unknown>).body as unknown[];
+    const position = body.length + 1;
+    (rawBindings as Record<string, unknown>).body = [
+      ...body, { position, variable: "checkout.itemsSummary" },
+    ];
+    const bodyComponent = components.find((component) => component && typeof component === "object" &&
+      (component as Record<string, unknown>).type === "BODY") as Record<string, unknown> | undefined;
+    if (bodyComponent && typeof bodyComponent.text === "string") {
+      bodyComponent.text = `${bodyComponent.text} {{${position}}}`;
+    }
+  }
   const bindings = rawBindings && typeof rawBindings === "object" && !Array.isArray(rawBindings)
     ? { promotionTarget: "CHECKOUT", ...rawBindings } : rawBindings;
   const digest = snapshotHash(components, bindings);
@@ -142,6 +161,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(prepared).toMatchObject({ outcome: "prepared", template: { components: [
       { type: "body", parameters: [
         { text: "Blue jacket" }, { text: "a current sale price" }, { text: productUrl }, { text: "Merchant" },
+        { text: "1 × Saved item" },
       ] },
       { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] },
       { type: "button", index: "1", parameters: [{ text: encodeURIComponent(productUrl) }] },
@@ -178,9 +198,11 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       expiresAt: null, code: "SAVE10", codes: ["SAVE10", "SHIPFREE"], description: "10% off",
     } }));
     expect(one).toMatchObject({ outcome: "prepared", variantId: "variant-single",
-      template: { components: [{ parameters: [{ text: "SAVE10" }, { text: "Merchant" }] }] } });
+      template: { components: [{ parameters: [{ text: "SAVE10" }, { text: "Merchant" },
+        { text: "1 × Saved item" }] }] } });
     expect(several).toMatchObject({ outcome: "prepared", variantId: "variant-plural",
-      template: { components: [{ parameters: [{ text: "SAVE10, SHIPFREE" }, { text: "Merchant" }] }] } });
+      template: { components: [{ parameters: [{ text: "SAVE10, SHIPFREE" }, { text: "Merchant" },
+        { text: "1 × Saved item" }] }] } });
   });
 
   it.each(["INITIAL", "FOLLOW_UP"] as const)("maps all three %s verified-offer purposes without sending", async (stage: "INITIAL" | "FOLLOW_UP") => {
@@ -198,8 +220,10 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
           verifiedAt: now, expiresAt: null, code: "SAVE10", description: "10% off" },
       }));
       const expectedBody = offer === "CODE_OFFER" && stage === "INITIAL"
-        ? [{ type: "text", text: "SAVE10" }, { type: "text", text: "Alex" }, { type: "text", text: "Merchant" }]
-        : [{ type: "text", text: "Alex" }, { type: "text", text: "Merchant" }];
+        ? [{ type: "text", text: "SAVE10" }, { type: "text", text: "Alex" },
+          { type: "text", text: "Merchant" }, { type: "text", text: "1 × Saved item" }]
+        : [{ type: "text", text: "Alex" }, { type: "text", text: "Merchant" },
+          ...(stage === "INITIAL" ? [{ type: "text", text: "1 × Saved item" }] : [])];
       expect(result).toMatchObject({ outcome: "prepared", purpose: `${stage}_${offer}`,
         variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
         providerTemplateName: "moda_initial_no_offer", providerLanguageCode: "en_US",
@@ -224,11 +248,11 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     const english = await service.prepare(input());
     const french = await service.prepare(input({ conversationLanguageTag: "fr-CA" }));
     expect(english).toMatchObject({ outcome: "prepared", template: { components: [{
-      parameters: [{ text: "Alex" }, { text: "Merchant" }],
+      parameters: [{ text: "Alex" }, { text: "Merchant" }, { text: "1 × Saved item" }],
     }] } });
     expect(french).toMatchObject({ outcome: "prepared", canonicalLanguageTag: "fr",
       selectionSource: "base", template: { components: [{
-        parameters: [{ text: "Merchant" }, { text: "Alex" }],
+        parameters: [{ text: "Merchant" }, { text: "Alex" }, { text: "1 × Saved item" }],
       }] } });
   });
 
@@ -294,7 +318,8 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     } });
     const { service } = setup([row]);
     expect(await service.prepare(input())).toMatchObject({ outcome: "prepared",
-      template: { components: [{ type: "body", parameters: [{ text: sourceUrl }, { text: "Merchant" }] },
+      template: { components: [{ type: "body", parameters: [{ text: sourceUrl }, { text: "Merchant" },
+        { text: "1 × Saved item" }] },
         { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] }] },
     });
     expect(await service.prepare(input({ checkout: { ...checkout,
@@ -316,14 +341,16 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     await unavailable(service, "CHECKOUT_UNAVAILABLE", input({ checkout: {
       ...checkout, shopId: "other-shop" } }));
     const differentStoredValue = "not validated by this sender";
-    const changedValue = fixture({ components: [body, { ...button, buttons: [{
+    const changedValueWithRedirect = fixture({ components: [{ ...body, text: "Checkout {{1}} from {{2}} {{3}}" },
+      { ...button, buttons: [{
       ...button.buttons[0], url: "https://redirect.attacker.test/?next={{1}}",
     }] }], bindings: row.metaRegistration!.parameterBindingsSnapshot });
-    const preparedChangedValue = await setup([changedValue]).service.prepare(input({
+    const preparedChangedValue = await setup([changedValueWithRedirect]).service.prepare(input({
       checkout: { ...checkout, url: differentStoredValue },
     }));
     expect(preparedChangedValue).toMatchObject({ outcome: "prepared", template: { components: [
-      { type: "body", parameters: [{ text: differentStoredValue }, { text: "Merchant" }] },
+      { type: "body", parameters: [{ text: differentStoredValue }, { text: "Merchant" },
+        { text: "1 × Saved item" }] },
       { type: "button", parameters: [{ text: encodeURIComponent(differentStoredValue) }] },
     ] } });
   });
@@ -362,6 +389,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
         { text: "https://assets.moda-cdn.test/SQUARE_LOGO.png" },
         { text: "https://assets.moda-cdn.test/COVER_IMAGE.png" },
         { text: "Moda Brand" },
+        { text: "1 × Saved item" },
       ] }],
     } });
     expect(success.readShopBrand).toHaveBeenCalledTimes(1);
@@ -414,7 +442,8 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(result).toMatchObject({ outcome: "prepared", variantId: "variant-image", template: {
       components: [
         { type: "header", parameters: [{ type: "image", image: { link: expect.stringContaining("/outreach-products/") } }] },
-        { type: "body", parameters: [{ type: "text", text: "Merchant" }] },
+        { type: "body", parameters: [{ type: "text", text: "Merchant" },
+          { type: "text", text: "1 × Saved item" }] },
       ],
     } });
     expect(prepareForBinding).toHaveBeenCalledWith(request);
@@ -446,6 +475,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(result).toMatchObject({ outcome: "prepared", variantId: "variant-text", template: {
       components: [{ type: "body", parameters: [
         { type: "text", text: "Alex" }, { type: "text", text: "Merchant" },
+        { type: "text", text: "1 × Saved item" },
       ] },
       ],
     } });
@@ -517,7 +547,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       bindings: { header: [], body: [{ position: 1, variable: "shopBrand.brandName" },
         { position: 2, variable: "shop.name" }], buttons: [] },
     })]);
-    await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: undefined }));
     expect(warn).toHaveBeenCalledWith("recovery_template.prepare.binding_unavailable",
       expect.objectContaining({ reason: "BINDING_VALUE_UNAVAILABLE", errorType: "BindingUnavailable" }));
     readCatalogue.mockRejectedValueOnce(new Error("SENSITIVE customer checkout url and token"));
@@ -539,15 +569,19 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
 
     const [preparedA, preparedB] = await Promise.all([
       shopA.service.prepare(input({ shopId: "shop-a", shopName: { shopId: "shop-a", value: "shop-a.test" },
-        checkout: { ...checkout, shopId: "shop-a" }, checkoutItems: { shopId: "shop-a", lineItems: [] } })),
+        checkout: { ...checkout, shopId: "shop-a" }, checkoutItems: { shopId: "shop-a",
+          lineItems: [{ title: "Item A", quantity: 1 }] } })),
       shopB.service.prepare(input({ shopId: "shop-b", shopName: { shopId: "shop-b", value: "shop-b.test" },
-        checkout: { ...checkout, shopId: "shop-b" }, checkoutItems: { shopId: "shop-b", lineItems: [] } })),
+        checkout: { ...checkout, shopId: "shop-b" }, checkoutItems: { shopId: "shop-b",
+          lineItems: [{ title: "Item B", quantity: 1 }] } })),
     ]);
 
     expect(preparedA).toMatchObject({ outcome: "prepared", shopId: "shop-a",
-      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant A" }] }] } });
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant A" },
+        { text: "1 × Item A" }] }] } });
     expect(preparedB).toMatchObject({ outcome: "prepared", shopId: "shop-b",
-      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant B" }] }] } });
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant B" },
+        { text: "1 × Item B" }] }] } });
     expect(shopA.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-a", senderWabaId: "waba-1",
       purpose: "INITIAL_NO_OFFER" });
     expect(shopB.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-b", senderWabaId: "waba-1",
@@ -572,12 +606,14 @@ describe("taxonomy-backed recovery template binding", () => {
     });
     const result = await service.prepare(input());
     expect(result).toMatchObject({ outcome: "prepared", template: { components: [
-      { type: "body", parameters: [{ text: "Outdoor equipment" }, { text: "Merchant" }] },
+      { type: "body", parameters: [{ text: "Outdoor equipment" }, { text: "Merchant" },
+        { text: "1 × Saved item" }] },
     ] } });
     expect(readShopCategory).toHaveBeenCalledWith("shop-1", "en");
     const translated = await service.prepare(input({ conversationLanguageTag: "fr-CA" }));
     expect(translated).toMatchObject({ outcome: "prepared", canonicalLanguageTag: "fr",
-      template: { components: [{ parameters: [{ text: "Équipement de plein air" }, { text: "Merchant" }] }] } });
+      template: { components: [{ parameters: [{ text: "Équipement de plein air" }, { text: "Merchant" },
+        { text: "1 × Saved item" }] }] } });
     expect(readShopCategory).toHaveBeenCalledWith("shop-1", "fr");
   });
 
@@ -598,6 +634,24 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       { position: 2, variable: "shop.name" }], buttons: [] },
   });
 
+  it("excludes INITIAL registrations without one well-formed summary binding", async () => {
+    const noSummary = fixture({ preserveBindings: true });
+    const duplicate = fixture({ preserveBindings: true,
+      components: [{ type: "BODY", text: "{{1}} {{2}}" }],
+      bindings: { header: [], body: [
+        { position: 1, variable: "checkout.itemsSummary" },
+        { position: 2, variable: "checkout.itemsSummary" },
+      ], buttons: [] },
+    });
+    const malformedPosition = fixture({ preserveBindings: true,
+      components: [{ type: "BODY", text: "{{1}}" }],
+      bindings: { header: [], body: [{ position: 2, variable: "checkout.itemsSummary" }], buttons: [] },
+    });
+    await unavailable(setup([noSummary]).service, "DEFINITION_UNAVAILABLE");
+    await unavailable(setup([duplicate]).service, "DEFINITION_UNAVAILABLE");
+    await unavailable(setup([malformedPosition]).service, "BINDINGS_INVALID");
+  });
+
   it("binds a deterministic Shopify basket summary and prefers the configured shop display name", async () => {
     const brand: ShopBrandRow = { brandName: "Verified Outfitters", logoUrl: null,
       logoAltText: null, logoWidth: null, logoHeight: null, squareLogoUrl: null,
@@ -615,22 +669,27 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       bindings: { header: [], body: [{ position: 1, variable: "shop.name" }], buttons: [] } });
     const branded = setup([nameTemplate], { brand });
     expect(await branded.service.prepare(input())).toMatchObject({ template: { components: [{
-      parameters: [{ text: "Verified Outfitters" }],
+      parameters: [{ text: "Verified Outfitters" }, { text: "1 × Saved item" }],
     }] } });
     const invalidBrand = setup([nameTemplate], { brand: { ...brand, brandName: "{{unsafe}}" } });
     expect(await invalidBrand.service.prepare(input())).toMatchObject({ template: { components: [{
-      parameters: [{ text: "Merchant" }],
+      parameters: [{ text: "Merchant" }, { text: "1 × Saved item" }],
     }] } });
   });
 
   it("fails closed for missing basket data, malformed rows and cross-tenant facts", async () => {
     const { service } = setup([basketTemplate]);
-    await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: undefined }));
     await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
       shopId: "other-shop", lineItems: [{ title: "PRIVATE OTHER TENANT", quantity: 1 }],
     } }));
     await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
       shopId: "shop-1", lineItems: [{ title: "{{1}}", quantity: 1 }],
+    } }));
+    await unavailable(service, "BINDING_VALUE_UNAVAILABLE", input({ checkoutItems: {
+      shopId: "shop-1", lineItems: [
+        { title: "Valid", quantity: 1 }, { title: "", quantity: 0 },
+      ],
     } }));
   });
 });

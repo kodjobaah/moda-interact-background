@@ -71,6 +71,21 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     expect(job?.data).toMatchObject({ recoveryId: a.recoveryId, attemptId: attempts[0]!.id });
   }, 90_000);
 
+  it("does not send or reserve/commit billing when the approved initial template lacks the basket binding", async () => {
+    await f!.cleanup();
+    f = await createWooOutreachFixture({ includeCheckoutItemsBinding: false });
+    const a = f!;
+    await a.service.enqueueInitial(a.recoveryId);
+
+    await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({
+      kind: "suppressed", reason: "marketing-template-unavailable",
+    });
+    expect(a.providerRequests).toBe(0);
+    expect(await a.db.usageReservation.count({ where: { shopId: a.shopId } })).toBe(0);
+    expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } }))
+      .toBe(0);
+  }, 90_000);
+
   it("persists exactly one confirmed send, Free credit charge and usage event under concurrent dispatch/replay", async () => {
     const a = f!;
     await a.service.enqueueInitial(a.recoveryId);
@@ -138,10 +153,12 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(first.providerRequests).toBe(1);
       expect(second.providerRequests).toBe(1);
       expect(first.providerTemplateRequests).toMatchObject([{
-        shopId: first.shopId, recoveryId: first.recoveryId, bodyParameters: [firstShop.domain],
+        shopId: first.shopId, recoveryId: first.recoveryId,
+        bodyParameters: [firstShop.domain, "1 × Test item"],
       }]);
       expect(second.providerTemplateRequests).toMatchObject([{
-        shopId: second.shopId, recoveryId: second.recoveryId, bodyParameters: [secondShop.domain],
+        shopId: second.shopId, recoveryId: second.recoveryId,
+        bodyParameters: [secondShop.domain, "1 × Test item"],
       }]);
 
       const attempts = await Promise.all([
