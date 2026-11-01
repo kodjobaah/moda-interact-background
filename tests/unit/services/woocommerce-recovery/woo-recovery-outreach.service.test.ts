@@ -266,6 +266,20 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     },
   );
 
+  it("sends approved neutral fallback through the guarded sender without offer-source admission", async () => {
+    const f = makeFixture();
+    const { admissionToken: _admissionToken, ...neutralTemplate } = template;
+    f.select.mockResolvedValueOnce({ kind: "selected", template: neutralTemplate } as never);
+
+    expect(await f.service.processInitial("recovery")).toEqual({ kind: "sent", attemptId: "attempt-1" });
+    expect(f.send).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: "recovery-outreach:attempt-1",
+      template: expect.not.objectContaining({ admissionToken: expect.anything() }),
+    }));
+    expect(f.validateAdmission).not.toHaveBeenCalled();
+    expect(f.finalize).toHaveBeenCalledOnce();
+  });
+
   it("prevents duplicate irreversible sends even under concurrent job replay", async () => {
     const f = makeFixture();
     const [a, b] = await Promise.all([f.service.processInitial("recovery"), f.service.processInitial("recovery")]);

@@ -9,15 +9,6 @@ import type { FinalTemplateIdentity } from
  */
 export const WOO_TEST_SENDER_WABA = "987654321";
 
-const components = [{ type: "BODY", text: "{{1}}: Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." }];
-const bindings = {
-  schemaVersion: 1,
-  promotionTarget: "CHECKOUT",
-  header: [],
-  body: [{ position: 1, variable: "shop.name" }],
-  buttons: [],
-};
-
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -25,17 +16,30 @@ function stableJson(value: unknown): string {
     .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}`;
 }
 
-const contentHash = createHash("sha256").update(stableJson({
-  schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING",
-  components, parameterBindings: bindings,
-})).digest("hex");
-
 export async function seedApprovedInitialWooTemplateRegistration(
-  db: PrismaClient, shopId: string,
+  db: PrismaClient, shopId: string, shopUrl: string,
 ): Promise<FinalTemplateIdentity> {
   const suffix = randomUUID().replaceAll("-", "");
   const name = `moda_woo_${suffix}`;
   const providerId = BigInt(`0x${suffix}`).toString(10);
+  const components = [
+    { type: "BODY", text: "{{1}}: {{2}}. Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." },
+    { type: "BUTTONS", buttons: [{ type: "URL", text: "Resume checkout", url: `${shopUrl}/checkout?url={{1}}` }] },
+  ];
+  const bindings = {
+    schemaVersion: 1,
+    promotionTarget: "CHECKOUT",
+    header: [],
+    body: [
+      { position: 1, variable: "shop.name" },
+      { position: 2, variable: "checkout.itemsSummary" },
+    ],
+    buttons: [{ index: 0, subType: "url", variable: "checkout.url" }],
+  };
+  const contentHash = createHash("sha256").update(stableJson({
+    schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING",
+    components, parameterBindings: bindings,
+  })).digest("hex");
   const admin = await db.platformAdmin.create({ data: {
     email: `woo-template-${suffix}@example.invalid`,
   } });

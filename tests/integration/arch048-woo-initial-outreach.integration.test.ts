@@ -138,10 +138,12 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(first.providerRequests).toBe(1);
       expect(second.providerRequests).toBe(1);
       expect(first.providerTemplateRequests).toMatchObject([{
-        shopId: first.shopId, recoveryId: first.recoveryId, bodyParameters: [firstShop.domain],
+        shopId: first.shopId, recoveryId: first.recoveryId,
+        bodyParameters: [firstShop.domain, expect.stringContaining("Test item")],
       }]);
       expect(second.providerTemplateRequests).toMatchObject([{
-        shopId: second.shopId, recoveryId: second.recoveryId, bodyParameters: [secondShop.domain],
+        shopId: second.shopId, recoveryId: second.recoveryId,
+        bodyParameters: [secondShop.domain, expect.stringContaining("Test item")],
       }]);
 
       const attempts = await Promise.all([
@@ -240,7 +242,7 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     const next = await a.db.checkoutRecovery.create({ data: {
       shopId: a.shopId, customerId: a.customerId, checkoutToken: a.checkoutToken,
       generation: 2, status: "DETECTED", lastExternalActivityAt: new Date(),
-      currency: "GBP",
+      currency: "GBP", checkoutUrl: `${a.shopUrl}/checkout/${a.checkoutToken}`,
       lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     expect(await a.service.enqueueInitial(next.id)).toMatchObject({ kind: "queued" });

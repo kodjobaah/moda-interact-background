@@ -94,9 +94,6 @@ export function createWooRecoveryOutreachService(input: {
         if (selected.kind !== "prepared") {
           return { kind: "unavailable" as const, reason: selected.reason };
         }
-          if (!selected.admissionToken) {
-            return { kind: "unavailable" as const, reason: "INITIAL_OFFER_ADMISSION_TOKEN_UNAVAILABLE" };
-          }
         return {
           kind: "selected" as const,
           template: {
@@ -105,7 +102,7 @@ export function createWooRecoveryOutreachService(input: {
             canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
             verifiedCategory: "MARKETING" as const,
             sendFields: selected.send,
-              admissionToken: selected.admissionToken,
+              ...(selected.admissionToken ? { admissionToken: selected.admissionToken } : {}),
           },
         };
       },

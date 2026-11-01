@@ -76,7 +76,7 @@ export async function createWooOutreachFixture() {
     await db.shopEntitlementCounter.create({ data: {
       shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1,
     } });
-    await seedApprovedInitialWooTemplateRegistration(db, shopId);
+    await seedApprovedInitialWooTemplateRegistration(db, shopId, shop.domain);
     let platformPrompt = await db.commerceAgentPrompt.findFirst({
       where: { scope: "PLATFORM", shopId: null },
       select: { id: true },
@@ -144,7 +144,7 @@ export async function createWooOutreachFixture() {
     });
     const recovery = await db.checkoutRecovery.create({ data: {
       shopId, customerId: customer.id, checkoutToken, lastExternalActivityAt: sentAt,
-      currency: "GBP",
+      currency: "GBP", checkoutUrl: `${shop.domain}/checkout/${checkoutToken}`,
       lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     const reader = new WooRecoveryConsentReader(db);
@@ -236,7 +236,7 @@ export async function createWooOutreachFixture() {
       } },
     });
     return {
-      db, redis, queue, shopId, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
+      db, redis, queue, shopId, shopUrl: shop.domain, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
       guardedSender: sender,
       phoneId: phone.id, service, coordinator,
       providerTemplateRequests,

@@ -428,22 +428,20 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         }
         if (revalidated.kind === "blocked") return this.dispatchOutcome(state, "deferred", revalidated.reason);
         billing = revalidated;
-        if (!selected.template.admissionToken) {
-          await this.deps.billing.releaseBeforeProvider(billing.admission);
-          return this.dispatchOutcome(state, "suppressed", "offer-admission-token-unavailable");
-        }
-        let offerAdmissionValid: boolean;
-        try {
-          offerAdmissionValid = await this.deps.templates.validateAdmission(
-            selected.template.admissionToken, AbortSignal.timeout(15_000),
-          );
-        } catch (error) {
-          await this.releaseOrThrow(billing.admission, error);
-          throw error;
-        }
-        if (!offerAdmissionValid) {
-          await this.deps.billing.releaseBeforeProvider(billing.admission);
-          return this.dispatchOutcome(state, "suppressed", "offer-source-changed");
+        if (selected.template.admissionToken) {
+          let offerAdmissionValid: boolean;
+          try {
+            offerAdmissionValid = await this.deps.templates.validateAdmission(
+              selected.template.admissionToken, AbortSignal.timeout(15_000),
+            );
+          } catch (error) {
+            await this.releaseOrThrow(billing.admission, error);
+            throw error;
+          }
+          if (!offerAdmissionValid) {
+            await this.deps.billing.releaseBeforeProvider(billing.admission);
+            return this.dispatchOutcome(state, "suppressed", "offer-source-changed");
+          }
         }
         state.stage = "durable-provider-permit-and-send";
         const source = billing.admission;

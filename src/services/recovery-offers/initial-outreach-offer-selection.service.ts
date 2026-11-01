@@ -25,6 +25,13 @@ const logger = createLogger({
 
 type ContextBuilder = Pick<InitialOutreachAgentContextService, "build">;
 
+export class InitialOfferEnrichmentError extends Error {
+  constructor(readonly trigger: "AI_UNAVAILABLE" | "MCP_UNAVAILABLE", cause: unknown) {
+    super("Initial offer enrichment failed.", { cause });
+    this.name = "InitialOfferEnrichmentError";
+  }
+}
+
 export type InitialOutreachOfferSelectionDependencies = Readonly<{
   db?: PrismaClient;
   environment?: CommerceEnvironment;
@@ -136,13 +143,29 @@ export class InitialOutreachOfferSelectionService {
       outreachAttemptId: input.outreachAttemptId,
       signal,
     });
-    const result = await this.agent(context, {
-      signal,
-      ...(this.dependenciesModelInvoker ? { modelInvoker: this.dependenciesModelInvoker } : {}),
-      createSelector: this.createSelector,
-      createModelInvoker: () => this.createModelInvoker(input.shopId),
-      logger: this.logger,
-    });
+    let result: InitialOutreachAgentResult;
+    try {
+      result = await this.agent(context, {
+        signal,
+        ...(this.dependenciesModelInvoker ? { modelInvoker: this.dependenciesModelInvoker } : {}),
+        createSelector: this.createSelector,
+        createModelInvoker: () => this.createModelInvoker(input.shopId),
+        logger: this.logger,
+      });
+    } catch (error) {
+      const trigger = error instanceof Error && error.name === "CommerceHostError"
+        ? "MCP_UNAVAILABLE" : "AI_UNAVAILABLE";
+      this.logger.error("recovery_offer.initial_enrichment.failed", {
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        trigger,
+        reason: "OPTIONAL_ENRICHMENT_FAILURE",
+        errorType: error instanceof Error ? error.name : "unknown",
+        error,
+      });
+      throw new InitialOfferEnrichmentError(trigger, error);
+    }
     const currentContext = await contextBuilder.build({
       shopId: input.shopId,
       checkoutRecoveryId: input.checkoutRecoveryId,
