@@ -87,9 +87,11 @@ function setup(rows: AssignedVariantRow[] = [fixture()], options: {
   mediaHosts?: string[];
   defaultLanguage?: string | null;
   categoryNames?: Record<string, string | null>;
+  shopId?: string;
 } = {}) {
+  const shopId = options.shopId ?? "shop-1";
   const readCatalogue = vi.fn(async () => ({
-    shop: { id: "shop-1", status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
+    shop: { id: shopId, status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
     variants: rows,
   }));
   const readShopBrand = vi.fn(async () => options.brand ?? null);
@@ -461,6 +463,31 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     }));
     expect(JSON.stringify(error.mock.calls)).not.toContain("SENSITIVE");
     expect(error.mock.lastCall?.[1]).not.toHaveProperty("errorMessage");
+  });
+
+  it("binds each shared-WABA template to its own authenticated merchant name", async () => {
+    const shopA = setup([fixture({ variant: { id: "variant-a", shopId: "shop-a" } })], {
+      shopId: "shop-a", brand: { brandName: "Merchant A" } as ShopBrandRow,
+    });
+    const shopB = setup([fixture({ variant: { id: "variant-b", shopId: "shop-b" } })], {
+      shopId: "shop-b", brand: { brandName: "Merchant B" } as ShopBrandRow,
+    });
+
+    const [preparedA, preparedB] = await Promise.all([
+      shopA.service.prepare(input({ shopId: "shop-a", shopName: { shopId: "shop-a", value: "shop-a.test" },
+        checkout: { ...checkout, shopId: "shop-a" }, checkoutItems: { shopId: "shop-a", lineItems: [] } })),
+      shopB.service.prepare(input({ shopId: "shop-b", shopName: { shopId: "shop-b", value: "shop-b.test" },
+        checkout: { ...checkout, shopId: "shop-b" }, checkoutItems: { shopId: "shop-b", lineItems: [] } })),
+    ]);
+
+    expect(preparedA).toMatchObject({ outcome: "prepared", shopId: "shop-a",
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant A" }] }] } });
+    expect(preparedB).toMatchObject({ outcome: "prepared", shopId: "shop-b",
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant B" }] }] } });
+    expect(shopA.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-a", senderWabaId: "waba-1",
+      purpose: "INITIAL_NO_OFFER" });
+    expect(shopB.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-b", senderWabaId: "waba-1",
+      purpose: "INITIAL_NO_OFFER" });
   });
 });
 

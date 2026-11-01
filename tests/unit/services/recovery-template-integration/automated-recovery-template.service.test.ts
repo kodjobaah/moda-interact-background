@@ -167,6 +167,23 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       select: { checkoutRecoveryLifetimeDays: true } });
   });
 
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "passes the exact persisted %s checkout URL to template preparation",
+    async (platform) => {
+      const checkoutUrl = "https://checkout.example/continue?token=A%2FB&keep=%2B";
+      const f = fixture({ ...recovered, checkoutUrl,
+        shop: { ...recovered.shop, platform } });
+
+      const result = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+        stage: "INITIAL", policy: policy as never, conversationLanguageTag: null });
+
+      expect(result.kind).toBe("prepared");
+      expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
+        checkout: expect.objectContaining({ shopId: "shop-1", url: checkoutUrl }),
+      }));
+    },
+  );
+
   it.each([
     ["FIXED", "CODE_OFFER", "SAVE10"],
     ["AI_BEST_APPLICABLE", "AUTOMATIC_OFFER", null],
