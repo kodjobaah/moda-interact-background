@@ -257,7 +257,7 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     const next = await a.db.checkoutRecovery.create({ data: {
       shopId: a.shopId, customerId: a.customerId, checkoutToken: a.checkoutToken,
       generation: 2, status: "DETECTED", lastExternalActivityAt: new Date(),
-      currency: "GBP",
+      currency: "GBP", checkoutUrl: `${a.shopUrl}/checkout/${a.checkoutToken}`,
       lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     expect(await a.service.enqueueInitial(next.id)).toMatchObject({ kind: "queued" });

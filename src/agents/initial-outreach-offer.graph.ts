@@ -3,7 +3,12 @@ import {
   CommerceToolOutputs,
   InitialOutreachCheckoutOfferSetSchema,
 } from "@modainteract/moda-interact-shared/commerce";
-import type { CommerceModelInvoker, ModelRequest, ModelStep } from "@modainteract/moda-interact-shared/commerce/runner";
+import {
+  CommerceModelInvocationFailure,
+  type CommerceModelInvoker,
+  type ModelRequest,
+  type ModelStep,
+} from "@modainteract/moda-interact-shared/commerce/runner";
 import { CommerceHostError } from "../commerce/mcp-client.js";
 import { evaluateCheckoutDiscount } from "./initial-outreach-offer.eligibility.js";
 import { selectCompatibleCheckoutOffers } from "./initial-outreach-offer.combinations.js";
@@ -104,6 +109,9 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function failureFrom(error: unknown): FailureState {
+  if (error instanceof CommerceModelInvocationFailure && error.diagnostic.stage === "model.invoke") {
+    return { code: "UNAVAILABLE", reasonCode: "AI_UNAVAILABLE", error };
+  }
   if (error instanceof CommerceHostError) {
     const code = error.code === "DENIED" ? "DENIED"
       : error.code === "CANCELLED" || error.code === "DEADLINE" ? error.code

@@ -1,8 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import type { CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
-import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
+import {
+  CommerceModelInvocationFailure,
+  type CommerceModelInvoker,
+} from "@modainteract/moda-interact-shared/commerce/runner";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
+import { CommerceHostError } from "../../commerce/mcp-client.js";
 import { runInitialOutreachOfferAgent } from "../../agents/initial-outreach-offer.agent.js";
 import type { InitialOutreachAgentResult } from "../../agents/initial-outreach-offer.types.js";
 import { createProductionCommerceModelInvoker } from "../../commerce/production-model.js";
@@ -24,6 +28,23 @@ const logger = createLogger({
 });
 
 type ContextBuilder = Pick<InitialOutreachAgentContextService, "build">;
+
+export class InitialOfferEnrichmentError extends Error {
+  constructor(readonly trigger: "AI_UNAVAILABLE" | "MCP_UNAVAILABLE", cause: unknown) {
+    super("Initial offer enrichment failed.", { cause });
+    this.name = "InitialOfferEnrichmentError";
+  }
+}
+
+function optionalAgentFailure(error: unknown): "AI_UNAVAILABLE" | "MCP_UNAVAILABLE" | null {
+  if (error instanceof CommerceHostError) {
+    return error.code === "UNAVAILABLE" && error.retryable ? "MCP_UNAVAILABLE" : null;
+  }
+  if (error instanceof CommerceModelInvocationFailure && error.diagnostic.stage === "model.invoke") {
+    return "AI_UNAVAILABLE";
+  }
+  return null;
+}
 
 export type InitialOutreachOfferSelectionDependencies = Readonly<{
   db?: PrismaClient;
@@ -136,13 +157,38 @@ export class InitialOutreachOfferSelectionService {
       outreachAttemptId: input.outreachAttemptId,
       signal,
     });
-    const result = await this.agent(context, {
-      signal,
-      ...(this.dependenciesModelInvoker ? { modelInvoker: this.dependenciesModelInvoker } : {}),
-      createSelector: this.createSelector,
-      createModelInvoker: () => this.createModelInvoker(input.shopId),
-      logger: this.logger,
-    });
+    let result: InitialOutreachAgentResult;
+    try {
+      result = await this.agent(context, {
+        signal,
+        ...(this.dependenciesModelInvoker ? { modelInvoker: this.dependenciesModelInvoker } : {}),
+        createSelector: this.createSelector,
+        createModelInvoker: () => this.createModelInvoker(input.shopId),
+        logger: this.logger,
+      });
+    } catch (error) {
+      const trigger = optionalAgentFailure(error);
+      if (!trigger) {
+        this.logger.error("recovery_offer.initial_enrichment.unclassified_failure", {
+          shopId: input.shopId,
+          recoveryId: input.checkoutRecoveryId,
+          attemptId: input.outreachAttemptId,
+          reason: "OUTREACH_AGENT_FAILURE_NOT_CLASSIFIED_AS_OPTIONAL",
+          error,
+        });
+        throw error;
+      }
+      this.logger.error("recovery_offer.initial_enrichment.failed", {
+        shopId: input.shopId,
+        recoveryId: input.checkoutRecoveryId,
+        attemptId: input.outreachAttemptId,
+        trigger,
+        reason: "OPTIONAL_ENRICHMENT_FAILURE",
+        errorType: error instanceof Error ? error.name : "unknown",
+        error,
+      });
+      throw new InitialOfferEnrichmentError(trigger, error);
+    }
     const currentContext = await contextBuilder.build({
       shopId: input.shopId,
       checkoutRecoveryId: input.checkoutRecoveryId,

@@ -332,22 +332,20 @@ export class RecoveryInitiationService {
         return recovery;
       }
       billing = revalidated;
-      if (!selected.admissionToken) {
-        await this.billingService.releaseBeforeProvider(billing.admission);
-        return recovery;
-      }
-      let offerAdmissionValid: boolean;
-      try {
-        offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
-          selected.admissionToken, AbortSignal.timeout(15_000),
-        );
-      } catch (error) {
-        await this.billingService.releaseBeforeProvider(billing.admission);
-        throw error;
-      }
-      if (!offerAdmissionValid) {
-        await this.billingService.releaseBeforeProvider(billing.admission);
-        return recovery;
+      if (selected.admissionToken) {
+        let offerAdmissionValid: boolean;
+        try {
+          offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
+            selected.admissionToken, AbortSignal.timeout(15_000),
+          );
+        } catch (error) {
+          await this.billingService.releaseBeforeProvider(billing.admission);
+          throw error;
+        }
+        if (!offerAdmissionValid) {
+          await this.billingService.releaseBeforeProvider(billing.admission);
+          return recovery;
+        }
       }
       result = await outboundWhatsAppAdmissionService.sendTemplate({
         shopId: recovery.shopId,

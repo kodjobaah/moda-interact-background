@@ -652,6 +652,29 @@ describe("RecoveryInitiationService", () => {
     }));
   });
 
+  it("sends neutral fallback through the same billing and idempotent attempt without offer admission", async () => {
+    mocks.automated.prepare.mockResolvedValueOnce({
+      kind: "prepared",
+      prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "approved_initial_no_offer",
+        canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB" },
+      send: { templateName: "approved_initial_no_offer", languageCode: "en_GB",
+        templateRegistration: { shopId: "shop-1", purpose: "INITIAL_NO_OFFER" },
+        recoveryPromise: { kind: "NO_OFFER" } },
+    } as never);
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(billing.admit).toHaveBeenCalledOnce();
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: "recovery-outreach:attempt-1",
+      recoveryCreditSourceKey: admission.sourceKey,
+      recoveryPromise: { kind: "NO_OFFER" },
+    }));
+    expect(mocks.automated.validateAdmission).not.toHaveBeenCalled();
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledOnce();
+  });
+
   it("releases billing and skips Meta when F3 offer admission detects source churn", async () => {
     // The IMAGE preparation completed and produced a verified immutable URL,
     // but current price admission is stale. Prepared media is not send authority.

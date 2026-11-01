@@ -66,14 +66,19 @@ function makeService(overrides: {
   toolResult?: unknown;
   toolResults?: Record<string, unknown>;
   productResult?: unknown;
+  onSelectorCall?: () => void | Promise<void>;
+  readBudgetMs?: number;
 } = {}) {
   let latestContext = overrides.currentContext ?? context();
   const contextBuilder = { build: vi.fn(async () => latestContext) };
   const selector = {
     connect: vi.fn(async () => undefined), tools: vi.fn(async () => []),
-    call: vi.fn(async (name: string, args?: { offerId?: string }) => name === "commerce_get_product"
-      ? overrides.productResult ?? mcpSuccess({ product: null })
-      : overrides.toolResults?.[args?.offerId ?? ""] ?? overrides.toolResult ?? mcpSuccess({ details })),
+    call: vi.fn(async (name: string, args?: { offerId?: string }) => {
+      await overrides.onSelectorCall?.();
+      return name === "commerce_get_product"
+        ? overrides.productResult ?? mcpSuccess({ product: null })
+        : overrides.toolResults?.[args?.offerId ?? ""] ?? overrides.toolResult ?? mcpSuccess({ details });
+    }),
     close: vi.fn(async () => undefined),
   };
   let fenceCall = 0;
@@ -88,6 +93,7 @@ function makeService(overrides: {
     contextBuilder: contextBuilder as never,
     createSelector: () => selector,
     readFence,
+    ...(overrides.readBudgetMs !== undefined ? { readBudgetMs: overrides.readBudgetMs } : {}),
     clock: () => new Date("2026-10-31T12:00:00.000Z"),
   });
   return { service, contextBuilder, selector, readFence,
@@ -142,6 +148,38 @@ describe("current outreach offer revalidation", () => {
     expect(result).toMatchObject({ kind: "FAILURE", reasonCode: "SOURCE_FENCE_F2_CHANGED" });
     expect(selector.call).toHaveBeenCalledOnce();
   });
+
+  it("keeps caller cancellation distinct from the optional source-read deadline", async () => {
+    const controller = new AbortController();
+    const { service, selector } = makeService({ onSelectorCall: () => controller.abort() });
+
+    await expect(service.revalidateCurrentOutreachOffer({ ...input(), signal: controller.signal }))
+      .resolves.toMatchObject({ kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_CANCELLED", retryable: false });
+    expect(selector.call).toHaveBeenCalledOnce();
+    expect(selector.close).toHaveBeenCalledOnce();
+  });
+
+  it("reports the service-owned source-read timeout as optional enrichment unavailability", async () => {
+    const { service, selector } = makeService({
+      readBudgetMs: 1,
+      onSelectorCall: () => new Promise((resolve) => setTimeout(resolve, 10)),
+    });
+
+    await expect(service.revalidateCurrentOutreachOffer(input()))
+      .resolves.toMatchObject({ kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true });
+    expect(selector.close).toHaveBeenCalledOnce();
+  });
+
+  it.each(["CONTEXT_UNAVAILABLE", "CANCELLED", "INVALID_INPUT", "READ_FAILED"])(
+    "preserves unavailable F2 reason %s instead of reporting source drift", async (reasonCode) => {
+      const { service, selector } = makeService({ secondFence: { kind: "UNAVAILABLE", reasonCode } });
+
+      await expect(service.revalidateCurrentOutreachOffer(input())).resolves.toMatchObject({
+        kind: "FAILURE", reasonCode: `SOURCE_FENCE_F2_${reasonCode}`, retryable: true,
+      });
+      expect(selector.call).toHaveBeenCalledOnce();
+    },
+  );
 
   it("trims a three-member proposal to the freshly supported proposed subset", async () => {
     const makeMember = (offerId: string, providerDiscountId: string, code: string) => ({
