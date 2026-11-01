@@ -3,6 +3,11 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 import { whatsAppService } from "../whatsapp.service.js";
 import { BindingUnavailable, RecoveryVariableResolver } from "./recovery-template-brand.js";
 import { createProductionShopBrandMediaAdapter } from "../shop-brand-media-runtime/resolver.js";
+import {
+  createProductionRecoveryProductImageResolver,
+  type PreparedOutreachProductMedia,
+  type RecoveryProductImageResolver,
+} from "../recovery-product-media/recovery-product-image-resolver.js";
 import { prepareFrozenComponents } from "./recovery-template-bindings.js";
 import { PrismaRecoveryTemplateRepository } from "./recovery-template-repository.js";
 import { purposeFor, selectRecoveryAssignment } from "./recovery-template-selection.js";
@@ -43,6 +48,8 @@ export class RecoveryTemplatePreparer {
     private readonly approvedMediaHosts?: MediaApprovedHosts,
     private readonly clock: () => Date = () => new Date(),
     private readonly logger: Pick<StructuredLogger, "warn" | "error"> = defaultLogger,
+    private readonly createProductImageResolver: () => Pick<RecoveryProductImageResolver, "prepareForBinding"> =
+      createProductionRecoveryProductImageResolver,
   ) {}
 
   async prepare(input: RecoveryTemplatePreparationInput): Promise<PreparationResult> {
@@ -76,7 +83,7 @@ export class RecoveryTemplatePreparer {
       });
       if (!catalogue.shop || catalogue.shop.status !== "ACTIVE") return unavailable("SHOP_UNAVAILABLE");
 
-      const selected = selectRecoveryAssignment({
+      const selectionInput = {
         shop: catalogue.shop, shopId: input.shopId, senderWabaId: configuredSender,
         purpose, variants: catalogue.variants,
         stage: input.stage, offer: input.offerPresentation,
@@ -87,35 +94,71 @@ export class RecoveryTemplatePreparer {
         platformFallbackEnabled: input.platformFallbackEnabled ?? false,
         platformFallbackLanguageTag: input.platformFallbackLanguageTag ?? null,
         logger: this.logger,
+      } as const;
+      const select = (headerFormat: "TEXT" | "IMAGE") => selectRecoveryAssignment({
+        ...selectionInput, headerFormat,
       });
+      let selectedFormat: "TEXT" | "IMAGE" = "TEXT";
+      let selected = input.stage === "INITIAL" && input.productImage
+        ? select("IMAGE")
+        : { outcome: "unavailable" as const, reason: "NO_APPROVED_ASSIGNMENT" as const };
+      let productMedia: PreparedOutreachProductMedia | undefined;
+      if (selected.outcome === "selected" && input.productImage) {
+        productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+        if (productMedia.result.kind === "READY") selectedFormat = "IMAGE";
+        else selected = { outcome: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+      }
+      if (selected.outcome !== "selected") {
+        if (selected.reason === "IDENTITY_MISMATCH") return unavailable(selected.reason);
+        selected = select("TEXT");
+        selectedFormat = "TEXT";
+        productMedia = undefined;
+      }
       if (selected.outcome === "unavailable") return unavailable(selected.reason);
-      const { variant, canonicalLanguageTag, selectionSource } = selected.value;
-      const registration = variant.metaRegistration!;
+
+      let selectedAssignment = selected.value;
+      let registration = selectedAssignment.variant.metaRegistration!;
       // Lazy operation-scoped adapter: TEXT-only messages never read publicMedia,
       // and no platform config is cached across separate preparations.
       const productionMedia = !this.resolveReadyShopBrandMedia || !this.approvedMediaHosts
         ? createProductionShopBrandMediaAdapter() : null;
-      const variables = new RecoveryVariableResolver(
+      const variablesFor = (readyProduct?: PreparedOutreachProductMedia) => new RecoveryVariableResolver(
         input, (shopId) => this.repository.readShopBrand(shopId),
         this.resolveReadyShopBrandMedia ?? productionMedia!.resolve,
         this.approvedMediaHosts ?? productionMedia!.approvedHosts, this.clock,
-        (shopId, languageTag) => this.repository.readShopCategory(shopId, languageTag), canonicalLanguageTag,
+        (shopId, languageTag) => this.repository.readShopCategory(shopId, languageTag),
+        selectedAssignment.canonicalLanguageTag,
+        readyProduct?.result.kind === "READY" ? readyProduct.result.publicImageUrl : undefined,
+        readyProduct?.result.kind === "READY" ? readyProduct.validateBeforeBinding : undefined,
       );
-      const prepared = await prepareFrozenComponents({ registration, variables });
+      let preparedBindings: Awaited<ReturnType<typeof prepareFrozenComponents>>;
+      try {
+        preparedBindings = await prepareFrozenComponents({ registration, variables: variablesFor(productMedia) });
+      } catch (error) {
+        if (selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
+            error.reason !== "MEDIA_NOT_READY") throw error;
+        const textFallback = select("TEXT");
+        if (textFallback.outcome !== "selected") return unavailable(textFallback.reason);
+        selectedAssignment = textFallback.value;
+        selectedFormat = "TEXT";
+        registration = selectedAssignment.variant.metaRegistration!;
+        preparedBindings = await prepareFrozenComponents({ registration, variables: variablesFor(undefined) });
+      }
       return {
         outcome: "prepared", shopId: input.shopId, senderWabaId: configuredSender,
-        purpose, variantId: variant.id, registrationId: registration.id,
+        purpose, variantId: selectedAssignment.variant.id, registrationId: registration.id,
         definitionId: registration.locale.definition.id,
         providerTemplateId: registration.providerTemplateId!,
         providerTemplateName: registration.providerTemplateName,
         providerLanguageCode: registration.providerLanguageCode,
-        canonicalLanguageTag, selectionSource,
+        canonicalLanguageTag: selectedAssignment.canonicalLanguageTag,
+        selectionSource: selectedAssignment.selectionSource,
         submittedContentHash: registration.submittedContentHash,
-        bindingFingerprint: prepared.bindingFingerprint,
+        bindingFingerprint: preparedBindings.bindingFingerprint,
         template: {
           name: registration.providerTemplateName,
           language: { code: registration.providerLanguageCode },
-          components: prepared.components,
+          components: preparedBindings.components,
         },
       } satisfies PreparedRecoveryTemplate;
     } catch (error) {

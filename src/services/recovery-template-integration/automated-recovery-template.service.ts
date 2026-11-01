@@ -24,6 +24,7 @@ import {
   type CheckoutRecoveryLifetimeReader,
 } from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import { templateSendFields, type RecoveryOfferPromise } from "./prepared-template-send.js";
+import type { OutreachProductImageRequest } from "../recovery-product-media/recovery-product-image-resolver.js";
 
 export type AutomatedTemplateResult =
   | { kind: "prepared"; prepared: PreparedRecoveryTemplate; send: ReturnType<typeof templateSendFields>;
@@ -170,6 +171,19 @@ function sameCurrentOfferContext(
     samePriceEvidence(original.priceReconciliation, current.priceReconciliation);
 }
 
+function checkoutImageProduct(lineItems: unknown): { productId: string; variantId: string | null } | null {
+  if (!Array.isArray(lineItems)) return null;
+  for (const value of lineItems) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const line = value as Record<string, unknown>;
+    if (typeof line.productId !== "string" || !line.productId.trim() ||
+        (line.variantId !== null && line.variantId !== undefined &&
+          (typeof line.variantId !== "string" || !line.variantId.trim()))) continue;
+    return { productId: line.productId, variantId: typeof line.variantId === "string" ? line.variantId : null };
+  }
+  return null;
+}
+
 function authorisedHosts(domain: string): string[] {
   // Only the authenticated Shop's canonical host can authorise a checkout URL.
   // Never add a host inferred from a merchant-controlled checkout URL itself.
@@ -270,6 +284,7 @@ export class AutomatedRecoveryTemplateService {
       let promotionTarget: RecoveryPromotionTarget = "CHECKOUT";
       let verifiedOffer: TrustedOffer | undefined;
       let promotionalProduct: SourceBoundPromotionalProduct | undefined;
+      let productImageIdentity: { productId: string; variantId: string | null } | null = null;
       let recoveryPromise: RecoveryOfferPromise;
       let admissionToken: CurrentOutreachOfferAdmissionToken | undefined;
       if (input.stage === "INITIAL") {
@@ -360,6 +375,7 @@ export class AutomatedRecoveryTemplateService {
             ...(result.code ? { code: result.code } : {}), description: result.description,
           };
           const product = result.product.product;
+          productImageIdentity = { productId: product.productId, variantId: product.variantId };
           promotionalProduct = {
             sourceTool: result.product.sourceTool,
             authenticatedShopId: result.product.authenticatedShopId,
@@ -412,6 +428,18 @@ export class AutomatedRecoveryTemplateService {
           };
         }
       }
+      if (input.stage === "INITIAL" && promotionTarget === "CHECKOUT") {
+        productImageIdentity = checkoutImageProduct(recovery.lineItems);
+      }
+      const productImage: OutreachProductImageRequest | null = input.stage === "INITIAL" &&
+        input.outreachAttemptId && productImageIdentity ? {
+          shopId: input.shopId,
+          checkoutRecoveryId: input.recoveryId,
+          outreachAttemptId: input.outreachAttemptId,
+          generation: recovery.generation,
+          productId: productImageIdentity.productId,
+          variantId: productImageIdentity.variantId,
+        } : null;
       const prep: RecoveryTemplatePreparationInput = {
         shopId: input.shopId,
         senderWabaId: await this.senderWaba(),
@@ -432,6 +460,7 @@ export class AutomatedRecoveryTemplateService {
         } : null,
         ...(verifiedOffer ? { verifiedOffer } : {}),
         ...(promotionalProduct ? { promotionalProduct } : {}),
+        productImage,
       };
       const prepared = await this.preparer.prepare(prep);
       if (prepared.outcome !== "prepared") return unavailable(prepared.reason);

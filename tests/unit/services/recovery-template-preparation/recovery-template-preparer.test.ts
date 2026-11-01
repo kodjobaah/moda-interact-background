@@ -388,6 +388,70 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(injected.resolveMedia).toHaveBeenCalledWith("shop-1", "LOGO");
   });
 
+  it("binds only the verified attempt-specific product derivative to an approved IMAGE variant", async () => {
+    const imageRow = fixture({ variant: { id: "variant-image" },
+      components: [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "Hello {{1}}" }],
+      bindings: { schemaVersion: 1, headerMediaRole: "CHECKOUT_PRODUCT", header: [], body: [
+        { position: 1, variable: "shop.name" },
+      ], buttons: [] },
+    });
+    const textRow = fixture({ variant: { id: "variant-text" } });
+    const configured = setup([imageRow, textRow]);
+    const request = { shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+      generation: 1, productId: "product-1", variantId: null };
+    const validateBeforeBinding = vi.fn(async () => true);
+    const prepareForBinding = vi.fn(async () => ({ result: {
+      kind: "READY", shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+      productId: "product-1", variantId: null, objectKey: "outreach-products/shopify/shop/2026/10/25/attempt-1/p-x/v-none/sha256-y.jpg",
+      publicImageUrl: "https://media.modainteract.com/outreach-products/shopify/shop/2026/10/25/attempt-1/p-x/v-none/sha256-y.jpg",
+      contentSha256: "a".repeat(64), width: 1125, height: 600, contentType: "image/jpeg", preparedAt: now,
+    }, validateBeforeBinding }));
+    const service = new RecoveryTemplatePreparer(configured.repo, configured.resolveConfiguredSender,
+      configured.resolveMedia, [], () => now, { warn: vi.fn(), error: vi.fn() },
+      () => ({ prepareForBinding }) as never);
+
+    const result = await service.prepare(input({ productImage: request }));
+    expect(result).toMatchObject({ outcome: "prepared", variantId: "variant-image", template: {
+      components: [
+        { type: "header", parameters: [{ type: "image", image: { link: expect.stringContaining("/outreach-products/") } }] },
+        { type: "body", parameters: [{ type: "text", text: "Merchant" }] },
+      ],
+    } });
+    expect(prepareForBinding).toHaveBeenCalledWith(request);
+    expect(validateBeforeBinding).toHaveBeenCalledOnce();
+  });
+
+  it.each(["unavailable", "stale"] as const)("uses the approved TEXT variant when product media is %s", async (mode) => {
+    const imageRow = fixture({ variant: { id: "variant-image" },
+      components: [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "Hello {{1}}" }],
+      bindings: { schemaVersion: 1, headerMediaRole: "CHECKOUT_PRODUCT", header: [], body: [
+        { position: 1, variable: "shop.name" },
+      ], buttons: [] },
+    });
+    const textRow = fixture({ variant: { id: "variant-text" } });
+    const configured = setup([imageRow, textRow]);
+    const prepareForBinding = vi.fn(async () => ({ result: mode === "unavailable"
+      ? { kind: "UNAVAILABLE", reason: "PRODUCT_IMAGE_UNAVAILABLE" }
+      : { kind: "READY", shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+          productId: "product-1", variantId: null, objectKey: "outreach-products/shopify/shop/2026/10/25/attempt-1/p-x/v-none/sha256-y.jpg",
+          publicImageUrl: "https://media.modainteract.com/outreach-products/image.jpg", contentSha256: "a".repeat(64),
+          width: 1125, height: 600, contentType: "image/jpeg", preparedAt: now },
+      validateBeforeBinding: async () => false }));
+    const service = new RecoveryTemplatePreparer(configured.repo, configured.resolveConfiguredSender,
+      configured.resolveMedia, [], () => now, { warn: vi.fn(), error: vi.fn() },
+      () => ({ prepareForBinding }) as never);
+
+    const result = await service.prepare(input({ productImage: { shopId: "shop-1", checkoutRecoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1", generation: 1, productId: "product-1", variantId: null } }));
+    expect(result).toMatchObject({ outcome: "prepared", variantId: "variant-text", template: {
+      components: [{ type: "body", parameters: [
+        { type: "text", text: "Alex" }, { type: "text", text: "Merchant" },
+      ] },
+      ],
+    } });
+    expect(JSON.stringify(result)).not.toContain("media.modainteract.com");
+  });
+
   it("fails closed on wrongly scoped, disabled or revoked variants, even with a misbehaving repository adapter", async () => {
     for (const changes of [
       { shopId: "other-shop" }, { providerAccountId: "other-waba" },

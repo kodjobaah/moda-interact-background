@@ -26,6 +26,24 @@ export class ShopBrandMediaError extends Error {
   }
 }
 
+/** Bounded diagnostic provenance for provider/library failures; never retain a source URL or common secrets. */
+export function boundedMediaProviderMessage(error: unknown): string | undefined {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  if (!raw) return undefined;
+  const message = [...raw].map((character) => {
+    const code = character.codePointAt(0)!;
+    return code <= 0x1f || code === 0x7f ? " " : character;
+  }).join("")
+    .replace(/\bhttps?:\/\/[^\s,;]+/gi, "[URL REDACTED]")
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/\b(bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[REDACTED]")
+    .replace(/((?:access.?key(?:.?id)?|secret.?key|session.?token|security.?token|token|password|signature|credential|api.?key)\s*[:=]\s*)[^\s,;&"'<>]+/gi, "$1[REDACTED]")
+    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[EMAIL REDACTED]")
+    .replace(/\b(?:\+?\d[\d ().-]{7,}\d)\b/g, "[PHONE REDACTED]")
+    .replace(/\s+/g, " ").trim().slice(0, 300);
+  return message || undefined;
+}
+
 export interface ShopBrandMediaInput {
   shopId: string;
   domain: string;
@@ -61,7 +79,7 @@ export interface FetchedBrandSource {
 }
 
 export interface SafeFetcher {
-  fetch(url: string): Promise<FetchedBrandSource>;
+  fetch(url: string, signal?: AbortSignal): Promise<FetchedBrandSource>;
 }
 
 export interface ImageTransformer {
@@ -77,7 +95,7 @@ export interface R2ObjectWriter {
 }
 
 export interface PublicMediaProbe {
-  verify(input: { url: string; image: VerifiedBrandImage }): Promise<void>;
+  verify(input: { url: string; image: VerifiedBrandImage }, signal?: AbortSignal): Promise<void>;
 }
 
 export type ShopBrandPublicMediaSettings = Readonly<{
