@@ -27,6 +27,7 @@ const cases: ReadonlyArray<Readonly<{
   name: string;
   prepared: PreparedRecoveryTemplate;
   promise: RecoveryOfferPromise;
+  promotionTarget: "CHECKOUT" | "ALTERNATIVE_PRODUCT";
   expectedButtonIndexes: readonly string[];
 }>> = [
   {
@@ -36,6 +37,7 @@ const cases: ReadonlyArray<Readonly<{
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
     ]),
     promise: { kind: "NO_OFFER" },
+    promotionTarget: "CHECKOUT",
     expectedButtonIndexes: ["0"],
   },
   {
@@ -45,8 +47,10 @@ const cases: ReadonlyArray<Readonly<{
         { type: "text", text: "SAVE10" }] },
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
     ]),
-    promise: { kind: "CHECKOUT_DISCOUNT", offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1",
+    promise: { kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT",
+      offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1",
       offers: [{ offerId: "offer-1", providerDiscountId: "discount-1", method: "CODE", code: "SAVE10" }] } },
+    promotionTarget: "CHECKOUT",
     expectedButtonIndexes: ["0"],
   },
   {
@@ -57,8 +61,10 @@ const cases: ReadonlyArray<Readonly<{
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-suffix" }] },
       { type: "button", sub_type: "url", index: "1", parameters: [{ type: "text", text: "product-suffix" }] },
     ]),
-    promise: { kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: "offer-1", providerDiscountId: "discount-1",
-      method: "CODE", code: "SAVE10", productId: "product-1", variantId: "variant-1", productTitle: "Scarf" },
+    promise: { kind: "ALTERNATIVE_PRODUCT_PROMOTION", promotionTarget: "ALTERNATIVE_PRODUCT",
+      offerId: "offer-1", providerDiscountId: "discount-1", method: "CODE", code: "SAVE10",
+      productId: "product-1", variantId: "variant-1", productTitle: "Scarf" },
+    promotionTarget: "ALTERNATIVE_PRODUCT",
     expectedButtonIndexes: ["0", "1"],
   },
 ];
@@ -73,10 +79,12 @@ describe("ARCH-052 initial template Meta payloads", () => {
     harness = await startArch040BackgroundMocks();
 
     for (const [index, item] of cases.entries()) {
-      const fields = templateSendFields(item.prepared, item.promise);
-      const { providerInput } = prepareAutomatedTemplateInput({
+      const fields = templateSendFields(item.prepared, item.promise, item.promotionTarget);
+      const preparedInput = prepareAutomatedTemplateInput({
         ...fields, to: "+447400123456",
       });
+      expect(JSON.parse(preparedInput.effectiveText).recoveryPromise).toEqual(item.promise);
+      const { providerInput } = preparedInput;
       const sent = await harness.provider.sendWhatsAppTemplate(providerInput);
       expect(sent.providerMessageId).toBeTruthy();
 

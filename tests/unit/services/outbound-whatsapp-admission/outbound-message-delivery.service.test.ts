@@ -356,6 +356,43 @@ describe("OutboundMessageDeliveryService", () => {
     }));
   });
 
+  it("persists the ordered target-bearing checkout offer set on the provider-confirmed receipt", async () => {
+    const test = harness();
+    const recoveryPromise = {
+      kind: "CHECKOUT_DISCOUNT" as const,
+      promotionTarget: "CHECKOUT" as const,
+      offerSet: {
+        schemaVersion: "moda.outreach.checkout-offers.v1" as const,
+        offers: [
+          { offerId: "offer-1", providerDiscountId: "provider-1", method: "CODE" as const, code: "SAVE10" },
+          { offerId: "offer-2", providerDiscountId: "provider-2", method: "CODE" as const, code: "SHIPFREE" },
+        ],
+      },
+    };
+    const input = {
+      to: "+15551234567", templateName: "recovery", languageCode: "en",
+      bodyParameters: ["Cart details"], recoveryPromise,
+      templateRegistration: {
+        shopId: "shop-1", senderWabaId: "phone-number-id", purpose: "INITIAL_CODE_OFFER" as const,
+        variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
+        providerTemplateId: "provider-template-1", providerTemplateName: "recovery",
+        providerLanguageCode: "en", submittedContentHash: "a".repeat(64), bindingFingerprint: "b".repeat(64),
+      },
+    };
+    const effectiveText = prepareAutomatedTemplateInput(input).effectiveText;
+
+    await expect(test.service.sendPreparedTemplate(admission, input)).resolves.toMatchObject({ kind: "admitted" });
+
+    expect(JSON.parse(effectiveText).recoveryPromise).toEqual(recoveryPromise);
+    expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: { content: effectiveText },
+    }));
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
+    expect(test.database.conversationMessage.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "SENT", providerMessageId: "wamid-template" }),
+    }));
+  });
+
   it("suppresses a blocked automated template and releases its reserved usage", async () => {
     const test = harness({ moderationOutcome: "block" });
     const result = await test.service.sendPreparedTemplate(admission, {

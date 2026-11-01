@@ -1,15 +1,19 @@
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
 import type { InitialOutreachCheckoutOfferSet } from "@modainteract/moda-interact-shared/commerce";
 import type { PreparedRecoveryTemplate } from "../recovery-template-preparation/recovery-template.types.js";
+import type { RecoveryPromotionTarget } from "../recovery-template-preparation/recovery-template.types.js";
 import type { FinalTemplateIdentity } from "./final-template-registration.service.js";
 
 export type RecoveryOfferPromise = Readonly<
   | { kind: "NO_OFFER" }
-  | { kind: "CODE_OFFER"; providerDiscountId: string; code?: string }
-  | { kind: "AUTOMATIC_OFFER"; providerDiscountId: string; code?: string }
-  | { kind: "CHECKOUT_DISCOUNT"; offerSet: InitialOutreachCheckoutOfferSet }
-  | { kind: "ALTERNATIVE_PRODUCT_PROMOTION"; offerId: string; providerDiscountId: string;
-      method: "CODE" | "AUTOMATIC"; code: string | null; productId: string;
+    | { kind: "CODE_OFFER"; promotionTarget: RecoveryPromotionTarget; providerDiscountId: string; code: string }
+    | { kind: "AUTOMATIC_OFFER"; promotionTarget: RecoveryPromotionTarget; providerDiscountId: string }
+    | { kind: "CHECKOUT_DISCOUNT"; promotionTarget: "CHECKOUT"; offerSet: InitialOutreachCheckoutOfferSet }
+    | { kind: "ALTERNATIVE_PRODUCT_PROMOTION"; promotionTarget: "ALTERNATIVE_PRODUCT";
+      offerId: string; providerDiscountId: string; method: "CODE"; code: string; productId: string;
+      variantId: string | null; productTitle: string }
+    | { kind: "ALTERNATIVE_PRODUCT_PROMOTION"; promotionTarget: "ALTERNATIVE_PRODUCT";
+      offerId: string; providerDiscountId: string; method: "AUTOMATIC"; productId: string;
       variantId: string | null; productTitle: string }
 >;
 
@@ -17,11 +21,15 @@ export type RecoveryOfferPromise = Readonly<
  * parameters. The Admin/BG001-frozen components are already authoritative. */
 export function templateSendFields(
   prepared: PreparedRecoveryTemplate, recoveryPromise: RecoveryOfferPromise,
+  promotionTarget: RecoveryPromotionTarget = "CHECKOUT",
 ): Omit<SendTemplateInput, "to"> {
   if (prepared.outcome !== "prepared" ||
       prepared.template.name !== prepared.providerTemplateName ||
       prepared.template.language.code !== prepared.providerLanguageCode) {
     throw new Error("PREPARED_TEMPLATE_IDENTITY_INVALID");
+  }
+  if (recoveryPromise.kind !== "NO_OFFER" && recoveryPromise.promotionTarget !== promotionTarget) {
+    throw new Error("PREPARED_TEMPLATE_PROMOTION_TARGET_MISMATCH");
   }
   let header: string | undefined;
   let image: string | undefined;

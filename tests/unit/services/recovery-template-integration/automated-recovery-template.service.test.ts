@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AutomatedRecoveryTemplateService } from
+import { AutomatedRecoveryTemplateService, previousPromise } from
   "../../../../src/services/recovery-template-integration/automated-recovery-template.service.js";
 import { prepareAutomatedTemplateInput } from
   "../../../../src/services/conversation-moderation/automated-template-input.js";
@@ -202,7 +202,8 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     }));
     expect(f.offers.resolve).not.toHaveBeenCalled();
     if (result.kind === "prepared") expect(result.send.recoveryPromise).toMatchObject({
-      kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [{ providerDiscountId: "provider-offer-1",
+      kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT",
+      offerSet: { offers: [{ providerDiscountId: "provider-offer-1",
         method: kind === "CODE_OFFER" ? "CODE" : "AUTOMATIC", code }] },
     });
   });
@@ -240,7 +241,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       verifiedOffer: expect.objectContaining({ description: "Description automatic-one, Description automatic-two" }),
     }));
     if (result.kind === "prepared") expect(result.send.recoveryPromise).toMatchObject({
-      kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [
+      kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet: { offers: [
         { offerId: "automatic-one" }, { offerId: "automatic-two" },
       ] },
     });
@@ -290,8 +291,11 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       expect(result.send.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
       const receipt = JSON.parse(prepareAutomatedTemplateInput({
         ...result.send, to: "15551234567",
-      }).effectiveText) as { bodyParameters: string[]; recoveryPromise: { offerSet: { offers: unknown[] } } };
+      }).effectiveText) as { bodyParameters: string[]; recoveryPromise: {
+        promotionTarget: string; offerSet: { offers: unknown[] };
+      } };
       expect(receipt.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      expect(receipt.recoveryPromise.promotionTarget).toBe("CHECKOUT");
       expect(receipt.recoveryPromise.offerSet.offers).toEqual(surviving);
       expect(receipt.recoveryPromise.offerSet.offers).not.toContainEqual(
         expect.objectContaining({ offerId: proposed[proposedCount - 1]!.offerId }),
@@ -362,9 +366,11 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
           url: "https://shop.example/products/scarf" } },
     }));
     if (prepared.kind === "prepared") expect(prepared.send.recoveryPromise).toMatchObject({
-      kind: "ALTERNATIVE_PRODUCT_PROMOTION", productId: "product-2", variantId: "variant-2",
+      kind: "ALTERNATIVE_PRODUCT_PROMOTION", promotionTarget: "ALTERNATIVE_PRODUCT",
+      productId: "product-2", variantId: "variant-2",
       providerDiscountId: "provider-offer-1", productTitle: "Matching scarf",
     });
+    if (prepared.kind === "prepared") expect(prepared.send.recoveryPromise).not.toHaveProperty("code");
 
     const crossShop = fixture();
     crossShop.context.mode = "AI_BEST_APPLICABLE";
@@ -393,7 +399,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
   it("reads a confirmed singleton checkout offer-set receipt for follow-up verification", async () => {
     const f = fixture({ ...recovered, status: "MESSAGE_SENT" });
     f.database.conversationMessage.findUnique.mockResolvedValueOnce({
-      content: storedPromise({ kind: "CHECKOUT_DISCOUNT", offerSet: {
+      content: storedPromise({ kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet: {
         schemaVersion: "moda.outreach.checkout-offers.v1",
         offers: [{ offerId: "offer-1", providerDiscountId: "provider-offer-1", method: "CODE", code: "SAVE10" }],
       } }), status: "SENT", providerMessageId: "wamid-1", senderType: "AUTOMATION", direction: "OUTBOUND",
@@ -411,8 +417,29 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
 
     expect(result.kind).toBe("prepared");
     expect(f.offers.resolve).toHaveBeenCalledWith(expect.objectContaining({
-      previouslyPromisedOffer: { kind: "CODE_OFFER", providerDiscountId: "provider-offer-1", code: "SAVE10" },
+      previouslyPromisedOffer: { kind: "CODE_OFFER", providerDiscountId: "provider-offer-1",
+        code: "SAVE10", promotionTarget: "CHECKOUT" },
     }));
+  });
+
+  it("retains trusted targets from confirmed receipts without guessing legacy targets", () => {
+    expect(previousPromise(storedPromise({ kind: "CODE_OFFER", promotionTarget: "CHECKOUT",
+      providerDiscountId: "provider-1", code: "SAVE10" }))).toEqual({
+      kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: "provider-1", code: "SAVE10",
+    });
+    expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
+      promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-2",
+      method: "AUTOMATIC", code: null }))).toEqual({
+      kind: "AUTOMATIC_OFFER", promotionTarget: "ALTERNATIVE_PRODUCT", providerDiscountId: "provider-2",
+    });
+    expect(previousPromise(storedPromise({ kind: "ALTERNATIVE_PRODUCT_PROMOTION",
+      providerDiscountId: "legacy-provider-2", method: "AUTOMATIC", code: null }))).toEqual({
+      kind: "AUTOMATIC_OFFER", providerDiscountId: "legacy-provider-2",
+    });
+    expect(previousPromise(storedPromise({ kind: "CODE_OFFER", providerDiscountId: "legacy-1", code: "OLD" })))
+      .toEqual({ kind: "CODE_OFFER", providerDiscountId: "legacy-1", code: "OLD" });
+    expect(previousPromise(storedPromise({ kind: "CHECKOUT_DISCOUNT", promotionTarget: "ALTERNATIVE_PRODUCT",
+      offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: [] } }))).toBeNull();
   });
 
   it("denies a follow-up when initial proof is missing or unsafe", async () => {
@@ -436,7 +463,8 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     });
     expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "FOLLOW_UP", policy: policy as never, conversationLanguageTag: "fr-CA" }))
-      .toEqual({ kind: "unavailable", reason: "PREVIOUS_OFFER_UNVERIFIED" });
+      .toEqual({ kind: "unavailable", reason: "PREVIOUS_OFFER_UNKNOWN" });
+    expect(f.offers.resolve).not.toHaveBeenCalled();
     expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
