@@ -282,6 +282,19 @@ export class AutomatedRecoveryTemplateService {
       if (failure.code === "BUDGET_EXHAUSTED" && failure.reasonCode === "MODEL_STEP_BUDGET_EXHAUSTED") {
         return "AI_UNAVAILABLE";
       }
+      if (failure.code === "UNAVAILABLE" && [
+        "OFFER_DISCOVERY_INCOMPLETE",
+        "CURRENT_SOURCE_READ_DEADLINE",
+        "SOURCE_FENCE_F1_CATALOGUE_UNAVAILABLE",
+        "SOURCE_FENCE_F1_READ_DEADLINE_EXCEEDED",
+        "SOURCE_FENCE_F1_READ_FAILED",
+        "SOURCE_FENCE_F1_SOURCE_DATA_INVALID",
+        "SOURCE_FENCE_F1_SOURCE_ROW_UNAVAILABLE",
+        "SOURCE_FENCE_F1_SOURCE_TOO_LARGE",
+        "SOURCE_FENCE_F2_CHANGED",
+      ].includes(failure.reasonCode)) {
+        return "DISCOUNT_REVALIDATION_UNAVAILABLE";
+      }
       return null;
     };
     const noOfferTrigger = (reason: string): InitialFallbackTrigger => {

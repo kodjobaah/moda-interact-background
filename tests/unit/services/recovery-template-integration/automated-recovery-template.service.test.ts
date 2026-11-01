@@ -547,6 +547,20 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       "AI_UNAVAILABLE"],
     [{ kind: "FAILURE", code: "BUDGET_EXHAUSTED", reasonCode: "MODEL_STEP_BUDGET_EXHAUSTED", retryable: true },
       "AI_UNAVAILABLE"],
+    ...[
+      "OFFER_DISCOVERY_INCOMPLETE",
+      "CURRENT_SOURCE_READ_DEADLINE",
+      "SOURCE_FENCE_F1_CATALOGUE_UNAVAILABLE",
+      "SOURCE_FENCE_F1_READ_DEADLINE_EXCEEDED",
+      "SOURCE_FENCE_F1_READ_FAILED",
+      "SOURCE_FENCE_F1_SOURCE_DATA_INVALID",
+      "SOURCE_FENCE_F1_SOURCE_ROW_UNAVAILABLE",
+      "SOURCE_FENCE_F1_SOURCE_TOO_LARGE",
+      "SOURCE_FENCE_F2_CHANGED",
+    ].map((reasonCode) => [
+      { kind: "FAILURE", code: "UNAVAILABLE", reasonCode, retryable: true },
+      "DISCOUNT_REVALIDATION_UNAVAILABLE",
+    ] as const),
     [{ kind: "NO_VERIFIED_OFFER", reason: "AI_UNAVAILABLE", discoveryIncomplete: true },
       "AI_UNAVAILABLE"],
   ] as const)("routes optional enrichment result %j to one neutral fallback", async (result, trigger) => {
@@ -572,6 +586,11 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "OUTREACH_OPERATION_FAILED", retryable: true },
     { kind: "FAILURE", code: "INVALID_RESULT", reasonCode: "PRICE_PREFLIGHT_MISSING", retryable: false },
     { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "MCP_UNAVAILABLE", retryable: false },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F1_CONTEXT_UNAVAILABLE", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F1_CANCELLED", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F1_INVALID_INPUT", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "CURRENT_CONTEXT_CHANGED_DURING_SOURCE_READ", retryable: true },
+    { kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "SOURCE_FENCE_F9_UNKNOWN", retryable: true },
   ] as const)("does not classify non-optional failure %j as fallback", async (result) => {
     const f = fixture();
     f.context.mode = "AI_BEST_APPLICABLE";
