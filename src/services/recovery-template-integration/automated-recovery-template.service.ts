@@ -266,11 +266,22 @@ export class AutomatedRecoveryTemplateService {
       });
       return unavailable(`INITIAL_FALLBACK_${fallback.reason}`);
     };
-    const failureTrigger = (reasonCode: string): InitialFallbackTrigger | null => {
-      if (/^(MCP_|CURRENT_SOURCE|SOURCE_FENCE)/.test(reasonCode)) return "MCP_UNAVAILABLE";
-      if (/PRICE/.test(reasonCode)) return "PRICE_UNVERIFIABLE";
-      if (/DISCOUNT|OFFER/.test(reasonCode)) return "DISCOUNT_REVALIDATION_UNAVAILABLE";
-      if (/AI|MODEL|OUTREACH_(DEADLINE|UNAVAILABLE|OPERATION)/.test(reasonCode)) return "AI_UNAVAILABLE";
+    const failureTrigger = (failure: Extract<
+      Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>["result"], { kind: "FAILURE" }
+    >): InitialFallbackTrigger | null => {
+      if (!failure.retryable) return null;
+      if (failure.code === "UNAVAILABLE" && failure.reasonCode === "MCP_UNAVAILABLE") {
+        return "MCP_UNAVAILABLE";
+      }
+      if (failure.code === "UNAVAILABLE" && failure.reasonCode === "AI_UNAVAILABLE") {
+        return "AI_UNAVAILABLE";
+      }
+      if (failure.code === "DEADLINE" && failure.reasonCode === "OUTREACH_DEADLINE") {
+        return "AI_UNAVAILABLE";
+      }
+      if (failure.code === "BUDGET_EXHAUSTED" && failure.reasonCode === "MODEL_STEP_BUDGET_EXHAUSTED") {
+        return "AI_UNAVAILABLE";
+      }
       return null;
     };
     const noOfferTrigger = (reason: string): InitialFallbackTrigger => {
@@ -364,7 +375,7 @@ export class AutomatedRecoveryTemplateService {
         }
         const { result, context, currentContext } = selected;
         if (result.kind === "FAILURE") {
-          const trigger = failureTrigger(result.reasonCode);
+          const trigger = failureTrigger(result);
           if (trigger) return prepareFallback(trigger);
           return unavailable(result.reasonCode);
         }

@@ -1,8 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import type { CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
-import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
+import {
+  CommerceModelInvocationFailure,
+  type CommerceModelInvoker,
+} from "@modainteract/moda-interact-shared/commerce/runner";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
+import { CommerceHostError } from "../../commerce/mcp-client.js";
 import { runInitialOutreachOfferAgent } from "../../agents/initial-outreach-offer.agent.js";
 import type { InitialOutreachAgentResult } from "../../agents/initial-outreach-offer.types.js";
 import { createProductionCommerceModelInvoker } from "../../commerce/production-model.js";
@@ -30,6 +34,16 @@ export class InitialOfferEnrichmentError extends Error {
     super("Initial offer enrichment failed.", { cause });
     this.name = "InitialOfferEnrichmentError";
   }
+}
+
+function optionalAgentFailure(error: unknown): "AI_UNAVAILABLE" | "MCP_UNAVAILABLE" | null {
+  if (error instanceof CommerceHostError) {
+    return error.code === "UNAVAILABLE" && error.retryable ? "MCP_UNAVAILABLE" : null;
+  }
+  if (error instanceof CommerceModelInvocationFailure && error.diagnostic.stage === "model.invoke") {
+    return "AI_UNAVAILABLE";
+  }
+  return null;
 }
 
 export type InitialOutreachOfferSelectionDependencies = Readonly<{
@@ -153,8 +167,17 @@ export class InitialOutreachOfferSelectionService {
         logger: this.logger,
       });
     } catch (error) {
-      const trigger = error instanceof Error && error.name === "CommerceHostError"
-        ? "MCP_UNAVAILABLE" : "AI_UNAVAILABLE";
+      const trigger = optionalAgentFailure(error);
+      if (!trigger) {
+        this.logger.error("recovery_offer.initial_enrichment.unclassified_failure", {
+          shopId: input.shopId,
+          recoveryId: input.checkoutRecoveryId,
+          attemptId: input.outreachAttemptId,
+          reason: "OUTREACH_AGENT_FAILURE_NOT_CLASSIFIED_AS_OPTIONAL",
+          error,
+        });
+        throw error;
+      }
       this.logger.error("recovery_offer.initial_enrichment.failed", {
         shopId: input.shopId,
         recoveryId: input.checkoutRecoveryId,

@@ -14,7 +14,7 @@ const preparedTemplate: PreparedRecoveryTemplate = {
   variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
   providerTemplateId: "provider-template-1", providerTemplateName: "approved_initial_no_offer",
   providerLanguageCode: "en_GB", submittedContentHash: "a".repeat(64),
-  bindingFingerprint: "b".repeat(64),
+  bindingFingerprint: "b".repeat(64), initialCheckoutItemsBodyPosition: 2,
   template: { name: "approved_initial_no_offer", language: { code: "en_GB" }, components: [
     { type: "body", parameters: [{ type: "text", text: "Alice" }, { type: "text", text: "2 x Shoes" }] },
     { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "token" }] },
