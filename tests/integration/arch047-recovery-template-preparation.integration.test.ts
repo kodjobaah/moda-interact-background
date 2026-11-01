@@ -91,6 +91,7 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
         ] } };
       expect(await service.prepare(request)).toMatchObject({
         outcome: "prepared", shopId, definitionId, registrationId,
+        initialCheckoutItemsBodyPosition: 4,
         canonicalLanguageTag: "en", template: { components: [{
           type: "body", parameters: [{ text: "Alex" },
             { text: "Tenant Brand" }, { text: "Tenant Brand" },

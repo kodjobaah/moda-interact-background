@@ -138,10 +138,12 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(first.providerRequests).toBe(1);
       expect(second.providerRequests).toBe(1);
       expect(first.providerTemplateRequests).toMatchObject([{
-        shopId: first.shopId, recoveryId: first.recoveryId, bodyParameters: [firstShop.domain],
+        shopId: first.shopId, recoveryId: first.recoveryId,
+        bodyParameters: [firstShop.domain, "1 × Test item"],
       }]);
       expect(second.providerTemplateRequests).toMatchObject([{
-        shopId: second.shopId, recoveryId: second.recoveryId, bodyParameters: [secondShop.domain],
+        shopId: second.shopId, recoveryId: second.recoveryId,
+        bodyParameters: [secondShop.domain, "1 × Test item"],
       }]);
 
       const attempts = await Promise.all([

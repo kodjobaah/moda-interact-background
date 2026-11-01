@@ -8,6 +8,7 @@ import type {
   TemplateUnavailableReason,
   VerifiedOfferPresentation,
 } from "./recovery-template.types.js";
+import { decideInitialCheckoutItemsBinding } from "./initial-checkout-items-policy.js";
 
 export const PURPOSE_BY_STAGE_AND_OFFER = {
   INITIAL: {
@@ -90,10 +91,20 @@ export function selectRecoveryAssignment(input: {
     return { outcome: "unavailable", reason: "IDENTITY_MISMATCH" };
   }
 
+  let initialBindingFailure: "BINDINGS_INVALID" | "DEFINITION_UNAVAILABLE" = "DEFINITION_UNAVAILABLE";
+  let rejectedInitialBinding = false;
   const initialCandidates = input.stage !== "INITIAL" ? input.variants : input.variants.filter((row) => {
     const registration = row.metaRegistration;
     if (!registration) return true;
     const bindings = registration?.parameterBindingsSnapshot;
+    const checkoutItemsDecision = decideInitialCheckoutItemsBinding({
+      stage: "INITIAL", parameterBindingsSnapshot: bindings,
+    });
+    if (!checkoutItemsDecision.ok) {
+      rejectedInitialBinding = true;
+      if (checkoutItemsDecision.reason === "BINDINGS_INVALID") initialBindingFailure = "BINDINGS_INVALID";
+      return false;
+    }
     const components = registration?.componentsSnapshot;
     if (!bindings || typeof bindings !== "object" || Array.isArray(bindings) ||
         !components || !Array.isArray(components)) return false;
@@ -135,6 +146,10 @@ export function selectRecoveryAssignment(input: {
   add(merchant, "merchant-fallback");
   if (input.platformFallbackEnabled) add(platform, "platform-fallback");
   if (!choices.length) return { outcome: "unavailable", reason: "NO_LANGUAGE" };
+
+  if (input.stage === "INITIAL" && initialCandidates.length === 0 && rejectedInitialBinding) {
+    return { outcome: "unavailable", reason: initialBindingFailure };
+  }
 
   for (const choice of choices) {
     const candidates: AssignedVariantRow[] = [];

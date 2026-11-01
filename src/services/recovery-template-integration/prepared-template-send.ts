@@ -4,6 +4,14 @@ import type { PreparedRecoveryTemplate } from "../recovery-template-preparation/
 import type { RecoveryPromotionTarget } from "../recovery-template-preparation/recovery-template.types.js";
 import type { FinalTemplateIdentity } from "./final-template-registration.service.js";
 
+export class PreparedTemplateSendAdmissionError extends Error {
+  constructor(readonly code: "INITIAL_CHECKOUT_ITEMS_POSITION_INVALID" |
+    "INITIAL_CHECKOUT_ITEMS_BODY_INVALID") {
+    super(code);
+    this.name = "PreparedTemplateSendAdmissionError";
+  }
+}
+
 export type RecoveryOfferPromise = Readonly<
   | { kind: "NO_OFFER" }
     | { kind: "CODE_OFFER"; promotionTarget: RecoveryPromotionTarget; providerDiscountId: string; code: string }
@@ -35,8 +43,12 @@ export function templateSendFields(
   let image: string | undefined;
   let body: string[] | undefined;
   const buttons: Array<{ index: number; text: string }> = [];
+  let bodyCount = 0;
   let last = -1;
   for (const component of prepared.template.components) {
+    if (prepared.purpose.startsWith("INITIAL_") && component.type === "body" && bodyCount > 0) {
+      throw new PreparedTemplateSendAdmissionError("INITIAL_CHECKOUT_ITEMS_BODY_INVALID");
+    }
     const order = component.type === "header" ? 0 : component.type === "body" ? 1 : 2;
     if (order < last || (order === last && component.type !== "button")) {
       throw new Error("PREPARED_TEMPLATE_COMPONENT_ORDER_INVALID");
@@ -48,12 +60,23 @@ export function templateSendFields(
       if (parameter.type === "text") header = parameter.text;
       else image = parameter.image.link;
     } else if (component.type === "body") {
+      bodyCount += 1;
       body = component.parameters.map((parameter) => parameter.text);
     } else {
       const index = Number(component.index);
       if (!Number.isSafeInteger(index) || index < 0 || component.parameters.length !== 1 ||
           component.parameters[0]?.type !== "text") throw new Error("PREPARED_TEMPLATE_BUTTON_INVALID");
       buttons.push({ index, text: component.parameters[0].text });
+    }
+  }
+  if (prepared.purpose.startsWith("INITIAL_")) {
+    const position = prepared.initialCheckoutItemsBodyPosition;
+    if (position === null || !Number.isSafeInteger(position) || position < 1) {
+      throw new PreparedTemplateSendAdmissionError("INITIAL_CHECKOUT_ITEMS_POSITION_INVALID");
+    }
+    if (bodyCount !== 1 || !body || position > body.length ||
+        typeof body[position - 1] !== "string" || !body[position - 1]!.trim()) {
+      throw new PreparedTemplateSendAdmissionError("INITIAL_CHECKOUT_ITEMS_BODY_INVALID");
     }
   }
   if (buttons.length > 2 || buttons.some((button, index) =>
