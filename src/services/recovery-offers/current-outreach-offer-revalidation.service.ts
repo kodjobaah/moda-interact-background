@@ -20,6 +20,7 @@ import { RecoveryOutreachMcpSelectorService } from "./recovery-outreach-mcp-sele
 import type { DiscountSourceFence, DiscountSourceFenceResult } from "./current-discount-source-fence.js";
 import { readCurrentDiscountSourceFence } from "./current-discount-source-fence.js";
 import type { CheckoutPriceReconciliation } from "../recovery-pricing/checkout-price-reconciliation.types.js";
+import { isSafePromotionProductUrl } from "./promotion-product-url.js";
 
 const MCP_READ_BUDGET_MS = 15_000;
 const logger = createLogger({
@@ -354,6 +355,9 @@ export class CurrentOutreachOfferRevalidationService {
     if (!candidate || !freshProduct ||
         !productTargetMatches(candidate, freshProduct, this.clock())) {
       return noOffer(context, "ALTERNATIVE_PRODUCT_NO_LONGER_VERIFIABLE", true, second.fence);
+    }
+    if (!freshProduct.url || !isSafePromotionProductUrl(freshProduct.url)) {
+      return noOffer(context, "PROMOTION_PRODUCT_URL_UNAVAILABLE", true, second.fence);
     }
     const validated = {
       kind: "ALTERNATIVE_PRODUCT_PROMOTION" as const,

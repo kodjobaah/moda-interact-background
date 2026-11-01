@@ -10,10 +10,13 @@ const integration = databaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "
   ? describe : describe.skip;
 
 const now = new Date("2026-10-25T13:30:00.000Z");
-const components = [{ type: "BODY", text: "Hello {{1}} {{2}}: {{3}}" }];
-const bindings = { header: [], body: [{ position: 1, variable: "customer.firstName" },
-  { position: 2, variable: "shopBrand.brandName" },
-  { position: 3, variable: "checkout.itemsSummary" }], buttons: [] };
+const components = [{ type: "BODY", text: "Hello {{1}} from {{2}} ({{3}}): {{4}}. Quote this message using WhatsApp Reply and send text or a voice note (2-minute limit)." }];
+const bindings = { promotionTarget: "CHECKOUT", header: [], body: [
+  { position: 1, variable: "customer.firstName" },
+  { position: 2, variable: "shop.name" },
+  { position: 3, variable: "shopBrand.brandName" },
+  { position: 4, variable: "checkout.itemsSummary" },
+], buttons: [] };
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -78,8 +81,10 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
       const service = new RecoveryTemplatePreparer(repo, async () => waba, async () => null,
         [], () => now, logger);
       const request = { shopId, senderWabaId: waba, stage: "INITIAL" as const,
-        offerPresentation: "NO_OFFER" as const, conversationLanguageTag: "en-GB",
+        offerPresentation: "NO_OFFER" as const, promotionTarget: "CHECKOUT" as const,
+        conversationLanguageTag: "en-GB",
         merchantLanguageTag: null, customerFirstName: "Alex",
+          shopName: { shopId, value: `${suffix}.arch047.example.test` },
         checkoutItems: { shopId, lineItems: [
           { title: "Shoes", variantTitle: "Blue / 9", quantity: 2 },
           { title: "Water bottle", quantity: 1 },
@@ -87,7 +92,8 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
       expect(await service.prepare(request)).toMatchObject({
         outcome: "prepared", shopId, definitionId, registrationId,
         canonicalLanguageTag: "en", template: { components: [{
-          type: "body", parameters: [{ text: "Alex" }, { text: "Tenant Brand" },
+          type: "body", parameters: [{ text: "Alex" },
+            { text: "Tenant Brand" }, { text: "Tenant Brand" },
             { text: "2 × Shoes (Blue / 9) and 1 × Water bottle" }],
         }] },
       });

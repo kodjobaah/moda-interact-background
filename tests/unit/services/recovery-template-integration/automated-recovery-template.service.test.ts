@@ -1,8 +1,15 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AutomatedRecoveryTemplateService } from
   "../../../../src/services/recovery-template-integration/automated-recovery-template.service.js";
+import { prepareAutomatedTemplateInput } from
+  "../../../../src/services/conversation-moderation/automated-template-input.js";
 import { fingerprintRecoveryPricingBasket } from
   "../../../../src/services/recovery-pricing/price-comparison.js";
+import { RecoveryTemplatePreparer } from
+  "../../../../src/services/recovery-template-preparation/recovery-template-preparer.service.js";
+import type { AssignedVariantRow, RecoveryTemplateRepository } from
+  "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
 import type { PreparedRecoveryTemplate } from
   "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
 
@@ -86,6 +93,53 @@ function fixture(recovery = recovered) {
     implementation.prepare(input.stage === "INITIAL" && !input.outreachAttemptId
       ? { ...input, outreachAttemptId: "attempt-1" } : input) };
   return { offers, preparer, database, logger, service, initialOffers, context, setCheckoutDecision };
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}`;
+}
+
+function approvedCodeVariant(binding: "offer.code" | "offer.codes"): AssignedVariantRow {
+  const suffix = binding === "offer.code" ? "single" : "plural";
+  const providerTemplateName = `approved_${suffix}_code`;
+  const components = [{ type: "BODY", text: "Use {{1}} from {{2}}" }];
+  const parameterBindings = { promotionTarget: "CHECKOUT", header: [], body: [
+    { position: 1, variable: binding }, { position: 2, variable: "shop.name" },
+  ], buttons: [] };
+  const contentHash = createHash("sha256").update(stableJson({ schemaVersion: 1,
+    family: "META_RECOVERY", category: "MARKETING", components,
+    parameterBindings })).digest("hex");
+  const definition = { id: `definition-${suffix}`, kind: "META_RECOVERY", purpose: "INITIAL",
+    offerType: "CODE_OFFER", status: "PUBLISHED", category: "MARKETING",
+    providerTemplateName, publishedAt: now, retiredAt: null };
+  const locale = { id: `locale-${suffix}`, languageTag: "en-GB", providerLanguageCode: "en_GB",
+    status: "REVIEWED", contentHash, definition };
+  const registration = { id: `registration-${suffix}`, wabaId: "waba-1", providerTemplateName,
+    providerLanguageCode: "en_GB", providerTemplateId: `provider-${suffix}`, category: "MARKETING",
+    providerStatus: "APPROVED", submissionState: "APPROVED", failureCode: null,
+    driftDetectedAt: null, lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
+    submittedContentHash: contentHash, componentsSnapshot: components,
+    parameterBindingsSnapshot: parameterBindings, locale };
+  return {
+    id: `variant-${suffix}`, shopId: "shop-1", providerAccountId: "waba-1",
+    purpose: "INITIAL_CODE_OFFER", languageTag: "en-GB", providerLanguageCode: "en_GB",
+    providerTemplateName, providerTemplateId: `provider-${suffix}`, status: "APPROVED",
+    enabled: true, metaRegistrationId: registration.id, metaRegistration: registration,
+  } as unknown as AssignedVariantRow;
+}
+
+function createRealPreparer(variants: readonly AssignedVariantRow[], logger: { warn: () => void; error: () => void }) {
+  const repository: RecoveryTemplateRepository = {
+    readCatalogue: async () => ({ shop: { id: "shop-1", status: "ACTIVE", defaultLanguageTag: "en-GB" },
+      variants }),
+    readShopBrand: async () => null,
+    readShopCategory: async () => null,
+  };
+  return new RecoveryTemplatePreparer(repository, async () => "waba-1", async () => null,
+    [], () => now, logger);
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -173,6 +227,92 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
         { offerId: "automatic-one" }, { offerId: "automatic-two" },
       ] },
     });
+  });
+
+  it.each([
+    { proposedCount: 3, survivingCodes: ["SAVE10", "SHIPFREE"],
+      variantId: "variant-plural" },
+    { proposedCount: 2, survivingCodes: ["SAVE10"],
+      variantId: "variant-single" },
+  ])("selects and receipts the approved revision after a fresh $proposedCount-to-$survivingCodes.length trim",
+    async ({ proposedCount, survivingCodes, variantId }) => {
+      const f = fixture();
+      f.context.mode = "AI_BEST_APPLICABLE";
+      const proposed = Array.from({ length: proposedCount }, (_, index) => ({
+        offerId: `offer-${index + 1}`, providerDiscountId: `provider-${index + 1}`,
+        method: "CODE" as const, code: index === 0 ? "SAVE10" : index === 1 ? "SHIPFREE" : "TAKE5",
+      }));
+      const surviving = proposed.filter((offer) => survivingCodes.includes(offer.code));
+      f.initialOffers.resolve.mockResolvedValueOnce({
+        context: f.context, currentContext: f.context, signal: new AbortController().signal,
+        result: {
+          kind: "CHECKOUT_DISCOUNT",
+          offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: surviving },
+          members: surviving.map((offer) => ({ ...offer, description: `Description ${offer.offerId}`,
+            eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [] } })),
+          group: { verdict: "SUPPORTED", offerIds: surviving.map(({ offerId }) => offerId), reasonCodes: [] },
+          shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+          generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint,
+          priceReconciliation: null, discoveryIncomplete: false,
+        },
+      } as never);
+      const realPreparer = createRealPreparer([
+        approvedCodeVariant("offer.code"), approvedCodeVariant("offer.codes"),
+      ], f.logger);
+      const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
+        f.database as never, async () => "waba-1", () => now, f.logger as never,
+        undefined, f.initialOffers as never);
+
+      const result = await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+        stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+        conversationLanguageTag: null, outreachAttemptId: "attempt-1" });
+
+      expect(result.kind).toBe("prepared");
+      if (result.kind !== "prepared") throw new Error("missing prepared trimmed offer set");
+      expect(result.prepared.variantId).toBe(variantId);
+      expect(result.send.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      const receipt = JSON.parse(prepareAutomatedTemplateInput({
+        ...result.send, to: "15551234567",
+      }).effectiveText) as { bodyParameters: string[]; recoveryPromise: { offerSet: { offers: unknown[] } } };
+      expect(receipt.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      expect(receipt.recoveryPromise.offerSet.offers).toEqual(surviving);
+      expect(receipt.recoveryPromise.offerSet.offers).not.toContainEqual(
+        expect.objectContaining({ offerId: proposed[proposedCount - 1]!.offerId }),
+      );
+      expect(f.initialOffers.resolve).toHaveBeenCalledTimes(1);
+      expect(f.offers.resolve).not.toHaveBeenCalled();
+    });
+
+  it("fails closed rather than binding a singular revision to a surviving plural set", async () => {
+    const f = fixture();
+    f.context.mode = "AI_BEST_APPLICABLE";
+    const surviving = [
+      { offerId: "offer-1", providerDiscountId: "provider-1", method: "CODE", code: "SAVE10" },
+      { offerId: "offer-2", providerDiscountId: "provider-2", method: "CODE", code: "SHIPFREE" },
+    ];
+    f.initialOffers.resolve.mockResolvedValueOnce({
+      context: f.context, currentContext: f.context, signal: new AbortController().signal,
+      result: {
+        kind: "CHECKOUT_DISCOUNT",
+        offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: surviving },
+        members: surviving.map((offer) => ({ ...offer, description: `Description ${offer.offerId}`,
+          eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [] } })),
+        group: { verdict: "SUPPORTED", offerIds: surviving.map(({ offerId }) => offerId), reasonCodes: [] },
+        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+        generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint,
+        priceReconciliation: null, discoveryIncomplete: false,
+      },
+    } as never);
+    const realPreparer = createRealPreparer([approvedCodeVariant("offer.code")], f.logger);
+    const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
+      f.database as never, async () => "waba-1", () => now, f.logger as never,
+      undefined, f.initialOffers as never);
+
+    expect(await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null, outreachAttemptId: "attempt-1" }))
+      .toEqual({ kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
+    expect(f.initialOffers.resolve).toHaveBeenCalledTimes(1);
   });
 
   it("requires authenticated exact-product provenance before preparing an alternative promotion", async () => {
