@@ -60,7 +60,8 @@ export class RecoveryTemplatePreparer {
       if (!input || typeof input.shopId !== "string" || !input.shopId.trim() ||
           typeof input.senderWabaId !== "string" || !input.senderWabaId.trim() ||
           !["INITIAL", "FOLLOW_UP"].includes(input.stage) ||
-          !["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"].includes(input.offerPresentation)) {
+          !["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"].includes(input.offerPresentation) ||
+          (input.stage === "INITIAL" && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(input.promotionTarget)))) {
         return unavailable("INVALID_REQUEST");
       }
       purpose = purposeFor(input.stage, input.offerPresentation);
@@ -79,6 +80,8 @@ export class RecoveryTemplatePreparer {
         shop: catalogue.shop, shopId: input.shopId, senderWabaId: configuredSender,
         purpose, variants: catalogue.variants,
         stage: input.stage, offer: input.offerPresentation,
+        offerCount: input.verifiedOffer?.codes?.length ?? 1,
+        ...(input.promotionTarget ? { promotionTarget: input.promotionTarget } : {}),
         conversationLanguageTag: input.conversationLanguageTag,
         merchantLanguageTag: input.merchantLanguageTag,
         platformFallbackEnabled: input.platformFallbackEnabled ?? false,

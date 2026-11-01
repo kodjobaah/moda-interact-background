@@ -1,33 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { LLMock } from "@copilotkit/aimock";
-import { OpenRouterModelClient } from "@modainteract/moda-interact-shared/commerce/model/node";
+import type { CommerceModelInvoker, ModelRequest } from "@modainteract/moda-interact-shared/commerce/runner";
 import { runInitialOutreachOfferAgent } from "../../src/agents/initial-outreach-offer.agent.js";
 import { InitialOutreachAgentContextSchema } from "../../src/agents/initial-outreach-offer.types.js";
 import type { OutreachMcpToolDescriptor } from "../../src/services/recovery-offers/recovery-outreach-mcp-selector.service.js";
-
-const localModelRoute = vi.hoisted(() => ({
-  baseURL: null as string | null,
-  constructions: [] as Array<{ model: string; baseURL: string }>,
-}));
-
-vi.mock("@langchain/openrouter", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@langchain/openrouter")>();
-  return {
-    ...actual,
-    ChatOpenRouter: class LoopbackChatOpenRouter extends actual.ChatOpenRouter {
-      constructor(fields: ConstructorParameters<typeof actual.ChatOpenRouter>[0]) {
-        const baseURL = localModelRoute.baseURL;
-        if (!baseURL) throw new Error("Local Aimock endpoint is required");
-        const endpoint = new URL(baseURL);
-        if (endpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname)) {
-          throw new Error("Aimock endpoint must use loopback HTTP");
-        }
-        super({ ...(typeof fields === "string" ? { model: fields } : fields), baseURL: endpoint.href });
-        localModelRoute.constructions.push({ model: this.model, baseURL: this.baseURL });
-      }
-    },
-  };
-});
 
 const offer = {
   offerId: "offer-aimock",
@@ -157,11 +133,6 @@ function context() {
   });
 }
 
-afterEach(() => {
-  localModelRoute.baseURL = null;
-  localModelRoute.constructions.length = 0;
-});
-
 describe("initial outreach offer agent with local Aimock", () => {
   it("routes real model/tool/model turns through loopback and returns the source-validated offer", async () => {
     const mock = new LLMock({ port: 0 });
@@ -171,7 +142,6 @@ describe("initial outreach offer agent with local Aimock", () => {
     const endpoint = new URL(mock.url);
     expect(endpoint.protocol).toBe("http:");
     expect(["127.0.0.1", "localhost", "[::1]"]).toContain(endpoint.hostname);
-    localModelRoute.baseURL = `${endpoint.origin}/v1`;
 
     const modelName = "moda/initial-outreach-aimock";
     mock.on({ model: modelName, sequenceIndex: 0 }, () => {
@@ -187,22 +157,51 @@ describe("initial outreach offer agent with local Aimock", () => {
       return { toolCalls: [{ name: "submitInitialOutreachOffer", arguments: { kind: "CHECKOUT_DISCOUNT", offerIds: [offer.offerId] } }] };
     });
 
-    const model = new OpenRouterModelClient({
-      provider: "moda",
-      providerModelId: "initial-outreach-aimock",
-      configurationSchemaVersion: 1,
-      configuration: {},
-      credential: "test-only-not-a-provider-key",
-    });
-    expect(localModelRoute.constructions).toEqual([{
-      model: modelName,
-      baseURL: `${endpoint.origin}/v1`,
-    }]);
+    const modelInvoker: CommerceModelInvoker = {
+      async invoke(request: ModelRequest, signal: AbortSignal) {
+        const response = await fetch(`${endpoint.origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { authorization: "Bearer test-only-local-aimock", "content-type": "application/json" },
+          body: JSON.stringify({
+            model: modelName,
+            messages: [
+              { role: "system", content: request.instructions.join("\n") },
+              { role: "user", content: JSON.stringify({
+                context: request.context, history: request.history, messages: request.messages,
+              }) },
+            ],
+            tools: request.tools.map((tool) => ({
+              type: "function", function: { name: tool.name, description: tool.description,
+                parameters: tool.inputSchema },
+            })),
+            max_tokens: request.maxOutputTokens,
+            stream: false,
+          }),
+          signal,
+        });
+        if (!response.ok) throw new Error(`Local Aimock returned HTTP ${response.status}`);
+        const body = await response.json() as {
+          choices?: Array<{ message?: { tool_calls?: Array<{
+            function?: { name?: string; arguments?: string };
+          }> } }>;
+          usage?: { completion_tokens?: number };
+        };
+        const calls = body.choices?.[0]?.message?.tool_calls ?? [];
+        if (calls.length !== 1 || !calls[0]?.function?.name || !calls[0].function.arguments) {
+          throw new Error("Local Aimock did not produce exactly one tool call");
+        }
+        return {
+          calls: [{ name: calls[0].function.name,
+            arguments: JSON.parse(calls[0].function.arguments) as unknown }],
+          outputTokens: body.usage?.completion_tokens ?? 0,
+        };
+      },
+    };
 
     try {
       const result = await runInitialOutreachOfferAgent(context(), {
         signal: new AbortController().signal,
-        modelInvoker: model,
+        modelInvoker,
         createSelector: () => ({
           async connect() {},
           async tools() { return tools; },
@@ -250,12 +249,7 @@ describe("initial outreach offer agent with local Aimock", () => {
         generation: 3,
         fingerprint: "b".repeat(64),
       });
-      expect(localModelRoute.constructions.every(({ baseURL }) => {
-        const target = new URL(baseURL);
-        return target.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(target.hostname);
-      })).toBe(true);
     } finally {
-      localModelRoute.baseURL = null;
       await mock.stop();
     }
   });

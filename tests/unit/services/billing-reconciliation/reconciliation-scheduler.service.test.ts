@@ -66,11 +66,12 @@ describe("BillingReconciliationSchedulerService", () => {
 
     expect(test.logger.warn).toHaveBeenCalledWith(
       "billing.subscription_reconciliation.enqueue_failed",
-      {
+      expect.objectContaining({
         shopId: "shop-1",
         subscriptionId: "subscription-1",
         errorMessage: "Redis unavailable",
-      },
+        error: expect.any(Error),
+      }),
     );
   });
 

@@ -6,9 +6,10 @@ import type {
 
 type JsonObject = Record<string, unknown>;
 type TextBinding = { position: number; variable: SemanticKey };
-type ButtonBinding = { index: number; subType: "url"; variable: "checkout.url" };
+type ButtonBinding = { index: number; subType: "url"; variable: "checkout.url" | "promotion.productUrl" };
 type FrozenBindings = {
   schemaVersion?: 1;
+  promotionTarget?: "CHECKOUT" | "ALTERNATIVE_PRODUCT";
   headerMediaRole?: BrandMediaRole;
   header: TextBinding[];
   body: TextBinding[];
@@ -38,21 +39,28 @@ function parseFrozenBindings(raw: unknown): FrozenBindings {
   // Admin owns the immutable projection. Keep optional schemaVersion in the
   // digest only when it was actually stored: older TEXT snapshots omit it.
   if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1) return invalid();
-  if (Object.keys(raw).some((key) =>
-      !["schemaVersion", "headerMediaRole", "header", "body", "buttons"].includes(key))) return invalid();
+    if (Object.keys(raw).some((key) =>
+      !["schemaVersion", "promotionTarget", "headerMediaRole", "header", "body", "buttons"].includes(key))) return invalid();
   if (raw.headerMediaRole !== undefined &&
       (raw.schemaVersion !== 1 || !MEDIA_ROLES.includes(raw.headerMediaRole as BrandMediaRole) ||
        !Array.isArray(raw.header) || raw.header.length !== 0)) return invalid();
-  if (!Array.isArray(raw.buttons) || raw.buttons.length > 1) return invalid();
+  if (raw.promotionTarget !== undefined && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(raw.promotionTarget))) return invalid();
+  if (!Array.isArray(raw.buttons) || raw.buttons.length > 2) return invalid();
   const buttons: ButtonBinding[] = [];
-  for (const entry of raw.buttons) {
-    if (!obj(entry) || entry.subType !== "url" || entry.variable !== "checkout.url" ||
-        !Number.isSafeInteger(entry.index) || entry.index !== 0 ||
+  for (const [position, entry] of raw.buttons.entries()) {
+    if (!obj(entry) || entry.subType !== "url" ||
+        !["checkout.url", "promotion.productUrl"].includes(String(entry.variable)) ||
+        !Number.isSafeInteger(entry.index) || entry.index !== position ||
         Object.keys(entry).some((key) => !["index", "subType", "variable"].includes(key))) return invalid();
-    buttons.push({ index: 0, subType: "url", variable: "checkout.url" });
+    const variable = entry.variable as ButtonBinding["variable"];
+    if ((raw.promotionTarget === "CHECKOUT" || raw.promotionTarget === undefined) && variable !== "checkout.url") return invalid();
+    if (raw.promotionTarget === "ALTERNATIVE_PRODUCT" &&
+        (position === 0 ? variable !== "checkout.url" : variable !== "promotion.productUrl")) return invalid();
+    buttons.push({ index: position, subType: "url", variable });
   }
   return {
     ...(raw.schemaVersion === 1 ? { schemaVersion: 1 as const } : {}),
+    ...(raw.promotionTarget !== undefined ? { promotionTarget: raw.promotionTarget as "CHECKOUT" | "ALTERNATIVE_PRODUCT" } : {}),
     ...(raw.headerMediaRole !== undefined ? { headerMediaRole: raw.headerMediaRole as BrandMediaRole } : {}),
     header: parseTextBindings(raw.header ?? [], 1),
     body: parseTextBindings(raw.body, 10),
@@ -169,7 +177,7 @@ export async function prepareFrozenComponents(input: {
           component.text.length > 60 || /[{}]/.test(component.text)) return invalid();
     } else if (component.type === "BUTTONS") {
       matchedButtons = true;
-      if (!Array.isArray(component.buttons) || component.buttons.length > 1) return invalid();
+      if (!Array.isArray(component.buttons) || component.buttons.length > 2) return invalid();
       for (const [index, candidate] of component.buttons.entries()) {
         if (!obj(candidate) || candidate.type !== "URL" ||
             typeof candidate.text !== "string" || !candidate.text.trim() ||
@@ -180,7 +188,9 @@ export async function prepareFrozenComponents(input: {
               candidate.url.slice(0, -5).includes("{{") ||
               candidate.url.slice(0, -5).includes("}}")) return invalid();
           const prefix = candidate.url.slice(0, -5);
-          const suffix = variables.encodeCheckoutButtonSuffix(prefix);
+          const suffix = binding.variable === "checkout.url"
+            ? variables.encodeCheckoutButtonSuffix(prefix)
+            : variables.encodePromotionButtonSuffix(prefix);
           result.push({ type: "button", sub_type: "url", index: String(index),
             parameters: [{ type: "text", text: suffix }] });
         } else {

@@ -53,6 +53,22 @@ describe("ARCH-047 compiled template component pass-through", () => {
     expect(JSON.parse(emitted.effectiveText).imageHeader).toBe("READY_DERIVATIVE");
   });
 
+  it("preserves two approved URL button indexes through the durable moderation descriptor", () => {
+    const prepared = { ...base, template: { ...base.template, components: [
+      base.template.components[0]!,
+      { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "checkout-token" }] },
+      { type: "button", sub_type: "url", index: "1", parameters: [{ type: "text", text: "product-token" }] },
+    ] } } as PreparedRecoveryTemplate;
+    const send = templateSendFields(prepared, { kind: "NO_OFFER" });
+    expect(send.dynamicUrlButtons).toEqual([
+      { index: 0, text: "checkout-token" },
+      { index: 1, text: "product-token" },
+    ]);
+    const emitted = prepareAutomatedTemplateInput({ ...send, to: "+447400123456" });
+    expect(emitted.providerInput.dynamicUrlButtons).toEqual(send.dynamicUrlButtons);
+    expect(JSON.parse(emitted.effectiveText).dynamicUrlButtons).toEqual(send.dynamicUrlButtons);
+  });
+
   it("never accepts reordered compiled components, or a mismatched template promise", () => {
     const invalid = { ...base, template: { ...base.template,
       components: [base.template.components[1]!, base.template.components[0]!] } };

@@ -9,7 +9,21 @@ type EmulatorRuntime = {
 
 type OutboundMessage = {
   statusCode: number;
-  body: { type?: string; to?: string; text?: { body?: string }; template?: { name?: string } };
+  body: {
+    type?: string;
+    to?: string;
+    text?: { body?: string };
+    template?: {
+      name?: string;
+      language?: { code?: string };
+      components?: Array<{
+        type?: string;
+        sub_type?: string;
+        index?: string;
+        parameters?: Array<{ type?: string; text?: string }>;
+      }>;
+    };
+  };
 };
 
 /**

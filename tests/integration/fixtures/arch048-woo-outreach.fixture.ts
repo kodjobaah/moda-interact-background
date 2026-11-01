@@ -34,6 +34,14 @@ export async function createWooOutreachFixture() {
   const queue = new Queue(`arch048-outreach-${runId}`, { connection: redis });
   const orderKey = `arch048:observed-order:${runId}`;
   const sentAt = new Date();
+  const providerTemplateRequests: Array<{
+    shopId: string;
+    recoveryId: string;
+    attemptId: string;
+    conversationId: string;
+    templateName: string;
+    bodyParameters: string[];
+  }> = [];
   let providerRequests = 0;
   let beforePermit: (() => Promise<void>) | undefined;
 
@@ -69,6 +77,45 @@ export async function createWooOutreachFixture() {
       shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1,
     } });
     await seedApprovedInitialWooTemplateRegistration(db, shopId);
+    let platformPrompt = await db.commerceAgentPrompt.findFirst({
+      where: { scope: "PLATFORM", shopId: null },
+      select: { id: true },
+    });
+    if (!platformPrompt) {
+      platformPrompt = await db.commerceAgentPrompt.create({ data: { scope: "PLATFORM", shopId: null }, select: { id: true } });
+    }
+    const shopPromptId = randomUUID();
+    const shopRevisionId = randomUUID();
+    const activePlatform = await db.commerceAgentConfiguration.findFirst({
+      where: { environment: "TEST", scope: "PLATFORM", shopId: null },
+      select: { activePromptRevisionId: true },
+    });
+    let platformRevisionId = activePlatform?.activePromptRevisionId;
+    if (!platformRevisionId) {
+      const publishedPlatformRevision = await db.commerceAgentPromptRevision.findFirst({
+        where: { promptId: platformPrompt.id, status: "PUBLISHED" },
+        orderBy: { revisionNumber: "desc" },
+        select: { id: true },
+      });
+      platformRevisionId = publishedPlatformRevision?.id ?? randomUUID();
+      if (!publishedPlatformRevision) {
+        await db.commerceAgentPromptRevision.create({ data: {
+          id: platformRevisionId, promptId: platformPrompt.id, revisionNumber: 1,
+          status: "PUBLISHED", promptText: "Platform safety rules.", publishedAt: sentAt,
+        } });
+      }
+      await db.commerceAgentConfiguration.create({ data: {
+        environment: "TEST", scope: "PLATFORM", shopId: null, activePromptRevisionId: platformRevisionId,
+      } });
+    }
+    await db.commerceAgentPrompt.create({ data: { id: shopPromptId, scope: "SHOP", shopId } });
+    await db.commerceAgentPromptRevision.create({ data: {
+      id: shopRevisionId, promptId: shopPromptId, revisionNumber: 1,
+      status: "PUBLISHED", promptText: "Merchant recovery instructions.", publishedAt: sentAt,
+    } });
+    await db.commerceAgentConfiguration.create({ data: {
+      environment: "TEST", scope: "SHOP", shopId, activePromptRevisionId: shopRevisionId,
+    } });
     const customer = await db.customer.create({ data: { shopId, phone: recipient } });
     const phone = await db.customerPhone.create({ data: { customerId: customer.id, phone: recipient } });
     // The real ARCH-046 DB trigger requires immutable Woo consent evidence in
@@ -97,6 +144,8 @@ export async function createWooOutreachFixture() {
     });
     const recovery = await db.checkoutRecovery.create({ data: {
       shopId, customerId: customer.id, checkoutToken, lastExternalActivityAt: sentAt,
+      currency: "GBP",
+      lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     const reader = new WooRecoveryConsentReader(db);
 
@@ -154,6 +203,14 @@ export async function createWooOutreachFixture() {
         });
         if (control?.controlMode !== "AI")
           return { kind: "suppressed", reason: "conversation-not-ai-controlled" };
+        providerTemplateRequests.push({
+          shopId: input.recovery.shopId,
+          recoveryId: input.recovery.id,
+          attemptId: input.attemptId,
+          conversationId: input.conversationId,
+          templateName: input.template.name,
+          bodyParameters: input.template.sendFields?.bodyParameters ?? [],
+        });
         const admittedAt = new Date();
         await db.conversationMessage.create({ data: {
           conversationId: input.conversationId,
@@ -182,6 +239,7 @@ export async function createWooOutreachFixture() {
       db, redis, queue, shopId, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
       guardedSender: sender,
       phoneId: phone.id, service, coordinator,
+      providerTemplateRequests,
       useRedisCheckoutCoordinator() { activeCoordinator = redisCoordinator; },
       get providerRequests() { return providerRequests; },
       setBeforePermit(run: (() => Promise<void>) | undefined) { beforePermit = run; },

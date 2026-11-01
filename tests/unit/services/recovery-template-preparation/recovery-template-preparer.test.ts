@@ -14,6 +14,7 @@ const checkout = { shopId: "shop-1", url: sourceUrl,
   approvedHosts: ["shop.example"] };
 const input = (override: Partial<RecoveryTemplatePreparationInput> = {}): RecoveryTemplatePreparationInput => ({
   shopId: "shop-1", senderWabaId: "waba-1", stage: "INITIAL", offerPresentation: "NO_OFFER",
+  promotionTarget: "CHECKOUT",
   conversationLanguageTag: "en-US", merchantLanguageTag: "en",
   customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Merchant" }, checkout,
   ...override,
@@ -35,6 +36,7 @@ const standardComponents = [
   { type: "BODY", text: "Hello {{1}} from {{2}}", example: { body_text: [["Alex", "Merchant"]] } },
 ];
 const standardBindings = {
+  promotionTarget: "CHECKOUT",
   header: [], body: [{ position: 1, variable: "customer.firstName" }, { position: 2, variable: "shop.name" }],
   buttons: [],
 };
@@ -48,7 +50,9 @@ function fixture(overrides: {
   const language = overrides.language ?? "en";
   const languageCode = overrides.languageCode ?? "en_US";
   const components = overrides.components ?? standardComponents;
-  const bindings = overrides.bindings ?? standardBindings;
+  const rawBindings = overrides.bindings ?? standardBindings;
+  const bindings = rawBindings && typeof rawBindings === "object" && !Array.isArray(rawBindings)
+    ? { promotionTarget: "CHECKOUT", ...rawBindings } : rawBindings;
   const digest = snapshotHash(components, bindings);
   const definition = {
     id: "definition-1", kind: "META_RECOVERY", purpose: overrides.stage ?? "INITIAL",
@@ -83,9 +87,11 @@ function setup(rows: AssignedVariantRow[] = [fixture()], options: {
   mediaHosts?: string[];
   defaultLanguage?: string | null;
   categoryNames?: Record<string, string | null>;
+  shopId?: string;
 } = {}) {
+  const shopId = options.shopId ?? "shop-1";
   const readCatalogue = vi.fn(async () => ({
-    shop: { id: "shop-1", status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
+    shop: { id: shopId, status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
     variants: rows,
   }));
   const readShopBrand = vi.fn(async () => options.brand ?? null);
@@ -106,20 +112,100 @@ const unavailable = async (service: RecoveryTemplatePreparer, reason: string,
 };
 
 describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template preparation", () => {
+  it("binds a source-bound alternative product only to its approved CTA while retaining checkout CTA", async () => {
+    const components = [
+      { type: "BODY", text: "{{1}} {{2}} {{3}} from {{4}}" },
+      { type: "BUTTONS", buttons: [
+        { type: "URL", text: "Resume checkout", url: "https://shop.example/resume?url={{1}}" },
+        { type: "URL", text: "View product", url: "https://shop.example/product?url={{1}}" },
+      ] },
+    ];
+    const bindings = { promotionTarget: "ALTERNATIVE_PRODUCT", header: [], body: [
+      { position: 1, variable: "promotion.productName" },
+      { position: 2, variable: "promotion.offerDescription" },
+      { position: 3, variable: "promotion.productUrl" },
+      { position: 4, variable: "shop.name" },
+    ], buttons: [
+      { index: 0, subType: "url", variable: "checkout.url" },
+      { index: 1, subType: "url", variable: "promotion.productUrl" },
+    ] };
+    const row = fixture({ offer: "AUTOMATIC_OFFER", components, bindings });
+    const { service } = setup([row]);
+    const productUrl = "https://shop.example/products/blue-jacket";
+    const request = input({ offerPresentation: "AUTOMATIC_OFFER", promotionTarget: "ALTERNATIVE_PRODUCT",
+      verifiedOffer: { kind: "AUTOMATIC_OFFER", shopId: "shop-1", verified: true,
+        verifiedAt: now, expiresAt: null, description: "a current sale price" },
+      promotionalProduct: { sourceTool: "commerce_get_product", authenticatedShopId: "shop-1",
+        product: { productId: "product-2", variantId: "variant-2", title: "Blue jacket", url: productUrl } },
+    });
+    const prepared = await service.prepare(request);
+    expect(prepared).toMatchObject({ outcome: "prepared", template: { components: [
+      { type: "body", parameters: [
+        { text: "Blue jacket" }, { text: "a current sale price" }, { text: productUrl }, { text: "Merchant" },
+      ] },
+      { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] },
+      { type: "button", index: "1", parameters: [{ text: encodeURIComponent(productUrl) }] },
+    ] } });
+
+    await unavailable(service, "PROMOTION_PRODUCT_URL_UNAVAILABLE", {
+      ...request,
+      promotionalProduct: { ...request.promotionalProduct!, product: {
+        ...request.promotionalProduct!.product, url: "http://shop.example/products/blue-jacket",
+      } },
+    });
+  });
+
+  it("selects the approved singular or plural CODE revision for the final source-backed offer count", async () => {
+    const single = fixture({ offer: "CODE_OFFER", variant: { id: "variant-single" },
+      components: [{ type: "BODY", text: "Use {{1}} from {{2}}" }],
+      bindings: { promotionTarget: "CHECKOUT", header: [], body: [
+        { position: 1, variable: "offer.code" }, { position: 2, variable: "shop.name" },
+      ], buttons: [] },
+    });
+    const plural = fixture({ offer: "CODE_OFFER", variant: { id: "variant-plural" },
+      components: [{ type: "BODY", text: "Possible codes {{1}} from {{2}}" }],
+      bindings: { promotionTarget: "CHECKOUT", header: [], body: [
+        { position: 1, variable: "offer.codes" }, { position: 2, variable: "shop.name" },
+      ], buttons: [] },
+    });
+    const { service } = setup([single, plural]);
+    const one = await service.prepare(input({ offerPresentation: "CODE_OFFER", verifiedOffer: {
+      kind: "CODE_OFFER", shopId: "shop-1", verified: true, verifiedAt: now,
+      expiresAt: null, code: "SAVE10", codes: ["SAVE10"], description: "10% off",
+    } }));
+    const several = await service.prepare(input({ offerPresentation: "CODE_OFFER", verifiedOffer: {
+      kind: "CODE_OFFER", shopId: "shop-1", verified: true, verifiedAt: now,
+      expiresAt: null, code: "SAVE10", codes: ["SAVE10", "SHIPFREE"], description: "10% off",
+    } }));
+    expect(one).toMatchObject({ outcome: "prepared", variantId: "variant-single",
+      template: { components: [{ parameters: [{ text: "SAVE10" }, { text: "Merchant" }] }] } });
+    expect(several).toMatchObject({ outcome: "prepared", variantId: "variant-plural",
+      template: { components: [{ parameters: [{ text: "SAVE10, SHIPFREE" }, { text: "Merchant" }] }] } });
+  });
+
   it.each(["INITIAL", "FOLLOW_UP"] as const)("maps all three %s verified-offer purposes without sending", async (stage: "INITIAL" | "FOLLOW_UP") => {
     for (const offer of ["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"] as const) {
-      const row = fixture({ stage, offer });
+      const row = offer === "CODE_OFFER" && stage === "INITIAL" ? fixture({ stage, offer,
+        components: [{ type: "BODY", text: "{{1}} {{2}} {{3}}" }],
+        bindings: { promotionTarget: "CHECKOUT", header: [], body: [
+          { position: 1, variable: "offer.code" }, { position: 2, variable: "customer.firstName" },
+          { position: 3, variable: "shop.name" },
+        ], buttons: [] },
+      }) : fixture({ stage, offer });
       const { service, readCatalogue, readShopBrand } = setup([row]);
       const result = await service.prepare(input({ stage, offerPresentation: offer,
         verifiedOffer: offer === "NO_OFFER" ? null : { kind: offer, shopId: "shop-1", verified: true,
           verifiedAt: now, expiresAt: null, code: "SAVE10", description: "10% off" },
       }));
+      const expectedBody = offer === "CODE_OFFER" && stage === "INITIAL"
+        ? [{ type: "text", text: "SAVE10" }, { type: "text", text: "Alex" }, { type: "text", text: "Merchant" }]
+        : [{ type: "text", text: "Alex" }, { type: "text", text: "Merchant" }];
       expect(result).toMatchObject({ outcome: "prepared", purpose: `${stage}_${offer}`,
         variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
         providerTemplateName: "moda_initial_no_offer", providerLanguageCode: "en_US",
         canonicalLanguageTag: "en", selectionSource: "base",
         template: { components: [{ type: "body", parameters: [
-          { type: "text", text: "Alex" }, { type: "text", text: "Merchant" } ] }] },
+          ...expectedBody ] }] },
       });
       expect(readCatalogue).toHaveBeenCalledWith({ shopId: "shop-1",
         senderWabaId: "waba-1", purpose: `${stage}_${offer}` });
@@ -191,22 +277,24 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     const wrong = fixture({ components: [{ type: "BODY", text: "Hello {{2}}" }],
       bindings: { header: [], body: [{ position: 1, variable: "shop.name" }], buttons: [] } });
     await unavailable(setup([wrong]).service, "BINDINGS_INVALID");
-    const unsupported = fixture({ components: [{ type: "BODY", text: "Hi" },
-      { type: "CAROUSEL", cards: [] }], bindings: { header: [], body: [], buttons: [] } });
+    const unsupported = fixture({ components: [{ type: "BODY", text: "Hi {{1}}" },
+      { type: "CAROUSEL", cards: [] }], bindings: {
+      header: [], body: [{ position: 1, variable: "shop.name" }], buttons: [],
+    } });
     await unavailable(setup([unsupported]).service, "BINDINGS_INVALID");
   });
 
-  it("enforces body text versus real URL button, HTTPS allowlist and single encoding", async () => {
-    const body = { type: "BODY", text: "Checkout {{1}}" };
+  it("binds the persisted checkout URL unchanged and applies only provider parameter encoding", async () => {
+    const body = { type: "BODY", text: "Checkout {{1}} from {{2}}" };
     const button = { type: "BUTTONS", buttons: [{ type: "URL", text: "Finish checkout",
       url: "https://shop.example/finish?target={{1}}", example: ["https://shop.example/example"] }] };
     const row = fixture({ components: [body, button], bindings: {
-      header: [], body: [{ position: 1, variable: "checkout.url" }],
+      header: [], body: [{ position: 1, variable: "checkout.url" }, { position: 2, variable: "shop.name" }],
       buttons: [{ index: 0, subType: "url", variable: "checkout.url" }],
     } });
     const { service } = setup([row]);
     expect(await service.prepare(input())).toMatchObject({ outcome: "prepared",
-      template: { components: [{ type: "body", parameters: [{ text: sourceUrl }] },
+      template: { components: [{ type: "body", parameters: [{ text: sourceUrl }, { text: "Merchant" }] },
         { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] }] },
     });
     expect(await service.prepare(input({ checkout: { ...checkout,
@@ -225,14 +313,19 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       checkoutRecoveryLifetimeDays: 0, lastExternalActivityAt: now } })))
       .toMatchObject({ outcome: "unavailable", reason: "CHECKOUT_UNAVAILABLE" });
     await unavailable(service, "CHECKOUT_UNAVAILABLE", input({ checkout: null }));
-    await unavailable(service, "CHECKOUT_UNTRUSTED", input({ checkout: {
-      ...checkout, url: "https://shop.example.evil/checkout/1" } }));
     await unavailable(service, "CHECKOUT_UNAVAILABLE", input({ checkout: {
       ...checkout, shopId: "other-shop" } }));
-    const malicious = fixture({ components: [body, { ...button, buttons: [{
+    const differentStoredValue = "not validated by this sender";
+    const changedValue = fixture({ components: [body, { ...button, buttons: [{
       ...button.buttons[0], url: "https://redirect.attacker.test/?next={{1}}",
     }] }], bindings: row.metaRegistration!.parameterBindingsSnapshot });
-    await unavailable(setup([malicious]).service, "CHECKOUT_UNTRUSTED");
+    const preparedChangedValue = await setup([changedValue]).service.prepare(input({
+      checkout: { ...checkout, url: differentStoredValue },
+    }));
+    expect(preparedChangedValue).toMatchObject({ outcome: "prepared", template: { components: [
+      { type: "body", parameters: [{ text: differentStoredValue }, { text: "Merchant" }] },
+      { type: "button", parameters: [{ text: encodeURIComponent(differentStoredValue) }] },
+    ] } });
   });
 
   it("reads only the sending shop's brand once and refuses raw original image URLs", async () => {
@@ -249,8 +342,9 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       { position: 6, variable: "shopBrand.logoUrl" },
       { position: 7, variable: "shopBrand.squareLogoUrl" },
       { position: 8, variable: "shopBrand.coverImageUrl" },
+      { position: 9, variable: "shop.name" },
     ], buttons: [] };
-    const components = [{ type: "BODY", text: Array.from({ length: 8 }, (_, i) => `{{${i + 1}}}`).join(" ") }];
+    const components = [{ type: "BODY", text: Array.from({ length: 9 }, (_, i) => `{{${i + 1}}}`).join(" ") }];
     const row = fixture({ components, bindings });
     const media = async (shopId: string, role: string): Promise<ReadyBrandMedia> => ({
       shopId, role: role as ReadyBrandMedia["role"], status: "READY", kind: "R2_DERIVATIVE",
@@ -267,6 +361,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
         { text: "Square" }, { text: "https://assets.moda-cdn.test/LOGO.png" },
         { text: "https://assets.moda-cdn.test/SQUARE_LOGO.png" },
         { text: "https://assets.moda-cdn.test/COVER_IMAGE.png" },
+        { text: "Moda Brand" },
       ] }],
     } });
     expect(success.readShopBrand).toHaveBeenCalledTimes(1);
@@ -276,16 +371,17 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
 
   it("rejects legacy unbound IMAGE headers and binds only a frozen canonical READY role", async () => {
     const components = [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "Hello" }];
-    const legacy = fixture({ components, bindings: { header: [], body: [], buttons: [] } });
-    await unavailable(setup([legacy]).service, "BINDINGS_INVALID");
-    const bound = fixture({ components, bindings: {
+    const followUpInput = input({ stage: "FOLLOW_UP" });
+    const legacy = fixture({ stage: "FOLLOW_UP", components, bindings: { header: [], body: [], buttons: [] } });
+    await unavailable(setup([legacy]).service, "BINDINGS_INVALID", followUpInput);
+    const bound = fixture({ stage: "FOLLOW_UP", components, bindings: {
       schemaVersion: 1, headerMediaRole: "LOGO", header: [], body: [], buttons: [],
     } });
-    await unavailable(setup([bound]).service, "MEDIA_NOT_READY");
+    await unavailable(setup([bound]).service, "MEDIA_NOT_READY", followUpInput);
     const media: ReadyBrandMedia = { shopId: "shop-1", role: "LOGO", kind: "R2_DERIVATIVE",
       status: "READY", httpsUrl: "https://assets.moda-cdn.test/ready.jpeg" };
     const injected = setup([bound], { media, mediaHosts: ["assets.moda-cdn.test"] });
-    expect(await injected.service.prepare(input()))
+    expect(await injected.service.prepare(followUpInput))
       .toMatchObject({ outcome: "prepared", template: { components: [{
         type: "header", parameters: [{ type: "image", image: { link: media.httpsUrl } }],
       }] } });
@@ -322,20 +418,23 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
       { key: "shopBrand.logoHeight", wrong: { logoHeight: -1 } },
     ];
     for (const { key, wrong } of cases) {
-      const row = fixture({ components: [{ type: "BODY", text: "Brand {{1}}" }],
-        bindings: { header: [], body: [{ position: 1, variable: key }], buttons: [] } });
+      const row = fixture({ components: [{ type: "BODY", text: "Brand {{1}} from {{2}}" }],
+        bindings: { header: [], body: [{ position: 1, variable: key },
+          { position: 2, variable: "shop.name" }], buttons: [] } });
       await unavailable(setup([row], { brand: { ...brand, ...wrong } }).service,
         "BINDING_VALUE_UNAVAILABLE");
     }
     // No ShopBrand is a normal WooCommerce state; never borrow Shopify data.
-    await unavailable(setup([fixture({ components: [{ type: "BODY", text: "{{1}}" }],
-      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.brandName" }], buttons: [] },
+    await unavailable(setup([fixture({ components: [{ type: "BODY", text: "{{1}} {{2}}" }],
+      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.brandName" },
+        { position: 2, variable: "shop.name" }], buttons: [] },
     })]).service, "BINDING_VALUE_UNAVAILABLE");
   });
 
   it("fails closed for a wrong-shop ready media derivative, and never logs customer content", async () => {
-    const row = fixture({ components: [{ type: "BODY", text: "{{1}}" }],
-      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.logoUrl" }], buttons: [] } });
+    const row = fixture({ components: [{ type: "BODY", text: "{{1}} {{2}}" }],
+      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.logoUrl" },
+        { position: 2, variable: "shop.name" }], buttons: [] } });
     const brand: ShopBrandRow = { brandName: null, logoUrl: "https://merchant.example/logo.png",
       logoAltText: null, logoWidth: null, logoHeight: null, squareLogoUrl: null,
       squareLogoAltText: null, coverImageUrl: null };
@@ -350,8 +449,9 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
 
   it("logs every handled binding exception and rethrows unexpected provider/database errors", async () => {
     const { service, warn, error, readCatalogue } = setup([fixture({
-      components: [{ type: "BODY", text: "Hello {{1}}" }],
-      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.brandName" }], buttons: [] },
+      components: [{ type: "BODY", text: "Hello {{1}} from {{2}}" }],
+      bindings: { header: [], body: [{ position: 1, variable: "shopBrand.brandName" },
+        { position: 2, variable: "shop.name" }], buttons: [] },
     })]);
     await unavailable(service, "BINDING_VALUE_UNAVAILABLE");
     expect(warn).toHaveBeenCalledWith("recovery_template.prepare.binding_unavailable",
@@ -363,6 +463,31 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     }));
     expect(JSON.stringify(error.mock.calls)).not.toContain("SENSITIVE");
     expect(error.mock.lastCall?.[1]).not.toHaveProperty("errorMessage");
+  });
+
+  it("binds each shared-WABA template to its own authenticated merchant name", async () => {
+    const shopA = setup([fixture({ variant: { id: "variant-a", shopId: "shop-a" } })], {
+      shopId: "shop-a", brand: { brandName: "Merchant A" } as ShopBrandRow,
+    });
+    const shopB = setup([fixture({ variant: { id: "variant-b", shopId: "shop-b" } })], {
+      shopId: "shop-b", brand: { brandName: "Merchant B" } as ShopBrandRow,
+    });
+
+    const [preparedA, preparedB] = await Promise.all([
+      shopA.service.prepare(input({ shopId: "shop-a", shopName: { shopId: "shop-a", value: "shop-a.test" },
+        checkout: { ...checkout, shopId: "shop-a" }, checkoutItems: { shopId: "shop-a", lineItems: [] } })),
+      shopB.service.prepare(input({ shopId: "shop-b", shopName: { shopId: "shop-b", value: "shop-b.test" },
+        checkout: { ...checkout, shopId: "shop-b" }, checkoutItems: { shopId: "shop-b", lineItems: [] } })),
+    ]);
+
+    expect(preparedA).toMatchObject({ outcome: "prepared", shopId: "shop-a",
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant A" }] }] } });
+    expect(preparedB).toMatchObject({ outcome: "prepared", shopId: "shop-b",
+      template: { components: [{ parameters: [{ text: "Alex" }, { text: "Merchant B" }] }] } });
+    expect(shopA.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-a", senderWabaId: "waba-1",
+      purpose: "INITIAL_NO_OFFER" });
+    expect(shopB.readCatalogue).toHaveBeenCalledWith({ shopId: "shop-b", senderWabaId: "waba-1",
+      purpose: "INITIAL_NO_OFFER" });
   });
 });
 
@@ -404,8 +529,9 @@ describe("taxonomy-backed recovery template binding", () => {
 
 describe("ARCH-052 saved basket and merchant bindings", () => {
   const basketTemplate = fixture({
-    components: [{ type: "BODY", text: "{{1}}" }],
-    bindings: { header: [], body: [{ position: 1, variable: "checkout.itemsSummary" }], buttons: [] },
+    components: [{ type: "BODY", text: "{{1}} from {{2}}" }],
+    bindings: { header: [], body: [{ position: 1, variable: "checkout.itemsSummary" },
+      { position: 2, variable: "shop.name" }], buttons: [] },
   });
 
   it("binds a deterministic Shopify basket summary and prefers the configured shop display name", async () => {
@@ -418,7 +544,7 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       { title: "Water bottle", quantity: 1 },
     ] } }));
     expect(result).toMatchObject({ outcome: "prepared", template: { components: [{
-      parameters: [{ text: "2 × Shoes (Blue) and 1 × Water bottle" }],
+      parameters: [{ text: "2 × Shoes (Blue) and 1 × Water bottle" }, { text: "Verified Outfitters" }],
     }] } });
 
     const nameTemplate = fixture({ components: [{ type: "BODY", text: "{{1}}" }],

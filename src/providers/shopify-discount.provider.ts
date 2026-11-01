@@ -334,6 +334,7 @@ type DiscountConditionFacts = {
   targeting: TargetingFacts;
   minimumSubtotal: string | null;
   maximumSubtotal: string | null;
+  subtotalRequirementCurrency: string | null;
   minimumQuantity: number | null;
   usageLimit: number | null;
   usageCount: number | null;
@@ -595,6 +596,7 @@ function normalizeConditionFacts(
     targeting: emptyTargeting(),
     minimumSubtotal: null,
     maximumSubtotal: null,
+    subtotalRequirementCurrency: null,
     minimumQuantity: null,
     usageLimit: positiveOrZeroInteger(discount.usageLimit),
     usageCount: positiveOrZeroInteger(discount.asyncUsageCount),
@@ -663,6 +665,7 @@ function normalizeConditionFacts(
     const money = normalizeMoney(minimum.greaterThanOrEqualToSubtotal);
     if (money) {
       base.minimumSubtotal = money.amount;
+      base.subtotalRequirementCurrency = money.currencyCode;
     } else {
       reasons.add("MINIMUM_SUBTOTAL_UNAVAILABLE");
     }

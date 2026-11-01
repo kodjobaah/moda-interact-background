@@ -1,6 +1,15 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AutomatedRecoveryTemplateService } from
   "../../../../src/services/recovery-template-integration/automated-recovery-template.service.js";
+import { prepareAutomatedTemplateInput } from
+  "../../../../src/services/conversation-moderation/automated-template-input.js";
+import { fingerprintRecoveryPricingBasket } from
+  "../../../../src/services/recovery-pricing/price-comparison.js";
+import { RecoveryTemplatePreparer } from
+  "../../../../src/services/recovery-template-preparation/recovery-template-preparer.service.js";
+import type { AssignedVariantRow, RecoveryTemplateRepository } from
+  "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
 import type { PreparedRecoveryTemplate } from
   "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
 
@@ -20,6 +29,7 @@ const policy = { recoveryOfferMode: "NONE" as const,
   fixedShopifyDiscountId: null, offerSnapshot: null };
 const recovered = {
   id: "recovery-1", shopId: "shop-1", checkoutUrl: "https://shop.test/checkouts/abc",
+  generation: 1, currency: "GBP",
   lineItems: [{ title: "Shoes", variantTitle: "Blue", quantity: 2 }],
   updatedAt: new Date("2026-10-26T08:59:00Z"), status: "DETECTED",
   lastExternalActivityAt: new Date(now.getTime() - 60_000), expiredAt: null,
@@ -41,10 +51,95 @@ function fixture(recovery = recovered) {
       senderType: "AUTOMATION", direction: "OUTBOUND",
     })) },
   };
+  const context = {
+    shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+    mode: "NONE", authorisedDiscountIds: [],
+    priceReconciliation: null,
+    basket: { generation: recovery.generation, fingerprint: fingerprintRecoveryPricingBasket({
+      shopId: recovery.shopId, checkoutRecoveryId: recovery.id, generation: recovery.generation,
+      currency: recovery.currency, lineItems: recovery.lineItems,
+    }) },
+  };
+  const initialOffers = { resolve: vi.fn(async () => ({
+    result: { kind: "NO_VERIFIED_OFFER", reason: "POLICY_NONE", discoveryIncomplete: false },
+    context, currentContext: context, signal: new AbortController().signal,
+  })) };
+  const setCheckoutDecision = (mode: "FIXED" | "AI_BEST_APPLICABLE", kind: "CODE" | "AUTOMATIC",
+    code: string | null) => {
+    const offerId = mode === "FIXED" ? "fixed-discount-1" : "offer-1";
+    context.mode = mode;
+    context.authorisedDiscountIds = mode === "FIXED" ? [offerId] : [];
+    const offer = { offerId, providerDiscountId: "provider-offer-1", method: kind, code };
+    initialOffers.resolve.mockResolvedValueOnce({
+      context, currentContext: context, signal: new AbortController().signal,
+      result: {
+        kind: "CHECKOUT_DISCOUNT",
+        offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: [offer] },
+        members: [{ ...offer, description: "Save £10", eligibility: {
+          verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [],
+        } }],
+        group: { verdict: "SUPPORTED", offerIds: [offerId], reasonCodes: [] },
+        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+        generation: context.basket.generation, fingerprint: context.basket.fingerprint,
+        priceReconciliation: null, discoveryIncomplete: false,
+      },
+    } as never);
+  };
   const logger = { warn: vi.fn(), error: vi.fn() };
-  const service = new AutomatedRecoveryTemplateService(offers as never,
-    preparer as never, database as never, async () => "waba-1", () => now, logger as never);
-  return { offers, preparer, database, logger, service };
+  const implementation = new AutomatedRecoveryTemplateService(offers as never,
+    preparer as never, database as never, async () => "waba-1", () => now, logger as never,
+    undefined, initialOffers as never);
+  const service = { prepare: (input: Parameters<typeof implementation.prepare>[0]) =>
+    implementation.prepare(input.stage === "INITIAL" && !input.outreachAttemptId
+      ? { ...input, outreachAttemptId: "attempt-1" } : input) };
+  return { offers, preparer, database, logger, service, initialOffers, context, setCheckoutDecision };
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}`;
+}
+
+function approvedCodeVariant(binding: "offer.code" | "offer.codes"): AssignedVariantRow {
+  const suffix = binding === "offer.code" ? "single" : "plural";
+  const providerTemplateName = `approved_${suffix}_code`;
+  const components = [{ type: "BODY", text: "Use {{1}} from {{2}}" }];
+  const parameterBindings = { promotionTarget: "CHECKOUT", header: [], body: [
+    { position: 1, variable: binding }, { position: 2, variable: "shop.name" },
+  ], buttons: [] };
+  const contentHash = createHash("sha256").update(stableJson({ schemaVersion: 1,
+    family: "META_RECOVERY", category: "MARKETING", components,
+    parameterBindings })).digest("hex");
+  const definition = { id: `definition-${suffix}`, kind: "META_RECOVERY", purpose: "INITIAL",
+    offerType: "CODE_OFFER", status: "PUBLISHED", category: "MARKETING",
+    providerTemplateName, publishedAt: now, retiredAt: null };
+  const locale = { id: `locale-${suffix}`, languageTag: "en-GB", providerLanguageCode: "en_GB",
+    status: "REVIEWED", contentHash, definition };
+  const registration = { id: `registration-${suffix}`, wabaId: "waba-1", providerTemplateName,
+    providerLanguageCode: "en_GB", providerTemplateId: `provider-${suffix}`, category: "MARKETING",
+    providerStatus: "APPROVED", submissionState: "APPROVED", failureCode: null,
+    driftDetectedAt: null, lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
+    submittedContentHash: contentHash, componentsSnapshot: components,
+    parameterBindingsSnapshot: parameterBindings, locale };
+  return {
+    id: `variant-${suffix}`, shopId: "shop-1", providerAccountId: "waba-1",
+    purpose: "INITIAL_CODE_OFFER", languageTag: "en-GB", providerLanguageCode: "en_GB",
+    providerTemplateName, providerTemplateId: `provider-${suffix}`, status: "APPROVED",
+    enabled: true, metaRegistrationId: registration.id, metaRegistration: registration,
+  } as unknown as AssignedVariantRow;
+}
+
+function createRealPreparer(variants: readonly AssignedVariantRow[], logger: { warn: () => void; error: () => void }) {
+  const repository: RecoveryTemplateRepository = {
+    readCatalogue: async () => ({ shop: { id: "shop-1", status: "ACTIVE", defaultLanguageTag: "en-GB" },
+      variants }),
+    readShopBrand: async () => null,
+    readShopCategory: async () => null,
+  };
+  return new RecoveryTemplatePreparer(repository, async () => "waba-1", async () => null,
+    [], () => now, logger);
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -58,8 +153,8 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     if (result.kind !== "prepared") throw new Error("missing preparation");
     expect(result.send).toMatchObject({ bodyParameters: ["Alice"], recoveryPromise: { kind: "NO_OFFER" },
       templateRegistration: { variantId: "variant-1", shopId: "shop-1" } });
-    expect(f.offers.resolve).toHaveBeenCalledWith(expect.objectContaining({
-      shopId: "shop-1", checkoutRecoveryId: "recovery-1", stage: "INITIAL" }));
+    expect(f.offers.resolve).not.toHaveBeenCalled();
+    expect(f.initialOffers.resolve).toHaveBeenCalledTimes(1);
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       stage: "INITIAL", offerPresentation: "NO_OFFER", conversationLanguageTag: null,
       merchantLanguageTag: "en-GB", senderWabaId: "waba-1", customerFirstName: "Alice",
@@ -72,29 +167,215 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       select: { checkoutRecoveryLifetimeDays: true } });
   });
 
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)(
+    "passes the exact persisted %s checkout URL to template preparation",
+    async (platform) => {
+      const checkoutUrl = "https://checkout.example/continue?token=A%2FB&keep=%2B";
+      const f = fixture({ ...recovered, checkoutUrl,
+        shop: { ...recovered.shop, platform } });
+
+      const result = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+        stage: "INITIAL", policy: policy as never, conversationLanguageTag: null });
+
+      expect(result.kind).toBe("prepared");
+      expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
+        checkout: expect.objectContaining({ shopId: "shop-1", url: checkoutUrl }),
+      }));
+    },
+  );
+
   it.each([
     ["FIXED", "CODE_OFFER", "SAVE10"],
     ["AI_BEST_APPLICABLE", "AUTOMATIC_OFFER", null],
   ] as const)("accepts independently verified %s %s evidence", async (mode, kind, code) => {
     const f = fixture();
-    const verified = { kind, shopId: "shop-1", checkoutRecoveryId: "recovery-1",
-      providerDiscountId: "provider-offer-1", description: "Save £10",
-      parameters: code ? { code } : {}, evidence: { evaluatedAt: now,
-        expiresAt: new Date(now.getTime() + 60_000) },
-    };
-    f.offers.resolve.mockResolvedValueOnce(verified as never);
+    f.setCheckoutDecision(mode, kind === "CODE_OFFER" ? "CODE" : "AUTOMATIC", code);
     f.preparer.prepare.mockResolvedValueOnce({ ...basePrepared, purpose: `INITIAL_${kind}` } as never);
     const result = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
-      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: mode } as never,
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: mode,
+        fixedShopifyDiscountId: mode === "FIXED" ? "fixed-discount-1" : null } as never,
       conversationLanguageTag: null });
     expect(result.kind).toBe("prepared");
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       offerPresentation: kind, verifiedOffer: expect.objectContaining({
         kind, verified: true, shopId: "shop-1", description: "Save £10" }),
     }));
-    if (result.kind === "prepared") expect(result.send.recoveryPromise).toEqual({
-      kind, providerDiscountId: "provider-offer-1", ...(code ? { code } : {}),
+    expect(f.offers.resolve).not.toHaveBeenCalled();
+    if (result.kind === "prepared") expect(result.send.recoveryPromise).toMatchObject({
+      kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [{ providerDiscountId: "provider-offer-1",
+        method: kind === "CODE_OFFER" ? "CODE" : "AUTOMATIC", code }] },
     });
+  });
+
+  it("keeps the largest verified homogeneous group and persists only that actual set", async () => {
+    const f = fixture();
+    f.context.mode = "AI_BEST_APPLICABLE";
+    const offers = [
+      { offerId: "code-offer", providerDiscountId: "provider-code", method: "CODE", code: "SAVE10" },
+      { offerId: "automatic-one", providerDiscountId: "provider-auto-1", method: "AUTOMATIC", code: null },
+      { offerId: "automatic-two", providerDiscountId: "provider-auto-2", method: "AUTOMATIC", code: null },
+    ];
+    f.initialOffers.resolve.mockResolvedValueOnce({
+      context: f.context, currentContext: f.context, signal: new AbortController().signal,
+      result: {
+        kind: "CHECKOUT_DISCOUNT",
+        offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers },
+        members: offers.map((offer) => ({ ...offer, description: `Description ${offer.offerId}`,
+          eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [] } })),
+        group: { verdict: "SUPPORTED", offerIds: offers.map(({ offerId }) => offerId), reasonCodes: [] },
+        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+        generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint,
+        priceReconciliation: null, discoveryIncomplete: false,
+      },
+    } as never);
+    f.preparer.prepare.mockResolvedValueOnce({ ...basePrepared, purpose: "INITIAL_AUTOMATIC_OFFER" });
+
+    const result = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null });
+
+    expect(result.kind).toBe("prepared");
+    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      offerPresentation: "AUTOMATIC_OFFER",
+      verifiedOffer: expect.objectContaining({ description: "Description automatic-one, Description automatic-two" }),
+    }));
+    if (result.kind === "prepared") expect(result.send.recoveryPromise).toMatchObject({
+      kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [
+        { offerId: "automatic-one" }, { offerId: "automatic-two" },
+      ] },
+    });
+  });
+
+  it.each([
+    { proposedCount: 3, survivingCodes: ["SAVE10", "SHIPFREE"],
+      variantId: "variant-plural" },
+    { proposedCount: 2, survivingCodes: ["SAVE10"],
+      variantId: "variant-single" },
+  ])("selects and receipts the approved revision after a fresh $proposedCount-to-$survivingCodes.length trim",
+    async ({ proposedCount, survivingCodes, variantId }) => {
+      const f = fixture();
+      f.context.mode = "AI_BEST_APPLICABLE";
+      const proposed = Array.from({ length: proposedCount }, (_, index) => ({
+        offerId: `offer-${index + 1}`, providerDiscountId: `provider-${index + 1}`,
+        method: "CODE" as const, code: index === 0 ? "SAVE10" : index === 1 ? "SHIPFREE" : "TAKE5",
+      }));
+      const surviving = proposed.filter((offer) => survivingCodes.includes(offer.code));
+      f.initialOffers.resolve.mockResolvedValueOnce({
+        context: f.context, currentContext: f.context, signal: new AbortController().signal,
+        result: {
+          kind: "CHECKOUT_DISCOUNT",
+          offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: surviving },
+          members: surviving.map((offer) => ({ ...offer, description: `Description ${offer.offerId}`,
+            eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [] } })),
+          group: { verdict: "SUPPORTED", offerIds: surviving.map(({ offerId }) => offerId), reasonCodes: [] },
+          shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+          generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint,
+          priceReconciliation: null, discoveryIncomplete: false,
+        },
+      } as never);
+      const realPreparer = createRealPreparer([
+        approvedCodeVariant("offer.code"), approvedCodeVariant("offer.codes"),
+      ], f.logger);
+      const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
+        f.database as never, async () => "waba-1", () => now, f.logger as never,
+        undefined, f.initialOffers as never);
+
+      const result = await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+        stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+        conversationLanguageTag: null, outreachAttemptId: "attempt-1" });
+
+      expect(result.kind).toBe("prepared");
+      if (result.kind !== "prepared") throw new Error("missing prepared trimmed offer set");
+      expect(result.prepared.variantId).toBe(variantId);
+      expect(result.send.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      const receipt = JSON.parse(prepareAutomatedTemplateInput({
+        ...result.send, to: "15551234567",
+      }).effectiveText) as { bodyParameters: string[]; recoveryPromise: { offerSet: { offers: unknown[] } } };
+      expect(receipt.bodyParameters).toEqual([survivingCodes.join(", "), "shop.test"]);
+      expect(receipt.recoveryPromise.offerSet.offers).toEqual(surviving);
+      expect(receipt.recoveryPromise.offerSet.offers).not.toContainEqual(
+        expect.objectContaining({ offerId: proposed[proposedCount - 1]!.offerId }),
+      );
+      expect(f.initialOffers.resolve).toHaveBeenCalledTimes(1);
+      expect(f.offers.resolve).not.toHaveBeenCalled();
+    });
+
+  it("fails closed rather than binding a singular revision to a surviving plural set", async () => {
+    const f = fixture();
+    f.context.mode = "AI_BEST_APPLICABLE";
+    const surviving = [
+      { offerId: "offer-1", providerDiscountId: "provider-1", method: "CODE", code: "SAVE10" },
+      { offerId: "offer-2", providerDiscountId: "provider-2", method: "CODE", code: "SHIPFREE" },
+    ];
+    f.initialOffers.resolve.mockResolvedValueOnce({
+      context: f.context, currentContext: f.context, signal: new AbortController().signal,
+      result: {
+        kind: "CHECKOUT_DISCOUNT",
+        offerSet: { schemaVersion: "moda.outreach.checkout-offers.v1", offers: surviving },
+        members: surviving.map((offer) => ({ ...offer, description: `Description ${offer.offerId}`,
+          eligibility: { verdict: "SUPPORTED", eligibleLineKeys: ["line-0001"], reasonCodes: [] } })),
+        group: { verdict: "SUPPORTED", offerIds: surviving.map(({ offerId }) => offerId), reasonCodes: [] },
+        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+        generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint,
+        priceReconciliation: null, discoveryIncomplete: false,
+      },
+    } as never);
+    const realPreparer = createRealPreparer([approvedCodeVariant("offer.code")], f.logger);
+    const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
+      f.database as never, async () => "waba-1", () => now, f.logger as never,
+      undefined, f.initialOffers as never);
+
+    expect(await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null, outreachAttemptId: "attempt-1" }))
+      .toEqual({ kind: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
+    expect(f.initialOffers.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires authenticated exact-product provenance before preparing an alternative promotion", async () => {
+    const f = fixture();
+    f.context.mode = "AI_BEST_APPLICABLE";
+    const product = {
+      productId: "product-2", variantId: "variant-2", title: "Matching scarf",
+      url: "https://shop.example/products/scarf", available: true, unitPrice: null, currency: null,
+      productType: "Accessories", vendor: "Shop", categories: ["Accessories"], categoryIds: ["category-2"],
+      collectionIds: [], imageUrl: null, saleEvidence: null, observedAt: now.toISOString(),
+    };
+    const result = {
+      kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: "offer-1", providerDiscountId: "provider-offer-1",
+      method: "AUTOMATIC", code: null, description: "a current sale price",
+      productId: "product-2", variantId: "variant-2",
+      product: { sourceTool: "commerce_get_product", authenticatedShopId: "shop-1", shopId: "shop-1", product },
+      shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+      generation: f.context.basket.generation, fingerprint: f.context.basket.fingerprint, discoveryIncomplete: false,
+    };
+    f.initialOffers.resolve.mockResolvedValueOnce({ context: f.context, currentContext: f.context,
+      result, signal: new AbortController().signal } as never);
+    const prepared = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null });
+    expect(prepared.kind).toBe("prepared");
+    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      promotionTarget: "ALTERNATIVE_PRODUCT",
+      promotionalProduct: { sourceTool: "commerce_get_product", authenticatedShopId: "shop-1",
+        product: { productId: "product-2", variantId: "variant-2", title: "Matching scarf",
+          url: "https://shop.example/products/scarf" } },
+    }));
+    if (prepared.kind === "prepared") expect(prepared.send.recoveryPromise).toMatchObject({
+      kind: "ALTERNATIVE_PRODUCT_PROMOTION", productId: "product-2", variantId: "variant-2",
+      providerDiscountId: "provider-offer-1", productTitle: "Matching scarf",
+    });
+
+    const crossShop = fixture();
+    crossShop.context.mode = "AI_BEST_APPLICABLE";
+    crossShop.initialOffers.resolve.mockResolvedValueOnce({ context: crossShop.context,
+      currentContext: crossShop.context, signal: new AbortController().signal,
+      result: { ...result, product: { ...result.product, authenticatedShopId: "other-shop" } },
+    } as never);
+    expect(await crossShop.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null })).toEqual({ kind: "unavailable", reason: "PROMOTION_PRODUCT_URL_UNAVAILABLE" });
+    expect(crossShop.preparer.prepare).not.toHaveBeenCalled();
   });
 
   it("uses conversation language and a persisted sent promise on sequence two", async () => {
@@ -107,6 +388,31 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "FOLLOW_UP", previouslyPromisedOffer: { kind: "NO_OFFER" } }));
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       stage: "FOLLOW_UP", conversationLanguageTag: "fr-CA" }));
+  });
+
+  it("reads a confirmed singleton checkout offer-set receipt for follow-up verification", async () => {
+    const f = fixture({ ...recovered, status: "MESSAGE_SENT" });
+    f.database.conversationMessage.findUnique.mockResolvedValueOnce({
+      content: storedPromise({ kind: "CHECKOUT_DISCOUNT", offerSet: {
+        schemaVersion: "moda.outreach.checkout-offers.v1",
+        offers: [{ offerId: "offer-1", providerDiscountId: "provider-offer-1", method: "CODE", code: "SAVE10" }],
+      } }), status: "SENT", providerMessageId: "wamid-1", senderType: "AUTOMATION", direction: "OUTBOUND",
+    });
+    f.offers.resolve.mockResolvedValueOnce({ kind: "CODE_OFFER", shopId: "shop-1",
+      checkoutRecoveryId: "recovery-1", providerDiscountId: "provider-offer-1",
+      description: "Save £10", parameters: { code: "SAVE10" },
+      evidence: { evaluatedAt: now, expiresAt: new Date(now.getTime() + 60_000) },
+    } as never);
+    f.preparer.prepare.mockResolvedValueOnce({ ...basePrepared, purpose: "FOLLOW_UP_CODE_OFFER" });
+
+    const result = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "FOLLOW_UP", policy: { ...policy, recoveryOfferMode: "FIXED",
+        fixedShopifyDiscountId: "fixed-discount-1" } as never, conversationLanguageTag: "fr-CA" });
+
+    expect(result.kind).toBe("prepared");
+    expect(f.offers.resolve).toHaveBeenCalledWith(expect.objectContaining({
+      previouslyPromisedOffer: { kind: "CODE_OFFER", providerDiscountId: "provider-offer-1", code: "SAVE10" },
+    }));
   });
 
   it("denies a follow-up when initial proof is missing or unsafe", async () => {
@@ -134,14 +440,56 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
-  it("logs missing checkout-rule evaluator capability and prepares a No Offer variant", async () => {
+  it("accepts a validated BG010 no-offer decision without consulting the legacy resolver", async () => {
     const f = fixture();
-    f.offers.resolve.mockResolvedValueOnce({ kind: "NO_OFFER", reason: "PROVIDER_VERIFICATION_UNAVAILABLE" });
     expect((await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
-      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "FIXED" } as never,
+      stage: "INITIAL", policy: policy as never,
       conversationLanguageTag: null })).kind).toBe("prepared");
-    expect(f.logger.warn).toHaveBeenCalledWith("recovery_offer.capability_gap",
-      expect.objectContaining({ reason: "CHECKOUT_RULE_READER_UNAVAILABLE" }));
+    expect(f.offers.resolve).not.toHaveBeenCalled();
+    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({ offerPresentation: "NO_OFFER" }));
+  });
+
+  it("rejects a basket fingerprint change observed after BG010 before template preparation", async () => {
+    const f = fixture();
+    f.initialOffers.resolve.mockResolvedValueOnce({
+      context: f.context,
+      currentContext: { ...f.context, basket: { ...f.context.basket, fingerprint: "b".repeat(64) } },
+      result: { kind: "NO_VERIFIED_OFFER", reason: "POLICY_NONE", discoveryIncomplete: false },
+      signal: new AbortController().signal,
+    } as never);
+    expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: policy as never, conversationLanguageTag: null }))
+      .toEqual({ kind: "unavailable", reason: "INITIAL_OFFER_CONTEXT_STALE" });
+    expect(f.preparer.prepare).not.toHaveBeenCalled();
+  });
+
+  it("rejects changed BG016 price evidence observed after BG010 before template preparation", async () => {
+    const f = fixture();
+    f.context.mode = "AI_BEST_APPLICABLE";
+    const originalReport = {
+      shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
+      generation: 1, basketFingerprint: f.context.basket.fingerprint, evaluatedAt: now.toISOString(),
+      lines: [{ lineKey: "line-0001", productId: "product-1", variantId: "variant-1", quantity: 2,
+        checkoutUnitPrice: "10.00", checkoutCurrency: "GBP", catalogueUnitPrice: "10.00",
+        catalogueCurrency: "GBP", catalogueObservedAt: now.toISOString(), catalogueComparison: "EQUAL",
+        checkoutPriceChange: "CONFIRMED_UNCHANGED", reasonCodes: [] }],
+      reasonCodes: [], currentMerchandiseSubtotal: { amountDecimal: "20.00", currency: "GBP" },
+      completeness: "COMPLETE",
+    };
+    f.context.priceReconciliation = originalReport as never;
+    const changedReport = { ...originalReport, lines: [{ ...originalReport.lines[0]!,
+      catalogueUnitPrice: "12.00", catalogueComparison: "DIFFERENT" }] };
+    f.initialOffers.resolve.mockResolvedValueOnce({
+      context: f.context,
+      currentContext: { ...f.context, priceReconciliation: changedReport },
+      result: { kind: "NO_VERIFIED_OFFER", reason: "AI_INCONCLUSIVE", discoveryIncomplete: false },
+      signal: new AbortController().signal,
+    } as never);
+    expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
+      conversationLanguageTag: null }))
+      .toEqual({ kind: "unavailable", reason: "INITIAL_OFFER_CONTEXT_STALE" });
+    expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
   it("treats incomplete media as typed unavailability, without reserving or sending", async () => {

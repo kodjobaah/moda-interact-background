@@ -189,7 +189,7 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     await expect(f.fence.admitFinalSend(scope)).rejects.toBe(failure);
     expect(f.logger.error).toHaveBeenCalledWith("woocommerce.recovery.initial.sql_permit.failed", {
       shopId: "shop-1", recoveryId: "recovery-1", attemptId: "attempt-1",
-      errorName: "Error", errorCode: "P1001", error: failure,
+      errorName: "Error", errorCode: "P1001", error: new Error("PERSISTENCE_FAILURE"),
     });
   });
 });

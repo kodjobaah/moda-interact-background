@@ -80,19 +80,23 @@ export function createWooRecoveryOutreachService(input: {
     consent: wooRecoveryConsentReader,
     policies: recoveryPolicyService,
     templates: {
-      async select(shopId, recoveryId, policy) {
+      async select(shopId, recoveryId, attemptId, policy) {
         const conversation = await prisma.conversation.findUnique({
           where: { checkoutRecoveryId: recoveryId },
           select: { languageTag: true },
         });
         const selected = await automatedRecoveryTemplateService.prepare({
           shopId, recoveryId, stage: "INITIAL",
+          outreachAttemptId: attemptId,
           policy: policy ?? await recoveryPolicyService.resolve(shopId),
           conversationLanguageTag: conversation?.languageTag ?? null,
         });
         if (selected.kind !== "prepared") {
           return { kind: "unavailable" as const, reason: selected.reason };
         }
+          if (!selected.admissionToken) {
+            return { kind: "unavailable" as const, reason: "INITIAL_OFFER_ADMISSION_TOKEN_UNAVAILABLE" };
+          }
         return {
           kind: "selected" as const,
           template: {
@@ -101,9 +105,11 @@ export function createWooRecoveryOutreachService(input: {
             canonicalLanguageTag: selected.prepared.canonicalLanguageTag,
             verifiedCategory: "MARKETING" as const,
             sendFields: selected.send,
+              admissionToken: selected.admissionToken,
           },
         };
       },
+      validateAdmission: (token, signal) => automatedRecoveryTemplateService.validateAdmission(token, signal),
     },
     conversations: {
       async getOrCreate(recoveryId) {

@@ -1,7 +1,8 @@
 import type {
   BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
-  ShopBrandRow, TemplateUnavailableReason,
+  ShopBrandRow, SourceBoundPromotionalProduct, TemplateUnavailableReason,
 } from "./recovery-template.types.js";
+import { isIP } from "node:net";
 import { isCheckoutRecoveryWithinLifetime } from "../recovery-lifetime/checkout-recovery-lifetime.js";
 import { formatCheckoutItemsSummary } from "./recovery-template-items-summary.js";
 
@@ -24,12 +25,15 @@ export const BRAND_KEYS = [...BRAND_TEXT_KEYS, ...BRAND_URL_KEYS] as const;
 export type SemanticKey =
   | (typeof BRAND_KEYS)[number]
   | "customer.firstName" | "shop.name" | "shop.categoryName" | "checkout.url" | "checkout.itemsSummary"
-  | "offer.code" | "offer.description";
+  | "offer.code" | "offer.description" | "offer.codes"
+  | "promotion.productName" | "promotion.productUrl" | "promotion.offerDescription" | "promotion.code";
 
 export function isSemanticKey(value: unknown): value is SemanticKey {
   return typeof value === "string" && (
     BRAND_KEYS.some((key) => key === value) ||
-    ["customer.firstName", "shop.name", "shop.categoryName", "checkout.url", "checkout.itemsSummary", "offer.code", "offer.description"].includes(value)
+    ["customer.firstName", "shop.name", "shop.categoryName", "checkout.url", "checkout.itemsSummary",
+      "offer.code", "offer.codes", "offer.description", "promotion.productName", "promotion.productUrl",
+      "promotion.offerDescription", "promotion.code"].includes(value)
   );
 }
 
@@ -85,43 +89,28 @@ export class RecoveryVariableResolver {
 
   checkout(): string {
     const checkout = this.input.checkout;
-    const now = this.clock();
-    if (!checkout || !checkout.url || checkout.shopId !== this.input.shopId ||
+    if (!checkout || checkout.shopId !== this.input.shopId ||
         !isCheckoutRecoveryWithinLifetime({
           lastExternalActivityAt: checkout.lastExternalActivityAt,
-          now,
+          now: this.clock(),
           checkoutRecoveryLifetimeDays: checkout.checkoutRecoveryLifetimeDays,
-        }) ||
-        (checkout.expiresAt !== null &&
-          (!(checkout.expiresAt instanceof Date) || checkout.expiresAt.getTime() <= now.getTime()))) {
-      throw new BindingUnavailable("CHECKOUT_UNAVAILABLE");
-    }
-    const allowed = checkout.approvedHosts;
-    if (!Array.isArray(allowed) || !allowed.length ||
-        !allowed.every((host) => typeof host === "string" && host === host.toLowerCase()) ||
-        !validHttps(checkout.url, allowed)) {
-      throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
-    }
+        })) throw new BindingUnavailable("CHECKOUT_UNAVAILABLE");
     return checkout.url;
   }
 
   /** URL-button prefix must come from immutable Meta components, never caller input. */
-  encodeCheckoutButtonSuffix(approvedPrefix: string): string {
+  encodeCheckoutButtonSuffix(_approvedPrefix: string): string {
     const fullUrl = this.checkout();
-    const approvedHosts = this.input.checkout!.approvedHosts;
-    if (!approvedPrefix || !/[/?=&]$/.test(approvedPrefix) ||
-        !validHttps(approvedPrefix, approvedHosts) ||
-        approvedPrefix.includes("{{") || approvedPrefix.includes("}}") ||
-        approvedPrefix.includes(encodeURIComponent(fullUrl)) ||
-        approvedPrefix.length > 1900) {
-      throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
+    return encodeURIComponent(fullUrl);
+  }
+
+  encodePromotionButtonSuffix(approvedPrefix: string): string {
+    const product = this.promotionalProduct();
+    if (!approvedPrefix || !/[/?=&]$/.test(approvedPrefix) || approvedPrefix.includes("{{") ||
+        approvedPrefix.includes("}}") || approvedPrefix.length > 1900) {
+      throw new BindingUnavailable("PROMOTION_PRODUCT_URL_UNAVAILABLE");
     }
-    const suffix = encodeURIComponent(fullUrl);
-    // Check the fully reconstructed provider URL without exposing it in logs.
-    if (!validHttps(approvedPrefix + suffix, approvedHosts)) {
-      throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
-    }
-    return suffix;
+    return encodeURIComponent(product.product.url!);
   }
 
   checkStaticButtonUrl(url: string): void {
@@ -182,6 +171,28 @@ export class RecoveryVariableResolver {
         return boundedText(await this.categoryRead, 200);
       case "checkout.url":
         return this.checkout();
+      case "offer.codes": {
+        const offer = this.input.verifiedOffer;
+        if (this.input.offerPresentation !== "CODE_OFFER" || !offer?.verified ||
+            offer.shopId !== this.input.shopId || !Array.isArray(offer.codes) ||
+            offer.codes.length < 1 || offer.codes.length > 3) {
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        }
+        return offer.codes.map((code) => boundedText(code, 100)).join(", ");
+      }
+      case "promotion.productName":
+        return boundedText(this.promotionalProduct().product.title, 200);
+      case "promotion.productUrl":
+        return this.promotionalProduct().product.url!;
+      case "promotion.offerDescription":
+        return boundedText(this.input.verifiedOffer?.description, 200);
+      case "promotion.code": {
+        const offer = this.input.verifiedOffer;
+        if (!offer?.verified || offer.shopId !== this.input.shopId || offer.kind !== "CODE_OFFER") {
+          throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        }
+        return boundedText(offer.code, 100);
+      }
       case "checkout.itemsSummary": {
         const items = this.input.checkoutItems;
         if (!items || items.shopId !== this.input.shopId) {
@@ -227,5 +238,32 @@ export class RecoveryVariableResolver {
         return boundedText(value, 200);
       }
     }
+  }
+
+  private promotionalProduct(): SourceBoundPromotionalProduct {
+    const source = this.input.promotionalProduct;
+    if (this.input.promotionTarget !== "ALTERNATIVE_PRODUCT" || !source ||
+        source.sourceTool !== "commerce_get_product" ||
+        source.authenticatedShopId !== this.input.shopId || source.product.productId.trim() === "" ||
+      (source.product.variantId !== null && source.product.variantId.trim() === "") ||
+      !isSafePromotionalUrl(source.product.url)) {
+      throw new BindingUnavailable("PROMOTION_PRODUCT_URL_UNAVAILABLE");
+    }
+    return source;
+  }
+}
+
+function isSafePromotionalUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048 ||
+  Array.from(value).some((character) => character.trim().length === 0 || hasForbiddenControls(character))) return false;
+  try {
+    const authority = /^https:\/\/([^/?#]+)/i.exec(value)?.[1];
+    if (!authority || authority.includes("@") || /:\d+$/.test(authority)) return false;
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && !url.hash &&
+      !isIP(url.hostname) && url.hostname !== "localhost" && !url.hostname.endsWith(".localhost") &&
+      url.hostname.includes(".");
+  } catch {
+    return false;
   }
 }

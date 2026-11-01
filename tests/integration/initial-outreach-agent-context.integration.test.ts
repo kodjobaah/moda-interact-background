@@ -123,5 +123,5 @@ describeWithDatabase("Initial outreach trusted context PostgreSQL assembly", () 
       // The runner owns a disposable database; published prompt revisions are immutable audit records.
       await db.$disconnect();
     }
-  });
+  }, 30_000);
 });

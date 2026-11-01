@@ -212,6 +212,52 @@ describe("WhatsAppService API base URL", () => {
     ]);
   });
 
+  it("serializes approved dynamic URL buttons in order with their own indexes", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ messages: [{ id: "wamid-template" }] }), { status: 200 }),
+    );
+
+    await new WhatsAppService(fetchMock).sendWhatsAppTemplate({
+      to: input.to,
+      templateName: "alternative_product_recovery",
+      languageCode: "en_US",
+      dynamicUrlButtons: [
+        { index: 0, text: "checkout-token" },
+        { index: 1, text: "product-token" },
+      ],
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).template.components).toEqual([
+      {
+        type: "button",
+        sub_type: "url",
+        index: "0",
+        parameters: [{ type: "text", text: "checkout-token" }],
+      },
+      {
+        type: "button",
+        sub_type: "url",
+        index: "1",
+        parameters: [{ type: "text", text: "product-token" }],
+      },
+    ]);
+  });
+
+  it("rejects duplicate dynamic URL button indexes before provider dispatch", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    await expect(new WhatsAppService(fetchMock).sendWhatsAppTemplate({
+      to: input.to,
+      templateName: "invalid_template",
+      languageCode: "en_US",
+      dynamicUrlButtons: [
+        { index: 0, text: "checkout-token" },
+        { index: 0, text: "product-token" },
+      ],
+    })).rejects.toMatchObject({ code: "invalid-template-input" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not invent components for a static approved template URL", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({ messages: [{ id: "wamid-static" }] }), { status: 200 }),
@@ -255,6 +301,58 @@ describe("WhatsAppService API base URL", () => {
 
     await expect(new WhatsAppService(fetchMock).sendWhatsAppText(input))
       .rejects.toMatchObject({ code: "provider-rejected", providerCode: undefined });
+  });
+
+  it("logs the original bounded Meta failure and redacts echoed secrets and customer data", async () => {
+    const logger = { error: vi.fn() };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: {
+      message: "Distinct Meta rejection for customer +447700900123 token=secret-value https://shop.test/checkout",
+      code: 131026,
+      error_subcode: 77,
+      error_data: { details: "delivery window", phone: "+447700900123", api_token: "secret-value" },
+      fbtrace_id: "trace-meta-123",
+    } }), {
+      status: 400,
+      headers: { "content-type": "application/json", "x-fb-request-id": "request-meta-123" },
+    }));
+
+    await expect(new WhatsAppService(fetchMock, logger).sendWhatsAppTemplate({
+      to: input.to, templateName: "recovery", languageCode: "en_US",
+    })).rejects.toMatchObject({ code: "provider-rejected", providerCode: "131026" });
+
+    expect(logger.error).toHaveBeenCalledWith("whatsapp.meta.send.failed", expect.objectContaining({
+      origin: "provider_response", provider: "meta", operation: "sendWhatsAppTemplate",
+      reasonCode: "META_SEND_FAILED", httpStatus: 400, providerRequestId: "request-meta-123",
+      providerError: expect.objectContaining({
+        message: expect.stringContaining("Distinct Meta rejection for customer [REDACTED]"),
+        code: 131026, error_subcode: 77, fbtrace_id: "trace-meta-123",
+        error_data: { details: "delivery window" },
+      }),
+      redactionApplied: true,
+    }));
+    const fields = logger.error.mock.lastCall?.[1];
+    expect(JSON.stringify(fields)).not.toContain("secret-value");
+    expect(JSON.stringify(fields)).not.toContain("shop.test");
+    expect(JSON.stringify(fields)).not.toContain("+447700900123");
+  });
+
+  it("logs the original SDK cause chain without inventing a provider error", async () => {
+    const logger = { error: vi.fn() };
+    const cause = new Error("socket closed after request");
+    const failure = new Error("transport failed token=secret-value", { cause });
+    const fetchMock = vi.fn<typeof fetch>(async () => { throw failure; });
+
+    await expect(new WhatsAppService(fetchMock, logger).sendWhatsAppTemplate({
+      to: input.to, templateName: "recovery", languageCode: "en_US",
+    })).rejects.toBe(failure);
+
+    expect(logger.error).toHaveBeenCalledWith("whatsapp.meta.send.failed", expect.objectContaining({
+      origin: "sdk_exception", provider: "meta", operation: "sendWhatsAppTemplate",
+      sourceError: { name: "Error", message: "transport failed token=[REDACTED]" },
+      causeChain: [{ name: "Error", message: "socket closed after request" }],
+    }));
+    expect(logger.error.mock.lastCall?.[1]).not.toHaveProperty("providerError");
+    expect(JSON.stringify(logger.error.mock.lastCall?.[1])).not.toContain("secret-value");
   });
   it.each(["sendWhatsAppText", "sendWhatsAppTemplate"] as const)(
     "treats a non-JSON HTTP rejection as definitive without inventing a Meta code (%s)", async (method) => {

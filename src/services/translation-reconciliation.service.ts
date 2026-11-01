@@ -212,7 +212,6 @@ export class TranslationReconciliationService {
       try {
         logger.warn("background.support_translation.reconciliation_credential_unavailable", {
           batchId: batch.id, reasonCode: "PROVIDER_CREDENTIAL_UNAVAILABLE",
-          errorMessage: error instanceof Error ? error.message : String(error), error,
         });
       } catch { /* Logging must not affect credential enforcement. */ }
       throw new Error(UNAVAILABLE_CREDENTIAL, { cause: error });

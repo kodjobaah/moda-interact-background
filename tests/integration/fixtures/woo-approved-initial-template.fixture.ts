@@ -9,8 +9,14 @@ import type { FinalTemplateIdentity } from
  */
 export const WOO_TEST_SENDER_WABA = "987654321";
 
-const components = [{ type: "BODY", text: "Your checkout is waiting." }];
-const bindings = { header: [], body: [], buttons: [] };
+const components = [{ type: "BODY", text: "{{1}}: Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)." }];
+const bindings = {
+  schemaVersion: 1,
+  promotionTarget: "CHECKOUT",
+  header: [],
+  body: [{ position: 1, variable: "shop.name" }],
+  buttons: [],
+};
 
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);

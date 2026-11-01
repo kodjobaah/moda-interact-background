@@ -3,6 +3,7 @@ import type { CheckoutRecoveryStatus, RecoveryOutreachStatus } from "@prisma/cli
 import type { WooRecoveryConsentReaderPort, WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import type { RecoveryBillingAdmission, RecoveryBillingService } from "../recovery-billing.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
+import type { CurrentOutreachOfferAdmissionToken } from "../recovery-offers/current-outreach-offer-revalidation.service.js";
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
 import { WhatsAppServiceError } from "../whatsapp.service.js";
 import type {
@@ -61,6 +62,7 @@ export type WooMarketingTemplate = Readonly<{
   verifiedCategory: "MARKETING";
   /** Exact Admin-frozen transport payload plus BG006 final admission identity. */
   sendFields?: Omit<SendTemplateInput, "to">;
+  admissionToken?: CurrentOutreachOfferAdmissionToken;
 }>;
 
 /**
@@ -106,10 +108,11 @@ export interface WooOutreachDependencies {
   consent: Pick<WooRecoveryConsentReaderPort, "evaluateStoredRecipient">;
   policies: { resolve(shopId: string): Promise<RecoveryPolicySnapshot> };
   templates: {
-    select(shopId: string, recoveryId: string, policy?: RecoveryPolicySnapshot): Promise<
+    select(shopId: string, recoveryId: string, attemptId: string, policy?: RecoveryPolicySnapshot): Promise<
       { kind: "selected"; template: WooMarketingTemplate } |
       { kind: "unavailable"; reason: string }
     >;
+    validateAdmission(token: CurrentOutreachOfferAdmissionToken, signal: AbortSignal): Promise<boolean>;
   };
   conversations: { getOrCreate(recoveryId: string): Promise<{ id: string }> };
   billing: Pick<RecoveryBillingService,
@@ -385,7 +388,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         this.requireInitial(attempt, guard.recipient);
         state.attemptId = attempt.id;
         state.stage = "select-marketing-template";
-        const selected = await this.deps.templates.select(fresh.shopId, recoveryId, policy);
+        const selected = await this.deps.templates.select(fresh.shopId, recoveryId, attempt.id, policy);
         if (selected.kind !== "selected" || selected.template.verifiedCategory !== "MARKETING")
           return this.dispatchOutcome(state, "suppressed", "marketing-template-unavailable");
         state.stage = "resolve-conversation";
@@ -413,22 +416,6 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
           return this.dispatchOutcome(state, repeat.kind === "allowed" ? "suppressed" : repeat.kind,
             repeat.kind === "allowed" ? "recipient-changed" : repeat.reason);
         }
-        let currentTemplate: Awaited<ReturnType<WooOutreachDependencies["templates"]["select"]>>;
-        try {
-          currentTemplate = await this.deps.templates.select(fresh.shopId, recoveryId, policy);
-        } catch (error) {
-          await this.releaseOrThrow(billing.admission, error);
-          throw error;
-        }
-        if (currentTemplate.kind !== "selected" ||
-          currentTemplate.template.verifiedCategory !== "MARKETING" ||
-          currentTemplate.template.name !== selected.template.name ||
-          currentTemplate.template.languageCode !== selected.template.languageCode ||
-          JSON.stringify(currentTemplate.template.sendFields ?? null) !==
-            JSON.stringify(selected.template.sendFields ?? null)) {
-          await this.deps.billing.releaseBeforeProvider(billing.admission);
-          return this.dispatchOutcome(state, "suppressed", "marketing-template-changed");
-        }
         state.stage = "revalidate-credit";
         let revalidated: Awaited<ReturnType<WooOutreachDependencies["billing"]["revalidateBeforeProvider"]>>;
         try {
@@ -441,6 +428,23 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         }
         if (revalidated.kind === "blocked") return this.dispatchOutcome(state, "deferred", revalidated.reason);
         billing = revalidated;
+        if (!selected.template.admissionToken) {
+          await this.deps.billing.releaseBeforeProvider(billing.admission);
+          return this.dispatchOutcome(state, "suppressed", "offer-admission-token-unavailable");
+        }
+        let offerAdmissionValid: boolean;
+        try {
+          offerAdmissionValid = await this.deps.templates.validateAdmission(
+            selected.template.admissionToken, AbortSignal.timeout(15_000),
+          );
+        } catch (error) {
+          await this.releaseOrThrow(billing.admission, error);
+          throw error;
+        }
+        if (!offerAdmissionValid) {
+          await this.deps.billing.releaseBeforeProvider(billing.admission);
+          return this.dispatchOutcome(state, "suppressed", "offer-source-changed");
+        }
         state.stage = "durable-provider-permit-and-send";
         const source = billing.admission;
         let result: Awaited<ReturnType<WooGuardedInitialSender["sendInitial"]>>;

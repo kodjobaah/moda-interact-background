@@ -280,7 +280,7 @@ export class WooInitialSendFenceService {
           typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
             ? { errorCode: error.code } : {}
         ),
-        error,
+        error: new Error("PERSISTENCE_FAILURE"),
       });
       throw error;
     }
