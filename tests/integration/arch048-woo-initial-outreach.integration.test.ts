@@ -10,6 +10,8 @@ import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/ser
 import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import type { WhatsAppInboundEvent } from "../../src/integration/whatsapp/types.js";
+import { RecoveryRoutingService } from "../../src/services/recovery-routing.service.js";
 import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import {
   createWooOutreachFixture,
@@ -109,6 +111,106 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({ kind: "already-initialized" });
     expect(a.providerRequests).toBe(1);
     expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+  }, 90_000);
+
+  it("keeps shared-sender confirmed sends and quoted replies isolated by merchant", async () => {
+    const first = f!;
+    const second = await createWooOutreachFixture();
+    try {
+      const [firstShop, secondShop] = await Promise.all([
+        first.db.shop.findUniqueOrThrow({ where: { id: first.shopId }, select: { domain: true } }),
+        second.db.shop.findUniqueOrThrow({ where: { id: second.shopId }, select: { domain: true } }),
+      ]);
+      await Promise.all([
+        first.service.enqueueInitial(first.recoveryId),
+        second.service.enqueueInitial(second.recoveryId),
+      ]);
+
+      const outcomes = await Promise.all([
+        first.service.processInitial(first.recoveryId),
+        first.service.processInitial(first.recoveryId),
+        second.service.processInitial(second.recoveryId),
+        second.service.processInitial(second.recoveryId),
+      ]);
+        expect(outcomes.map((outcome) => outcome.kind).sort()).toEqual([
+          "already-initialized", "already-initialized", "sent", "sent",
+        ]);
+      expect(first.providerRequests).toBe(1);
+      expect(second.providerRequests).toBe(1);
+      expect(first.providerTemplateRequests).toMatchObject([{
+        shopId: first.shopId, recoveryId: first.recoveryId, bodyParameters: [firstShop.domain],
+      }]);
+      expect(second.providerTemplateRequests).toMatchObject([{
+        shopId: second.shopId, recoveryId: second.recoveryId, bodyParameters: [secondShop.domain],
+      }]);
+
+      const attempts = await Promise.all([
+        first.db.recoveryOutreachAttempt.findUniqueOrThrow({
+          where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: first.recoveryId, sequence: 1 } },
+        }),
+        second.db.recoveryOutreachAttempt.findUniqueOrThrow({
+          where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: second.recoveryId, sequence: 1 } },
+        }),
+      ]);
+      const messages = await Promise.all(attempts.map((attempt) => first.db.conversationMessage.findUniqueOrThrow({
+        where: { id: attempt.outboundMessageId! },
+        include: { conversation: { select: { checkoutRecovery: { select: { id: true, shopId: true } } } } },
+      })));
+      expect(messages[0]).toMatchObject({
+        direction: "OUTBOUND", status: "SENT", providerMessageId: expect.any(String),
+        conversation: { checkoutRecovery: { id: first.recoveryId, shopId: first.shopId } },
+      });
+      expect(messages[1]).toMatchObject({
+        direction: "OUTBOUND", status: "SENT", providerMessageId: expect.any(String),
+        conversation: { checkoutRecovery: { id: second.recoveryId, shopId: second.shopId } },
+      });
+      expect(attempts[0]!.outboundMessageId).toBe(messages[0]!.id);
+      expect(attempts[1]!.outboundMessageId).toBe(messages[1]!.id);
+      expect(messages[0]!.providerMessageId).not.toBe(messages[1]!.providerMessageId);
+
+      const routing = new RecoveryRoutingService(first.db, { isShopExecutionActive: async () => true }, {
+        resolveSender: async () => ({
+          providerAccountId: WOO_TEST_SENDER_WABA, providerPhoneNumberId: "123456789",
+        }),
+      });
+      const quotedEvent = (providerMessageId: string, contextMessageId: string): WhatsAppInboundEvent => ({
+        schemaVersion: 1, provider: "whatsapp", providerAccountId: WOO_TEST_SENDER_WABA,
+        providerPhoneNumberId: "123456789", providerMessageId, customerPhone: "+447400123456",
+        contextMessageId, occurredAt: new Date().toISOString(), content: { type: "text", text: "Help" },
+      });
+      const routes = await Promise.all(messages.map((message, index) => routing.resolveInboundMessage(
+        quotedEvent(`inbound-${index}-${randomUUID()}`, message.providerMessageId!),
+      )));
+      expect(routes[0]).toMatchObject({
+        kind: "resolved", shopId: first.shopId, checkoutRecoveryId: first.recoveryId,
+        conversationId: messages[0]!.conversationId,
+      });
+      expect(routes[1]).toMatchObject({
+        kind: "resolved", shopId: second.shopId, checkoutRecoveryId: second.recoveryId,
+        conversationId: messages[1]!.conversationId,
+      });
+
+      await Promise.all([
+        first.service.processInitial(first.recoveryId),
+        second.service.processInitial(second.recoveryId),
+      ]);
+      expect(first.providerRequests).toBe(1);
+      expect(second.providerRequests).toBe(1);
+      expect(await first.db.usageEvent.count({
+        where: { shopId: first.shopId, metric: "RECOVERY_CONVERSATION" },
+      })).toBe(1);
+      expect(await first.db.usageEvent.count({
+        where: { shopId: second.shopId, metric: "RECOVERY_CONVERSATION" },
+      })).toBe(1);
+        expect(await first.db.conversationMessage.count({
+          where: { conversationId: messages[0]!.conversationId, direction: "OUTBOUND", status: "SENT" },
+        })).toBe(1);
+        expect(await first.db.conversationMessage.count({
+          where: { conversationId: messages[1]!.conversationId, direction: "OUTBOUND", status: "SENT" },
+        })).toBe(1);
+    } finally {
+      await second.cleanup();
+    }
   }, 90_000);
 
   it("cancels a resumed generation, releases its reserved free credit once, and permits generation two independently", async () => {
