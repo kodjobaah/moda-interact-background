@@ -115,6 +115,7 @@ async function seedRecoveryConversation(delayMinutes = 7) {
       type: "RECOVERY",
       checkoutRecoveryId: recoveryId,
       controlRevision: 3,
+      controlChangedAt: new Date("2026-10-31T00:00:00.000Z"),
     },
   });
   return { conversationId, recoveryId, shopId };
