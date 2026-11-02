@@ -71,7 +71,7 @@ export function startPendingTurnRepairPoller({
 }
 
 export function startProductionPendingTurnRepair(
-  queue: Pick<Queue<ConversationTurnJob>, "add">,
+  queue: Pick<Queue<ConversationTurnJob>, "add" | "getJob">,
 ): () => Promise<void> {
   const service = new PendingTurnRepairService(
     prisma,

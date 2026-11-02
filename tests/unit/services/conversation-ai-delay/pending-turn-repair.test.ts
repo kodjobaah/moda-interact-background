@@ -24,7 +24,7 @@ function candidate(id: string): Candidate {
   };
 }
 
-function harness(initialCandidates: Candidate[]) {
+function harness(initialCandidates: Candidate[], now = new Date("2026-11-02T12:02:00.000Z")) {
   const candidates = initialCandidates;
   const query = vi.fn(async (_sql: string, cursorDate: Date | null, cursorId: string | null,
     _staleBefore: Date, limit: number) => candidates
@@ -34,15 +34,16 @@ function harness(initialCandidates: Candidate[]) {
       left.id.localeCompare(right.id))
     .slice(0, limit));
   const add = vi.fn(async (_name: string, _data: unknown, _options: unknown) => undefined);
+  const getJob = vi.fn(async (_jobId: string) => null);
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const service = new PendingTurnRepairService(
     { $queryRawUnsafe: query } as never,
-    { add } as never,
+    { add, getJob } as never,
     { current: () => ({ conversationQuietWindowMs: 250, conversationMaxSettleWindowMs: 30_000 }) } as never,
-    () => new Date("2026-11-02T12:02:00.000Z"),
+    () => now,
     log,
   );
-  return { candidates, query, add, log, service };
+  return { candidates, query, add, getJob, log, service };
 }
 
 describe("PendingTurnRepairService", () => {
@@ -94,7 +95,7 @@ describe("PendingTurnRepairService", () => {
     test.add.mockRejectedValueOnce(error);
 
     await expect(test.service.runPass()).rejects.toBe(error);
-    expect(test.log.error).toHaveBeenCalledWith("whatsapp.turn.repair.enqueue_failed", expect.objectContaining({
+    expect(test.log.error).toHaveBeenCalledWith("whatsapp.turn.repair.job_recovery_failed", expect.objectContaining({
       conversationId: "conversation-a",
       jobId: "conversation-turn__conversation-a__4",
       error,
@@ -106,5 +107,48 @@ describe("PendingTurnRepairService", () => {
       conversationId: "conversation-a",
       observedVersion: 4,
     });
+  });
+
+  it("retries a retained failed job only after its frozen eligibility deadline and resets exhausted attempts", async () => {
+    const test = harness([candidate("conversation-a")]);
+    let state = "failed";
+    const failedJob = {
+      getState: vi.fn(async () => state),
+      retry: vi.fn(async () => { state = "waiting"; }),
+    };
+    test.getJob.mockResolvedValue(failedJob as never);
+
+    const due = await test.service.runPass();
+    expect(due.requeued).toBe(1);
+    expect(due.skipped).toBe(0);
+    expect(failedJob.retry).toHaveBeenCalledWith("failed", {
+      resetAttemptsMade: true,
+      resetAttemptsStarted: true,
+    });
+    expect(test.add).not.toHaveBeenCalled();
+
+    state = "failed";
+    failedJob.retry.mockClear();
+    const futureTest = harness([candidate("conversation-a")], new Date("2026-11-02T12:00:30.000Z"));
+    futureTest.getJob.mockResolvedValue(failedJob as never);
+    const notDue = await futureTest.service.runPass();
+    expect(notDue.skipped).toBe(1);
+    expect(failedJob.retry).not.toHaveBeenCalled();
+  });
+
+  it("treats a competing replica's successful retry as a skip without touching a now-active job", async () => {
+    const test = harness([candidate("conversation-a")]);
+    const retryError = new Error("job is no longer failed");
+    const failedJob = {
+      getState: vi.fn().mockResolvedValueOnce("failed").mockResolvedValueOnce("active"),
+      retry: vi.fn().mockRejectedValue(retryError),
+    };
+    test.getJob.mockResolvedValue(failedJob as never);
+
+    const result = await test.service.runPass();
+    expect(result.requeued).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(failedJob.retry).toHaveBeenCalledOnce();
   });
 });

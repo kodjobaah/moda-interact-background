@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import type { Queue } from "bullmq";
+import type { Job, Queue } from "bullmq";
 import {
   createLogger,
   type StructuredLogger,
@@ -21,7 +21,8 @@ const logger = createLogger({
 });
 
 type RepairDatabase = Pick<PrismaClient, "$queryRawUnsafe">;
-type RepairQueue = Pick<Queue<ConversationTurnJob>, "add">;
+type RepairQueue = Pick<Queue<ConversationTurnJob>, "add" | "getJob">;
+type RepairJob = Pick<Job<ConversationTurnJob>, "getState" | "retry">;
 type RuntimeConfigReader = Pick<{
   current(): BackgroundRuntimeConfigSnapshot;
 }, "current">;
@@ -98,15 +99,20 @@ export class PendingTurnRepairService {
             continue;
           }
 
+          if (eligibleAt <= now.getTime()) {
+            result.oldestDueLagMs = Math.max(
+              result.oldestDueLagMs ?? 0,
+              now.getTime() - eligibleAt,
+            );
+          }
+
           const jobId = `conversation-turn__${candidate.id}__${candidate.inboundVersion}`;
           try {
-            await this.queue.add("process-conversation-turn", {
-              conversationId: candidate.id,
-              observedVersion: candidate.inboundVersion,
-            }, { jobId, delay, removeOnComplete: true });
+            const outcome = await this.enqueueCandidate(candidate, jobId, delay);
+            result[outcome]++;
           } catch (error) {
             result.failed++;
-            this.log.error("whatsapp.turn.repair.enqueue_failed", {
+            this.log.error("whatsapp.turn.repair.job_recovery_failed", {
               conversationId: candidate.id,
               observedVersion: candidate.inboundVersion,
               jobId,
@@ -116,13 +122,6 @@ export class PendingTurnRepairService {
             throw error;
           }
 
-          result.requeued++;
-          if (eligibleAt <= now.getTime()) {
-            result.oldestDueLagMs = Math.max(
-              result.oldestDueLagMs ?? 0,
-              now.getTime() - eligibleAt,
-            );
-          }
           this.cursor = { deadline: candidate.pendingAiNotBeforeAt, id: candidate.id };
         }
 
@@ -137,6 +136,43 @@ export class PendingTurnRepairService {
       throw error;
     } finally {
       this.log.info("whatsapp.turn.repair.pass_completed", result);
+    }
+  }
+
+  private async enqueueCandidate(
+    candidate: Candidate,
+    jobId: string,
+    delay: number,
+  ): Promise<"requeued" | "skipped"> {
+    const existing = await this.queue.getJob(jobId) as RepairJob | undefined | null;
+    if (existing) return this.retryFailedJob(existing, delay);
+
+    await this.queue.add("process-conversation-turn", {
+      conversationId: candidate.id,
+      observedVersion: candidate.inboundVersion,
+    }, { jobId, delay, removeOnComplete: true });
+    return "requeued";
+  }
+
+  private async retryFailedJob(
+    job: RepairJob,
+    delay: number,
+  ): Promise<"requeued" | "skipped"> {
+    const state = await job.getState();
+    if (state !== "failed" || delay > 0) return "skipped";
+
+    try {
+      await job.retry("failed", { resetAttemptsMade: true, resetAttemptsStarted: true });
+      return "requeued";
+    } catch (error) {
+      let stateAfterRetry: string;
+      try {
+        stateAfterRetry = await job.getState();
+      } catch {
+        throw error;
+      }
+      if (stateAfterRetry !== "failed") return "skipped";
+      throw error;
     }
   }
 
