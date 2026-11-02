@@ -80,6 +80,7 @@ export async function runAiTurnThroughBackgroundMocks(
   await f.db.conversation.update({ where: { id: f.conversationId }, data: {
     inboundVersion: 1, lastProcessedVersion: 0,
     lastInboundAt: pendingAt, pendingTurnStartedAt: pendingAt,
+    pendingAiNotBeforeAt: pendingAt, pendingAiDelayMinutes: 0, pendingAiControlRevision: 2,
     processingInboundVersion: null, processingStartedAt: null,
   } });
   const prepared = await f.db.conversationMessage.create({ data: {
@@ -99,20 +100,43 @@ export async function runAiTurnThroughBackgroundMocks(
       where: { id }, select: {
         inboundVersion: true, lastProcessedVersion: true, lastInboundAt: true,
         pendingTurnStartedAt: true, processingInboundVersion: true, processingStartedAt: true,
+        pendingAiNotBeforeAt: true, pendingAiControlRevision: true, pendingAiDelayMinutes: true,
+        controlMode: true, controlRevision: true,
       },
     }),
-    claimTurn: async (id: string, version: number, now: Date) =>
+    claimTurn: async (id: string, version: number, now: Date, expectedControlRevision?: number) =>
       (await f.db.conversation.updateMany({
         where: { id, inboundVersion: version, lastProcessedVersion: { lt: version },
-          pendingTurnStartedAt: { not: null }, processingInboundVersion: null },
+          pendingTurnStartedAt: { not: null }, processingInboundVersion: null,
+          ...(expectedControlRevision === undefined ? {} : {
+            controlMode: "AI", controlRevision: expectedControlRevision,
+            pendingAiControlRevision: expectedControlRevision,
+          }) },
         data: { processingInboundVersion: version, processingStartedAt: now },
       })).count === 1,
-    completeTurn: async (id: string, version: number) =>
+    completeTurn: async (id: string, version: number, expectedControlRevision?: number) =>
       (await f.db.conversation.updateMany({
-        where: { id, inboundVersion: version, processingInboundVersion: version },
+        where: { id, inboundVersion: version, processingInboundVersion: version,
+          ...(expectedControlRevision === undefined ? {} : {
+            controlMode: "AI", controlRevision: expectedControlRevision,
+            pendingAiControlRevision: expectedControlRevision,
+          }) },
         data: { lastProcessedVersion: version, pendingTurnStartedAt: null,
+          pendingAiNotBeforeAt: null, pendingAiControlRevision: null, pendingAiDelayMinutes: null,
           processingInboundVersion: null, processingStartedAt: null },
       })).count === 1,
+      suppressStaleTurn: async (id: string, version: number, expectedControlRevision: number) =>
+        (await f.db.conversation.updateMany({
+          where: { id, inboundVersion: version, lastProcessedVersion: { lt: version },
+            pendingTurnStartedAt: { not: null }, OR: [
+              { controlMode: { not: "AI" } },
+              { controlRevision: { not: expectedControlRevision } },
+              { pendingAiControlRevision: { not: expectedControlRevision } },
+            ] },
+          data: { lastProcessedVersion: version, pendingTurnStartedAt: null,
+            pendingAiNotBeforeAt: null, pendingAiControlRevision: null, pendingAiDelayMinutes: null,
+            processingInboundVersion: null, processingStartedAt: null },
+        })).count === 1,
     releaseTurn: async (id: string, version: number) => {
       await f.db.conversation.updateMany({ where: { id, processingInboundVersion: version },
         data: { processingInboundVersion: null, processingStartedAt: null } });

@@ -4,7 +4,7 @@ import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.
 
 type GeneralSendDatabase = Pick<PrismaClient, "$transaction">;
 export type GeneralSendPermit = { kind: "admitted" } |
-  { kind: "suppressed"; reason: "shop-inactive" | "invalid-scope" | "local-no-contact" | "already-admitted-or-sent" };
+  { kind: "suppressed"; reason: "shop-inactive" | "invalid-scope" | "local-no-contact" | "already-admitted-or-sent" | "stale-inbound-version" };
 
 /** Final, durable admission for prepared NON-recovery text and template sends.
  * The Shop row is the first lock, matching the STOP writer and recovery fence.
@@ -16,7 +16,7 @@ export class GeneralOutboundSendFenceService {
 
   async admitFinalSend(input: {
     shopId: string; conversationId: string; messageId: string; recipient: string;
-    expectedContent: string;
+    expectedContent: string; expectedInboundVersion?: number;
   }): Promise<GeneralSendPermit> {
     return this.database.$transaction(async (tx): Promise<GeneralSendPermit> => {
       const shops = await tx.$queryRawUnsafe<Array<{ status: string }>>(`
@@ -26,12 +26,15 @@ export class GeneralOutboundSendFenceService {
 
       // Shop -> Conversation -> message is the common ordering contract. Do not
       // accidentally treat a recovery conversation as a general-send fallback.
-      const conversations = await tx.$queryRawUnsafe<Array<{ controlRevision: number }>>(`
-        SELECT "controlRevision" FROM "whatsapp"."Conversation"
+      const conversations = await tx.$queryRawUnsafe<Array<{ controlRevision: number; inboundVersion: number }>>(`
+        SELECT "controlRevision","inboundVersion" FROM "whatsapp"."Conversation"
         WHERE "id"=$1 AND "shopId"=$2 AND "checkoutRecoveryId" IS NULL
           AND "type" <> 'RECOVERY'
         FOR UPDATE`, input.conversationId, input.shopId);
       if (conversations.length !== 1) return { kind: "suppressed", reason: "invalid-scope" };
+        if (input.expectedInboundVersion !== undefined &&
+            conversations[0]!.inboundVersion !== input.expectedInboundVersion)
+          return { kind: "suppressed", reason: "stale-inbound-version" };
 
       const messages = await tx.$queryRawUnsafe<Array<{
         status: string; content: string;

@@ -75,12 +75,14 @@ export class OutboundMessageDeliveryService {
     previewUrl,
     replyToProviderMessageId,
     expectedControlRevision,
+    expectedInboundVersion,
   }: AdmittedOutbound & {
     to: string;
     text: string;
     previewUrl?: boolean;
     replyToProviderMessageId?: string;
     expectedControlRevision?: number;
+    expectedInboundVersion?: number;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
     // Check the durable admission before any failure/usage side effects. An
@@ -107,6 +109,7 @@ export class OutboundMessageDeliveryService {
       shopId, conversationId, messageId, to, expectedContent: outboundText,
       executionScope, deliveryKind: "TEXT",
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
+      ...(expectedInboundVersion === undefined ? {} : { expectedInboundVersion }),
     });
     if (fenced) return fenced;
 
@@ -371,7 +374,7 @@ export class OutboundMessageDeliveryService {
    */
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
-    expectedContent: string; expectedControlRevision?: number;
+    expectedContent: string; expectedControlRevision?: number; expectedInboundVersion?: number;
     executionScope?: "general" | "recovery";
     template?: { name: string; languageCode: string;
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
@@ -389,6 +392,7 @@ export class OutboundMessageDeliveryService {
         shopId: input.shopId, conversationId: input.conversationId,
         messageId: input.messageId, recipient: input.to,
         expectedContent: input.expectedContent,
+        ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
       });
       if (permit.kind === "admitted") return null;
       if (permit.reason === "already-admitted-or-sent")
@@ -432,6 +436,7 @@ export class OutboundMessageDeliveryService {
       conversationId: input.conversationId, shopId: input.shopId,
       recoveryId: ownership.recoveryId,
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
+      ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
       messageId: input.messageId, recipient: input.to, now: new Date(),
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,

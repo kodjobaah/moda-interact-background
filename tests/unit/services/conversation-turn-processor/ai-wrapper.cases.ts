@@ -104,9 +104,16 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
 
   it("does not send after HUMAN takeover during the awaited wrapper read", async () => {
     const test = harness();
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiControlRevision: 9,
+      controlRevision: 9,
+    }));
     const ownership = {
       readTurnOwnership: vi.fn().mockResolvedValue({ revision: 9 }),
       checkAutomatedTurn: vi.fn().mockResolvedValueOnce({ kind: "allowed" })
+        .mockResolvedValueOnce({ kind: "allowed" })
+        .mockResolvedValueOnce({ kind: "allowed" })
+        .mockResolvedValueOnce({ kind: "allowed" })
         .mockResolvedValueOnce({ kind: "allowed" })
         .mockResolvedValueOnce({ kind: "suppressed", reason: "stale-control-revision" }),
     };
@@ -120,7 +127,7 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
     });
     test.aiWrapper.renderConversationResponse.mockResolvedValue(rendered("should never send"));
     await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
-    expect(ownership.checkAutomatedTurn).toHaveBeenCalledTimes(3);
+    expect(ownership.checkAutomatedTurn).toHaveBeenCalledTimes(6);
     expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
     expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
   });

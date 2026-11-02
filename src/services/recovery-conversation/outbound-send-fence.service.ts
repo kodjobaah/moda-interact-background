@@ -23,6 +23,7 @@ export type DispatchInput = {
   senderType: DispatchActor;
   conversationId: string; shopId: string; recoveryId: string;
   expectedControlRevision: number;
+  expectedInboundVersion?: number;
   commandId?: string; leaseToken?: string; messageId?: string;
   recipient: string; now: Date;
   /** Provider-verified BEFORE this SQL transaction, never fetched inside it. */
@@ -208,6 +209,10 @@ export class OutboundSendFenceService {
           LIMIT 1`, input.commandId, hash, moderationConfig().policyVersion);
         if (!assessment) return { kind: "suppressed", reason: "moderation_content_stale" } as const;
       }
+
+      if (input.expectedInboundVersion !== undefined &&
+          context.inboundVersion !== input.expectedInboundVersion)
+        return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`

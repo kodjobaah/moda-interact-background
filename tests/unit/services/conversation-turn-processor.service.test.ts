@@ -62,6 +62,7 @@ function harness(overrides: Partial<any> = {}) {
     claimTurn: vi.fn().mockResolvedValue(true),
     completeTurn: vi.fn().mockResolvedValue(true),
     releaseTurn: vi.fn().mockResolvedValue(undefined),
+    suppressStaleTurn: vi.fn().mockResolvedValue(true),
     hasChanged: vi.fn().mockResolvedValue(false),
     applyDetectedLanguage: vi.fn().mockResolvedValue(true),
   };
@@ -156,13 +157,38 @@ describe("ConversationTurnProcessor", () => {
 
 // Preserve the original standalone regression outside the describe block.
 it("does not persist model language or send when the version/lease is stale", async () => {
- const test = harness();test.conversation.hasChanged.mockResolvedValue(true);
+ const test = harness();test.conversation.hasChanged
+  .mockResolvedValueOnce(false)
+  .mockResolvedValueOnce(true);
  await test.processor.process({conversationId:"conversation-1",observedVersion:3});
  expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
 });
 
+it("re-enqueues a newer inbound before reserving an AGENT outbound", async () => {
+  const test = harness();
+  test.conversation.hasChanged.mockResolvedValue(true);
+  test.conversation.getTurnState
+    .mockResolvedValueOnce(state())
+    .mockResolvedValueOnce(state({ inboundVersion: 4 }));
+
+  await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+  expect(test.admission.reserve).not.toHaveBeenCalled();
+  expect(test.runAgent).not.toHaveBeenCalled();
+  expect(test.conversation.releaseTurn).toHaveBeenCalledWith("conversation-1", 3);
+  expect(test.queue.add).toHaveBeenCalledWith(
+    "process-conversation-turn",
+    { conversationId: "conversation-1", observedVersion: 4 },
+    expect.objectContaining({ jobId: "conversation-turn__conversation-1__4" }),
+  );
+});
+
 it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress", async () => {
   const test = harness();
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiControlRevision: 3,
+      controlRevision: 3,
+    }));
   const ownership = {
     readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "HUMAN", revision: 3 }),
     checkAutomatedTurn: vi.fn().mockResolvedValue({ kind: "suppressed", reason: "human-controlled", phase: "before-agent" }),
@@ -188,9 +214,15 @@ it("suppresses a recovery AI turn in HUMAN mode without losing customer ingress"
 
 it("does not send a model result after HUMAN takeover and subsequent AI resume", async () => {
   const test = harness();
+  test.conversation.getTurnState.mockResolvedValue(state({
+    pendingAiControlRevision: 2,
+    controlRevision: 2,
+  }));
   const ownership = {
     readTurnOwnership: vi.fn().mockResolvedValue({ conversationId: "conversation-1", shopId: "shop-1", recoveryId: "recovery", mode: "AI", revision: 2 }),
     checkAutomatedTurn: vi.fn().mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
+      .mockResolvedValueOnce({ kind: "allowed", phase: "before-agent" })
+      .mockResolvedValueOnce({ kind: "allowed", phase: "after-await" })
       .mockResolvedValueOnce({ kind: "suppressed", reason: "stale-control-revision", phase: "after-await" }),
   };
   const processor = new ConversationTurnProcessor({
@@ -205,7 +237,7 @@ it("does not send a model result after HUMAN takeover and subsequent AI resume",
   expect(test.runAgent).toHaveBeenCalledOnce();
   expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
   expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
-  expect(ownership.checkAutomatedTurn).toHaveBeenNthCalledWith(2, {
+  expect(ownership.checkAutomatedTurn).toHaveBeenNthCalledWith(4, {
     conversationId: "conversation-1", expectedRevision: 2, phase: "after-await", shopId: "shop-1",
   });
 });

@@ -1,12 +1,14 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
 export function registerAgentRaceCases(context: ConversationTurnFacadeContext) {
-  const { harness, state } = context;
+  const { harness, state, first, ConversationTurnProcessor } = context;
 
   it("suppresses a stale agent response and schedules the newest version", async () => {
     const test = harness();
-    test.conversation.hasChanged.mockResolvedValue(true);
+    test.conversation.hasChanged
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
     test.conversation.getTurnState
       .mockResolvedValueOnce(state())
       .mockResolvedValueOnce(state({ inboundVersion: 4 }));
@@ -25,6 +27,47 @@ export function registerAgentRaceCases(context: ConversationTurnFacadeContext) {
         jobId: "conversation-turn__conversation-1__4",
       }),
     );
+  });
+
+  it("passes the original inbound version through a late ownership check", async () => {
+    const test = harness();
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiControlRevision: 7,
+      controlRevision: 7,
+    }));
+    const ownership = {
+      readTurnOwnership: async () => ({
+        conversationId: "conversation-1", recoveryId: "recovery-1",
+        shopId: "shop-1", mode: "AI" as const, revision: 7,
+      }),
+      checkAutomatedTurn: vi.fn(async ({ phase }: { phase: string }) => {
+        if (phase === "before-provider") {
+          test.conversation.getTurnState.mockResolvedValue(state({ inboundVersion: 4 }));
+        }
+        return { kind: "allowed" as const, phase };
+      }),
+    };
+    const processor = new ConversationTurnProcessor({
+      queue: test.queue,
+      conversation: test.conversation,
+      admission: test.admission,
+      abuseAdmission: test.abuseAdmission,
+      ownership,
+      loadTurn: async () => test.loaded,
+      runAgent: test.runAgent,
+      aiWrapper: test.aiWrapper,
+      getResult: (result: any) => result,
+      now: () => new Date(first.getTime() + 20_000),
+      runtimeConfig: test.runtimeConfig,
+      logger: test.logger,
+    });
+
+    await processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+    expect(test.admission.sendPreparedText).toHaveBeenCalledWith(expect.objectContaining({
+      expectedControlRevision: 7,
+      expectedInboundVersion: 3,
+    }));
   });
 
   it.each([

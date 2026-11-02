@@ -28,6 +28,7 @@ export type RecoveryContext = {
   recoveryStatus: string;
   mode: "AI" | "HUMAN";
   revision: number;
+  inboundVersion: number;
   lastInboundAt: Date | null;
 };
 
@@ -40,7 +41,7 @@ export async function readRecoveryContext(
   return first<RecoveryContext>(db, `
     SELECT c."id", r."shopId", r."id" AS "recoveryId", r."checkoutToken",
       r."status"::text AS "recoveryStatus", c."controlMode"::text AS "mode",
-      c."controlRevision" AS "revision", c."lastInboundAt"
+      c."controlRevision" AS "revision", c."inboundVersion", c."lastInboundAt"
     FROM "whatsapp"."Conversation" c
     JOIN "commerce"."CheckoutRecovery" r ON r."id"=c."checkoutRecoveryId"
     WHERE c."id"=$1 AND c."type"='RECOVERY'

@@ -77,6 +77,33 @@ export function registerClaimAndStateCases(context: ConversationTurnFacadeContex
     expect(test.runAgent).not.toHaveBeenCalled();
   });
 
+  it("suppresses a pre-takeover turn after HUMAN-to-AI resume changes the revision", async () => {
+    const test = harness();
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiControlRevision: 2,
+      controlRevision: 3,
+      controlMode: "AI",
+    }));
+    test.conversation.claimTurn.mockResolvedValue(false);
+
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+    expect(test.conversation.claimTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+      expect.any(Date),
+      2,
+    );
+    expect(test.conversation.suppressStaleTurn).toHaveBeenCalledWith(
+      "conversation-1",
+      3,
+      2,
+    );
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+    expect(test.queue.add).not.toHaveBeenCalled();
+  });
+
   it("lets only one racing worker claim and process a conversation", async () => {
     const test = harness();
     test.conversation.claimTurn
@@ -99,6 +126,26 @@ export function registerClaimAndStateCases(context: ConversationTurnFacadeContex
     expect(test.queue.add.mock.calls[0]?.[2].jobId).toBe(
       "conversation-turn__conversation-1__3",
     );
+  });
+
+  it("enqueues a newer inbound version when it wins the race against claim", async () => {
+    const test = harness();
+    test.conversation.claimTurn.mockResolvedValue(false);
+    test.conversation.getTurnState
+      .mockResolvedValueOnce(state())
+      .mockResolvedValueOnce(state({
+        inboundVersion: 4,
+        lastInboundAt: new Date(state().lastInboundAt.getTime() + 1_000),
+      }));
+
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+    expect(test.queue.add).toHaveBeenCalledWith(
+      "process-conversation-turn",
+      { conversationId: "conversation-1", observedVersion: 4 },
+      expect.objectContaining({ jobId: "conversation-turn__conversation-1__4" }),
+    );
+    expect(test.runAgent).not.toHaveBeenCalled();
   });
 
   it("processes different conversations concurrently", async () => {
