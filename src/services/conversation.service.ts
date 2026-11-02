@@ -231,6 +231,7 @@ export class ConversationService {
     conversationId: string,
     observedVersion: number,
     now: Date,
+    expectedControlRevision?: number,
   ): Promise<boolean> {
     const staleBefore = new Date(now.getTime() - 120_000);
     const claimed = await prisma.conversation.updateMany({
@@ -239,6 +240,11 @@ export class ConversationService {
         inboundVersion: observedVersion,
         lastProcessedVersion: { lt: observedVersion },
         pendingTurnStartedAt: { not: null },
+        ...(expectedControlRevision === undefined ? {} : {
+          controlMode: "AI",
+          controlRevision: expectedControlRevision,
+          pendingAiControlRevision: expectedControlRevision,
+        }),
         OR: [
           { processingInboundVersion: null },
           { processingStartedAt: { lt: staleBefore } },
@@ -255,12 +261,18 @@ export class ConversationService {
   async completeTurn(
     conversationId: string,
     observedVersion: number,
+    expectedControlRevision?: number,
   ): Promise<boolean> {
     const completed = await prisma.conversation.updateMany({
       where: {
         id: conversationId,
         inboundVersion: observedVersion,
         processingInboundVersion: observedVersion,
+        ...(expectedControlRevision === undefined ? {} : {
+          controlMode: "AI",
+          controlRevision: expectedControlRevision,
+          pendingAiControlRevision: expectedControlRevision,
+        }),
       },
       data: {
         lastProcessedVersion: observedVersion,
@@ -273,6 +285,36 @@ export class ConversationService {
       },
     });
     return completed.count === 1;
+  }
+
+  async suppressStaleTurn(
+    conversationId: string,
+    observedVersion: number,
+    expectedControlRevision: number,
+  ): Promise<boolean> {
+    const suppressed = await prisma.conversation.updateMany({
+      where: {
+        id: conversationId,
+        inboundVersion: observedVersion,
+        lastProcessedVersion: { lt: observedVersion },
+        pendingTurnStartedAt: { not: null },
+        OR: [
+          { controlMode: { not: "AI" } },
+          { controlRevision: { not: expectedControlRevision } },
+          { pendingAiControlRevision: { not: expectedControlRevision } },
+        ],
+      },
+      data: {
+        lastProcessedVersion: observedVersion,
+        pendingTurnStartedAt: null,
+        pendingAiNotBeforeAt: null,
+        pendingAiControlRevision: null,
+        pendingAiDelayMinutes: null,
+        processingInboundVersion: null,
+        processingStartedAt: null,
+      },
+    });
+    return suppressed.count === 1;
   }
 
   async releaseTurn(

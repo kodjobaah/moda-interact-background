@@ -6,7 +6,9 @@ export function registerAgentRaceCases(context: ConversationTurnFacadeContext) {
 
   it("suppresses a stale agent response and schedules the newest version", async () => {
     const test = harness();
-    test.conversation.hasChanged.mockResolvedValue(true);
+    test.conversation.hasChanged
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
     test.conversation.getTurnState
       .mockResolvedValueOnce(state())
       .mockResolvedValueOnce(state({ inboundVersion: 4 }));

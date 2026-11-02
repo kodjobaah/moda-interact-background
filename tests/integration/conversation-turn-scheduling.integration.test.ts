@@ -225,6 +225,7 @@ describe("ARCH-054 pending AI deadline PostgreSQL transaction", () => {
       pendingAiControlRevision: null,
     });
   });
+
 });
 
 async function createTurnBoundary({ failFirstSchedule = false } = {}) {

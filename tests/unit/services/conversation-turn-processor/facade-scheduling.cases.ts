@@ -32,6 +32,49 @@ export function registerSchedulingCases(context: ConversationTurnFacadeContext) 
     expect(test.queue.add.mock.calls[0]?.[2].delay).toBe(5_000);
   });
 
+  it("releases a claimed turn and delays AGENT admission until its frozen deadline", async () => {
+    const test = harness({ now: () => new Date(first.getTime() + 20_000) });
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
+      pendingAiDelayMinutes: 1,
+      pendingAiControlRevision: 3,
+      controlRevision: 3,
+    }));
+
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+    expect(test.abuseAdmission.admitSettledTurn).toHaveBeenCalledOnce();
+    expect(test.conversation.releaseTurn).toHaveBeenCalledWith("conversation-1", 3);
+    expect(test.queue.add).toHaveBeenCalledWith(
+      "process-conversation-turn",
+      { conversationId: "conversation-1", observedVersion: 3 },
+      expect.objectContaining({ jobId: "conversation-turn__conversation-1__3", delay: 40_000 }),
+    );
+    expect(test.admission.reserve).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not delay AUTOMATION clarification while an AGENT deadline is pending", async () => {
+    const test = harness({ now: () => new Date(first.getTime() + 20_000) });
+    test.conversation.getTurnState.mockResolvedValue(state({
+      pendingAiNotBeforeAt: new Date(first.getTime() + 60_000),
+      pendingAiDelayMinutes: 1,
+      pendingAiControlRevision: 3,
+      controlRevision: 3,
+    }));
+    test.loaded.clarificationText = "Please send a shorter question.";
+
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+
+    expect(test.admission.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      senderType: "AUTOMATION",
+      content: "Please send a shorter question.",
+    }));
+    expect(test.admission.sendPreparedText).toHaveBeenCalledOnce();
+    expect(test.queue.add).not.toHaveBeenCalled();
+    expect(test.runAgent).not.toHaveBeenCalled();
+  });
+
   it("fails closed when the injected maximum is below the quiet window", async () => {
     const test = harness({
       runtimeConfig: { current: () => ({ conversationQuietWindowMs: 5_000, conversationMaxSettleWindowMs: 1_000 }) },

@@ -406,6 +406,69 @@ describe("ConversationService turn state", () => {
     });
   });
 
+  it("atomically claims a recovery turn only for its frozen AI control revision", async () => {
+    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+    const now = new Date("2026-09-08T12:00:00.000Z");
+
+    await expect(new ConversationService().claimTurn("conversation-1", 3, now, 7))
+      .resolves.toBe(true);
+
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        controlMode: "AI",
+        controlRevision: 7,
+        pendingAiControlRevision: 7,
+      }),
+    }));
+  });
+
+  it("completes only when the original control revision remains current", async () => {
+    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+
+    await expect(new ConversationService().completeTurn("conversation-1", 3, 7))
+      .resolves.toBe(true);
+
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        inboundVersion: 3,
+        processingInboundVersion: 3,
+        controlMode: "AI",
+        controlRevision: 7,
+        pendingAiControlRevision: 7,
+      }),
+      data: expect.objectContaining({
+        pendingTurnStartedAt: null,
+        pendingAiNotBeforeAt: null,
+        pendingAiControlRevision: null,
+        pendingAiDelayMinutes: null,
+      }),
+    }));
+  });
+
+  it("acknowledges an obsolete revision without touching a newer inbound version", async () => {
+    prismaMock.conversation.updateMany.mockClear().mockResolvedValue({ count: 1 });
+
+    await expect(new ConversationService().suppressStaleTurn("conversation-1", 3, 7))
+      .resolves.toBe(true);
+
+    expect(prismaMock.conversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        inboundVersion: 3,
+        lastProcessedVersion: { lt: 3 },
+        OR: expect.arrayContaining([
+          { controlMode: { not: "AI" } },
+          { controlRevision: { not: 7 } },
+          { pendingAiControlRevision: { not: 7 } },
+        ]),
+      }),
+      data: expect.objectContaining({
+        lastProcessedVersion: 3,
+        pendingAiNotBeforeAt: null,
+        pendingAiControlRevision: null,
+      }),
+    }));
+  });
+
   it("keeps the first pending-turn timestamp when concurrent receipts race", async () => {
     const conditionalUpdate = vi
       .fn()
