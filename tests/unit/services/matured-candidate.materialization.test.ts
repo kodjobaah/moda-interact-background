@@ -98,6 +98,7 @@ const hoisted = vi.hoisted(() => {
     },
     automatedTemplateMock: {
       prepare: vi.fn(),
+      validateAdmission: vi.fn(async () => true),
     },
     recoveryBillingServiceMock: {
       admit: vi.fn(async () => ({
@@ -175,6 +176,11 @@ vi.mock("../../../src/services/recovery-template-integration/automated-recovery-
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
 }));
+vi.mock("../../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js", () => ({
+  recoveryInitialOutreachSupportNoticeService: {
+    finalizeConfirmedInitial: vi.fn(async () => ({ outcome: "disabled", outreachAttemptId: "attempt-1" })),
+  },
+}));
 vi.mock("../../../src/services/shop-execution-eligibility.service.js", () => ({
   shopExecutionEligibilityService: hoisted.executionEligibilityMock,
 }));
@@ -193,6 +199,7 @@ function preparedTemplateResult(
   return {
     kind: "prepared" as const,
     prepared: { purpose, providerTemplateName, canonicalLanguageTag, providerLanguageCode },
+    admissionToken: { shopId: "shop_1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1" },
     send: {
       templateName: providerTemplateName,
       languageCode: providerLanguageCode,
@@ -261,6 +268,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     hoisted.consentAdmissionMock.evaluateReentry.mockResolvedValue(true);
     hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
     automatedTemplateMock.prepare.mockResolvedValue(preparedTemplateResult() as never);
+    automatedTemplateMock.validateAdmission.mockResolvedValue(true);
     whatsAppServiceMock.sendWhatsAppTemplate.mockResolvedValue({
       providerMessageId: "wamid-1",
     });
@@ -282,16 +290,18 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
       checkout: recoverableCheckout,
     });
     prismaMock.checkoutRecovery.findFirst.mockImplementation(async (args) => prismaMock.checkoutRecovery.findUnique(args));
-      prismaMock.checkoutRecovery.create.mockImplementation(async ({ data }) => ({
+    prismaMock.checkoutRecovery.create.mockImplementation(async ({ data }) => ({
+      ...data,
       id: "recovery-1",
+      shopId: typeof data.shopId === "string" ? data.shopId : "shop_1",
       status: "DETECTED",
-        ...data,
     }));
-      prismaMock.checkoutRecovery.update.mockImplementation(async ({ data }) => ({
-        id: "recovery-1",
-        status: "DETECTED",
-        ...data,
-      }));
+    prismaMock.checkoutRecovery.update.mockImplementation(async ({ data }) => ({
+      ...data,
+      id: "recovery-1",
+      shopId: typeof data.shopId === "string" ? data.shopId : "shop_1",
+      status: "DETECTED",
+    }));
   });
 
   it("creates a recovery from current Shopify data when the lookup is found and recoverable", async () => {
@@ -515,14 +525,15 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
-  it("allows provider-check-required templates to reach the provider", async () => {
+  it("routes provider-check-required templates through existing provider admission", async () => {
     automatedTemplateMock.prepare.mockResolvedValueOnce(
       preparedTemplateResult("checkout_recovery_fr_ca", "fr-CA", "fr_CA_CUSTOM", "INITIAL_NO_OFFER") as never,
     );
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(whatsAppServiceMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(outboundWhatsAppAdmissionServiceMock.sendTemplate).toHaveBeenCalledOnce();
+    expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
   });
 
   it("blocks an exhausted billing admission before creating a conversation or sending", async () => {

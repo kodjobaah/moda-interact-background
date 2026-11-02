@@ -138,7 +138,7 @@ describe("SamePlanPeriodProgressionService", () => {
     })).resolves.toEqual({ billingPeriodId: "period-successor", packMeterHandle: "pack-meter" });
     expect(test.logger.warn).toHaveBeenCalledWith(
       "billing.recovery_capacity_resume.enqueue_failed",
-      { shopId: "shop-1", errorMessage: "queue unavailable" },
+      expect.objectContaining({ shopId: "shop-1", errorMessage: "queue unavailable", error: expect.any(Error) }),
     );
   });
 

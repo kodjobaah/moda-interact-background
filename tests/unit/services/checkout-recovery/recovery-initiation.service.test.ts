@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
     sendTemplate: vi.fn(),
     findExistingAdmission: vi.fn(),
   },
-  automated: { prepare: vi.fn() },
+  automated: { prepare: vi.fn(), validateAdmission: vi.fn() },
   policy: { resolve: vi.fn() },
   attempt: {
     getOrCreate: vi.fn(),
@@ -140,12 +140,16 @@ beforeEach(() => {
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
   mocks.automated.prepare.mockResolvedValue({
     kind: "prepared",
+    admissionToken: { shopId: "shop-1", checkoutRecoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1", generation: 1, fingerprint: "fingerprint",
+      mode: "NONE", authorisedDiscountIds: [], priceReconciliation: null, sourceFence: null },
     prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "checkout_recovery",
       canonicalLanguageTag: "en-US", providerLanguageCode: "en_US" },
     send: { templateName: "checkout_recovery", languageCode: "en_US",
       templateRegistration: { shopId: "shop-1", purpose: "INITIAL_NO_OFFER" },
       recoveryPromise: { kind: "NO_OFFER" } },
   });
+  mocks.automated.validateAdmission.mockResolvedValue(true);
   mocks.policy.resolve.mockResolvedValue({ followUpEnabled: false, followUpDelayMinutes: null });
   mocks.attempt.getOrCreate.mockResolvedValue(attempt);
   mocks.attempt.markStatus.mockResolvedValue(undefined);
@@ -363,9 +367,11 @@ describe("RecoveryInitiationService", () => {
       await service.handleCheckoutCreated(event);
       expect(mocks.automated.prepare).toHaveBeenCalledWith(expect.objectContaining({
         shopId: "shop-1", recoveryId: "recovery-1", stage: "INITIAL",
-        conversationLanguageTag: null,
+        conversationLanguageTag: null, outreachAttemptId: attempt.id,
       }));
-      expect(mocks.attempt.getOrCreate).not.toHaveBeenCalled();
+      expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+        recoveryId: "recovery-1", sequence: 1, recipient: "15551234567",
+      }));
       expect(billing.admit).not.toHaveBeenCalled();
       expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
     },
@@ -644,6 +650,59 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       to: "15551234567",
     }));
+  });
+
+  it("sends neutral fallback through the same billing and idempotent attempt without offer admission", async () => {
+    mocks.automated.prepare.mockResolvedValueOnce({
+      kind: "prepared",
+      prepared: { purpose: "INITIAL_NO_OFFER", providerTemplateName: "approved_initial_no_offer",
+        canonicalLanguageTag: "en-GB", providerLanguageCode: "en_GB" },
+      send: { templateName: "approved_initial_no_offer", languageCode: "en_GB",
+        templateRegistration: { shopId: "shop-1", purpose: "INITIAL_NO_OFFER" },
+        recoveryPromise: { kind: "NO_OFFER" } },
+    } as never);
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(billing.admit).toHaveBeenCalledOnce();
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: "recovery-outreach:attempt-1",
+      recoveryCreditSourceKey: admission.sourceKey,
+      recoveryPromise: { kind: "NO_OFFER" },
+    }));
+    expect(mocks.automated.validateAdmission).not.toHaveBeenCalled();
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledOnce();
+  });
+
+  it("releases billing and skips Meta when F3 offer admission detects source churn", async () => {
+    // The IMAGE preparation completed and produced a verified immutable URL,
+    // but current price admission is stale. Prepared media is not send authority.
+    mocks.automated.prepare.mockResolvedValueOnce({
+      kind: "prepared",
+      admissionToken: { shopId: "shop-1", checkoutRecoveryId: "recovery-1",
+        outreachAttemptId: "attempt-1", generation: 1, fingerprint: "fingerprint",
+        mode: "FIXED", authorisedDiscountIds: ["discount-1"], priceReconciliation: null, sourceFence: null },
+      prepared: { purpose: "INITIAL_CODE_OFFER", providerTemplateName: "checkout_recovery",
+        canonicalLanguageTag: "en-US", providerLanguageCode: "en_US" },
+      send: { templateName: "checkout_recovery", languageCode: "en_US",
+        imageHeader: { link: "https://media.modainteract.com/outreach-products/shopify/shop/2026/10/31/attempt-1/p-abc/v-none/sha256-def.jpg" },
+        templateRegistration: { shopId: "shop-1", purpose: "INITIAL_CODE_OFFER" },
+        recoveryPromise: { kind: "CODE_OFFER", providerDiscountId: "discount-1", code: "SAVE10" } },
+    } as never);
+    mocks.automated.validateAdmission.mockResolvedValueOnce(false);
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(mocks.automated.validateAdmission).toHaveBeenCalledOnce();
+    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    expect(billing.commitSuccessfulInitiation).not.toHaveBeenCalled();
+    expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).not.toHaveBeenCalled();
+    expect(mocks.prisma.checkoutRecovery.updateMany).not.toHaveBeenCalled();
+    expect(mocks.attempt.markWaitingAfterConfirmedSend).not.toHaveBeenCalled();
+    expect(billing.handleProviderFailure).not.toHaveBeenCalled();
   });
 
   it("repairs initial follow-up scheduling for an already-sent recovery", async () => {

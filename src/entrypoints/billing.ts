@@ -114,11 +114,9 @@ export async function reconcileWooPaidEntitlementsAndContinue<T>(
 }
 
 function reportBillingReconciliationFailure(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
   logger.error("billing.reconciliation.scan_failed", {
     errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-    errorMessage: message,
-    error: error,
+    reasonCode: "BILLING_RECONCILIATION_SCAN_FAILED",
   });
 }
 

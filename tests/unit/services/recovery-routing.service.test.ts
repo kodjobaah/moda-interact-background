@@ -188,6 +188,39 @@ describe("C2 strict recovery routing", () => {
       mode: "active",
     });
   });
+  it("routes shared-sender quotes from the same phone to each exact merchant recovery", async () => {
+    const recoveries = new Map([
+      ["conversation-a", { ...recovery, id: "recovery-a", shopId: "shop-a",
+        shop: { platform: "SHOPIFY" }, customer: { phone: "+4477" } }],
+      ["conversation-b", { ...recovery, id: "recovery-b", shopId: "shop-b",
+        shop: { platform: "SHOPIFY" }, customer: { phone: "+4477" } }],
+    ]);
+    const conversations = new Map([
+      ["conversation-a", "wamid-shop-a"],
+      ["conversation-b", "wamid-shop-b"],
+    ]);
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) => {
+      const conversationId = [...conversations].find(([, providerMessageId]) =>
+        providerMessageId === where.providerMessageId)?.[0];
+      return conversationId ? {
+        direction: "OUTBOUND", sentAt: new Date(), conversationId,
+        conversation: { checkoutRecovery: recoveries.get(conversationId) },
+      } : null;
+    });
+    db.conversation.findUnique.mockImplementation(async ({ where }) => ({
+      checkoutRecovery: recoveries.get(where.id),
+    }));
+
+    const service = new RecoveryRoutingService();
+    const shopA = await service.resolveInboundMessage({ ...event, contextMessageId: "wamid-shop-a" });
+    const shopB = await service.resolveInboundMessage({ ...event, contextMessageId: "wamid-shop-b" });
+
+    expect(shopA).toMatchObject({ kind: "resolved", conversationId: "conversation-a",
+      checkoutRecoveryId: "recovery-a", shopId: "shop-a" });
+    expect(shopB).toMatchObject({ kind: "resolved", conversationId: "conversation-b",
+      checkoutRecoveryId: "recovery-b", shopId: "shop-b" });
+    expect(active.mock.calls.map(([shopId]) => shopId)).toEqual(["shop-a", "shop-b"]);
+  });
   it("does not manufacture ownership from a missing recovery", async () => {
     db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
     db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: null });

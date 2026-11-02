@@ -37,4 +37,5 @@ export interface SendTemplateInput {
   recoveryPromise?: RecoveryOfferPromise;
   imageHeader?: WhatsAppTemplateImageHeader;
   dynamicUrlButton?: WhatsAppTemplateUrlButton;
+  dynamicUrlButtons?: WhatsAppTemplateUrlButton[];
 }

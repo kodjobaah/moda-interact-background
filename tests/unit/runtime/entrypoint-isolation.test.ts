@@ -143,7 +143,8 @@ describe("production worker entrypoints", () => {
     expect(source).toContain('logger.error("billing.reconciliation.scan_failed"');
     expect(source).toContain("reportBillingReconciliationFailure,");
     expect(reporter).toContain("error.name.slice(0, 64)");
-    expect(reporter).toContain("error.message.slice(0, 256)");
+    expect(reporter).toContain('reasonCode: "BILLING_RECONCILIATION_SCAN_FAILED"');
+    expect(reporter).not.toContain("error.message");
     expect(reporter).not.toContain("error,");
     expect(reporter).not.toContain("error: error");
   });

@@ -8,6 +8,7 @@ import type {
   TemplateUnavailableReason,
   VerifiedOfferPresentation,
 } from "./recovery-template.types.js";
+import { decideInitialCheckoutItemsBinding } from "./initial-checkout-items-policy.js";
 
 export const PURPOSE_BY_STAGE_AND_OFFER = {
   INITIAL: {
@@ -60,11 +61,14 @@ export function selectRecoveryAssignment(input: {
   purpose: string;
   variants: readonly AssignedVariantRow[];
   stage: RecoveryStage;
+  promotionTarget?: "CHECKOUT" | "ALTERNATIVE_PRODUCT";
   offer: VerifiedOfferPresentation;
+  offerCount?: number;
   conversationLanguageTag: string | null;
   merchantLanguageTag: string | null;
   platformFallbackEnabled: boolean;
   platformFallbackLanguageTag: string | null;
+  headerFormat?: "TEXT" | "IMAGE";
   logger: Pick<StructuredLogger, "warn">;
 }): AssignmentSelection {
   const customer = language(input.conversationLanguageTag, input.logger, "conversation");
@@ -87,6 +91,52 @@ export function selectRecoveryAssignment(input: {
     return { outcome: "unavailable", reason: "IDENTITY_MISMATCH" };
   }
 
+  let initialBindingFailure: "BINDINGS_INVALID" | "DEFINITION_UNAVAILABLE" = "DEFINITION_UNAVAILABLE";
+  let rejectedInitialBinding = false;
+  const initialCandidates = input.stage !== "INITIAL" ? input.variants : input.variants.filter((row) => {
+    const registration = row.metaRegistration;
+    if (!registration) return true;
+    const bindings = registration?.parameterBindingsSnapshot;
+    const checkoutItemsDecision = decideInitialCheckoutItemsBinding({
+      stage: "INITIAL", parameterBindingsSnapshot: bindings,
+    });
+    if (!checkoutItemsDecision.ok) {
+      rejectedInitialBinding = true;
+      if (checkoutItemsDecision.reason === "BINDINGS_INVALID") initialBindingFailure = "BINDINGS_INVALID";
+      return false;
+    }
+    const components = registration?.componentsSnapshot;
+    if (!bindings || typeof bindings !== "object" || Array.isArray(bindings) ||
+        !components || !Array.isArray(components)) return false;
+    const header = components.find((component) => component && typeof component === "object" &&
+      !Array.isArray(component) && (component as Record<string, unknown>).type === "HEADER") as
+      Record<string, unknown> | undefined;
+    const headerKind = header?.format === undefined ? "TEXT" : header.format;
+    const parameterBindings = bindings as Record<string, unknown>;
+    const bodyBindings = Array.isArray((bindings as Record<string, unknown>).body)
+      ? (bindings as Record<string, unknown>).body as unknown[] : [];
+    const identifiesShop = bodyBindings.some((entry) => entry && typeof entry === "object" &&
+      !Array.isArray(entry) && (entry as Record<string, unknown>).variable === "shop.name");
+    const bodyVariables = bodyBindings.flatMap((entry) => entry && typeof entry === "object" &&
+      !Array.isArray(entry) && typeof (entry as Record<string, unknown>).variable === "string"
+      ? [(entry as Record<string, string>).variable] : []);
+    const hasSingleCode = bodyVariables.includes("offer.code");
+    const hasMultipleCodes = bodyVariables.includes("offer.codes");
+    const checkoutOfferBindingMatches = input.promotionTarget !== "CHECKOUT" ||
+      input.offer === "NO_OFFER" || (input.offer === "CODE_OFFER"
+        ? (input.offerCount ?? 1) > 1 ? hasMultipleCodes && !hasSingleCode : hasSingleCode && !hasMultipleCodes
+        : !hasSingleCode && !hasMultipleCodes);
+    const mediaRole = parameterBindings.headerMediaRole;
+    const headerMatches = (input.headerFormat ?? "TEXT") === "IMAGE"
+      ? headerKind === "IMAGE" && mediaRole === "CHECKOUT_PRODUCT"
+      : headerKind === "TEXT" && mediaRole === undefined;
+    return parameterBindings.promotionTarget === input.promotionTarget &&
+      headerMatches && identifiesShop && checkoutOfferBindingMatches;
+  });
+  if (input.stage === "INITIAL" && !input.promotionTarget) {
+    return { outcome: "unavailable", reason: "DEFINITION_UNAVAILABLE" };
+  }
+
   const choices: Array<{ tag: string; source: SelectionSource }> = [];
   const add = (tag: string | null, source: SelectionSource) => {
     if (tag && !choices.some((choice) => choice.tag === tag)) choices.push({ tag, source });
@@ -97,9 +147,13 @@ export function selectRecoveryAssignment(input: {
   if (input.platformFallbackEnabled) add(platform, "platform-fallback");
   if (!choices.length) return { outcome: "unavailable", reason: "NO_LANGUAGE" };
 
+  if (input.stage === "INITIAL" && initialCandidates.length === 0 && rejectedInitialBinding) {
+    return { outcome: "unavailable", reason: initialBindingFailure };
+  }
+
   for (const choice of choices) {
     const candidates: AssignedVariantRow[] = [];
-    for (const variant of input.variants) {
+    for (const variant of initialCandidates) {
       const tag = language(variant.languageTag, input.logger, "persisted-assignment");
       if (!tag) return { outcome: "unavailable", reason: "LOCALE_UNAVAILABLE" };
       if (tag === choice.tag) candidates.push(variant);

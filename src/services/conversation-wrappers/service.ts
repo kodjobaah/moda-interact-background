@@ -141,8 +141,6 @@ export class ConversationWrapperService {
         errorType: error instanceof Error ? error.name : "unknown",
         errorCode: error && typeof error === "object" && "code" in error &&
           typeof error.code === "string" ? error.code.slice(0, 48) : undefined,
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
       });
       throw error;
     }

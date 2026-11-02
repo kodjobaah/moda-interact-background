@@ -1,12 +1,14 @@
 /** ARCH-047 BG001: a local, read-only preparation boundary (not a send permit). */
 export type RecoveryStage = "INITIAL" | "FOLLOW_UP";
 export type VerifiedOfferPresentation = "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER";
+export type RecoveryPromotionTarget = "CHECKOUT" | "ALTERNATIVE_PRODUCT";
 export type RecoveryTemplatePurpose =
   | "INITIAL_NO_OFFER" | "INITIAL_CODE_OFFER" | "INITIAL_AUTOMATIC_OFFER"
   | "FOLLOW_UP_NO_OFFER" | "FOLLOW_UP_CODE_OFFER" | "FOLLOW_UP_AUTOMATIC_OFFER";
 
 export type SelectionSource = "exact" | "base" | "merchant-fallback" | "platform-fallback";
 export type BrandMediaRole = "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE";
+export type RecoveryTemplateHeaderMediaRole = BrandMediaRole | "CHECKOUT_PRODUCT";
 /** For isolated tests use a fixed list; production resolves the active platform policy per preparation. */
 export type MediaApprovedHosts = readonly string[] | (() => Promise<readonly string[]>);
 
@@ -44,7 +46,19 @@ export type TrustedOffer = Readonly<{
   verifiedAt: Date;
   expiresAt: Date | null;
   code?: string;
+  codes?: readonly string[];
   description?: string;
+}>;
+
+export type SourceBoundPromotionalProduct = Readonly<{
+  sourceTool: "commerce_get_product";
+  authenticatedShopId: string;
+  product: Readonly<{
+    productId: string;
+    variantId: string | null;
+    title: string;
+    url: string | null;
+  }>;
 }>;
 
 export type RecoveryTemplatePreparationInput = Readonly<{
@@ -53,6 +67,7 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   senderWabaId: string;
   stage: RecoveryStage;
   offerPresentation: VerifiedOfferPresentation;
+  promotionTarget?: RecoveryPromotionTarget;
   conversationLanguageTag: string | null;
   merchantLanguageTag: string | null;
   platformFallbackEnabled?: boolean;
@@ -62,6 +77,9 @@ export type RecoveryTemplatePreparationInput = Readonly<{
   checkout?: TrustedCheckout | null;
   checkoutItems?: TrustedCheckoutItems | null;
   verifiedOffer?: TrustedOffer | null;
+  promotionalProduct?: SourceBoundPromotionalProduct | null;
+  /** Trusted current attempt and selected product identity for optional CHECKOUT_PRODUCT IMAGE. */
+  productImage?: import("../../services/recovery-product-media/recovery-product-image-resolver.js").OutreachProductImageRequest | null;
 }>;
 
 export type TemplateUnavailableReason =
@@ -71,7 +89,8 @@ export type TemplateUnavailableReason =
   | "PROVIDER_UNAVAILABLE" | "PROVIDER_DRIFT" | "IDENTITY_MISMATCH"
   | "DEFINITION_UNAVAILABLE" | "LOCALE_UNAVAILABLE" | "BINDINGS_INVALID"
   | "BINDING_FINGERPRINT_MISMATCH" | "BINDING_VALUE_UNAVAILABLE"
-  | "CHECKOUT_UNAVAILABLE" | "CHECKOUT_UNTRUSTED" | "MEDIA_NOT_READY";
+  | "CHECKOUT_UNAVAILABLE" | "CHECKOUT_UNTRUSTED" | "MEDIA_NOT_READY"
+  | "PROMOTION_PRODUCT_URL_UNAVAILABLE";
 
 export type TemplateUnavailable = Readonly<{
   outcome: "unavailable";
@@ -105,6 +124,8 @@ export type PreparedRecoveryTemplate = Readonly<{
   submittedContentHash: string;
   /** Verification digest for the frozen compiled projection. */
   bindingFingerprint: string;
+  /** Verified 1-based BODY slot for the required INITIAL checkout summary. */
+  initialCheckoutItemsBodyPosition: number | null;
   /** Prepared Meta request; never a send/admission permit. */
   template: Readonly<{
     name: string;

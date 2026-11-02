@@ -98,6 +98,8 @@ export type ObservedCheckoutOffer = Readonly<{
 }>;
 
 export type SourceBoundOutreachProduct = Readonly<{
+  sourceTool: "commerce_get_product";
+  authenticatedShopId: string;
   shopId: string;
   product: InitialOutreachCommerceProduct;
 }>;
@@ -129,6 +131,9 @@ export const InitialOutreachAgentResultSchema = z.discriminatedUnion("kind", [
     members: z.array(z.strictObject({
       offerId: z.string().min(1),
       providerDiscountId: z.string().min(1),
+      method: z.enum(["CODE", "AUTOMATIC"]),
+      code: z.string().max(100).nullable(),
+      description: z.string().min(1).max(200),
       eligibility: z.custom<CheckoutEligibilityDecision>(),
     })).min(1).max(3),
     group: z.custom<CheckoutOfferGroupDecision>(),
@@ -144,9 +149,17 @@ export const InitialOutreachAgentResultSchema = z.discriminatedUnion("kind", [
     kind: z.literal("ALTERNATIVE_PRODUCT_PROMOTION"),
     offerId: z.string().min(1),
     providerDiscountId: z.string().min(1),
+    method: z.enum(["CODE", "AUTOMATIC"]),
+    code: z.string().max(100).nullable(),
+    description: z.string().min(1).max(200),
     productId: z.string().min(1),
     variantId: z.string().min(1).nullable(),
-    product: z.custom<SourceBoundOutreachProduct>(),
+    product: z.strictObject({
+      sourceTool: z.literal("commerce_get_product"),
+      authenticatedShopId: z.string().min(1),
+      shopId: z.string().min(1),
+      product: CommerceProductSchema,
+    }),
     shopId: z.string().min(1),
     checkoutRecoveryId: z.string().min(1),
     outreachAttemptId: z.string().min(1),

@@ -9,7 +9,7 @@ import { verifyEncodedBrandImage } from "./metadata-verifier.js";
 const SUPPORTED_SOURCES = new Set(["jpeg", "png", "webp", "avif", "heif", "gif", "svg", "tiff"]);
 
 /** Deny SVG constructs capable of loading secondary, unpinned network/file resources. */
-function assertSelfContainedSvg(bytes: Buffer): void {
+export function assertSelfContainedSvg(bytes: Buffer): void {
   const markup = bytes.toString("utf8");
   if (/(?:<!DOCTYPE|<!ENTITY|<\s*(?:script|image|use|foreignObject|iframe|object|embed|style|feImage)\b|(?:xlink:)?href\s*=|url\s*\(|@import\b|\bon[a-z]+\s*=)/i.test(markup)) {
     throw new ShopBrandMediaError("INVALID_IMAGE");

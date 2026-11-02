@@ -197,9 +197,6 @@ export class RecoveryOfferResolver {
     this.reporting.error(event, {
       shopId, ...(platform ? { platform } : {}),
       errorType: error instanceof Error ? error.name : "unknown",
-      // Never log error.message/stack: provider exceptions may contain secrets.,
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error: error,
     });
   }
 }

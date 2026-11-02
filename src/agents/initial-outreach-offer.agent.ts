@@ -200,6 +200,7 @@ export async function runInitialOutreachOfferAgent(
             typeof state.failure.error.sourceFailure === "object"
           ? state.failure.error.sourceFailure as Record<string, unknown> : {}),
         sourceErrorName: state.failure.error instanceof Error ? state.failure.error.name : undefined,
+        ...(state.failure.error !== undefined ? { error: state.failure.error } : {}),
         selectedOutcome: result.kind,
         modelSteps: state.modelSteps,
         toolCalls: state.mcpCalls,
@@ -228,6 +229,8 @@ export async function runInitialOutreachOfferAgent(
       origin: "internal",
       reasonCode: code === "DEADLINE" ? "OUTREACH_DEADLINE" : code === "CANCELLED" ? "OUTREACH_CANCELLED" : "OUTREACH_UNEXPECTED_FAILURE",
       sourceErrorName: error instanceof Error ? error.name : "NonErrorThrown",
+      ...safeExceptionFields(error),
+      error,
       durationMs: Math.max(0, (dependencies.now?.() ?? new Date()).getTime() - startedAt),
     });
     throw error;

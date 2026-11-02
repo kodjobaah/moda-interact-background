@@ -31,7 +31,7 @@ function fixture(role: string = "LOGO", overrides: { bindings?: unknown; compone
   const components = overrides.components ?? adminVector.componentsSnapshot;
   const bindings = overrides.bindings ?? { ...adminVector.parameterBindingsSnapshot, headerMediaRole: role };
   const digest = overrides.digest ?? hash(components, bindings);
-  const stage = overrides.stage ?? "INITIAL";
+  const stage = overrides.stage ?? "FOLLOW_UP";
   const registration = {
     id: "reg-1", wabaId: "waba-1", providerTemplateName: "moda_arch049_media",
     providerLanguageCode: "en_US", providerTemplateId: "meta-1", category: "MARKETING",
@@ -63,8 +63,10 @@ function setup(role: string, options: Parameters<typeof fixture>[1] = {}) {
   const logger = { warn: vi.fn(), error: vi.fn() };
   const preparer = new RecoveryTemplatePreparer(repository, async () => "waba-1",
     resolveMedia, ["media.modainteract.com"], () => now, logger);
-  const input = { shopId: "shop-1", senderWabaId: "waba-1", stage: options?.stage ?? "INITIAL",
+  const stage = options?.stage ?? "FOLLOW_UP";
+  const input = { shopId: "shop-1", senderWabaId: "waba-1", stage,
     offerPresentation: "NO_OFFER" as const, conversationLanguageTag: null, merchantLanguageTag: "en",
+    ...(stage === "INITIAL" ? { promotionTarget: "CHECKOUT" as const } : {}),
     customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Example Shop" } };
   return { preparer, input, resolveMedia, readShopBrand, logger };
 }
@@ -106,10 +108,15 @@ describe("ARCH-049 Admin frozen-image projection and BG006 pass-through", () => 
     }
   });
 
-  it.each(["INITIAL", "FOLLOW_UP"] as const)("supports %s without changing BG006 send semantics", async (stage) => {
-    const { preparer, input } = setup("COVER_IMAGE", { stage });
+  it("rejects an initial legacy IMAGE registration without target-bound approval", async () => {
+    const { preparer, input } = setup("COVER_IMAGE", { stage: "INITIAL" });
+    expect(await preparer.prepare(input)).toMatchObject({ outcome: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
+  });
+
+  it("supports FOLLOW_UP without changing BG006 send semantics", async () => {
+    const { preparer, input } = setup("COVER_IMAGE", { stage: "FOLLOW_UP" });
     const prepared = await preparer.prepare(input);
-    expect(prepared).toMatchObject({ outcome: "prepared", purpose: `${stage}_NO_OFFER` });
+    expect(prepared).toMatchObject({ outcome: "prepared", purpose: "FOLLOW_UP_NO_OFFER" });
     if (prepared.outcome === "prepared") {
       expect(templateSendFields(prepared, { kind: "NO_OFFER" }).imageHeader).toEqual({
         link: "https://media.modainteract.com/shop-brands/shop-1/cover_image/image.jpg",

@@ -214,10 +214,11 @@ describe("EstablishedPlanChangeReconciliationService", () => {
 
     await expect(test.service.reconcile("shop-1", { ...expected, pendingEffectiveAt: alreadyEffective }, provider as never, currentPlan, targetPlan)).resolves.toBeUndefined();
 
-    expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", {
+    expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.objectContaining({
       shopId: "shop-1",
       errorMessage: "queue unavailable",
-    });
+      error: expect.any(Error),
+    }));
     expect(transitionMock).toHaveBeenCalledOnce();
   });
 

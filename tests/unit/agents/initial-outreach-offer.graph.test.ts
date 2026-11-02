@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CommerceToolResult } from "@modainteract/moda-interact-shared/commerce";
-import type { CommerceModelInvoker, ModelRequest } from "@modainteract/moda-interact-shared/commerce/runner";
+import {
+  CommerceModelInvocationFailure,
+  type CommerceModelInvoker,
+  type ModelRequest,
+} from "@modainteract/moda-interact-shared/commerce/runner";
 import { createInitialOutreachOfferGraph } from "../../../src/agents/initial-outreach-offer.graph.js";
 import { InitialOutreachAgentContextSchema } from "../../../src/agents/initial-outreach-offer.types.js";
 import type { OutreachMcpToolDescriptor } from "../../../src/services/recovery-offers/recovery-outreach-mcp-selector.service.js";
@@ -99,6 +103,7 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
   detailOverride?: unknown;
   offerOverride?: Record<string, unknown>;
   evaluatedAt?: Date;
+  invokeError?: Error;
 } = {}) {
   const selector = {
     connect: vi.fn(async () => undefined),
@@ -121,6 +126,7 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
   const modelInvoker: CommerceModelInvoker = {
     async invoke(request) {
       requests.push(request);
+      if (options.invokeError) throw options.invokeError;
       const chosen = choices[step++];
       return { calls: chosen ? Array.isArray(chosen) ? chosen : [chosen] : [], outputTokens: 10 };
     },
@@ -137,6 +143,19 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
 }
 
 describe("InitialOutreachOffer LangGraph", () => {
+  it("preserves a typed model invocation failure as optional AI unavailability", async () => {
+    const failure = new CommerceModelInvocationFailure({
+      stage: "model.invoke", reasonCode: "MODEL_INVOCATION_FAILED",
+    });
+    const { graph } = fixture([], { invokeError: failure });
+
+    const state = await graph.invoke();
+
+    expect(state.finalDecision).toMatchObject({
+      kind: "FAILURE", code: "UNAVAILABLE", reasonCode: "AI_UNAVAILABLE", retryable: true,
+    });
+  });
+
   it("performs dynamic options and details calls before accepting an identifier-only checkout choice", async () => {
     const { graph, selector, requests } = fixture([
       { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
