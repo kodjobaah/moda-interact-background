@@ -57,7 +57,7 @@ const conversationTurnObservation = {
   }),
 } as const;
 
-const whatsappQueue = new Queue("whatsapp-events", {
+export const whatsappQueue = new Queue("whatsapp-events", {
   connection: connectionRedis,
 });
 
