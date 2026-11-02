@@ -18,6 +18,7 @@ import {
 } from "./conversation-language.service.js";
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { recordProcessableInbound } from "./conversation-ai-delay/pending-turn-repository.js";
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -46,6 +47,11 @@ export interface ConversationTurnState {
   lastProcessedVersion: number;
   lastInboundAt: Date | null;
   pendingTurnStartedAt: Date | null;
+  pendingAiNotBeforeAt: Date | null;
+  pendingAiControlRevision: number | null;
+  pendingAiDelayMinutes: number | null;
+  controlMode: "AI" | "HUMAN";
+  controlRevision: number;
   processingInboundVersion: number | null;
   processingStartedAt: Date | null;
 }
@@ -63,6 +69,24 @@ export class ConversationService {
    * which Conversation this message belongs to.
    */
   async receiveMessage(
+    message: ResolvedIncomingMessage,
+  ): Promise<{
+    conversationId: string;
+    version: number;
+    duplicate: boolean;
+  }> {
+    try {
+      return await this.receiveMessageInternal(message);
+    } catch (error) {
+      this.serviceLogger.error("whatsapp.inbound.persistence_failed", {
+        conversationId: message.conversationId,
+        error,
+      });
+      throw error;
+    }
+  }
+
+  private async receiveMessageInternal(
     message: ResolvedIncomingMessage,
   ): Promise<{
     conversationId: string;
@@ -136,63 +160,41 @@ export class ConversationService {
      * conversation version together.
      */
     const result = await prisma.$transaction(async (tx) => {
-      await tx.conversationMessage.create({
-        data: {
-          conversationId: message.conversationId,
-
-          providerMessageId: message.providerMessageId,
-
-          inReplyToProviderId: message.inReplyToProviderId,
-
-          direction: "INBOUND",
-
-          senderType: "CUSTOMER",
-
-          status: "DELIVERED",
-
-          content: message.content,
-          createdAt: receivedAt,
-        },
-      });
-
-      if (
-        currentConversation.inboundVersion ===
-          currentConversation.lastProcessedVersion &&
-        currentConversation.pendingTurnStartedAt === null
-      ) {
-        await tx.conversation.updateMany({
-          where: {
-            id: message.conversationId,
-            inboundVersion: currentConversation.inboundVersion,
-            lastProcessedVersion: currentConversation.lastProcessedVersion,
-            pendingTurnStartedAt: null,
+        await tx.conversationMessage.create({
+          data: {
+            conversationId: message.conversationId,
+            providerMessageId: message.providerMessageId,
+            inReplyToProviderId: message.inReplyToProviderId,
+            direction: "INBOUND",
+            senderType: "CUSTOMER",
+            status: "DELIVERED",
+            content: message.content,
+            createdAt: receivedAt,
           },
-          data: { pendingTurnStartedAt: receivedAt },
         });
-      }
 
-      const conversation = await tx.conversation.update({
-        where: { id: message.conversationId },
-        data: {
-          inboundVersion: { increment: 1 },
-          languageTag: language.languageTag,
-          languageSource: toPrismaLanguageSource(language.languageSource),
-        },
-        select: {
-          id: true,
-          inboundVersion: true,
-        },
+        const recorded = await recordProcessableInbound(
+          tx,
+          message.conversationId,
+          receivedAt,
+        );
+        await tx.conversation.update({
+          where: { id: message.conversationId },
+          data: {
+            languageTag: language.languageTag,
+            languageSource: toPrismaLanguageSource(language.languageSource),
+          },
+          select: { id: true, inboundVersion: true },
+        });
+
+        // A delayed verified webhook must never move either clock backwards.
+        await tx.$executeRaw`
+          UPDATE "whatsapp"."Conversation"
+          SET "lastInboundAt" = GREATEST("lastInboundAt", ${receivedAt}),
+            "lastMessageAt" = GREATEST("lastMessageAt", ${receivedAt})
+          WHERE "id" = ${message.conversationId}`;
+        return { id: message.conversationId, inboundVersion: recorded.version };
       });
-
-      // A delayed verified webhook must never move either clock backwards.
-      // This runs in the same transaction as the inbound-version increment.
-      await tx.$executeRaw`
-        UPDATE "whatsapp"."Conversation"
-        SET "lastInboundAt" = GREATEST("lastInboundAt", ${receivedAt}),
-          "lastMessageAt" = GREATEST("lastMessageAt", ${receivedAt})
-        WHERE "id" = ${message.conversationId}`;
-      return conversation;
-    });
 
     await recoveryOutreachAttemptService.markEngagedForConversation(
       result.id,
@@ -214,6 +216,11 @@ export class ConversationService {
         lastProcessedVersion: true,
         lastInboundAt: true,
         pendingTurnStartedAt: true,
+        pendingAiNotBeforeAt: true,
+        pendingAiControlRevision: true,
+        pendingAiDelayMinutes: true,
+        controlMode: true,
+        controlRevision: true,
         processingInboundVersion: true,
         processingStartedAt: true,
       },
@@ -258,6 +265,9 @@ export class ConversationService {
       data: {
         lastProcessedVersion: observedVersion,
         pendingTurnStartedAt: null,
+        pendingAiNotBeforeAt: null,
+        pendingAiControlRevision: null,
+        pendingAiDelayMinutes: null,
         processingInboundVersion: null,
         processingStartedAt: null,
       },

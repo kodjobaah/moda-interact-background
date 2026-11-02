@@ -57,6 +57,13 @@ describe("ConversationService language persistence", () => {
         callback({
           conversationMessage: { create },
           conversation: { updateMany, update },
+          $queryRaw: vi.fn().mockResolvedValue([{
+            id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+            controlMode: "AI", controlRevision: 0, inboundVersion: 0,
+            lastProcessedVersion: 0, pendingTurnStartedAt: null,
+            recoveryId: null, recoveryShopId: null,
+          }]),
+          shopSettings: { findUnique: vi.fn() },
           $executeRaw: executeRaw,
         } as any),
       );
@@ -72,14 +79,13 @@ describe("ConversationService language persistence", () => {
       expect(create).toHaveBeenCalledWith({
         data: expect.objectContaining({ createdAt: receivedAt }),
       });
-      expect(updateMany).toHaveBeenCalledWith({
-        where: {
-          id: "conversation-1",
-          inboundVersion: 0,
-          lastProcessedVersion: 0,
-          pendingTurnStartedAt: null,
+      expect(update).toHaveBeenCalledWith({
+        where: { id: "conversation-1" },
+        data: {
+          inboundVersion: { increment: 1 },
+          pendingTurnStartedAt: receivedAt,
         },
-        data: { pendingTurnStartedAt: receivedAt },
+        select: { inboundVersion: true },
       });
       expect(executeRaw.mock.calls[0]).toEqual([
         expect.any(Array),
@@ -114,6 +120,13 @@ describe("ConversationService language persistence", () => {
           updateMany: txConversationUpdateMany.mockResolvedValue({ count: 1 }),
           update: txConversationUpdate,
         },
+        $queryRaw: vi.fn().mockResolvedValue([{
+          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
+          lastProcessedVersion: 1, pendingTurnStartedAt: null,
+          recoveryId: null, recoveryShopId: null,
+        }]),
+        shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       }),
     );
@@ -121,6 +134,7 @@ describe("ConversationService language persistence", () => {
     const serviceLogger = {
       debug: vi.fn(),
       info: vi.fn(),
+      error: vi.fn(),
     } as any;
     const service = new ConversationService(
       new ConversationLanguageService(),
@@ -134,19 +148,17 @@ describe("ConversationService language persistence", () => {
       content: "Je veux modifier cette commande",
     });
 
-    expect(txConversationUpdateMany).toHaveBeenCalledWith({
-      where: {
-        id: "conversation-1",
-        inboundVersion: 1,
-        lastProcessedVersion: 1,
-        pendingTurnStartedAt: null,
-      },
-      data: { pendingTurnStartedAt: expect.any(Date) },
-    });
     expect(txConversationUpdate).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
       data: {
         inboundVersion: { increment: 1 },
+        pendingTurnStartedAt: expect.any(Date),
+      },
+      select: { inboundVersion: true },
+    });
+    expect(txConversationUpdate).toHaveBeenCalledWith({
+      where: { id: "conversation-1" },
+      data: {
         languageTag: "en-GB",
         languageSource: "SHOPIFY",
       },
@@ -266,6 +278,13 @@ describe("ConversationService language persistence", () => {
       callback({
         conversationMessage: { create },
         conversation: { updateMany, update },
+        $queryRaw: vi.fn().mockResolvedValue([{
+          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
+          lastProcessedVersion: 1, pendingTurnStartedAt: null,
+          recoveryId: null, recoveryShopId: null,
+        }]),
+        shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       } as any),
     );
@@ -289,8 +308,8 @@ describe("ConversationService language persistence", () => {
     });
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -393,6 +412,10 @@ describe("ConversationService turn state", () => {
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 0 });
     let nextVersion = 2;
+    const update = vi.fn().mockImplementation(async () => ({
+      id: "conversation-1",
+      inboundVersion: nextVersion++,
+    }));
     prismaMock.conversationMessage.findUnique.mockResolvedValue(null);
     prismaMock.conversation.findUniqueOrThrow.mockResolvedValue({
       inboundVersion: 1,
@@ -406,11 +429,15 @@ describe("ConversationService turn state", () => {
         conversationMessage: { create: vi.fn() },
         conversation: {
           updateMany: conditionalUpdate,
-          update: vi.fn().mockImplementation(async () => ({
-            id: "conversation-1",
-            inboundVersion: nextVersion++,
-          })),
+          update,
         },
+        $queryRaw: vi.fn().mockResolvedValue([{
+          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+          controlMode: "AI", controlRevision: 0, inboundVersion: 1,
+          lastProcessedVersion: 1, pendingTurnStartedAt: null,
+          recoveryId: null, recoveryShopId: null,
+        }]),
+        shopSettings: { findUnique: vi.fn() },
         $executeRaw: vi.fn().mockResolvedValue(1),
       }),
     );
@@ -431,25 +458,9 @@ describe("ConversationService turn state", () => {
       }),
     ]);
 
-    expect(conditionalUpdate).toHaveBeenCalledTimes(2);
-    expect(conditionalUpdate).toHaveBeenNthCalledWith(1, {
-      where: {
-        id: "conversation-1",
-        inboundVersion: 1,
-        lastProcessedVersion: 1,
-        pendingTurnStartedAt: null,
-      },
-      data: { pendingTurnStartedAt: expect.any(Date) },
-    });
-    expect(conditionalUpdate).toHaveBeenNthCalledWith(2, {
-      where: {
-        id: "conversation-1",
-        inboundVersion: 1,
-        lastProcessedVersion: 1,
-        pendingTurnStartedAt: null,
-      },
-      data: { pendingTurnStartedAt: expect.any(Date) },
-    });
+    expect(conditionalUpdate).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(4);
+    expect(update.mock.calls.filter(([call]) => call.data.pendingTurnStartedAt)).toHaveLength(2);
   });
 
   it("clears pending and processing state only for the claimed version", async () => {
@@ -469,6 +480,9 @@ describe("ConversationService turn state", () => {
       data: {
         lastProcessedVersion: 4,
         pendingTurnStartedAt: null,
+        pendingAiNotBeforeAt: null,
+        pendingAiControlRevision: null,
+        pendingAiDelayMinutes: null,
         processingInboundVersion: null,
         processingStartedAt: null,
       },

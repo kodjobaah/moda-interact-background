@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   database: {
     conversationMessage: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     conversation: { findUniqueOrThrow: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    shopSettings: { findUnique: vi.fn() },
     $queryRaw: vi.fn(), $executeRaw: vi.fn(), $transaction: vi.fn(),
   },
   media: { downloadAudio: vi.fn() },
@@ -18,7 +19,7 @@ vi.mock("../../../src/services/whatsapp-media.service.js", async (importOriginal
 }));
 
 vi.mock("music-metadata", () => ({ parseBuffer: mocks.parseBuffer }));
-vi.mock("@modainteract/moda-interact-shared/logging", () => ({ createLogger: () => ({ info: vi.fn(), warn: vi.fn() }) }));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({ createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) }));
 
 import { InboundWhatsAppAudioService } from "../../../src/services/inbound-whatsapp-audio.service.js";
 import { WhatsAppMediaError } from "../../../src/services/whatsapp-media.service.js";
@@ -41,6 +42,14 @@ describe("InboundWhatsAppAudioService", () => {
     mocks.database.conversationMessage.create.mockResolvedValue({ id: "message-row", conversationId: "conversation-1", transcriptionStatus: "PENDING" });
     mocks.database.conversationMessage.updateMany.mockResolvedValue({ count: 1 });
     mocks.database.conversation.updateMany.mockResolvedValue({ count: 1 });
+    mocks.database.conversation.update.mockResolvedValue({ inboundVersion: 3 });
+    mocks.database.shopSettings.findUnique.mockResolvedValue({ aiResponseDelayMinutes: 7 });
+    mocks.database.$queryRaw.mockResolvedValue([{
+      id: "conversation-1", type: "RECOVERY", checkoutRecoveryId: "recovery-1",
+      controlMode: "AI", controlRevision: 0, inboundVersion: 2,
+      lastProcessedVersion: 2, pendingTurnStartedAt: null,
+      recoveryId: "recovery-1", recoveryShopId: "shop-1",
+    }]);
     mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({ inboundVersion: 2, lastProcessedVersion: 2, pendingTurnStartedAt: null });
     mocks.database.$transaction.mockImplementation((callback: (tx: typeof mocks.database) => unknown) => callback(mocks.database));
     mocks.media.downloadAudio.mockResolvedValue({ bytes: new TextEncoder().encode("OggSfixture"), mimeType: "audio/ogg" });
@@ -148,7 +157,9 @@ describe("review R1/R2 event ordering", () => {
   mocks.database.conversationMessage.findFirst.mockResolvedValue(null);
   mocks.database.conversationMessage.updateMany.mockResolvedValue({count:1});
   mocks.database.conversation.updateMany.mockResolvedValue({count:1});
-  mocks.database.$queryRaw.mockResolvedValue([{id:"conversation-1"}]);
+  mocks.database.conversation.update.mockResolvedValue({inboundVersion:3});
+  mocks.database.shopSettings.findUnique.mockResolvedValue({aiResponseDelayMinutes:7});
+  mocks.database.$queryRaw.mockResolvedValue([{id:"conversation-1",type:"RECOVERY",checkoutRecoveryId:"recovery-1",controlMode:"AI",controlRevision:0,inboundVersion:2,lastProcessedVersion:2,pendingTurnStartedAt:null,recoveryId:"recovery-1",recoveryShopId:"shop-1"}]);
   mocks.database.$transaction.mockImplementation(async(fn)=>fn(mocks.database));
   mocks.media.downloadAudio.mockResolvedValue({bytes:new TextEncoder().encode("OggSfixture"),mimeType:"audio/ogg"});
   mocks.parseBuffer.mockResolvedValue({format:{duration:30}});
@@ -159,16 +170,16 @@ describe("review R1/R2 event ordering", () => {
   expect(await new InboundWhatsAppAudioService(mocks.media,mocks.transcription).process(event,"conversation-1")).toEqual({kind:"completed"});
   expect(mocks.transcription.transcribe).toHaveBeenCalledTimes(1);
   expect(mocks.database.conversationMessage.findFirst).toHaveBeenCalledWith({where:{conversationId:"conversation-1",direction:"INBOUND",senderType:"CUSTOMER",OR:[{createdAt:{gt:new Date(event.occurredAt)}},{createdAt:new Date(event.occurredAt),id:{gt:"message-row"}}]},select:{id:true}});
-  expect(mocks.database.conversation.updateMany.mock.calls.filter(([a])=>a.data.inboundVersion)).toHaveLength(1);
+  expect(mocks.database.conversation.update).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({inboundVersion:{increment:1}})}));
  });
  it.each(["provider","transaction"])("R2 prior reply completion during %s does not discard incoming voice",async(timing)=>{
   const state={inboundVersion:2,lastProcessedVersion:1};
   mocks.database.conversation.findUniqueOrThrow.mockImplementation(async()=>({...state}));
   if(timing==="provider")mocks.transcription.transcribe.mockImplementation(async()=>{state.lastProcessedVersion=2;return{text:"A substantive customer reply",provider:"groq",model:"whisper-large-v3-turbo"};});
-  else mocks.database.$queryRaw.mockImplementation(async()=>{state.lastProcessedVersion=2;return[{id:"conversation-1"}];});
+  else mocks.database.$queryRaw.mockImplementation(async()=>{state.lastProcessedVersion=2;return[{id:"conversation-1",type:"RECOVERY",checkoutRecoveryId:"recovery-1",controlMode:"AI",controlRevision:0,inboundVersion:state.inboundVersion,lastProcessedVersion:state.lastProcessedVersion,pendingTurnStartedAt:null,recoveryId:"recovery-1",recoveryShopId:"shop-1"}];});
   expect(await new InboundWhatsAppAudioService(mocks.media,mocks.transcription).process(event,"conversation-1")).toEqual({kind:"completed"});
   expect(state.lastProcessedVersion).toBe(2);
-  expect(mocks.database.conversation.updateMany.mock.calls.filter(([a])=>a.data.inboundVersion)).toEqual([[{where:{id:"conversation-1"},data:{inboundVersion:{increment:1}}}]]);
+  expect(mocks.database.conversation.update).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({inboundVersion:{increment:1}})}));
  });
  it("R1 a genuinely newer persisted inbound rejects an older note before download",async()=>{
   mocks.database.conversationMessage.findFirst.mockResolvedValue({id:"newer-message"});
@@ -186,8 +197,9 @@ describe("R1 overlapping notes retain durable event order",()=>{
   mocks.database.conversationMessage.findFirst.mockImplementation(async({where})=>rows.find(r=>r.conversationId===where.conversationId&&(r.createdAt>where.OR[0].createdAt.gt||(r.createdAt.getTime()===where.OR[1].createdAt.getTime()&&r.id>where.OR[1].id.gt)))??null);
   mocks.database.conversationMessage.updateMany.mockImplementation(async({where,data})=>{const r=rows.find(r=>r.id===where.id&&r.transcriptionStatus===where.transcriptionStatus);if(!r)return{count:0};Object.assign(r,data);return{count:1};});
   mocks.database.conversation.findUniqueOrThrow.mockImplementation(async()=>({...state}));
-  mocks.database.conversation.updateMany.mockImplementation(async({data})=>{if(data.inboundVersion)state.inboundVersion++;return{count:1};});
-  mocks.database.$queryRaw.mockResolvedValue([{id:"conversation-1"}]);
+  mocks.database.conversation.update.mockImplementation(async({data})=>{if(data.inboundVersion)state.inboundVersion++;return{inboundVersion:state.inboundVersion};});
+  mocks.database.shopSettings.findUnique.mockResolvedValue({aiResponseDelayMinutes:7});
+  mocks.database.$queryRaw.mockImplementation(async()=>[{id:"conversation-1",type:"RECOVERY",checkoutRecoveryId:"recovery-1",controlMode:"AI",controlRevision:0,inboundVersion:state.inboundVersion,lastProcessedVersion:state.lastProcessedVersion,pendingTurnStartedAt:null,recoveryId:"recovery-1",recoveryShopId:"shop-1"}]);
   mocks.database.$transaction.mockImplementation(async(fn)=>fn(mocks.database));
   mocks.media.downloadAudio.mockResolvedValue({bytes:new TextEncoder().encode("OggSfixture"),mimeType:"audio/ogg"});
   mocks.parseBuffer.mockResolvedValue({format:{duration:30}});

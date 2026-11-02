@@ -142,6 +142,14 @@ async function processRoutedInboundMessageInternal(
         return;
       }
       const state = await conversationService.getTurnState(route.conversationId);
+      if (state.controlMode !== "AI" || state.pendingTurnStartedAt === null) {
+        log.debug("whatsapp.inbound.audio_ai_schedule_skipped", {
+          messageDigest,
+          conversationId: route.conversationId,
+          controlMode: state.controlMode,
+        });
+        return;
+      }
       log.debug("whatsapp.inbound.audio_ready_for_turn", {
         messageDigest,
         conversationId: route.conversationId,
@@ -275,6 +283,15 @@ async function processRoutedInboundMessageInternal(
     log.warn("whatsapp.inbound.turn_suppressed", {
       ...routeIdentifiers(route), messageDigest, mode: route.mode,
       stage: "before-enqueue", reason: "RECOVERY_CLOSED_OR_SUPERSEDED",
+    });
+    return;
+  }
+  const state = await conversationService.getTurnState(route.conversationId);
+  if (state.controlMode !== "AI" || state.pendingTurnStartedAt === null) {
+    log.debug("whatsapp.inbound.text_ai_schedule_skipped", {
+      messageDigest,
+      conversationId: route.conversationId,
+      controlMode: state.controlMode,
     });
     return;
   }
