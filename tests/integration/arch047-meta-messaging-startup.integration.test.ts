@@ -58,6 +58,7 @@ vi.mock("../../src/entrypoints/resources.js", () => ({
 }));
 vi.mock("../../src/workers/whatsapp.worker.js", () => ({
   createWhatsappWorker: () => ({ close: vi.fn(async () => undefined) }),
+  whatsappQueue: { add: vi.fn(async () => undefined) },
 }));
 
 const url = process.env.TEST_DATABASE_URL;

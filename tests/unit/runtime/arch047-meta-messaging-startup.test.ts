@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
   due: vi.fn(),
   loading: null as Promise<void> | null,
   workerClose: vi.fn(),
+  repairStart: vi.fn(),
+  repairClose: vi.fn(async () => {}),
+  queue: { add: vi.fn() },
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
@@ -15,6 +18,9 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
 }));
 vi.mock("../../../src/services/meta-template-management/service.js", () => ({
   metaTemplateManagementService: { processDueRegistrations: mocks.due },
+}));
+vi.mock("../../../src/services/conversation-ai-delay/start-pending-turn-repair.js", () => ({
+  startProductionPendingTurnRepair: mocks.repairStart,
 }));
 vi.mock("../../../src/runtime/readiness.js", () => ({
   startReadyWorkerProcess: vi.fn((options: { loadWorkerProcess: () => Promise<{
@@ -43,7 +49,10 @@ vi.mock("../../../src/services/recovery-conversation/start-human-command-dispatc
 vi.mock("../../../src/entrypoints/resources.js", () => ({
   closeWorkerResources: [async () => {}],
 }));
-vi.mock("../../../src/workers/whatsapp.worker.js", () => ({ createWhatsappWorker: () => ({ close: mocks.workerClose }) }));
+vi.mock("../../../src/workers/whatsapp.worker.js", () => ({
+  createWhatsappWorker: () => ({ close: mocks.workerClose }),
+  whatsappQueue: mocks.queue,
+}));
 
 describe("ARCH-047 BG003 production messaging entrypoint", () => {
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -52,15 +61,18 @@ describe("ARCH-047 BG003 production messaging entrypoint", () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0);
     mocks.due.mockResolvedValue({ inspected: 1, processed: 1 });
+    mocks.repairStart.mockReturnValue(mocks.repairClose);
     await import("../../../src/entrypoints/messaging.js");
     const loading = mocks.loading as Promise<void> | null;
     expect(loading).not.toBeNull();
     await loading;
     expect(mocks.load).not.toBeNull();
+    expect(mocks.repairStart).toHaveBeenCalledExactlyOnceWith(mocks.queue);
     await vi.advanceTimersByTimeAsync(0);
     expect(mocks.due).toHaveBeenCalledExactlyOnceWith(25);
     const closers = mocks.load?.closeResources ?? [];
     for (const close of closers) await close();
+    expect(mocks.repairClose).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(mocks.due).toHaveBeenCalledTimes(1);
   });

@@ -7,16 +7,18 @@ import { backgroundRuntimeLeaseService } from "../runtime/background-runtime-lea
 import { startQueueConcurrencyController } from "../runtime/queue-concurrency-controller.js";
 import { startHumanCommandDispatcher } from "../services/recovery-conversation/start-human-command-dispatcher.js";
 import { startProductionMetaTemplateDuePoller } from "../services/meta-template-management/due-poller.js";
+import { startProductionPendingTurnRepair } from "../services/conversation-ai-delay/start-pending-turn-repair.js";
 
 void startReadyWorkerProcess({
   serviceName: "moda-messaging-worker",
   loadWorkerProcess: async () => {
     await backgroundRuntimeConfigService.start();
-    const [{ closeWorkerResources }, { createWhatsappWorker }] = await Promise.all([
+    const [{ closeWorkerResources }, { createWhatsappWorker, whatsappQueue }] = await Promise.all([
       import("./resources.js"),
       import("../workers/whatsapp.worker.js"),
     ]);
     const whatsappWorker = createWhatsappWorker();
+    const closePendingTurnRepair = startProductionPendingTurnRepair(whatsappQueue);
     const closeHumanDispatcher = await startHumanCommandDispatcher();
     const closeTemplateDuePoller = startProductionMetaTemplateDuePoller();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
@@ -32,6 +34,7 @@ void startReadyWorkerProcess({
     return {
       workers: [whatsappWorker],
       closeResources: [
+        closePendingTurnRepair,
         closeHumanDispatcher,
         closeTemplateDuePoller,
         ...closeWorkerResources,
