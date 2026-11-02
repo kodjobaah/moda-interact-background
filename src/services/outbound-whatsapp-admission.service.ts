@@ -124,6 +124,7 @@ export class OutboundWhatsAppAdmissionService {
       previewUrl?: boolean;
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
+      expectedInboundVersion?: number;
     },
   ): Promise<OutboundAdmissionResult> {
     return this.delivery.sendPreparedText(input);

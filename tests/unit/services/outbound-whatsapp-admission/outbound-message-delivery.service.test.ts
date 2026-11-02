@@ -221,6 +221,20 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
   });
 
+  it("forwards the original inbound version into the final general send permit", async () => {
+    const generalFence = { admitFinalSend: vi.fn(async () => ({ kind: "admitted" as const })) };
+    const test = harness({ generalFence });
+
+    await test.service.sendPreparedText({
+      ...admission, to: "+14155552671", text: "Prepared text", expectedInboundVersion: 3,
+    });
+
+    expect(generalFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({
+      expectedInboundVersion: 3,
+    }));
+    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledOnce();
+  });
+
   it("suppresses a prepared text when admission wins the content-update race", async () => {
     const test = harness();
     test.database.conversationMessage.update.mockRejectedValueOnce(

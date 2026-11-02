@@ -99,7 +99,12 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       content?: string;
     }) => Promise<OutboundAdmissionResult>;
     sendPreparedText: (
-      input: Admitted & { to: string; text: string; expectedControlRevision?: number },
+      input: Admitted & {
+        to: string;
+        text: string;
+        expectedControlRevision?: number;
+        expectedInboundVersion?: number;
+      },
     ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
   };
@@ -332,6 +337,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       return this.dependencies.admission.sendPreparedText({
         ...input,
         ...(controlRevision === undefined ? {} : { expectedControlRevision: controlRevision }),
+        expectedInboundVersion: observedVersion,
       });
     };
 
