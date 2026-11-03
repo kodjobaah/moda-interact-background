@@ -23,7 +23,7 @@ const logger = createLogger({ serviceName: "moda-background-runtime", environmen
 type CommandPointer = { conversationId: string; shopId: string; kind: string };
 type LockedCommand = {
   id: string; shopId: string; conversationId: string; kind: string;
-  state: string; idempotencyKey: string; leaseToken: string | null; leaseValid: boolean;
+  state: string; followUpClaimKey: string | null; leaseToken: string | null; leaseValid: boolean;
   recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
   providerDispatchAdmittedAt: Date | null; outboundMessageId: string | null;
 };
@@ -77,7 +77,8 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
         AND cmd."providerDispatchKey" IS NULL AND cmd."providerDispatchAdmittedAt" IS NULL
         AND cmd."outboundMessageId" IS NULL
         AND attempt."sequence"=2 AND attempt."status"='PENDING'
-        AND attempt."initiatedBy"='HUMAN' AND attempt."initiationKey"=cmd."idempotencyKey"
+        AND attempt."initiatedBy"='HUMAN' AND NULLIF(btrim(cmd."followUpClaimKey"),'') IS NOT NULL
+        AND attempt."initiationKey"=cmd."followUpClaimKey"
         AND attempt."outboundMessageId" IS NULL AND attempt."sentAt" IS NULL
         AND (cmd."nextAttemptAt" IS NULL OR cmd."nextAttemptAt"<=statement_timestamp())
       ORDER BY cmd."createdAt",cmd."id" LIMIT $1`, boundedLimit);
@@ -135,7 +136,7 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
     if (!context || context.shopId !== pointer.shopId) return "no-context";
     const command = await first<LockedCommand>(tx, `
       SELECT "id","shopId","conversationId","kind"::text,"state"::text,
-        "idempotencyKey","leaseToken",("leaseExpiresAt">statement_timestamp()) AS "leaseValid",
+        "followUpClaimKey","leaseToken",("leaseExpiresAt">statement_timestamp()) AS "leaseValid",
         "recoveryOutreachAttemptId","providerDispatchKey","providerDispatchAdmittedAt","outboundMessageId"
       FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1 FOR UPDATE`, commandId);
     if (!command || command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE" ||
@@ -152,8 +153,13 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
           WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2 FOR UPDATE`,
           command.recoveryOutreachAttemptId, context.recoveryId)
       : null;
-    const ownerMatches = !!attempt && attempt.status === "PENDING" &&
-      attempt.initiatedBy === "HUMAN" && attempt.initiationKey === command.idempotencyKey &&
+    const claimKeyValid = typeof command.followUpClaimKey === "string" && !!command.followUpClaimKey.trim();
+    if (!claimKeyValid) logger.error("arch055.follow_up_claim_key_integrity_failed", {
+      commandId, shopId: command.shopId, errorType: "FollowUpClaimKeyIntegrityError",
+      reasonCode: "persisted_claim_key_missing", source: "follow_up_claim_cancellation",
+    });
+    const ownerMatches = claimKeyValid && !!attempt && attempt.status === "PENDING" &&
+      attempt.initiatedBy === "HUMAN" && attempt.initiationKey === command.followUpClaimKey &&
       !attempt.outboundMessageId && !attempt.sentAt;
     const providerSafe = ownerMatches && attempt !== null &&
       !(await this.hasProviderEvidence(tx, attempt.id));
@@ -208,7 +214,7 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2
         AND "status"='PENDING' AND "initiatedBy"='HUMAN' AND "initiationKey"=$3
         AND "outboundMessageId" IS NULL AND "sentAt" IS NULL`,
-      attempt.id, context.recoveryId, command.idempotencyKey);
+      attempt.id, context.recoveryId, command.followUpClaimKey);
     if (released !== 1) throw new Error("Follow-up claim reset lost its owner");
     if (mode.kind === "cancelled") await changed(tx, `
       UPDATE "whatsapp"."MerchantConversationSendCommand"

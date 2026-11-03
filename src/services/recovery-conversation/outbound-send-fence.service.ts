@@ -1,3 +1,4 @@
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createHash, randomUUID } from "node:crypto";
 import { first, rows, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
@@ -8,6 +9,9 @@ import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
   type FinalTemplateIdentity } from "../recovery-template-integration/final-template-registration.service.js";
 import { currentHumanWrapperMatches, parsePreparedEvidence } from "./human-prepared-command.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
+
+const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
 export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string }
@@ -98,14 +102,15 @@ export class OutboundSendFenceService {
         expectedControlRevision: number; kind: string; recipientSnapshot: string;
         textBody: string | null; preparedTextBody: string | null; preparedWrapperEvidence: unknown;
         preparedAt: Date | null; templateName: string | null; templateLanguageCode: string | null;
-        idempotencyKey: string; recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
+        followUpClaimKey: string | null;
+        recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
       } | null = null;
       if (input.senderType === "HUMAN") {
         command = await first(tx, `
           SELECT "state"::text, "leaseToken", "leaseExpiresAt", "expectedControlRevision",
             "kind"::text, "recipientSnapshot", "textBody", "preparedTextBody",
             "preparedWrapperEvidence", "preparedAt", "templateName", "templateLanguageCode",
-            "idempotencyKey", "recoveryOutreachAttemptId", "providerDispatchKey"
+            "followUpClaimKey", "recoveryOutreachAttemptId", "providerDispatchKey"
           FROM "whatsapp"."MerchantConversationSendCommand"
           WHERE "id"=$1 AND "conversationId"=$2 AND "shopId"=$3 FOR UPDATE`,
           input.commandId, context.id, context.shopId);
@@ -119,6 +124,14 @@ export class OutboundSendFenceService {
         if (command.kind !== "HUMAN_TEXT" && command.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE")
           return { kind: "suppressed", reason: "unsupported-human-command" } as const;
         if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+          if (typeof command.followUpClaimKey !== "string" || !command.followUpClaimKey.trim()) {
+            logger.error("arch055.follow_up_claim_key_integrity_failed", {
+              commandId: input.commandId, shopId: input.shopId,
+              errorType: "FollowUpClaimKeyIntegrityError",
+              reasonCode: "persisted_claim_key_missing", source: "outbound_send_fence",
+            });
+            return { kind: "suppressed", reason: "follow-up-claim-key-integrity-failure" } as const;
+          }
           if (!input.proactive || input.proactive.verifiedCategory !== "MARKETING" ||
               input.proactive.templateName !== command.templateName ||
               input.proactive.languageCode !== command.templateLanguageCode ||
@@ -134,7 +147,7 @@ export class OutboundSendFenceService {
             WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=2 FOR UPDATE`,
             command.recoveryOutreachAttemptId, context.recoveryId);
           if (!attempt || attempt.initiatedBy !== "HUMAN" ||
-              attempt.initiationKey !== command.idempotencyKey ||
+              attempt.initiationKey !== command.followUpClaimKey ||
               attempt.outboundMessageId || attempt.sentAt || attempt.status !== "PENDING")
             return { kind: "suppressed", reason: "follow-up-already-used" } as const;
         }

@@ -8,6 +8,14 @@ import { HumanCommandDispatcherService, type HumanDispatcherDependencies } from 
 function harness(decision: { kind: "terminal" | "retryable"; reason: string }) {
   const commands = {
     claimDueHumanCommands: vi.fn(async () => [{ id: "merchant-command", leaseToken: "lease" }]),
+    loadClaimedCommand: vi.fn(async () => ({ kind: "claimed" as const, command: {
+      id: "merchant-command", shopId: "shop", conversationId: "conversation",
+      idempotencyKey: "public-key", followUpClaimKey: null, kind: "HUMAN_TEXT" as const,
+      state: "CLAIMED" as const, leaseToken: "lease", leaseExpiresAt: new Date(),
+      expectedControlRevision: 1, recipientSnapshot: "15551234567", textBody: "hello",
+      templateName: null, templateLanguageCode: null, templateParameters: null,
+      recoveryOutreachAttemptId: null, outboundMessageId: null, providerDispatchKey: null,
+    } })),
     rejectCommand: vi.fn(async () => true),
     deferCommand: vi.fn(async () => true),
   };

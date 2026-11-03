@@ -11,6 +11,7 @@ import type { RecoveryDatabase } from
  */
 function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
   providerEvidence?: boolean; leased?: boolean; owner?: string;
+  claimKey?: string | null;
   releaseFails?: boolean; inspectionFails?: boolean;
   capacity?: "free" | "purchased" } = {}) {
   const ordered: string[] = [];
@@ -36,7 +37,8 @@ function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
   };
   const cmd = {
     id: "command", shopId: "shop", conversationId: "conversation", kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
-    state: "CLAIMED", idempotencyKey: "original", leaseToken: "lease", leaseValid: options.leased !== false,
+    state: "CLAIMED", idempotencyKey: "original", followUpClaimKey: options.claimKey === undefined ? "original" : options.claimKey,
+    leaseToken: "lease", leaseValid: options.leased !== false,
     recoveryOutreachAttemptId: "attempt", providerDispatchKey: null, providerDispatchAdmittedAt: null,
     outboundMessageId: null, failureCode: null as string | null,
   };
@@ -58,7 +60,7 @@ function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
       ordered.push("attempt"); return [attempt];
     }
     if (statement.includes('FROM "whatsapp"."MerchantConversationSendCommand" cmd')) {
-      return cmd.state === "CANCELLED" && attempt.initiationKey === cmd.idempotencyKey
+      return cmd.state === "CANCELLED" && attempt.initiationKey === cmd.followUpClaimKey
         ? [{ id: cmd.id, shopId: cmd.shopId, conversationId: cmd.conversationId, kind: cmd.kind }]
         : [];
     }
@@ -172,6 +174,25 @@ describe("ARCH-040-BACKGROUND-007 claim cancellation", () => {
       expect(result).not.toBe("released");
       expect(f.attempt.initiationKey).not.toBeNull();
     }
+  });
+
+  it("uses a migrated persisted owner key even when it differs from public idempotency", async () => {
+    const f = fixture({ claimKey: "historical-owner" });
+    f.cmd.idempotencyKey = "public-key";
+    f.attempt.initiationKey = "historical-owner";
+    expect(f.cmd.idempotencyKey).not.toBe(f.cmd.followUpClaimKey);
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("released");
+    expect(f.attempt.initiationKey).toBeNull();
+  });
+
+  it.each([null, "   "])("holds a cancelled claim for missing/blank persisted key (%s)", async (claimKey) => {
+    const f = fixture({ claimKey });
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("held");
+    expect(f.cmd.state).toBe("CANCELLED");
+    expect(f.attempt.initiationKey).toBe("original");
+    expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
   });
 
   it("repairs cancelled-but-claimed rows idempotently without reclaiming a worker lease", async () => {
