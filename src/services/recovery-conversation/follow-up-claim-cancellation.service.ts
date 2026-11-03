@@ -1,5 +1,5 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
-import { MerchantSendCommandService } from "./merchant-send-command.service.js";
+import { FollowUpClaimKeyIntegrityError, MerchantSendCommandService } from "./merchant-send-command.service.js";
 import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from "./recovery-follow-up-billing.service.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import {
@@ -11,7 +11,8 @@ import {
  * Credit release is owned by the injected billing service, never by moderation.
  */
 export interface FollowUpClaimCancellation {
-  cancelClaimed(commandId: string, leaseToken: string, failureCode: string): Promise<CancellationResult>;
+  cancelClaimed(commandId: string, leaseToken: string, failureCode: string,
+    integrityError?: FollowUpClaimKeyIntegrityError): Promise<CancellationResult>;
   repairCancelledClaims(limit?: number): Promise<number>;
 }
 
@@ -48,12 +49,13 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
       "inspectBeforePermit" | "releaseBeforePermit"> = new RecoveryFollowUpBillingService(),
   ) {}
 
-  async cancelClaimed(commandId: string, leaseToken: string, failureCode: string): Promise<CancellationResult> {
+  async cancelClaimed(commandId: string, leaseToken: string, failureCode: string,
+    integrityError?: FollowUpClaimKeyIntegrityError): Promise<CancellationResult> {
     if (!/^[a-z][a-z0-9_-]{0,63}$/.test(failureCode)) throw new Error("invalid bounded failure code");
     const pointer = await this.pointer(commandId);
     if (!pointer || pointer.kind !== "RECOVERY_FOLLOW_UP_TEMPLATE") return "not-follow-up";
     const result = await this.transitionAndReconcile(commandId, pointer,
-      { kind: "claimed", leaseToken, failureCode });
+      { kind: "claimed", leaseToken, failureCode, ...(integrityError ? { integrityError } : {}) });
     if (result === "no-context") {
       // Invalid recovery linkage cannot authorise an attempt reset. Still fence
       // the original command using the existing lease-protected cancellation.
@@ -98,7 +100,9 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
    */
   private async transitionAndReconcile(
     commandId: string, pointer: CommandPointer,
-    mode: { kind: "claimed"; leaseToken: string; failureCode: string } | { kind: "cancelled" },
+    mode: { kind: "claimed"; leaseToken: string; failureCode: string;
+      integrityError?: FollowUpClaimKeyIntegrityError } |
+      { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
   ): Promise<CancellationResult | "no-context"> {
     const result = await this.database.$transaction((tx) =>
       this.transition(tx, commandId, pointer, mode));
@@ -130,7 +134,9 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
     tx: SqlTransaction,
     commandId: string,
     pointer: CommandPointer,
-    mode: { kind: "claimed"; leaseToken: string; failureCode: string } | { kind: "cancelled" },
+    mode: { kind: "claimed"; leaseToken: string; failureCode: string;
+      integrityError?: FollowUpClaimKeyIntegrityError } |
+      { kind: "cancelled"; integrityError?: FollowUpClaimKeyIntegrityError },
   ): Promise<InternalResult> {
     const context = await lockRecoveryContext(tx, pointer.conversationId);
     if (!context || context.shopId !== pointer.shopId) return "no-context";
@@ -154,10 +160,14 @@ export class FollowUpClaimCancellationService implements FollowUpClaimCancellati
           command.recoveryOutreachAttemptId, context.recoveryId)
       : null;
     const claimKeyValid = typeof command.followUpClaimKey === "string" && !!command.followUpClaimKey.trim();
-    if (!claimKeyValid) logger.error("arch055.follow_up_claim_key_integrity_failed", {
-      commandId, shopId: command.shopId, errorType: "FollowUpClaimKeyIntegrityError",
-      reasonCode: "persisted_claim_key_missing", source: "follow_up_claim_cancellation",
-    });
+    if (!claimKeyValid) {
+      const integrityError = mode.integrityError ?? new FollowUpClaimKeyIntegrityError(commandId);
+      logger.error("arch055.follow_up_claim_key_integrity_failed", {
+        commandId, shopId: command.shopId, errorType: integrityError.name,
+        errorMessage: integrityError.message, error: integrityError,
+        reasonCode: "persisted_claim_key_missing", source: "follow_up_claim_cancellation",
+      });
+    }
     const ownerMatches = claimKeyValid && !!attempt && attempt.status === "PENDING" &&
       attempt.initiatedBy === "HUMAN" && attempt.initiationKey === command.followUpClaimKey &&
       !attempt.outboundMessageId && !attempt.sentAt;

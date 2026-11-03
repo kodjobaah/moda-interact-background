@@ -18,8 +18,8 @@ export type CommandDecision = { kind: "claimed"; command: HumanCommand }
   | { kind: "refused"; reason: "invalid-lease" | "shop-mismatch" | "not-recovery-linked" | "stale-control-revision" | "human-inactive" | "invalid-recipient" | "terminal-recovery" };
 
 export class FollowUpClaimKeyIntegrityError extends Error {
-  constructor(readonly commandId: string) {
-    super("Persisted human follow-up claim key is missing or blank");
+  constructor(readonly commandId: string, options?: ErrorOptions) {
+    super("Persisted human follow-up claim key is missing or blank", options);
     this.name = "FollowUpClaimKeyIntegrityError";
   }
 }

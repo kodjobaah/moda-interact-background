@@ -76,12 +76,12 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
 describe("ARCH-028-BACKGROUND-006 synchronous HUMAN recovery boundary", () => {
   it("fails before evaluation, claim cancellation or provider dispatch for a missing persisted key", async () => {
     const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
-    vi.mocked(x.deps.commands.loadClaimedCommand).mockRejectedValueOnce(
-      new FollowUpClaimKeyIntegrityError("cmd-1"));
+    const integrityError = new FollowUpClaimKeyIntegrityError("cmd-1");
+    vi.mocked(x.deps.commands.loadClaimedCommand).mockRejectedValueOnce(integrityError);
     await x.dispatcher.processClaim("cmd-1", "lease-1");
     expect(x.deps.evaluator.evaluateHumanCommand).not.toHaveBeenCalled();
     expect(x.deps.followUpCancellations.cancelClaimed).toHaveBeenCalledWith(
-      "cmd-1", "lease-1", "follow_up_claim_key_integrity_failed",
+      "cmd-1", "lease-1", "follow_up_claim_key_integrity_failed", integrityError,
     );
     expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
     expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();

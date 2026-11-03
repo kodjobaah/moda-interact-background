@@ -1,5 +1,6 @@
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createHash, randomUUID } from "node:crypto";
+import { FollowUpClaimKeyIntegrityError } from "./merchant-send-command.service.js";
 import { first, rows, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { customerWindow } from "./recovery-follow-up-policy.service.js";
@@ -125,9 +126,10 @@ export class OutboundSendFenceService {
           return { kind: "suppressed", reason: "unsupported-human-command" } as const;
         if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
           if (typeof command.followUpClaimKey !== "string" || !command.followUpClaimKey.trim()) {
+            const integrityError = new FollowUpClaimKeyIntegrityError(input.commandId ?? "unknown");
             logger.error("arch055.follow_up_claim_key_integrity_failed", {
               commandId: input.commandId, shopId: input.shopId,
-              errorType: "FollowUpClaimKeyIntegrityError",
+              errorType: integrityError.name, errorMessage: integrityError.message, error: integrityError,
               reasonCode: "persisted_claim_key_missing", source: "outbound_send_fence",
             });
             return { kind: "suppressed", reason: "follow-up-claim-key-integrity-failure" } as const;

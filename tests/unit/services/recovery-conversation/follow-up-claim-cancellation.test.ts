@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+const sharedLogger = vi.hoisted(() => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: vi.fn(() => sharedLogger),
+}));
+
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 import { FollowUpClaimCancellationService } from
   "../../../../src/services/recovery-conversation/follow-up-claim-cancellation.service.js";
+import { FollowUpClaimKeyIntegrityError } from
+  "../../../../src/services/recovery-conversation/merchant-send-command.service.js";
 import type { RecoveryDatabase } from
   "../../../../src/services/recovery-conversation/recovery-conversation.sql.js";
 
@@ -192,6 +199,30 @@ describe("ARCH-040-BACKGROUND-007 claim cancellation", () => {
       .toBe("held");
     expect(f.cmd.state).toBe("CANCELLED");
     expect(f.attempt.initiationKey).toBe("original");
+    expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
+  });
+
+  it("logs the original typed integrity error message while excluding claim-key values", async () => {
+    const f = fixture({ claimKey: null });
+    f.attempt.initiationKey = "private-historical-owner";
+    const cause = new Error("safe originating validation detail");
+    const integrityError = new FollowUpClaimKeyIntegrityError("command", { cause });
+    sharedLogger.error.mockClear();
+
+    expect(await f.service.cancelClaimed("command", "lease", "follow_up_claim_key_integrity_failed", integrityError))
+      .toBe("held");
+
+    const logged = sharedLogger.error.mock.calls.find(([event]) =>
+      event === "arch055.follow_up_claim_key_integrity_failed")?.[1];
+    expect(logged).toMatchObject({
+      commandId: "command", shopId: "shop", errorType: integrityError.name,
+      errorMessage: integrityError.message, error: integrityError,
+      reasonCode: "persisted_claim_key_missing",
+    });
+    expect(JSON.stringify(logged)).not.toContain("private-historical-owner");
+    expect((logged as { error: FollowUpClaimKeyIntegrityError }).error.cause)
+      .toBe(integrityError.cause);
+    expect(f.attempt.initiationKey).toBe("private-historical-owner");
     expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
   });
 

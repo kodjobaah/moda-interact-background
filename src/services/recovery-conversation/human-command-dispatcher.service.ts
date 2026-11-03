@@ -208,7 +208,7 @@ export class HumanCommandDispatcherService {
       if (!(error instanceof FollowUpClaimKeyIntegrityError)) throw error;
       // Durably cancel malformed commands, but cancellation's integrity fence
       // logs the typed integrity failure and holds its attempt/credit for repair.
-      await this.rejectTerminal(commandId, leaseToken, "follow_up_claim_key_integrity_failed");
+      await this.rejectTerminal(commandId, leaseToken, "follow_up_claim_key_integrity_failed", error);
       return;
     }
     if (resolved.kind !== "claimed") {
@@ -493,9 +493,12 @@ export class HumanCommandDispatcherService {
   /** All terminal pre-provider denials share one application-owned path.
    * Ordinary HUMAN_TEXT retains its established command-only cancellation.
    */
-  private async rejectTerminal(commandId: string, leaseToken: string, reason: string): Promise<void> {
+  private async rejectTerminal(commandId: string, leaseToken: string, reason: string,
+    integrityError?: FollowUpClaimKeyIntegrityError): Promise<void> {
     const failureCode = safeCode(reason);
-    const outcome = await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
+    const outcome = integrityError
+      ? await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode, integrityError)
+      : await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
     if (outcome === "not-follow-up") {
       await this.deps.commands.rejectCommand(commandId, leaseToken, failureCode);
     } else if (outcome === "released" || outcome === "held") {
