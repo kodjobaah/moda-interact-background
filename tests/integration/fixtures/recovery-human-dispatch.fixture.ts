@@ -152,7 +152,7 @@ export async function humanDispatchFixture(
 
   async function addCommand(input: {
     kind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
-    idempotencyKey?: string; attemptId?: string; textBody?: string;
+    idempotencyKey?: string; followUpClaimKey?: string | null; attemptId?: string; textBody?: string;
     seedVerifiedInbound?: boolean;
     /** The accepted command payload is immutable; select the template at creation. */
     templateName?: string;
@@ -180,10 +180,12 @@ export async function humanDispatchFixture(
     const text = kind === "HUMAN_TEXT" ? input.textBody ?? `Hello ${id}` : null;
     const digest = createHash("sha256").update(`${key}:${kind}`).digest("hex");
     await db.$executeRawUnsafe(`INSERT INTO "whatsapp"."MerchantConversationSendCommand"
-      ("id","shopId","conversationId","idempotencyKey","payloadSha256", "expectedControlRevision",
+      ("id","shopId","conversationId","idempotencyKey","payloadSha256", "expectedControlRevision","followUpClaimKey",
        "kind","recipientSnapshot","textBody","templateName","templateLanguageCode","recoveryOutreachAttemptId")
-      VALUES ($1,$2,$3,$4,$5,1,$6::"whatsapp"."MerchantConversationSendKind",$7,$8,$9,$10,$11)`,
-      id, shopId, conversationId, key, digest, kind, recipient, text,
+      VALUES ($1,$2,$3,$4,$5,1,$6,$7::"whatsapp"."MerchantConversationSendKind",$8,$9,$10,$11,$12)`,
+      id, shopId, conversationId, key, digest,
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? (input.followUpClaimKey === undefined ? key : input.followUpClaimKey) : null,
+      kind, recipient, text,
       kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? (input.templateName ?? "recovery_follow_up") : null,
       kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "en_US" : null, input.attemptId ?? null);
     return id;
@@ -212,16 +214,19 @@ export async function humanDispatchFixture(
       conversationId, sentAt);
   }
 
-  async function addMerchantFollowUpCommand(templateName = "recovery_follow_up") {
+  async function addMerchantFollowUpCommand(
+    templateName = "recovery_follow_up", persistedKey?: string | null, publicKey?: string,
+  ) {
     await addInitialOutreach();
-    const idempotencyKey = `merchant-${recoveryId}`;
+    const idempotencyKey = publicKey ?? `merchant-${recoveryId}`;
+    const followUpClaimKey = persistedKey === undefined ? idempotencyKey : persistedKey;
     const claim = await followUps.claimSequenceTwo({
       recoveryId, initiator: "merchant_post_window", expectedRevision: 1,
-      initiationKey: idempotencyKey, recipient, now: new Date(),
+      initiationKey: followUpClaimKey ?? idempotencyKey, recipient, now: new Date(),
     });
     if (claim.kind !== "claimed") throw new Error(`Expected an eligible HUMAN follow-up: ${claim.reason}`);
     const commandId = await addCommand({ kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
-      idempotencyKey, attemptId: claim.attemptId, templateName });
+      idempotencyKey, followUpClaimKey: followUpClaimKey ?? null, attemptId: claim.attemptId, templateName });
     return { commandId, attemptId: claim.attemptId };
   }
 

@@ -6,7 +6,7 @@ import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js
 import { synchronousRecipientFailureService } from "../synchronous-recipient-failure.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
 import { recoveryOutreachAttemptService, type RecoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
-import { MerchantSendCommandService, type HumanCommand } from "./merchant-send-command.service.js";
+import { FollowUpClaimKeyIntegrityError, MerchantSendCommandService, type HumanCommand } from "./merchant-send-command.service.js";
 import { RecoveryFollowUpPolicyService } from "./recovery-follow-up-policy.service.js";
 import { HumanSendPolicyService } from "./human-send-policy.service.js";
 import { HumanCommandEvaluationService } from "./human-command-evaluation.service.js";
@@ -130,8 +130,11 @@ export class HumanCommandDispatcherService {
     });
     for (const claim of commands) {
       const active: Promise<void> = this.processClaim(claim.id, claim.leaseToken).catch((error: unknown) => {
-        logger.error("arch040.human_dispatcher.command_failed", {
+        logger.error(error instanceof FollowUpClaimKeyIntegrityError
+          ? "arch055.human_dispatcher.follow_up_claim_key_integrity_failed"
+          : "arch040.human_dispatcher.command_failed", {
           commandId: claim.id, errorType: error instanceof Error ? error.name : "unknown",
+          reasonCode: error instanceof FollowUpClaimKeyIntegrityError ? "persisted_claim_key_missing" : undefined,
           errorMessage: error instanceof Error ? error.message : String(error),
           error: error,
         });
@@ -197,8 +200,23 @@ export class HumanCommandDispatcherService {
   }
 
   async processClaim(commandId: string, leaseToken: string): Promise<void> {
-    const now = this.deps.now();
-    const evaluated = await this.deps.evaluator.evaluateHumanCommand(commandId, leaseToken, now);
+    // Validate immutable ownership before evaluation can cancel or release it.
+    let resolved: Awaited<ReturnType<MerchantSendCommandService["loadClaimedCommand"]>>;
+    try {
+      resolved = await this.deps.commands.loadClaimedCommand(commandId, leaseToken, this.deps.now());
+    } catch (error) {
+      if (!(error instanceof FollowUpClaimKeyIntegrityError)) throw error;
+      // Durably cancel malformed commands, but cancellation's integrity fence
+      // logs the typed integrity failure and holds its attempt/credit for repair.
+      await this.rejectTerminal(commandId, leaseToken, "follow_up_claim_key_integrity_failed", error);
+      return;
+    }
+    if (resolved.kind !== "claimed") {
+      await this.rejectTerminal(commandId, leaseToken, resolved.reason);
+      return;
+    }
+    const command = resolved.command;
+    const evaluated = await this.deps.evaluator.evaluateHumanCommand(commandId, leaseToken, this.deps.now());
     if (evaluated.kind === "terminal") {
       await this.rejectTerminal(commandId, leaseToken, evaluated.reason);
       return;
@@ -207,12 +225,6 @@ export class HumanCommandDispatcherService {
       await this.defer(commandId, leaseToken, evaluated.reason);
       return;
     }
-    const resolved = await this.deps.commands.loadClaimedCommand(commandId, leaseToken, this.deps.now());
-    if (resolved.kind !== "claimed") {
-      await this.rejectTerminal(commandId, leaseToken, resolved.reason);
-      return;
-    }
-    const command = resolved.command;
     const context = await readRecoveryContext(this.deps.database, command.conversationId);
     if (!context || context.shopId !== command.shopId) {
       await this.rejectTerminal(commandId, leaseToken, "not_recovery_linked");
@@ -340,7 +352,7 @@ export class HumanCommandDispatcherService {
     let attemptId: string | null = null;
     let credit: Awaited<ReturnType<RecoveryFollowUpBillingService["admitAndRevalidate"]>> | null = null;
     if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
-      const claimed = await this.claimMerchantFollowUp(command, context.recoveryId, now);
+      const claimed = await this.claimMerchantFollowUp(command, context.recoveryId, this.deps.now());
       if (!claimed) {
         await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
         return;
@@ -481,9 +493,12 @@ export class HumanCommandDispatcherService {
   /** All terminal pre-provider denials share one application-owned path.
    * Ordinary HUMAN_TEXT retains its established command-only cancellation.
    */
-  private async rejectTerminal(commandId: string, leaseToken: string, reason: string): Promise<void> {
+  private async rejectTerminal(commandId: string, leaseToken: string, reason: string,
+    integrityError?: FollowUpClaimKeyIntegrityError): Promise<void> {
     const failureCode = safeCode(reason);
-    const outcome = await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
+    const outcome = integrityError
+      ? await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode, integrityError)
+      : await this.deps.followUpCancellations.cancelClaimed(commandId, leaseToken, failureCode);
     if (outcome === "not-follow-up") {
       await this.deps.commands.rejectCommand(commandId, leaseToken, failureCode);
     } else if (outcome === "released" || outcome === "held") {
@@ -492,8 +507,12 @@ export class HumanCommandDispatcherService {
   }
 
   private async claimMerchantFollowUp(command: HumanCommand, recoveryId: string, now: Date): Promise<string | null> {
+    if (typeof command.followUpClaimKey !== "string" || !command.followUpClaimKey.trim()) {
+      throw new FollowUpClaimKeyIntegrityError(command.id);
+    }
+    const followUpClaimKey = command.followUpClaimKey;
     const claim = await this.deps.followUps.claimSequenceTwo({
-      initiator: "merchant_post_window", recoveryId, initiationKey: command.idempotencyKey,
+      initiator: "merchant_post_window", recoveryId, initiationKey: followUpClaimKey,
       recipient: command.recipientSnapshot, expectedRevision: command.expectedControlRevision, now,
     });
     let attemptId: string | undefined;
@@ -504,7 +523,7 @@ export class HumanCommandDispatcherService {
         SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
         WHERE "checkoutRecoveryId"=$1 AND "sequence"=2
           AND "initiatedBy"='HUMAN' AND "initiationKey"=$2
-          AND "outboundMessageId" IS NULL AND "status"='PENDING'`, recoveryId, command.idempotencyKey);
+          AND "outboundMessageId" IS NULL AND "status"='PENDING'`, recoveryId, followUpClaimKey);
       attemptId = existing?.id;
     }
     // DATABASE-001 makes the command's attempt FK immutable. Both producers

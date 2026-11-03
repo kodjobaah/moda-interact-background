@@ -5,6 +5,8 @@ vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 
 import { HumanCommandDispatcherService, type HumanDispatcherDependencies } from
   "../../../../src/services/recovery-conversation/human-command-dispatcher.service.js";
+import { FollowUpClaimKeyIntegrityError } from
+  "../../../../src/services/recovery-conversation/merchant-send-command.service.js";
 
 const error = Object.assign(new Error("provider rejected"), {
   name: "WhatsAppServiceError", code: "provider-rejected", providerCode: "131026",
@@ -13,7 +15,8 @@ const error = Object.assign(new Error("provider rejected"), {
 function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
   const command = {
     id: "cmd-1", shopId: "shop-1", conversationId: "conv-1",
-    idempotencyKey: "send-1", kind, expectedControlRevision: 2,
+    idempotencyKey: "send-1", followUpClaimKey: kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "send-1" : null,
+    kind, expectedControlRevision: 2,
     recipientSnapshot: "447700900001", textBody: "Hello", templateName: "follow_up",
     templateLanguageCode: "en", templateParameters: [],
     recoveryOutreachAttemptId: "attempt-1",
@@ -71,6 +74,20 @@ function fixture(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE") {
 }
 
 describe("ARCH-028-BACKGROUND-006 synchronous HUMAN recovery boundary", () => {
+  it("fails before evaluation, claim cancellation or provider dispatch for a missing persisted key", async () => {
+    const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
+    const integrityError = new FollowUpClaimKeyIntegrityError("cmd-1");
+    vi.mocked(x.deps.commands.loadClaimedCommand).mockRejectedValueOnce(integrityError);
+    await x.dispatcher.processClaim("cmd-1", "lease-1");
+    expect(x.deps.evaluator.evaluateHumanCommand).not.toHaveBeenCalled();
+    expect(x.deps.followUpCancellations.cancelClaimed).toHaveBeenCalledWith(
+      "cmd-1", "lease-1", "follow_up_claim_key_integrity_failed", integrityError,
+    );
+    expect(x.deps.followUps.claimSequenceTwo).not.toHaveBeenCalled();
+    expect(x.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    await x.dispatcher.close();
+  });
+
   it("corrects only after persisted 131026 on an admitted recovery follow-up", async () => {
     const x = fixture("RECOVERY_FOLLOW_UP_TEMPLATE");
     await x.dispatcher.processClaim("cmd-1", "lease-1");

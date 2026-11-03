@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+const sharedLogger = vi.hoisted(() => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }));
+vi.mock("@modainteract/moda-interact-shared/logging", () => ({
+  createLogger: vi.fn(() => sharedLogger),
+}));
+
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 import { FollowUpClaimCancellationService } from
   "../../../../src/services/recovery-conversation/follow-up-claim-cancellation.service.js";
+import { FollowUpClaimKeyIntegrityError } from
+  "../../../../src/services/recovery-conversation/merchant-send-command.service.js";
 import type { RecoveryDatabase } from
   "../../../../src/services/recovery-conversation/recovery-conversation.sql.js";
 
@@ -11,6 +18,7 @@ import type { RecoveryDatabase } from
  */
 function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
   providerEvidence?: boolean; leased?: boolean; owner?: string;
+  claimKey?: string | null;
   releaseFails?: boolean; inspectionFails?: boolean;
   capacity?: "free" | "purchased" } = {}) {
   const ordered: string[] = [];
@@ -36,7 +44,8 @@ function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
   };
   const cmd = {
     id: "command", shopId: "shop", conversationId: "conversation", kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
-    state: "CLAIMED", idempotencyKey: "original", leaseToken: "lease", leaseValid: options.leased !== false,
+    state: "CLAIMED", idempotencyKey: "original", followUpClaimKey: options.claimKey === undefined ? "original" : options.claimKey,
+    leaseToken: "lease", leaseValid: options.leased !== false,
     recoveryOutreachAttemptId: "attempt", providerDispatchKey: null, providerDispatchAdmittedAt: null,
     outboundMessageId: null, failureCode: null as string | null,
   };
@@ -58,7 +67,7 @@ function fixture(options: { reservation?: "RESERVED" | "RELEASED" | "AMBIGUOUS";
       ordered.push("attempt"); return [attempt];
     }
     if (statement.includes('FROM "whatsapp"."MerchantConversationSendCommand" cmd')) {
-      return cmd.state === "CANCELLED" && attempt.initiationKey === cmd.idempotencyKey
+      return cmd.state === "CANCELLED" && attempt.initiationKey === cmd.followUpClaimKey
         ? [{ id: cmd.id, shopId: cmd.shopId, conversationId: cmd.conversationId, kind: cmd.kind }]
         : [];
     }
@@ -172,6 +181,49 @@ describe("ARCH-040-BACKGROUND-007 claim cancellation", () => {
       expect(result).not.toBe("released");
       expect(f.attempt.initiationKey).not.toBeNull();
     }
+  });
+
+  it("uses a migrated persisted owner key even when it differs from public idempotency", async () => {
+    const f = fixture({ claimKey: "historical-owner" });
+    f.cmd.idempotencyKey = "public-key";
+    f.attempt.initiationKey = "historical-owner";
+    expect(f.cmd.idempotencyKey).not.toBe(f.cmd.followUpClaimKey);
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("released");
+    expect(f.attempt.initiationKey).toBeNull();
+  });
+
+  it.each([null, "   "])("holds a cancelled claim for missing/blank persisted key (%s)", async (claimKey) => {
+    const f = fixture({ claimKey });
+    expect(await f.service.cancelClaimed("command", "lease", "human_content_moderation_blocked"))
+      .toBe("held");
+    expect(f.cmd.state).toBe("CANCELLED");
+    expect(f.attempt.initiationKey).toBe("original");
+    expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
+  });
+
+  it("logs the original typed integrity error message while excluding claim-key values", async () => {
+    const f = fixture({ claimKey: null });
+    f.attempt.initiationKey = "private-historical-owner";
+    const cause = new Error("safe originating validation detail");
+    const integrityError = new FollowUpClaimKeyIntegrityError("command", { cause });
+    sharedLogger.error.mockClear();
+
+    expect(await f.service.cancelClaimed("command", "lease", "follow_up_claim_key_integrity_failed", integrityError))
+      .toBe("held");
+
+    const logged = sharedLogger.error.mock.calls.find(([event]) =>
+      event === "arch055.follow_up_claim_key_integrity_failed")?.[1];
+    expect(logged).toMatchObject({
+      commandId: "command", shopId: "shop", errorType: integrityError.name,
+      errorMessage: integrityError.message, error: integrityError,
+      reasonCode: "persisted_claim_key_missing",
+    });
+    expect(JSON.stringify(logged)).not.toContain("private-historical-owner");
+    expect((logged as { error: FollowUpClaimKeyIntegrityError }).error.cause)
+      .toBe(integrityError.cause);
+    expect(f.attempt.initiationKey).toBe("private-historical-owner");
+    expect(f.billing.releaseBeforePermit).not.toHaveBeenCalled();
   });
 
   it("repairs cancelled-but-claimed rows idempotently without reclaiming a worker lease", async () => {

@@ -15,7 +15,8 @@ const identity = {
   bindingFingerprint: "a".repeat(64),
 };
 const command: HumanCommand = {
-  id: "cmd1", idempotencyKey: "merchant:cmd1", shopId: "shop-1", conversationId: "conv1",
+  id: "cmd1", idempotencyKey: "merchant:cmd1", followUpClaimKey: "merchant:cmd1",
+  shopId: "shop-1", conversationId: "conv1",
   kind: "RECOVERY_FOLLOW_UP_TEMPLATE", state: "CLAIMED", leaseToken: "lease1",
   leaseExpiresAt: new Date(Date.now() + 60_000), expectedControlRevision: 1,
   recipientSnapshot: "447700900001", textBody: null, templateName: "moda_follow_up",

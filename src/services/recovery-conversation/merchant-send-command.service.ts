@@ -4,7 +4,7 @@ import { first, rows, changed, recoveryDatabase, readRecoveryContext,
   type RecoveryDatabase } from "./recovery-conversation.sql.js";
 
 export type HumanCommand = {
-  id: string; idempotencyKey: string; shopId: string; conversationId: string;
+  id: string; idempotencyKey: string; followUpClaimKey: string | null; shopId: string; conversationId: string;
   kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
   state: "ACCEPTED" | "CLAIMED" | "DISPATCH_ADMITTED" | "SENT" | "FAILED" | "CANCELLED" | "UNKNOWN";
   leaseToken: string | null; leaseExpiresAt: Date | null;
@@ -16,6 +16,13 @@ export type HumanCommand = {
 };
 export type CommandDecision = { kind: "claimed"; command: HumanCommand }
   | { kind: "refused"; reason: "invalid-lease" | "shop-mismatch" | "not-recovery-linked" | "stale-control-revision" | "human-inactive" | "invalid-recipient" | "terminal-recovery" };
+
+export class FollowUpClaimKeyIntegrityError extends Error {
+  constructor(readonly commandId: string, options?: ErrorOptions) {
+    super("Persisted human follow-up claim key is missing or blank", options);
+    this.name = "FollowUpClaimKeyIntegrityError";
+  }
+}
 
 export class MerchantSendCommandService {
   constructor(private readonly database: RecoveryDatabase = recoveryDatabase) {}
@@ -57,6 +64,10 @@ export class MerchantSendCommandService {
       WHERE "id"=$1 AND "state"='CLAIMED' AND "leaseToken"=$2
         AND "leaseExpiresAt">$3 AND "providerDispatchKey" IS NULL`, commandId, leaseToken, now);
     if (!command) return { kind: "refused", reason: "invalid-lease" };
+    if (command.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" &&
+        (typeof command.followUpClaimKey !== "string" || !command.followUpClaimKey.trim())) {
+      throw new FollowUpClaimKeyIntegrityError(command.id);
+    }
     const context = await readRecoveryContext(this.database, command.conversationId);
     if (!context) return { kind: "refused", reason: "not-recovery-linked" };
     if (context.shopId !== command.shopId) return { kind: "refused", reason: "shop-mismatch" };
