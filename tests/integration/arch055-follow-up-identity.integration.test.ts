@@ -112,6 +112,7 @@ suite("ARCH-055 persisted follow-up ownership identity", () => {
         .initiationKey).toBe(nextKey);
       expect(f.providerHttpRequests).toHaveLength(0);
       expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(0);
     } finally {
       releaseBlocker?.();
       await blocker?.catch(() => {});
@@ -134,6 +135,7 @@ suite("ARCH-055 persisted follow-up ownership identity", () => {
         .initiationKey).toBe(`merchant-${f.recoveryId}`);
       expect(f.providerHttpRequests).toHaveLength(0);
       expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(0);
     } finally { await f.close(); }
   }, 60_000);
 });
