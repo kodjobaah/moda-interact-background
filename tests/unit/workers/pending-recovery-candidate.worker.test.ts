@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { name: string; data: unknown; id: string; attemptsMade: number; failedReason: string }) => Promise<unknown>),
+  listeners: new Map<string, Array<(...args: unknown[]) => void>>(),
+  records: [] as Array<Record<string, unknown>>,
   materialize: vi.fn(async (_candidate?: unknown, _options?: unknown) => ({
     outcome: "discarded-shop-unavailable",
     checkoutToken: "checkout_1",
@@ -33,6 +35,8 @@ const hoisted = vi.hoisted(() => ({
   }),
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
   findRecovery: vi.fn(async () => hoisted.durableRecovery),
+  findShop: vi.fn(async () => ({ id: "shop_1", platform: "SHOPIFY" })),
+  findInitialAttempt: vi.fn(async () => null),
   suppressUntil: new Date(),
   findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
   scheduleResume: vi.fn(async () => "resume-job"),
@@ -54,6 +58,7 @@ const hoisted = vi.hoisted(() => ({
   attemptGetOrCreate: vi.fn(async () => ({ id: "attempt-1" })),
   billingAdmit: vi.fn(async () => ({ kind: "admitted", admission: { kind: "paid", sourceKey: "recovery:test" } })),
   providerSend: vi.fn(async () => ({ kind: "admitted" })),
+  inspectInitialAdmission: vi.fn(async () => ({ kind: "absent" })),
 }));
 
 vi.mock("bullmq", () => ({
@@ -62,24 +67,38 @@ vi.mock("bullmq", () => ({
       hoisted.processor = processor ?? undefined;
     }
 
-    on() {
+    on(event: string, listener: (...args: unknown[]) => void) {
+      const callbacks = hoisted.listeners.get(event) ?? [];
+      callbacks.push(listener);
+      hoisted.listeners.set(event, callbacks);
       return this;
     }
   },
 }));
+vi.mock("@modainteract/moda-interact-shared/logging", async (importOriginal) => {
+  const shared = await importOriginal<typeof import("@modainteract/moda-interact-shared/logging")>();
+  return {
+    ...shared,
+    createLogger: (options: Parameters<typeof shared.createLogger>[0]) => shared.createLogger({
+      ...options,
+      sink: (record) => hoisted.records.push(JSON.parse(JSON.stringify(record)) as Record<string, unknown>),
+    }),
+  };
+});
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => ({})),
 }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: hoisted.redis }));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
-    shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })) },
+    shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })), findUnique: hoisted.findShop },
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
       findUnique: hoisted.findRecovery,
       updateMany: hoisted.updateRecoveryMany,
     },
+    recoveryOutreachAttempt: { findFirst: hoisted.findInitialAttempt },
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
   },
 }));
@@ -97,6 +116,8 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
     getProviderAccountId: vi.fn(() => "provider-1"),
     sendTemplate: hoisted.providerSend,
     findExistingAdmission: vi.fn(),
+    inspectInitialOutreachAdmission: hoisted.inspectInitialAdmission,
+    resumeInitialTemplate: vi.fn(async () => ({ kind: "admitted" })),
   },
 }));
 vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
@@ -124,6 +145,7 @@ vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
 
 import {
   EVALUATE_PENDING_RECOVERY_JOB,
+  PENDING_RECOVERY_CANDIDATE_QUEUE,
 } from "../../../src/domain/pending-recovery-candidate.js";
 import { createPendingRecoveryCandidateWorker } from "../../../src/workers/pending-recovery-candidate.worker.js";
 import { RecoveryMaterializationService } from "../../../src/services/checkout-recovery/recovery-materialization.service.js";
@@ -140,11 +162,15 @@ createPendingRecoveryCandidateWorker();
 
 describe("pending recovery candidate worker", () => {
   beforeEach(() => {
+    hoisted.records.length = 0;
     hoisted.durableRecovery = null;
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     hoisted.findLatestRecovery.mockClear();
     hoisted.findRecovery.mockReset().mockImplementation(async () => hoisted.durableRecovery);
+    hoisted.findShop.mockReset().mockResolvedValue({ id: "shop_1", platform: "SHOPIFY" });
+    hoisted.findInitialAttempt.mockReset().mockResolvedValue(null);
+    hoisted.inspectInitialAdmission.mockReset().mockResolvedValue({ kind: "absent" });
     hoisted.suppressUntil = new Date(Date.now() + 60 * 60_000);
     hoisted.findSuppression.mockReset().mockResolvedValue({
       suppressUntil: hoisted.suppressUntil,
@@ -184,6 +210,66 @@ describe("pending recovery candidate worker", () => {
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
   });
 
+  it("logs both compound candidate failures through Shared and invokes retained worker listeners", async () => {
+    const materializationError = new Error("materialization failed phone +447000111222");
+    const cleanupError = Object.assign(new Error("cleanup failed"), { code: "P2034" });
+    hoisted.materialize.mockRejectedValueOnce(materializationError);
+    hoisted.cleanup.mockRejectedValueOnce(cleanupError);
+    const job = {
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "candidate-job-1",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 1,
+      failedReason: "",
+    };
+
+    let composite: unknown;
+    try {
+      await hoisted.processor?.(job);
+    } catch (error) {
+      composite = error;
+    }
+
+    expect(composite).toBeInstanceOf(Error);
+    expect((composite as Error).cause).toBeInstanceOf(AggregateError);
+    expect(((composite as Error).cause as AggregateError).errors).toEqual([
+      materializationError, cleanupError,
+    ]);
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.processing_cleanup_failed",
+      level: "error",
+      data: expect.objectContaining({
+        queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+        attempt: 2,
+        shopId: "shop_1",
+        materializationError: expect.objectContaining({
+          message: "materialization failed phone [REDACTED_PHONE]",
+        }),
+        cleanupError: expect.objectContaining({ message: "cleanup failed", code: "P2034" }),
+      }),
+    }));
+    expect(JSON.stringify(hoisted.records)).not.toContain("+447000111222");
+
+    const failed = hoisted.listeners.get("failed") ?? [];
+    const errors = hoisted.listeners.get("error") ?? [];
+    expect(failed.length).toBeGreaterThan(0);
+    expect(errors.length).toBeGreaterThan(0);
+    failed.forEach((listener) => listener(job, composite));
+    errors.forEach((listener) => listener(new Error("worker connection failed")));
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.job_failed",
+      level: "error",
+      data: expect.objectContaining({ attempt: 2, shopId: "shop_1" }),
+    }));
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.worker_error",
+      level: "error",
+      data: expect.objectContaining({ sourceError: expect.objectContaining({
+        message: "worker connection failed",
+      }) }),
+    }));
+  });
+
   it("retries a persisted DETECTED recovery after enqueue and version-read failures", async () => {
     const admission = new RecoveryRecipientSuppressionAdmissionService({
       whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
@@ -194,6 +280,8 @@ describe("pending recovery candidate worker", () => {
     } as never);
     const billing = {
       admit: hoisted.billingAdmit,
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
+      settleConfirmedInitialOutreach: vi.fn(async () => ({ kind: "held", reason: "settlement-not-committed" })),
       revalidateBeforeProvider: vi.fn(),
       releaseBeforeProvider: vi.fn(),
       handleProviderFailure: vi.fn(),

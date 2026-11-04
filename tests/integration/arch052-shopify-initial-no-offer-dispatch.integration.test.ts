@@ -12,6 +12,7 @@ import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-wh
 import { whatsAppService } from "../../src/services/whatsapp.service.js";
 import { ShopifyWhatsAppConsentService } from "../../src/services/shopify-whatsapp-consent.service.js";
 import { moderationAssessmentService } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
+import { abandonedCheckoutLookupService } from "../../src/services/abandoned-checkout-lookup.service.js";
 import type { RecoveryCheckoutSeed } from "../../src/events/checkout-events.js";
 import { seedApprovedInitialWooTemplateRegistration, WOO_TEST_SENDER_WABA } from
   "./fixtures/woo-approved-initial-template.fixture.js";
@@ -20,6 +21,13 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const withDatabase = databaseUrl && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
   ? describe : describe.skip;
 const clients: PrismaClient[] = [];
+
+vi.mock("../../src/runtime/background-runtime-config.js", () => ({
+  backgroundRuntimeConfigService: {
+    current: () => ({ version: 1, pendingRecoveryQueueGlobalConcurrency: 1 }),
+    subscribe: () => () => undefined,
+  },
+}));
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -138,8 +146,10 @@ async function fixture(consentAllowed = true) {
 withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)", () => {
   it("sends the prepared fallback once under its attempt identity and finalizes one credit", async () => {
     const f = await fixture();
+    const resumeInitialTemplate = vi.spyOn(outboundWhatsAppAdmissionService, "resumeInitialTemplate");
 
     await f.service.handleCheckoutCreated(f.event, 1, f.phone);
+    expect(resumeInitialTemplate).toHaveBeenCalledOnce();
 
     const recovery = await f.db.checkoutRecovery.findFirstOrThrow({
       where: { shopId: f.shopId, checkoutToken: f.checkoutToken },
@@ -147,10 +157,16 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
     const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
       where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recovery.id, sequence: 1 } },
     });
-    const message = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: attempt.outboundMessageId! } });
-    const admissionEvent = await f.db.usageEvent.findUniqueOrThrow({
+    const admissionEvent = await f.db.usageEvent.findUnique({
       where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
     });
+    expect(admissionEvent).not.toBeNull();
+    expect(resumeInitialTemplate).toHaveBeenCalledOnce();
+    expect(await resumeInitialTemplate.mock.results[0]!.value)
+      .toMatchObject({ kind: "admitted", executionScope: "recovery" });
+    expect(f.providerSend).toHaveBeenCalledOnce();
+    expect(attempt).toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: expect.any(String) });
+    const message = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: attempt.outboundMessageId! } });
     const reservation = await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId } });
     const counter = await f.db.shopEntitlementCounter.findUniqueOrThrow({
       where: { shopId_counter: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
@@ -176,6 +192,202 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
     expect(counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
     expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(1);
     expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+  }, 90_000);
+
+  it("resumes the same prepared message and credit through the real candidate worker after pre-permit interruption", async () => {
+    const f = await fixture();
+    const interruption = new Error("interrupted before provider permit");
+    const resume = vi.spyOn(outboundWhatsAppAdmissionService, "resumeInitialTemplate")
+      .mockRejectedValueOnce(interruption);
+    await expect(f.service.handleCheckoutCreated(f.event, 1, f.phone)).rejects.toBe(interruption);
+
+    const recovery = await f.db.checkoutRecovery.findFirstOrThrow({
+      where: { shopId: f.shopId, checkoutToken: f.checkoutToken },
+    });
+    const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recovery.id, sequence: 1 } },
+    });
+    const preparedUsage = await f.db.usageEvent.findUniqueOrThrow({
+      where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
+    });
+    const preparedMessage = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: preparedUsage.sourceId } });
+    expect(preparedMessage).toMatchObject({ status: "PENDING", providerDispatchKey: null,
+      providerDispatchAdmittedAt: null, providerMessageId: null, sentAt: null });
+    expect(preparedUsage).toMatchObject({ sourceId: preparedMessage.id });
+    expect(await f.db.usageReservation.count({ where: { shopId: f.shopId, status: "RESERVED" } })).toBe(1);
+    expect(f.providerSend).not.toHaveBeenCalled();
+
+    const lookup = vi.spyOn(abandonedCheckoutLookupService, "lookup").mockResolvedValue({
+      kind: "found",
+      checkout: {
+        shopifyAbandonedCheckoutId: null,
+        abandonedCheckoutUrl: f.checkoutUrl,
+        createdAt: f.event.detectedAt,
+        completedAt: null,
+        currencyCode: "GBP",
+        totalPrice: "25.00",
+        internationalContext: f.event.internationalContext!,
+        customer: {
+          shopifyCustomerId: "gid://shopify/Customer/125678912345",
+          email: null, phone: f.phone, firstName: "Taylor", lastName: null,
+        },
+        lineItems: f.lineItems,
+      },
+    });
+    const [{ Queue, QueueEvents }, { connectionRedis }, domain, workerModule] = await Promise.all([
+      import("bullmq"),
+      import("../../src/lib/redis.js"),
+      import("../../src/domain/pending-recovery-candidate.js"),
+      import("../../src/workers/pending-recovery-candidate.worker.js"),
+    ]);
+    const queue = new Queue(domain.PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
+    const events = new QueueEvents(domain.PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
+    const worker = workerModule.createPendingRecoveryCandidateWorker();
+    const jobId = `prepared-resume-${randomUUID()}`;
+    const candidate = {
+      shopId: f.shopId, shopDomain: f.domain, checkoutToken: f.checkoutToken,
+      cartToken: f.event.cartToken, abandonedCheckoutUrl: f.checkoutUrl,
+      checkoutCreatedAt: f.event.detectedAt,
+      internationalContext: f.event.internationalContext,
+    };
+    await queue.add(domain.EVALUATE_PENDING_RECOVERY_JOB, candidate, {
+      jobId, attempts: 1, removeOnComplete: false, removeOnFail: false,
+    });
+    try {
+      await Promise.all([worker.waitUntilReady(), events.waitUntilReady()]);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Prepared candidate did not finish: ${jobId}`)), 25_000);
+        worker.on("completed", (completed) => {
+          if (completed.id !== jobId) return;
+          clearTimeout(timer);
+          resolve();
+        });
+        worker.on("failed", (failed, error) => {
+          if (failed?.id !== jobId) return;
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+
+      expect(lookup).toHaveBeenCalledOnce();
+      expect(resume).toHaveBeenCalledTimes(2);
+      expect(resume.mock.calls[1]?.[0]).toMatchObject({ messageId: preparedMessage.id,
+        outreachAttemptId: attempt.id, recoveryCreditSourceKey: expect.any(String) });
+      expect(await resume.mock.results[1]!.value).toMatchObject({ kind: "admitted", executionScope: "recovery" });
+      expect(f.providerSend).toHaveBeenCalledOnce();
+      const finalAttempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+      const finalMessage = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: preparedMessage.id } });
+      expect(finalAttempt).toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: preparedMessage.id });
+      expect(finalMessage).toMatchObject({ status: "SENT", providerMessageId: expect.any(String) });
+      expect(await f.db.usageEvent.count({ where: { idempotencyKey: `recovery-outreach:${attempt.id}` } })).toBe(1);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(1);
+      expect(await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId } }))
+        .toMatchObject({ status: "COMMITTED", quantity: 1 });
+      expect((await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovery.id } })).status)
+        .toBe("MESSAGE_SENT");
+    } finally {
+      lookup.mockRestore();
+      resume.mockRestore();
+      await worker.close();
+      await events.close();
+      await queue.close();
+    }
+  }, 90_000);
+
+  it("keeps a permitted message held in the real candidate worker without a second provider request", async () => {
+    const f = await fixture();
+    const resume = vi.spyOn(outboundWhatsAppAdmissionService, "resumeInitialTemplate");
+    const providerTimeout = new Error("provider outcome unknown after permit");
+    f.providerSend.mockRejectedValueOnce(providerTimeout);
+    await expect(f.service.handleCheckoutCreated(f.event, 1, f.phone)).rejects.toBe(providerTimeout);
+
+    const recovery = await f.db.checkoutRecovery.findFirstOrThrow({
+      where: { shopId: f.shopId, checkoutToken: f.checkoutToken },
+    });
+    const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
+      where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recovery.id, sequence: 1 } },
+    });
+    const usage = await f.db.usageEvent.findUniqueOrThrow({
+      where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
+    });
+    const message = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: usage.sourceId } });
+    expect(message).toMatchObject({ status: "PENDING", providerDispatchKey: expect.any(String),
+      providerDispatchAdmittedAt: expect.any(Date), providerMessageId: null, sentAt: null });
+    expect(await f.db.usageReservation.count({ where: { shopId: f.shopId, status: "RESERVED" } })).toBe(1);
+    expect(f.providerSend).toHaveBeenCalledOnce();
+    const initialResumeCount = resume.mock.calls.length;
+
+    const lookup = vi.spyOn(abandonedCheckoutLookupService, "lookup").mockResolvedValue({
+      kind: "found",
+      checkout: {
+        shopifyAbandonedCheckoutId: null,
+        abandonedCheckoutUrl: f.checkoutUrl,
+        createdAt: f.event.detectedAt,
+        completedAt: null,
+        currencyCode: "GBP",
+        totalPrice: "25.00",
+        internationalContext: f.event.internationalContext!,
+        customer: {
+          shopifyCustomerId: "gid://shopify/Customer/125678912345",
+          email: null, phone: f.phone, firstName: "Taylor", lastName: null,
+        },
+        lineItems: f.lineItems,
+      },
+    });
+    const [{ Queue, QueueEvents }, { connectionRedis }, domain, workerModule] = await Promise.all([
+      import("bullmq"),
+      import("../../src/lib/redis.js"),
+      import("../../src/domain/pending-recovery-candidate.js"),
+      import("../../src/workers/pending-recovery-candidate.worker.js"),
+    ]);
+    const queue = new Queue(domain.PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
+    const events = new QueueEvents(domain.PENDING_RECOVERY_CANDIDATE_QUEUE, { connection: connectionRedis });
+    const worker = workerModule.createPendingRecoveryCandidateWorker();
+    const jobId = `permitted-uncertain-${randomUUID()}`;
+    const candidate = {
+      shopId: f.shopId, shopDomain: f.domain, checkoutToken: f.checkoutToken,
+      cartToken: f.event.cartToken, abandonedCheckoutUrl: f.checkoutUrl,
+      checkoutCreatedAt: f.event.detectedAt,
+      internationalContext: f.event.internationalContext,
+    };
+    await queue.add(domain.EVALUATE_PENDING_RECOVERY_JOB, candidate, {
+      jobId, attempts: 1, removeOnComplete: false, removeOnFail: false,
+    });
+    try {
+      await Promise.all([worker.waitUntilReady(), events.waitUntilReady()]);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Uncertain candidate did not finish: ${jobId}`)), 25_000);
+        worker.on("completed", (completed) => {
+          if (completed.id !== jobId) return;
+          clearTimeout(timer);
+          reject(new Error("Provider-uncertain candidate unexpectedly completed"));
+        });
+        worker.on("failed", (failed) => {
+          if (failed?.id !== jobId) return;
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+
+      expect(await (await queue.getJob(jobId))?.getState()).toBe("failed");
+      expect(lookup).not.toHaveBeenCalled();
+      expect(resume).toHaveBeenCalledTimes(initialResumeCount);
+      expect(f.providerSend).toHaveBeenCalledOnce();
+      expect(await f.db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } }))
+        .toMatchObject({ status: "PENDING", providerDispatchAdmittedAt: expect.any(Date),
+          providerMessageId: null, sentAt: null });
+      expect(await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId } }))
+        .toMatchObject({ status: "RESERVED", quantity: 1 });
+      expect(await f.db.merchantSupportMessage.count({ where: { checkoutRecoveryId: recovery.id } })).toBe(0);
+      expect((await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: recovery.id } })).status)
+        .toBe("DETECTED");
+    } finally {
+      lookup.mockRestore();
+      resume.mockRestore();
+      await worker.close();
+      await events.close();
+      await queue.close();
+    }
   }, 90_000);
 
   it("does not create an attempt, reserve credit or call Meta when required consent is denied", async () => {

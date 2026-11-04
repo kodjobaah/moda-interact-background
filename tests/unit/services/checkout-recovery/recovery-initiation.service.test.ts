@@ -2,22 +2,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   prisma: {
-    shop: { findUniqueOrThrow: vi.fn() },
+    shop: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn() },
     checkoutRecovery: {
       update: vi.fn(),
       updateMany: vi.fn(),
       findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
-    recoveryOutreachAttempt: { findUnique: vi.fn() },
+    recoveryOutreachAttempt: { findUnique: vi.fn(), findFirst: vi.fn() },
   },
   customer: { resolveCustomer: vi.fn() },
   conversation: { getOrCreateRecoveryConversation: vi.fn() },
   message: { buildRecoveryTemplateDescriptor: vi.fn() },
   outbound: {
     getProviderAccountId: vi.fn(),
+    reserve: vi.fn(),
     sendTemplate: vi.fn(),
     findExistingAdmission: vi.fn(),
+    inspectInitialOutreachAdmission: vi.fn(),
+    resumeInitialTemplate: vi.fn(),
   },
   automated: { prepare: vi.fn(), validateAdmission: vi.fn() },
   policy: { resolve: vi.fn() },
@@ -101,6 +104,11 @@ function createInitiation(overrides: {
 } = {}) {
   const billing = {
     admit: vi.fn(async () => ({ kind: "admitted" as const, admission })),
+    revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" as const })),
+    settleConfirmedInitialOutreach: vi.fn(async () => ({ kind: "settled" as const,
+      disposition: "committed" as const, sourceKind: "paid" as const,
+      sourceKey: admission.sourceKey, reservationId: "reservation-1",
+      committedUsageEventId: "usage-1", outboundMessageId: confirmedMessage.id, sentAt })),
     revalidateBeforeProvider: vi.fn(async () => ({ kind: "admitted" as const, admission })),
     releaseBeforeProvider: vi.fn(async () => undefined),
     handleProviderFailure: vi.fn(async () => undefined),
@@ -125,18 +133,25 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.customer.resolveCustomer.mockResolvedValue(null);
   mocks.prisma.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop-1" });
+  mocks.prisma.shop.findUnique.mockResolvedValue({ id: "shop-1", platform: "SHOPIFY" });
   mocks.prisma.checkoutRecovery.findFirst.mockResolvedValue(recovery);
+  mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(recovery);
   mocks.consent.evaluateFirst.mockResolvedValue(true);
   mocks.consent.evaluateReentry.mockResolvedValue(true);
   mocks.consent.notifyMissingRecipient.mockResolvedValue(undefined);
   mocks.prisma.checkoutRecovery.update.mockResolvedValue(recovery);
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
-  mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(null);
   mocks.prisma.recoveryOutreachAttempt.findUnique.mockResolvedValue(null);
+  mocks.prisma.recoveryOutreachAttempt.findFirst.mockResolvedValue(null);
   mocks.conversation.getOrCreateRecoveryConversation.mockResolvedValue({ id: "conversation-1" });
   mocks.message.buildRecoveryTemplateDescriptor.mockReturnValue("template-content");
   mocks.outbound.getProviderAccountId.mockReturnValue("provider-1");
+  mocks.outbound.reserve.mockResolvedValue({ kind: "admitted", shopId: "shop-1",
+    messageId: "message-1", conversationId: "conversation-1", terminal: false, executionScope: "general" });
   mocks.outbound.sendTemplate.mockResolvedValue({ kind: "admitted" });
+  mocks.outbound.inspectInitialOutreachAdmission.mockResolvedValue({ kind: "absent" });
+  mocks.outbound.resumeInitialTemplate.mockResolvedValue({ kind: "admitted", shopId: "shop-1",
+    messageId: "message-1", conversationId: "conversation-1", terminal: false, executionScope: "recovery" });
   mocks.outbound.findExistingAdmission.mockResolvedValue(confirmedMessage);
   mocks.automated.prepare.mockResolvedValue({
     kind: "prepared",
@@ -493,15 +508,27 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
-  it("releases admission when conversation creation fails before provider send", async () => {
+  it("does not admit billing when conversation creation fails", async () => {
     const error = new Error("conversation unavailable");
     mocks.conversation.getOrCreateRecoveryConversation.mockRejectedValue(error);
     const { service, billing } = createInitiation();
 
     await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
 
-    expect(billing.releaseBeforeProvider).toHaveBeenCalledWith(admission);
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("classifies durable outreach progress before template preparation", async () => {
+    const { service, billing } = createInitiation();
+
+    await service.handleCheckoutCreated(event);
+
+    expect(mocks.outbound.inspectInitialOutreachAdmission.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.automated.prepare.mock.invocationCallOrder[0]);
+    expect(billing.revalidateExistingInitialOutreach.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.automated.prepare.mock.invocationCallOrder[0]);
   });
 
   it("marks revalidation blocks without durably blocking recovery or releasing admission", async () => {
@@ -521,29 +548,61 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
-  it("routes provider errors through billing failure handling and marks the attempt failed", async () => {
+  it("retains existing credit when final consent revalidation fails technically", async () => {
+    const error = new Error("consent storage unavailable");
+    mocks.consent.evaluateReentry.mockResolvedValueOnce(true).mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(error);
+    const { service, billing } = createInitiation({ billing: {
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "admitted" as const,
+        admission, reservationId: "reservation-1" })),
+    } });
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
+
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
+    expect(mocks.outbound.resumeInitialTemplate).not.toHaveBeenCalled();
+  });
+
+  it("retains existing credit when offer validation fails technically", async () => {
+    const error = new Error("offer source unavailable");
+    mocks.automated.validateAdmission.mockRejectedValueOnce(error);
+    const { service, billing } = createInitiation({ billing: {
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "admitted" as const,
+        admission, reservationId: "reservation-1" })),
+    } });
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
+
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
+    expect(mocks.outbound.resumeInitialTemplate).not.toHaveBeenCalled();
+  });
+
+  it("preserves technical provider errors without inventing a definitive failed attempt", async () => {
     const error = new Error("provider unavailable");
-    mocks.outbound.sendTemplate.mockRejectedValue(error);
+    mocks.outbound.resumeInitialTemplate.mockRejectedValue(error);
     const { service, billing } = createInitiation();
 
     await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
 
-    expect(billing.handleProviderFailure).toHaveBeenCalledWith({ admission, error });
-    expect(mocks.attempt.markStatus).toHaveBeenCalledWith(attempt.id, "FAILED", {
+    expect(billing.handleProviderFailure).not.toHaveBeenCalled();
+    expect(mocks.attempt.markStatus).not.toHaveBeenCalledWith(attempt.id, "FAILED", {
       failureCode: "PROVIDER_FAILURE",
     });
   });
 
   it("finalizes a duplicate only when its durable message is confirmed", async () => {
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.resumeInitialTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
     const { service, billing } = createInitiation();
 
     await service.handleCheckoutCreated(event);
 
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledWith({
-      admission,
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledWith({
+      shopId: recovery.shopId,
       recoveryId: recovery.id,
-      occurredAt: sentAt,
+      outreachAttemptId: attempt.id,
+      outboundMessageId: confirmedMessage.id,
     });
     expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledWith({
       shopId: recovery.shopId,
@@ -563,29 +622,26 @@ describe("RecoveryInitiationService", () => {
     const { service, billing } = createInitiation();
 
     await expect(service.handleCheckoutCreated(event)).rejects.toBe(persistenceError);
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(1);
-    expect(mocks.outbound.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
-      idempotencyKey: `recovery-outreach:${attempt.id}`,
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenCalledTimes(1);
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      outreachAttemptId: attempt.id,
     }));
 
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.resumeInitialTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
     await expect(service.handleCheckoutCreated(event)).resolves.toEqual(recovery);
 
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledTimes(2);
-    expect(mocks.outbound.sendTemplate.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
-      idempotencyKey: `recovery-outreach:${attempt.id}`,
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenCalledTimes(2);
+    expect(mocks.outbound.resumeInitialTemplate.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      outreachAttemptId: attempt.id,
     }));
     expect(mocks.outbound.findExistingAdmission).toHaveBeenCalledTimes(2);
     expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledTimes(2);
-    expect(billing.commitSuccessfulInitiation).toHaveBeenNthCalledWith(1, {
-      admission,
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledTimes(2);
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledWith({
+      shopId: recovery.shopId,
       recoveryId: recovery.id,
-      occurredAt: sentAt,
-    });
-    expect(billing.commitSuccessfulInitiation).toHaveBeenNthCalledWith(2, {
-      admission,
-      recoveryId: recovery.id,
-      occurredAt: sentAt,
+      outreachAttemptId: attempt.id,
+      outboundMessageId: confirmedMessage.id,
     });
   });
 
@@ -593,7 +649,7 @@ describe("RecoveryInitiationService", () => {
     ["pending", { id: "message-1", conversationId: "conversation-1", status: "PENDING", sentAt: null }, /still pending/],
     ["missing", null, /has no durable message/],
   ])("keeps duplicate %s admission non-convergent", async (_label, durableMessage, expectedError) => {
-    mocks.outbound.sendTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
+    mocks.outbound.resumeInitialTemplate.mockResolvedValue({ kind: "suppressed", reason: "duplicate" });
     mocks.outbound.findExistingAdmission.mockResolvedValue(durableMessage);
     const { service, billing } = createInitiation();
 
@@ -609,16 +665,23 @@ describe("RecoveryInitiationService", () => {
 
     await service.handleCheckoutCreated(event);
 
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledWith({
-      admission,
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledWith({
+      shopId: recovery.shopId,
       recoveryId: recovery.id,
-      occurredAt: sentAt,
+      outreachAttemptId: attempt.id,
+      outboundMessageId: confirmedMessage.id,
     });
     expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
       recipient: "15551234567",
     }));
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      to: attempt.recipient,
+    expect(mocks.outbound.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: `recovery-outreach:${attempt.id}`,
+      recoveryCreditSourceKey: admission.sourceKey,
+      initialOutreach: expect.objectContaining({ outreachAttemptId: attempt.id }),
+    }));
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      outreachAttemptId: attempt.id,
+      template: expect.objectContaining({ to: attempt.recipient }),
     }));
     expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledWith({
       shopId: recovery.shopId,
@@ -629,7 +692,7 @@ describe("RecoveryInitiationService", () => {
       followUpDueAt: null,
     });
     expect(mocks.prisma.checkoutRecovery.updateMany).toHaveBeenCalledWith({
-      where: { id: recovery.id, status: "DETECTED" },
+      where: { id: recovery.id, shopId: recovery.shopId, status: "DETECTED" },
       data: {
         status: "MESSAGE_SENT",
         messageSentAt: sentAt,
@@ -647,8 +710,9 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.attempt.getOrCreate).toHaveBeenCalledWith(expect.objectContaining({
       recipient: "15551234567",
     }));
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      to: "15551234567",
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      outreachAttemptId: attempt.id,
+      template: expect.objectContaining({ to: "15551234567" }),
     }));
   });
 
@@ -666,10 +730,14 @@ describe("RecoveryInitiationService", () => {
     await service.handleCheckoutCreated(event);
 
     expect(billing.admit).toHaveBeenCalledOnce();
-    expect(mocks.outbound.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.outbound.reserve).toHaveBeenCalledWith(expect.objectContaining({
       idempotencyKey: "recovery-outreach:attempt-1",
       recoveryCreditSourceKey: admission.sourceKey,
       recoveryPromise: { kind: "NO_OFFER" },
+    }));
+    expect(mocks.outbound.resumeInitialTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      outreachAttemptId: attempt.id,
+      template: expect.objectContaining({ recoveryPromise: { kind: "NO_OFFER" } }),
     }));
     expect(mocks.automated.validateAdmission).not.toHaveBeenCalled();
     expect(mocks.initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledOnce();

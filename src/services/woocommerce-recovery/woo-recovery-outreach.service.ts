@@ -6,6 +6,7 @@ import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
 import type { CurrentOutreachOfferAdmissionToken } from "../recovery-offers/current-outreach-offer-revalidation.service.js";
 import type { SendTemplateInput } from "../../integration/whatsapp/types.js";
 import { WhatsAppServiceError } from "../whatsapp.service.js";
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import type {
   WooCheckoutCoordinator,
   WooCheckoutRef,
@@ -116,7 +117,8 @@ export interface WooOutreachDependencies {
   };
   conversations: { getOrCreate(recoveryId: string): Promise<{ id: string }> };
   billing: Pick<RecoveryBillingService,
-    "admit" | "revalidateBeforeProvider" | "releaseBeforeProvider" | "commitSuccessfulInitiation">;
+    "admit" | "revalidateBeforeProvider" | "releaseBeforeProvider" | "commitSuccessfulInitiation" |
+    "settleConfirmedInitialOutreach">;
   providerFailure: {
     /** Existing billing disposition; keep special 131026 compensation with its owner. */
     compensate(admission: RecoveryBillingAdmission, error: unknown): Promise<void>;
@@ -134,8 +136,11 @@ export interface WooOutreachDependencies {
       recovery: WooOutreachRecovery;
       attempt: WooInitialAttempt;
       message: WooConfirmedMessage;
-      admission: RecoveryBillingAdmission;
-    }): Promise<void>;
+    }): Promise<
+      | { kind: "finalized"; outboundMessageId: string; sentAt: Date }
+      | { kind: "held"; reason: "message-not-confirmed" | "lineage-conflict" | "reservation-ambiguous" |
+          "reservation-released" | "reservation-compensated" | "paid-period-not-current" | "settlement-not-committed" }
+    >;
   };
   enqueue: { initial(recoveryId: string, attemptId: string): Promise<void> };
   logger: StructuredLogger;
@@ -225,10 +230,12 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       if (!message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status))
         throw new Error("WOO_CONFIRMED_PROVIDER_MESSAGE_INVALID");
       state.stage = "finalize-resumed-confirmed-send";
-      await this.finalizeExisting(recovery, attempt, {
+      const finalization = await this.finalizeExisting(recovery, attempt, {
         id: message.id, conversationId: message.conversationId,
         status: message.status as WooConfirmedMessage["status"], sentAt: message.sentAt,
       }, state);
+      if (finalization.kind === "held")
+        throw new Error(`WOO_CONFIRMED_INITIAL_SETTLEMENT_HELD:${finalization.reason}`);
       return;
     }
     if (outcome.kind === "provider-failed") {
@@ -350,7 +357,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
               return this.dispatchOutcome(state, "already-initialized");
             // A confirmed send MUST be charged even if a paid order arrived
             // afterwards; replays finalize it, never re-send it.
-            await this.finalizeExisting(fresh, attempt, prior, state);
+            const finalization = await this.finalizeExisting(fresh, attempt, prior, state);
+            if (finalization.kind === "held")
+              return this.dispatchOutcome(state, "deferred", `confirmed-settlement-${finalization.reason}`);
             return this.dispatchOutcome(state, "already-initialized");
           }
           if (prior?.status === "PENDING") {
@@ -408,7 +417,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         try {
           repeat = await this.guard(await this.requireSameRecovery(fresh), guard.snapshot);
         } catch (error) {
-          await this.releaseOrThrow(billing.admission, error);
+          await this.releaseOrThrow(billing.admission, error, state);
           throw error;
         }
         if (repeat.kind !== "allowed" || repeat.recipient !== attempt.recipient) {
@@ -423,7 +432,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
             admission: billing.admission, recoveryId, outreachAttemptId: attempt.id,
           });
         } catch (error) {
-          await this.releaseOrThrow(billing.admission, error);
+          await this.releaseOrThrow(billing.admission, error, state);
           throw error;
         }
         if (revalidated.kind === "blocked") return this.dispatchOutcome(state, "deferred", revalidated.reason);
@@ -435,7 +444,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
               selected.template.admissionToken, AbortSignal.timeout(15_000),
             );
           } catch (error) {
-            await this.releaseOrThrow(billing.admission, error);
+            await this.releaseOrThrow(billing.admission, error, state);
             throw error;
           }
           if (!offerAdmissionValid) {
@@ -458,7 +467,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
           // send must never be refunded. Never mark this attempt FAILED on an
           // uncertain outcome, and never acknowledge the failed job.
           state.stage = "provider-failure-reconciliation";
-          await this.compensateProviderError(attempt.id, source, error);
+          await this.compensateProviderError(attempt.id, source, error, state);
           throw error;
         }
         state.stage = "verify-durable-provider-result";
@@ -466,7 +475,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         if (result.kind === "suppressed") {
           if (result.reason === "duplicate") {
             if (confirmed(message)) {
-              await this.deps.finalize.confirmed({ recovery: fresh, attempt, message, admission: source });
+              const finalization = await this.deps.finalize.confirmed({ recovery: fresh, attempt, message });
+              if (finalization.kind === "held")
+                return this.dispatchOutcome(state, "deferred", `confirmed-settlement-${finalization.reason}`);
               return this.dispatchOutcome(state, "already-initialized");
             }
             if (message?.status === "FAILED") {
@@ -487,7 +498,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
         if (!confirmed(message) || message.conversationId !== conversation.id)
           throw new Error("WOO_INITIAL_SENT_WITHOUT_CONFIRMED_DURABLE_MESSAGE");
         state.stage = "finalize-confirmed-send";
-        await this.deps.finalize.confirmed({ recovery: fresh, attempt, message, admission: source });
+        const finalization = await this.deps.finalize.confirmed({ recovery: fresh, attempt, message });
+        if (finalization.kind === "held")
+          return this.dispatchOutcome(state, "deferred", `confirmed-settlement-${finalization.reason}`);
         return this.dispatchOutcome(state, "sent");
       });
     } catch (error) {
@@ -548,22 +561,17 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   private async finalizeExisting(
     recovery: WooOutreachRecovery, attempt: WooInitialAttempt,
     message: WooConfirmedMessage, state: RunState,
-  ): Promise<void> {
+  ): Promise<Awaited<ReturnType<WooOutreachDependencies["finalize"]["confirmed"]>>> {
     if (attempt.followUpDueAt !== null) throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
     state.stage = "verify-confirmed-message-owner";
     const conversation = await this.deps.conversations.getOrCreate(recovery.id);
     if (message.conversationId !== conversation.id)
       throw new Error("WOO_CONFIRMED_MESSAGE_OWNERSHIP_MISMATCH");
-    state.stage = "replay-confirmed-credit";
-    const billing = await this.deps.billing.admit({
-      shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: attempt.id,
-    });
-    if (billing.kind !== "admitted") throw new Error("WOO_CONFIRMED_MESSAGE_CREDIT_UNAVAILABLE");
     state.stage = "replay-confirmed-finalization";
-    await this.deps.finalize.confirmed({ recovery, attempt, message, admission: billing.admission });
+    return this.deps.finalize.confirmed({ recovery, attempt, message });
   }
 
-  private async releaseOrThrow(admission: RecoveryBillingAdmission, original: unknown): Promise<void> {
+  private async releaseOrThrow(admission: RecoveryBillingAdmission, original: unknown, state: RunState): Promise<void> {
     let compensationFailure: { error: unknown } | undefined;
     try {
       await this.deps.billing.releaseBeforeProvider(admission);
@@ -571,6 +579,11 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       compensationFailure = { error: compensation };
     }
     if (compensationFailure) {
+      this.logComponents(state, "woocommerce.recovery.outreach.failed", {
+        diagnosticBoundary: "preflight_release",
+        preflightError: safeWooDiagnostic(original),
+        releaseError: safeWooDiagnostic(compensationFailure.error),
+      });
       throw new AggregateError(
         [original, compensationFailure.error], "WOO_PRE_SEND_RELEASE_FAILED", { cause: original },
       );
@@ -578,7 +591,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   }
 
   private async compensateProviderError(
-    attemptId: string, admission: RecoveryBillingAdmission, original: unknown,
+    attemptId: string, admission: RecoveryBillingAdmission, original: unknown, state: RunState,
   ): Promise<void> {
     let compensationFailure: { error: unknown } | undefined;
     try {
@@ -592,6 +605,11 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       compensationFailure = { error: compensation };
     }
     if (compensationFailure) {
+      this.logComponents(state, "woocommerce.recovery.outreach.failed", {
+        diagnosticBoundary: "send_compensation",
+          sendError: safeWooDiagnostic(original),
+          compensationError: safeWooDiagnostic(compensationFailure.error),
+        });
       throw new AggregateError(
         [original, compensationFailure.error], "WOO_PROVIDER_COMPENSATION_FAILED", { cause: original },
       );
@@ -631,15 +649,27 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   }
 
   private failed(state: RunState, error: unknown): void {
-    // Error messages often carry phone numbers, provider bodies or SQL. Log
-    // only bounded metadata. Do not pass the original Error to the shared
-    // serializer: even its message and stack can contain sensitive details.
-    this.log.error("woocommerce.recovery.outreach.failed", {
-      shopId: state.shopId, recoveryId: state.recoveryId, attemptId: state.attemptId,
-      stage: state.stage,
-      errorClass: error instanceof AggregateError ? "aggregate" :
-        error instanceof Error ? "exception" : "unknown",
-      errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
-    });
+    try {
+      this.log.error("woocommerce.recovery.outreach.failed", {
+        shopId: state.shopId, recoveryId: state.recoveryId, attemptId: state.attemptId,
+        stage: state.stage,
+        errorClass: error instanceof AggregateError ? "aggregate" :
+          error instanceof Error ? "exception" : "unknown",
+        errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
+        sourceError: safeWooDiagnostic(error),
+      });
+    } catch {
+      // Logging must not replace a provider, compensation, or preflight failure.
+    }
   }
+
+  private logComponents(state: RunState, event: string, components: Record<string, unknown>): void {
+    try { this.log.error(event, { ...state, ...components }); } catch { /* preserve aggregate */ }
+  }
+}
+
+function safeWooDiagnostic(error: unknown) {
+  const diagnostic = initialOutreachDiagnostic(error);
+  const message = diagnostic.message.replace(/\b(SQL|query)\s*[:=]\s*.*$/i, "$1=[REDACTED_SQL]");
+  return { ...diagnostic, message, redactionApplied: diagnostic.redactionApplied || message !== diagnostic.message };
 }

@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createLogger, type LogRecord, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+const outbound = vi.hoisted(() => ({ inspectInitialOutreachAdmission: vi.fn() }));
+vi.mock("../../../../src/services/outbound-whatsapp-admission.service.js", () => ({
+  outboundWhatsAppAdmissionService: outbound,
+}));
 import {
   InitialNoOfferFallbackService,
   type InitialFallbackTrigger,
 } from "../../../../src/services/recovery-template-integration/initial-no-offer-fallback.service.js";
 import type { PreparedRecoveryTemplate } from
   "../../../../src/services/recovery-template-preparation/recovery-template.types.js";
+import { CheckoutRecoveryLifetimePolicyUnavailableError } from
+  "../../../../src/services/recovery-lifetime/checkout-recovery-lifetime.js";
 
 const now = new Date("2026-10-26T09:00:00.000Z");
 const checkoutUrl = "https://shop.test/checkouts/original?token=exact%2Fvalue";
@@ -21,7 +28,7 @@ const preparedTemplate: PreparedRecoveryTemplate = {
   ] },
 };
 
-function fixture() {
+function fixture(log = { warn: vi.fn(), error: vi.fn() }) {
   const recovery = {
     id: "recovery-1", shopId: "shop-1", generation: 3, status: "DETECTED",
     checkoutUrl, lineItems: [{ title: "Shoes", variantTitle: "Default Title", quantity: 2 }],
@@ -44,7 +51,6 @@ function fixture() {
     checkoutRecoveryStatusHistory: { create: vi.fn(async () => ({ id: "history-1" })) },
   };
   const preparer = { prepare: vi.fn(async () => preparedTemplate) };
-  const log = { warn: vi.fn(), error: vi.fn() };
   const lifetimeReader = { read: vi.fn(async () => 21) };
   const service = new InitialNoOfferFallbackService(
     database as never, preparer as never, async () => "waba-1", () => now,
@@ -53,7 +59,10 @@ function fixture() {
   return { service, database, preparer, log, lifetimeReader, recovery, attempt };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  outbound.inspectInitialOutreachAdmission.mockResolvedValue({ kind: "absent" });
+});
 
 describe("InitialNoOfferFallbackService", () => {
   it.each<InitialFallbackTrigger>([
@@ -112,16 +121,17 @@ describe("InitialNoOfferFallbackService", () => {
     expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
-  it("reconciles an existing durable provider dispatch instead of preparing a duplicate", async () => {
+  it("prepares neutral fallback for a canonically prepared unpermitted message", async () => {
     const f = fixture();
-    f.database.conversationMessage.findFirst.mockResolvedValueOnce({ id: "pending-message" } as never);
+    outbound.inspectInitialOutreachAdmission.mockResolvedValueOnce({ kind: "prepared", message: { id: "pending-message" } });
     await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       outreachAttemptId: "attempt-1", trigger: "AI_UNAVAILABLE" }))
-      .resolves.toEqual({ kind: "RETRY", reason: "PROVIDER_OUTCOME_UNCERTAIN" });
-    expect(f.database.conversationMessage.findFirst).toHaveBeenCalledWith({
-      where: { providerDispatchKey: "recovery-outreach:attempt-1" }, select: { id: true },
+      .resolves.toMatchObject({ kind: "PREPARED", trigger: "AI_UNAVAILABLE",
+        send: { recoveryPromise: { kind: "NO_OFFER" } } });
+    expect(outbound.inspectInitialOutreachAdmission).toHaveBeenCalledWith({
+      shopId: "shop-1", recoveryId: "recovery-1", outreachAttemptId: "attempt-1",
     });
-    expect(f.preparer.prepare).not.toHaveBeenCalled();
+    expect(f.preparer.prepare).toHaveBeenCalledOnce();
   });
 
   it("blocks when the independently approved no-offer template is unavailable", async () => {
@@ -140,14 +150,51 @@ describe("InitialNoOfferFallbackService", () => {
     });
   });
 
-  it("returns a retry and logs the original required-state error", async () => {
+  it("logs and rethrows the original required-state error", async () => {
     const f = fixture();
     const failure = new Error("database failure");
     f.database.checkoutRecovery.findUnique.mockRejectedValueOnce(failure);
     await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
-      outreachAttemptId: "attempt-1", trigger: "MCP_UNAVAILABLE" }))
-      .resolves.toEqual({ kind: "RETRY", reason: "REQUIRED_STATE_UNAVAILABLE" });
+      outreachAttemptId: "attempt-1", trigger: "MCP_UNAVAILABLE" })).rejects.toBe(failure);
     expect(f.log.error).toHaveBeenCalledWith("recovery_template.initial_fallback.failed",
-      expect.objectContaining({ error: failure, reason: "REQUIRED_STATE_UNAVAILABLE" }));
+      expect.objectContaining({ sourceError: expect.objectContaining({ message: failure.message }), reason: "REQUIRED_STATE_UNAVAILABLE" }));
+  });
+
+  it("emits the safe required-state source through Shared and rethrows the same error", async () => {
+    const records: LogRecord[] = [];
+    const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test",
+      sink: (record) => records.push(JSON.parse(JSON.stringify(record)) as LogRecord) });
+    const f = fixture(logger as Pick<StructuredLogger, "warn" | "error">);
+    const cause = Object.assign(new Error("database unavailable for +447000111222"), { code: "P1001" });
+    const failure = Object.assign(new Error("fallback read failed for +447000111222"), {
+      code: "P2034", clientVersion: "6.19.3", cause,
+    });
+    f.database.checkoutRecovery.findUnique.mockRejectedValueOnce(failure);
+
+    await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1", trigger: "MCP_UNAVAILABLE" })).rejects.toBe(failure);
+
+    expect(records).toContainEqual(expect.objectContaining({
+      event: "recovery_template.initial_fallback.failed", level: "error",
+      data: expect.objectContaining({
+        reason: "REQUIRED_STATE_UNAVAILABLE",
+        sourceError: expect.objectContaining({
+          message: "fallback read failed for [REDACTED_PHONE]",
+          code: "P2034", clientVersion: "6.19.3",
+          cause: expect.objectContaining({ message: "database unavailable for [REDACTED_PHONE]", code: "P1001" }),
+        }),
+      }),
+    }));
+    expect(JSON.stringify(records)).not.toContain("+447000111222");
+  });
+
+  it("propagates actual missing lifetime configuration rather than converting it to a business refusal", async () => {
+    const f = fixture();
+    const failure = new CheckoutRecoveryLifetimePolicyUnavailableError("missing");
+    f.lifetimeReader.read.mockRejectedValueOnce(failure);
+    await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1", trigger: "AI_UNAVAILABLE" })).rejects.toBe(failure);
+    expect(f.log.error).toHaveBeenCalledWith("recovery_template.initial_fallback.failed",
+      expect.objectContaining({ sourceError: expect.objectContaining({ message: failure.message }), reason: "REQUIRED_STATE_UNAVAILABLE" }));
   });
 });

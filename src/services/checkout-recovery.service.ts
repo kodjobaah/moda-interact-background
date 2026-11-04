@@ -18,7 +18,13 @@ import { pendingRecoveryCandidateService } from "./pending-recovery-candidate.se
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { abandonedCheckoutLookupService } from "./abandoned-checkout-lookup.service.js";
 import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
-import { RecoveryInitiationService } from "./checkout-recovery/recovery-initiation.service.js";
+import {
+  InitialOutreachHeldError,
+  RecoveryInitiationService,
+} from "./checkout-recovery/recovery-initiation.service.js";
+import type { InitialOutreachProgress } from "./checkout-recovery/recovery-initiation.service.js";
+export { InitialOutreachHeldError } from "./checkout-recovery/recovery-initiation.service.js";
+export type { InitialOutreachProgress } from "./checkout-recovery/recovery-initiation.service.js";
 import { recoveryConsentAdmissionService } from "./checkout-recovery/recovery-consent-admission.service.js";
 import { RecoveryOutreachFinalizationService } from "./checkout-recovery/recovery-outreach-finalization.service.js";
 import { RecoveryOutreachFollowUpProcessorService } from "./checkout-recovery/recovery-outreach-follow-up-processor.service.js";
@@ -73,6 +79,7 @@ export class CheckoutRecoveryService {
       findLatestRecovery,
       snapshotBuilder: this.snapshotBuilderService,
       recipientResolver: recoveryRecipientResolverService,
+      continueInitialOutreach: (input) => this.continueInitialOutreach(input),
       initiate: (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
       noticeMissingRecipient: (shopId, checkoutToken) =>
         recoveryConsentAdmissionService.notifyMissingRecipient({ shopId, checkoutToken }),
@@ -191,6 +198,14 @@ export class CheckoutRecoveryService {
       suppressionWakeupTrigger,
       admissionGate,
     );
+  }
+
+  async continueInitialOutreach(input: { shopId: string; recoveryId: string }): Promise<InitialOutreachProgress> {
+    const progress = await this.initiationService.continueInitialOutreach(input);
+    if (progress.kind === "held") {
+      throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
+    }
+    return progress;
   }
 
   async processRecoveryOutreachFollowUp(recoveryId: string) {

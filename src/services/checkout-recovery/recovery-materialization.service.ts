@@ -7,10 +7,13 @@ import type { ShopExecutionEligibilityService } from "../shop-execution-eligibil
 import type { RecoverySnapshotBuilderService } from "./recovery-snapshot-builder.service.js";
 import type { findLatestRecovery } from "./latest-recovery.js";
 import type { RecoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
+import { InitialOutreachHeldError, type InitialOutreachProgress } from "./recovery-initiation.service.js";
 
 export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string }
   | { outcome: "recovery-reentered"; checkoutToken: string }
+  | { outcome: "recovery-reconciled"; checkoutToken: string; recoveryId: string }
+  | { outcome: "deferred-initial-outreach"; checkoutToken: string; recoveryId: string; reason: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable" }
   | { outcome: "deferred-no-recipient"; checkoutToken: string }
   | { outcome: "discarded-admission-denied"; checkoutToken: string }
   | { outcome: "no-op-existing"; checkoutToken: string; status: string }
@@ -36,6 +39,7 @@ type RecoveryMaterializationDependencies = {
   findLatestRecovery: typeof findLatestRecovery;
   snapshotBuilder: Pick<RecoverySnapshotBuilderService, "build">;
   recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
+  continueInitialOutreach?: (input: { shopId: string; recoveryId: string }) => Promise<InitialOutreachProgress>;
   initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string) => Promise<unknown>;
   noticeMissingRecipient?: (shopId: string, checkoutToken: string) => Promise<void>;
 };
@@ -47,24 +51,60 @@ export class RecoveryMaterializationService {
     candidate: PendingRecoveryCandidate,
     options: { jobId?: string; retrySuppressionAdmission?: boolean } = {},
   ): Promise<MaturedCandidateMaterializationResult> {
-    const execution = await this.dependencies.executionEligibility.evaluate(
-      candidate.shopId,
-      undefined,
-      "recovery",
-    );
-    if (!execution.allowed) {
-      return {
-        outcome: "discarded-shop-unavailable",
-        checkoutToken: candidate.checkoutToken,
-        ...(execution.reason !== "SHOP_UNAVAILABLE" ? { reason: execution.reason } : {}),
-      } as const;
-    }
-    const shopDomain = await this.dependencies.abandonedCheckoutLookup.resolveShopDomain(candidate.shopId);
-
     return this.dependencies.pendingRecoveryCandidate.withCheckoutLock(
       candidate.shopId,
       candidate.checkoutToken,
       async () => {
+        const existing = await this.dependencies.findLatestRecovery(candidate.shopId, candidate.checkoutToken);
+        let generation = 1;
+        const reenterSuppressionRetry = options.retrySuppressionAdmission &&
+          existing?.status === "DETECTED";
+        let continueExistingGeneration = false;
+        if (existing) {
+          if (this.dependencies.continueInitialOutreach) {
+            const progress = await this.dependencies.continueInitialOutreach({
+              shopId: candidate.shopId,
+              recoveryId: existing.id,
+            });
+            if (progress.kind === "reconciled") {
+              return { outcome: "recovery-reconciled", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId } as const;
+            }
+            if (progress.kind === "blocked") {
+              return { outcome: "deferred-initial-outreach", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId, reason: progress.reason } as const;
+            }
+            if (progress.kind === "held") {
+              throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
+            }
+          }
+          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+            if (existing.status !== "DETECTED") {
+              return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
+            }
+            if (this.dependencies.continueInitialOutreach) {
+              continueExistingGeneration = true;
+              generation = existing.generation;
+            } else if (!reenterSuppressionRetry) {
+              return {
+                outcome: "no-op-existing",
+                checkoutToken: candidate.checkoutToken,
+                status: existing.status,
+              } as const;
+            } else {
+              generation = existing.generation;
+              continueExistingGeneration = true;
+            }
+          } else {
+            generation = existing.generation + 1;
+          }
+          if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
+            return {
+              outcome: "discarded-terminal",
+              checkoutToken: candidate.checkoutToken,
+              status: existing.status,
+            } as const;
+          }
+        }
+
         const lockedExecution = await this.dependencies.executionEligibility.evaluate(
           candidate.shopId,
           undefined,
@@ -95,31 +135,7 @@ export class RecoveryMaterializationService {
           return { outcome: "discarded-superseded", checkoutToken: candidate.checkoutToken } as const;
         }
 
-        const existing = await this.dependencies.findLatestRecovery(candidate.shopId, candidate.checkoutToken);
-        let generation = 1;
-        const reenterSuppressionRetry = options.retrySuppressionAdmission &&
-          existing?.status === "DETECTED";
-        if (existing) {
-          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
-            if (!reenterSuppressionRetry) {
-              return {
-                outcome: "no-op-existing",
-                checkoutToken: candidate.checkoutToken,
-                status: existing.status,
-              } as const;
-            }
-            generation = existing.generation;
-          } else {
-            generation = existing.generation + 1;
-          }
-          if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
-            return {
-              outcome: "discarded-terminal",
-              checkoutToken: candidate.checkoutToken,
-              status: existing.status,
-            } as const;
-          }
-        }
+        const shopDomain = await this.dependencies.abandonedCheckoutLookup.resolveShopDomain(candidate.shopId);
 
         if (!candidate.abandonedCheckoutUrl || !candidate.checkoutCreatedAt) {
           return {
@@ -162,10 +178,10 @@ export class RecoveryMaterializationService {
           return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken } as const;
         }
 
-        return {
-          outcome: reenterSuppressionRetry ? "recovery-reentered" : "recovery-created",
-          checkoutToken: seed.checkoutToken,
-        } as const;
+        if (reenterSuppressionRetry || continueExistingGeneration) {
+          return { outcome: "recovery-reentered", checkoutToken: seed.checkoutToken } as const;
+        }
+        return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
       },
     );
   }
