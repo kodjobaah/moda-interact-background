@@ -131,6 +131,7 @@ describe("InitialOutreachCreditService", () => {
     expect(record).toMatchObject({ level: "warn", event: "recovery.initial_outreach_credit.held" });
     expect(JSON.stringify(record)).toContain('"reason":"message-not-confirmed"');
     expect(JSON.stringify(record)).not.toContain('"error"');
+    expect(JSON.stringify(record)).not.toContain('"databaseError"');
     expect(JSON.stringify(record)).not.toContain('"providerCode"');
   });
 
@@ -150,7 +151,9 @@ describe("InitialOutreachCreditService", () => {
 
   it("logs the original failure through Shared and rethrows the same object", async () => {
     const records: LogRecord[] = [];
-    const original = new Error("credit identity read failed");
+    const original = Object.assign(new Error("credit identity read failed"), {
+      cause: new Error("known nested transport cause"),
+    });
     const tx = transactionForAttempt({
       recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
     });
@@ -165,6 +168,45 @@ describe("InitialOutreachCreditService", () => {
     expect(emitted).toContain("recovery.initial_outreach_credit.failed");
     expect(emitted).toContain("credit identity read failed");
     expect(emitted).toContain('"stage":"identity"');
+    const record = JSON.parse(JSON.stringify(records[0])) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      level: "error",
+      event: "recovery.initial_outreach_credit.failed",
+      "service.name": "initial-outreach-credit-test",
+      "deployment.environment.name": "test",
+      data: {
+        operation: "settleConfirmedInitialOutreach",
+        stage: "identity",
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        outreachAttemptId: input.outreachAttemptId,
+        error: { name: "Error", message: "credit identity read failed" },
+        cause: { name: "Error", message: "known nested transport cause" },
+      },
+    });
+  });
+
+  it("redacts supported secret forms and truncates oversized emitted error messages", async () => {
+    const records: LogRecord[] = [];
+    const original = new Error(`source failure Bearer secret-bearer and ?token=secret-query ${"x".repeat(5000)}`);
+    const tx = transactionForAttempt({
+      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+    });
+    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+
+    await expect(service.settleConfirmedInitialOutreach({
+      ...input,
+      outboundMessageId: "message-1",
+    })).rejects.toBe(original);
+
+    const record = JSON.parse(JSON.stringify(records[0])) as {
+      data: { error: { message: string } };
+    };
+    expect(record.data.error.message).toContain("Bearer [REDACTED]");
+    expect(record.data.error.message).toContain("?token=[REDACTED]");
+    expect(record.data.error.message).toContain("[Truncated]");
+    expect(JSON.stringify(record)).not.toContain("secret-bearer");
+    expect(JSON.stringify(record)).not.toContain("secret-query");
   });
 
   it("emits bounded Prisma metadata while excluding arbitrary metadata", async () => {
@@ -172,7 +214,7 @@ describe("InitialOutreachCreditService", () => {
     const original = new Prisma.PrismaClientKnownRequestError("unique conflict sentinel", {
       code: "P2002",
       clientVersion: Prisma.prismaVersion.client,
-      meta: { modelName: "UsageReservation", target: ["sourceKey"], unsafe: "do-not-log" },
+      meta: { modelName: "UsageReservation", target: ["sourceKey"], unsafe: "do-not-log", query: "arbitrary-query-sentinel" },
     });
     const tx = transactionForAttempt({
       recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
@@ -191,6 +233,26 @@ describe("InitialOutreachCreditService", () => {
     expect(emitted).not.toContain("do-not-log");
   });
 
+  it("emits a supplied SQLSTATE without inventing or leaking query metadata", async () => {
+    const records: LogRecord[] = [];
+    const original = Object.assign(new Error("serialization failure sentinel"), {
+      meta: { code: "40001", query: "unsafe-query-sentinel" },
+    });
+    const tx = transactionForAttempt({
+      recoveryOutreachAttempt: { findUnique: async () => { throw original; } },
+    });
+    const service = new InitialOutreachCreditService(databaseFor(tx) as never, captureLogger(records));
+
+    await expect(service.settleConfirmedInitialOutreach({
+      ...input,
+      outboundMessageId: "message-1",
+    })).rejects.toBe(original);
+
+    const emitted = JSON.stringify(records);
+    expect(emitted).toContain('"meta":{"code":"40001"}');
+    expect(emitted).not.toContain("unsafe-query-sentinel");
+    expect(emitted).toContain("serialization failure sentinel");
+  });
   it("logs each actual retry and the exhausted failure without replacing the original error", async () => {
     const records: LogRecord[] = [];
     const original = new Prisma.PrismaClientKnownRequestError("", {

@@ -89,18 +89,18 @@ export class InitialOutreachCreditService {
         return result;
       } catch (error) {
         if (error instanceof HoldSignal) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(error.source ?? {}), ...(sourceKind ? { sourceKind } : {}), reason: error.reason, ...(error.original ? { error: error.original, ...databaseErrorContext(error.original) } : {}) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(error.source ?? {}), ...(sourceKind ? { sourceKind } : {}), reason: error.reason, ...(error.original ? { error: error.original, ...errorCauseContext(error.original), ...databaseErrorContext(error.original) } : {}) });
           return { kind: "held", reason: error.reason, ...(error.source ? { reservationId: error.source.reservationId, sourceKey: error.source.sourceKey } : {}) };
         }
         if (error instanceof RecoveryCompensationLineageError) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "settleConfirmedInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...databaseErrorContext(error) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "settleConfirmedInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           return { kind: "held", reason: "lineage-conflict" };
         }
         if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...databaseErrorContext(error) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           continue;
         }
-        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -119,18 +119,18 @@ export class InitialOutreachCreditService {
         return result;
       } catch (error) {
         if (error instanceof ExistingHoldSignal) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(error.source ?? {}), ...(sourceKind ? { sourceKind } : {}), reason: error.reason, ...(error.original ? { error: error.original, ...databaseErrorContext(error.original) } : {}) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(error.source ?? {}), ...(sourceKind ? { sourceKind } : {}), reason: error.reason, ...(error.original ? { error: error.original, ...errorCauseContext(error.original), ...databaseErrorContext(error.original) } : {}) });
           return { kind: "held", reason: error.reason, ...(error.source ? { reservationId: error.source.reservationId, sourceKey: error.source.sourceKey } : {}) };
         }
         if (error instanceof RecoveryCompensationLineageError) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...databaseErrorContext(error) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           return { kind: "held", reason: "lineage-conflict" };
         }
         if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...databaseErrorContext(error) });
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           continue;
         }
-        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -159,6 +159,11 @@ async function paidPeriodId(tx: Tx, reservation: { billingPeriodEntitlementCount
 
 function conflictCode(error: unknown): string {
   return error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "internal-concurrency-conflict";
+}
+
+function errorCauseContext(error: unknown): Record<string, unknown> {
+  if (!error || typeof error !== "object" || !("cause" in error)) return {};
+  return { cause: (error as { cause?: unknown }).cause };
 }
 
 function databaseErrorContext(error: unknown): Record<string, unknown> {

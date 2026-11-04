@@ -1,5 +1,8 @@
 import "dotenv/config";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 import { describe, expect, it } from "vitest";
+import { InitialOutreachCreditService } from "../../src/services/recovery-billing/initial-outreach-credit.service.js";
 import { createInitialOutreachCreditFixture } from "./fixtures/arch056-initial-outreach-credit.fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
@@ -88,6 +91,10 @@ suite("ARCH-056 initial outreach credit (PostgreSQL)", () => {
         await f.db.conversationMessage.update({
           where: { id: f.messageId },
           data: { status: "PENDING", providerMessageId: null, sentAt: null },
+        });
+        await f.db.recoveryOutreachAttempt.update({
+          where: { id: f.attemptId },
+          data: { sentAt: null },
         });
         await f.db.usageEvent.create({ data: {
           shopId: f.shopId,
@@ -201,6 +208,161 @@ suite("ARCH-056 initial outreach credit (PostgreSQL)", () => {
       expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId! } })).toEqual(reservationBefore);
       expect(await f.db.billingPeriodEntitlementCounter.findUniqueOrThrow({ where: { id: f.periodCounterId! } })).toEqual(counterBefore);
       expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(0);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("rolls back owner counter mutation when the positive usage insert conflicts and emits the original failure", async () => {
+    const f = await createInitialOutreachCreditFixture();
+    const records: LogRecord[] = [];
+    const service = new InitialOutreachCreditService(
+      f.db,
+      createLogger({ serviceName: "initial-outreach-credit-integration-test", environment: "test", sink: (record) => records.push(record) }),
+    );
+    try {
+      const sourceKey = f.sourceKey!;
+      const committedKey = createRecoveryIdempotencyKey(f.shopId, sourceKey);
+      await f.db.usageEvent.create({ data: {
+        shopId: f.shopId,
+        metric: "OUTBOUND_AUTOMATED_MESSAGE",
+        quantity: 1,
+        idempotencyKey: committedKey,
+        sourceType: "OUTBOUND_AUTOMATED_MESSAGE",
+        sourceId: "conflicting-source-sentinel",
+        provider: f.provider,
+      } });
+      const counterBefore = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+
+      await expect(service.settleConfirmedInitialOutreach({
+        shopId: f.shopId,
+        recoveryId: f.recoveryId,
+        outreachAttemptId: f.attemptId,
+        outboundMessageId: f.messageId,
+      })).rejects.toMatchObject({ code: "P2002" });
+
+      expect(await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } })).toEqual(counterBefore);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId! } }))
+        .toMatchObject({ status: "RESERVED", committedUsageEventId: null });
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(0);
+      const failure = JSON.parse(JSON.stringify(records.find((record) => record.event === "recovery.initial_outreach_credit.failed"))) as Record<string, unknown>;
+      expect(failure).toMatchObject({
+        level: "error",
+        "service.name": "initial-outreach-credit-integration-test",
+        data: {
+          stage: "source_commit",
+          shopId: f.shopId,
+          recoveryId: f.recoveryId,
+          outreachAttemptId: f.attemptId,
+          error: { name: "PrismaClientKnownRequestError" },
+          databaseError: { code: "P2002" },
+        },
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("rolls back the inserted positive event when an owner update throws the original exception", async () => {
+    const f = await createInitialOutreachCreditFixture();
+    const records: LogRecord[] = [];
+    const original = new Error("owner update failure after positive event sentinel");
+    const database = {
+      $transaction: (operation: (tx: never) => Promise<unknown>, options?: object) => f.db.$transaction(
+        (tx) => {
+          const transaction = new Proxy(tx, {
+            get(target, property, receiver) {
+              if (property !== "usageReservation") return Reflect.get(target, property, receiver);
+              return new Proxy(target.usageReservation, {
+                get(delegate, method, delegateReceiver) {
+                  const value = Reflect.get(delegate, method, delegateReceiver);
+                  if (method !== "update" || typeof value !== "function") return value;
+                  return async (...args: unknown[]) => {
+                    await Reflect.apply(value, delegate, args);
+                    throw original;
+                  };
+                },
+              });
+            },
+          });
+          return operation(transaction as never);
+        },
+        options as never,
+      ),
+    };
+    const service = new InitialOutreachCreditService(
+      database as never,
+      createLogger({ serviceName: "initial-outreach-credit-integration-test", environment: "test", sink: (record) => records.push(record) }),
+    );
+    try {
+      const counterBefore = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+      await expect(service.settleConfirmedInitialOutreach({
+        shopId: f.shopId,
+        recoveryId: f.recoveryId,
+        outreachAttemptId: f.attemptId,
+        outboundMessageId: f.messageId,
+      })).rejects.toBe(original);
+
+      expect(await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } })).toEqual(counterBefore);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId! } }))
+        .toMatchObject({ status: "RESERVED", committedUsageEventId: null });
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(0);
+      expect(JSON.stringify(records)).toContain("owner update failure after positive event sentinel");
+      expect(records.find((record) => record.event === "recovery.initial_outreach_credit.failed"))
+        .toMatchObject({ data: { stage: "source_commit", error: { message: original.message } } });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("rolls back owner mutations when final positive verification finds no committed source", async () => {
+    const f = await createInitialOutreachCreditFixture();
+    const records: LogRecord[] = [];
+    let sourceReads = 0;
+    const database = {
+      $transaction: (operation: (tx: never) => Promise<unknown>, options?: object) => f.db.$transaction(
+        (tx) => {
+          const transaction = new Proxy(tx, {
+            get(target, property, receiver) {
+              if (property !== "usageReservation") return Reflect.get(target, property, receiver);
+              return new Proxy(target.usageReservation, {
+                get(delegate, method, delegateReceiver) {
+                  const value = Reflect.get(delegate, method, delegateReceiver);
+                  if (method !== "findMany" || typeof value !== "function") return value;
+                  return async (...args: unknown[]) => {
+                    const rows = await Reflect.apply(value, delegate, args);
+                    sourceReads += 1;
+                    return sourceReads === 2 ? [] : rows;
+                  };
+                },
+              });
+            },
+          });
+          return operation(transaction as never);
+        },
+        options as never,
+      ),
+    };
+    const service = new InitialOutreachCreditService(
+      database as never,
+      createLogger({ serviceName: "initial-outreach-credit-integration-test", environment: "test", sink: (record) => records.push(record) }),
+    );
+    try {
+      const counterBefore = await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } });
+      await expect(service.settleConfirmedInitialOutreach({
+        shopId: f.shopId,
+        recoveryId: f.recoveryId,
+        outreachAttemptId: f.attemptId,
+        outboundMessageId: f.messageId,
+      })).resolves.toMatchObject({ kind: "held", reason: "settlement-not-committed" });
+
+      expect(sourceReads).toBe(2);
+      expect(await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } })).toEqual(counterBefore);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId! } }))
+        .toMatchObject({ status: "RESERVED", committedUsageEventId: null });
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(0);
+      expect(records.find((record) => record.event === "recovery.initial_outreach_credit.held"))
+        .toMatchObject({ data: { stage: "committed_usage_verification", reason: "settlement-not-committed" } });
     } finally {
       await f.close();
     }
