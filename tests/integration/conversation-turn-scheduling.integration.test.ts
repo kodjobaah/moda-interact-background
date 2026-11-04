@@ -14,6 +14,16 @@ import {
   type ConversationTurnJob,
 } from "../../src/services/conversation-turn-processor.service.js";
 import { recordProcessableInbound } from "../../src/services/conversation-ai-delay/pending-turn-repository.js";
+import {
+  cleanupArch056RecoveryFixture,
+  createArch056RecoveryFixture,
+} from "./helpers/arch056-inbound-fixtures.js";
+import {
+  createArch056Barrier,
+  patchArch056Transaction,
+  waitForArch056LockWait,
+  withArch056Timeout,
+} from "./helpers/arch056-inbound-barriers.js";
 
 const redisUrl = process.env.TEST_REDIS_URL;
 const integrationIt = redisUrl ? it : it.skip;
@@ -191,6 +201,7 @@ describe("ARCH-054 pending AI deadline PostgreSQL transaction", () => {
     const seeded = await seedRecoveryConversation(7);
     const providerMessageId = `rollback-${randomUUID()}`;
     await expect(prisma.$transaction(async (tx) => {
+      await recordProcessableInbound(tx, seeded.conversationId, new Date());
       await tx.conversationMessage.create({
         data: {
           conversationId: seeded.conversationId,
@@ -201,7 +212,6 @@ describe("ARCH-054 pending AI deadline PostgreSQL transaction", () => {
           content: "must roll back",
         },
       });
-      await recordProcessableInbound(tx, seeded.conversationId, new Date());
       throw new Error("ARCH054_INJECTED_TRANSACTION_FAILURE");
     })).rejects.toThrow("ARCH054_INJECTED_TRANSACTION_FAILURE");
 
@@ -441,4 +451,194 @@ describe.sequential("ARCH-007-BACKGROUND-010 live turn scheduling", () => {
       expect(boundary.providerOutputs).toEqual(["settled response"]);
     },
   );
+
+  integrationIt("opens a new pending turn when the old turn completes after the receive pre-read", async () => {
+    const fixture = await createArch056RecoveryFixture(1);
+    cleanup.push(() => cleanupArch056RecoveryFixture(fixture));
+    const oldStart = new Date(Date.now() - 60_000);
+    await prisma.conversation.update({
+      where: { id: fixture.conversationId },
+      data: {
+        inboundVersion: 1,
+        lastProcessedVersion: 0,
+        pendingTurnStartedAt: oldStart,
+        pendingAiNotBeforeAt: new Date(oldStart.getTime() + 60_000),
+        pendingAiDelayMinutes: 1,
+        pendingAiControlRevision: 3,
+        processingInboundVersion: 1,
+        processingStartedAt: new Date(),
+      },
+    });
+    const readCompleted = createArch056Barrier();
+    const releaseRead = createArch056Barrier();
+    const originalRead = prisma.conversation.findUniqueOrThrow.bind(prisma.conversation);
+    const readSpy = vi.spyOn(prisma.conversation, "findUniqueOrThrow").mockImplementation(async (args: any) => {
+      const state = await originalRead(args);
+      if (args.where?.id === fixture.conversationId) {
+        readSpy.mockRestore();
+        readCompleted.release();
+        await withArch056Timeout(releaseRead.promise, "receive pre-read release");
+      }
+      return state;
+    });
+
+    try {
+      const service = new ConversationService();
+      const receive = service.receiveMessage({
+        conversationId: fixture.conversationId,
+        providerMessageId: `arch056-after-completion-${fixture.suffix}`,
+        inReplyToProviderId: null,
+        content: "inbound after old turn completion",
+      });
+      await withArch056Timeout(readCompleted.promise, "receive pre-read");
+      expect(await service.completeTurn(fixture.conversationId, 1, 3)).toBe(true);
+      releaseRead.release();
+      await withArch056Timeout(receive, "receive after old turn completion");
+
+      const state = await prisma.conversation.findUniqueOrThrow({
+        where: { id: fixture.conversationId },
+        select: {
+          inboundVersion: true,
+          lastProcessedVersion: true,
+          pendingTurnStartedAt: true,
+          pendingAiNotBeforeAt: true,
+          pendingAiDelayMinutes: true,
+          pendingAiControlRevision: true,
+        },
+      });
+      expect(state.inboundVersion).toBe(2);
+      expect(state.lastProcessedVersion).toBe(1);
+      expect(state.pendingTurnStartedAt).not.toBeNull();
+      expect(state.pendingAiDelayMinutes).toBe(1);
+      expect(state.pendingAiControlRevision).toBe(3);
+      expect(state.pendingAiNotBeforeAt?.getTime()).toBe(
+        state.pendingTurnStartedAt!.getTime() + 60_000,
+      );
+    } finally {
+      releaseRead.release();
+      readSpy.mockRestore();
+    }
+  });
+
+  integrationIt("preserves HUMAN control state for both parent-lock winner orders", async () => {
+    for (const controlFirst of [true, false]) {
+      const fixture = await createArch056RecoveryFixture(1, 0);
+      cleanup.push(() => cleanupArch056RecoveryFixture(fixture));
+      const controlIndex = controlFirst ? 0 : 1;
+      const receiveIndex = controlFirst ? 1 : 0;
+      const requested = [createArch056Barrier(), createArch056Barrier()];
+      const releaseControl = createArch056Barrier();
+      const releaseReceive = createArch056Barrier();
+      const controlUpdated = createArch056Barrier();
+      const receiveAtInsert = createArch056Barrier();
+      const backendPids = [0, 0];
+      const restoreTransactions = patchArch056Transaction(prisma, (index) => ({
+        beforeParentLock: async (tx) => {
+          const rows = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;
+          backendPids[index] = Number(rows[0].pid);
+          requested[index].release();
+        },
+        afterPendingUpdate: async () => {
+          if (index !== controlIndex) return;
+          controlUpdated.release();
+          await withArch056Timeout(releaseControl.promise, "HUMAN control release");
+        },
+        beforeMessageInsert: async () => {
+          if (index !== receiveIndex) return;
+          receiveAtInsert.release();
+          await withArch056Timeout(releaseReceive.promise, "HUMAN receive release");
+        },
+      }));
+      const service = new ConversationService();
+      const receiveMessage = () => service.receiveMessage({
+        conversationId: fixture.conversationId,
+        providerMessageId: `arch056-human-${fixture.suffix}`,
+        inReplyToProviderId: null,
+        content: "inbound during HUMAN transition",
+      });
+      const setHuman = () => prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT pg_backend_pid()`;
+        await tx.conversation.update({
+          where: { id: fixture.conversationId },
+          data: {
+            controlMode: "HUMAN",
+            controlRevision: { increment: 1 },
+            controlChangedAt: new Date(),
+            pendingTurnStartedAt: null,
+            pendingAiNotBeforeAt: null,
+            pendingAiControlRevision: null,
+            pendingAiDelayMinutes: null,
+            processingInboundVersion: null,
+            processingStartedAt: null,
+          },
+        });
+        await tx.$executeRaw`
+          INSERT INTO "whatsapp"."ConversationControlEvent"
+            ("id", "conversationId", "fromMode", "toMode", "fromRevision", "toRevision")
+          VALUES (${`arch056-control-${fixture.suffix}`}, ${fixture.conversationId},
+            'AI'::"whatsapp"."ConversationControlMode", 'HUMAN'::"whatsapp"."ConversationControlMode", 0, 1)`;
+      });
+
+      try {
+        let receive: ReturnType<typeof receiveMessage>;
+        let control: ReturnType<typeof setHuman>;
+        if (controlFirst) {
+          control = setHuman();
+          await withArch056Timeout(controlUpdated.promise, "HUMAN control update");
+          receive = receiveMessage();
+          await withArch056Timeout(requested[receiveIndex].promise, "receive parent request");
+          await waitForArch056LockWait(prisma, backendPids[receiveIndex], "receive behind HUMAN transition");
+          expect(await prisma.conversationMessage.count({
+            where: { conversationId: fixture.conversationId },
+          })).toBe(0);
+          releaseControl.release();
+          await withArch056Timeout(receiveAtInsert.promise, "receive insert after HUMAN commit");
+          releaseReceive.release();
+        } else {
+          receive = receiveMessage();
+          await withArch056Timeout(receiveAtInsert.promise, "receive parent-first update");
+          control = setHuman();
+          await withArch056Timeout(requested[controlIndex].promise, "HUMAN parent request");
+          await waitForArch056LockWait(prisma, backendPids[controlIndex], "HUMAN transition behind receive");
+          releaseReceive.release();
+          await withArch056Timeout(controlUpdated.promise, "HUMAN transition after receive commit");
+          releaseControl.release();
+        }
+
+        await Promise.all([
+          withArch056Timeout(receive, "receive during HUMAN transition"),
+          withArch056Timeout(control, "HUMAN control transition"),
+        ]);
+        const [messageCount, state] = await Promise.all([
+          prisma.conversationMessage.count({ where: { conversationId: fixture.conversationId } }),
+          prisma.conversation.findUniqueOrThrow({
+            where: { id: fixture.conversationId },
+            select: {
+              inboundVersion: true,
+              controlMode: true,
+              controlRevision: true,
+              pendingTurnStartedAt: true,
+              pendingAiNotBeforeAt: true,
+              pendingAiControlRevision: true,
+              pendingAiDelayMinutes: true,
+            },
+          }),
+        ]);
+        expect(messageCount).toBe(1);
+        expect(state).toMatchObject({
+          inboundVersion: 1,
+          controlMode: "HUMAN",
+          controlRevision: 1,
+          pendingTurnStartedAt: null,
+          pendingAiNotBeforeAt: null,
+          pendingAiControlRevision: null,
+          pendingAiDelayMinutes: null,
+        });
+      } finally {
+        releaseControl.release();
+        releaseReceive.release();
+        restoreTransactions();
+      }
+    }
+  }, 30_000);
 });

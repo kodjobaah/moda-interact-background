@@ -136,8 +136,6 @@ export function createWhatsappWorker() {
       jobName: job?.name ?? null,
       attemptsMade: job?.attemptsMade ?? null,
       ...boundedError(error),
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error: error,
     });
   });
   worker.on("error", (error) => {
@@ -182,17 +180,42 @@ function normalizeJobId(jobId: string | undefined): string | null {
   return typeof jobId === "string" ? jobId.slice(0, 192) : null;
 }
 
-function boundedError(error: unknown): { errorName: string; errorMessage: string } {
-  if (error instanceof Error) {
-    return {
-      errorName: error.name.slice(0, 64),
-      errorMessage: error.message,
-    };
-  }
+function boundedError(error: unknown): {
+  errorName: string;
+  errorMessage: string;
+  prismaCode: string | null;
+  prismaClientVersion: string | null;
+  redactionApplied: boolean;
+  truncated: boolean;
+} {
+  const source = error instanceof Error ? error : new Error(String(error));
+  let errorMessage = source.message;
+  let redactionApplied = false;
+  const redact = (pattern: RegExp, replacement: string) => {
+    errorMessage = errorMessage.replace(pattern, replacement);
+    redactionApplied ||= errorMessage !== source.message;
+  };
+
+  redact(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
+  redact(/\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  redact(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED]");
+  redact(/\+?\d[\d\s().-]{7,}\d/g, "[REDACTED]");
+
+  const boundedMessage = errorMessage.slice(0, 512);
+  const safeCode = (key: "code" | "clientVersion") => {
+    const value = (source as Error & Record<string, unknown>)[key];
+    return typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value)
+      ? value
+      : null;
+  };
 
   return {
-    errorName: "UnknownError",
-    errorMessage: String(error),
+    errorName: source.name.slice(0, 64),
+    errorMessage: boundedMessage,
+    prismaCode: safeCode("code"),
+    prismaClientVersion: safeCode("clientVersion"),
+    redactionApplied,
+    truncated: errorMessage.length > 512,
   };
 }
 

@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   guidance: vi.fn(),
   templateStatus: vi.fn(),
   dispatch: null as null | ((job: unknown) => Promise<void>),
+  logRecords: [] as string[],
+  throwSink: false,
+  workerListeners: {} as Record<string, (job: any, error?: Error) => void>,
   optOut: vi.fn(),
   reachability: vi.fn(),
   audio: vi.fn(),
@@ -32,9 +35,25 @@ const mocks = vi.hoisted(() => ({
   eligibility: { isShopExecutionActive: vi.fn() },
 }));
 
-vi.mock("@modainteract/moda-interact-shared/logging", () => ({
-  createLogger: vi.fn(() => mocks.logger),
-}));
+vi.mock("@modainteract/moda-interact-shared/logging", async () => {
+  const actual = await vi.importActual<typeof import("@modainteract/moda-interact-shared/logging")>(
+    "@modainteract/moda-interact-shared/logging",
+  );
+  const sharedLogger = actual.createLogger({
+    serviceName: "moda-messaging-worker",
+    environment: "test",
+    sink: (record) => {
+      mocks.logRecords.push(JSON.stringify(record));
+      if (mocks.throwSink) throw new Error("test sink failure");
+    },
+  });
+  for (const level of ["debug", "info", "warn", "error"] as const) {
+    mocks.logger[level].mockImplementation((event: string, fields?: Record<string, unknown>) => {
+      sharedLogger[level](event, fields);
+    });
+  }
+  return { ...actual, createLogger: vi.fn(() => mocks.logger) };
+});
 vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: vi.fn(() => "test"),
 }));
@@ -57,7 +76,8 @@ vi.mock("bullmq", () => ({
     constructor(_queue: string, handler: (job: unknown) => Promise<void>) {
       mocks.dispatch = handler;
     }
-    on() {
+    on(event: string, listener: (job: any, error?: Error) => void) {
+      mocks.workerListeners[event] = listener;
       return this;
     }
   },
@@ -140,6 +160,9 @@ const event = {
 describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.logRecords.length = 0;
+    mocks.throwSink = false;
+    mocks.workerListeners = {};
     mocks.guidance.mockResolvedValue({ kind: "sent" });
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "allowed" });
     mocks.optOut.mockResolvedValue(false);
@@ -151,6 +174,7 @@ describe("WhatsApp worker inbound execution gate", () => {
     mocks.conversation.getTurnState.mockResolvedValue({
       pendingTurnStartedAt: new Date(),
       lastInboundAt: new Date(),
+      controlMode: "AI",
     });
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
     mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
@@ -396,6 +420,62 @@ describe("WhatsApp worker inbound execution gate", () => {
       expect(mocks.database.conversation.findUniqueOrThrow).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe("WhatsApp worker terminal error records", () => {
+  it("emits bounded original callback diagnostics without a raw Error override", () => {
+    createWhatsappWorker();
+    const sourceError = Object.assign(
+      new Error("arch056-worker-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value"),
+      { code: "P2002", clientVersion: "6.19.3" },
+    );
+
+    mocks.workerListeners.failed({
+      id: "job-arch056-1",
+      name: "message-received",
+      attemptsMade: 2,
+    }, sourceError);
+    mocks.workerListeners.error(sourceError);
+
+    const failed = JSON.parse(mocks.logRecords.find((line) => JSON.parse(line).event === "whatsapp.job.failed")!);
+    const workerError = JSON.parse(mocks.logRecords.find((line) => JSON.parse(line).event === "whatsapp.worker.error")!);
+    expect(failed).toMatchObject({
+      level: "error",
+      event: "whatsapp.job.failed",
+      "service.name": "moda-messaging-worker",
+      "deployment.environment.name": "test",
+      data: {
+        jobId: "job-arch056-1",
+        jobName: "message-received",
+        attemptsMade: 2,
+        errorName: "Error",
+        errorMessage: "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+        prismaCode: "P2002",
+        prismaClientVersion: "6.19.3",
+        redactionApplied: true,
+      },
+    });
+    expect(workerError.data).toMatchObject({
+      errorName: "Error",
+      errorMessage: "arch056-worker-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+      prismaCode: "P2002",
+      prismaClientVersion: "6.19.3",
+      redactionApplied: true,
+    });
+    expect(failed.data.error).toBeUndefined();
+    expect(JSON.stringify([failed, workerError])).not.toContain("customer@example.com");
+    expect(JSON.stringify([failed, workerError])).not.toContain("+447700900000");
+    expect(JSON.stringify([failed, workerError])).not.toContain("secret-value");
+  });
+
+  it("keeps failed-job handling best-effort when the Shared sink throws", () => {
+    createWhatsappWorker();
+    mocks.throwSink = true;
+    expect(() => mocks.workerListeners.failed(
+      { id: "job-arch056-sink", name: "message-status", attemptsMade: 0 },
+      new Error("arch056-worker-fixture-source-failure"),
+    )).not.toThrow();
+  });
 });
 
 it("routes ambiguous voice to guidance before downloading or recording engagement", async () => {
