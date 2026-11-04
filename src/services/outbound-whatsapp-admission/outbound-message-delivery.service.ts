@@ -14,14 +14,14 @@ import { recoveryRuntimeEligibility } from "../recovery-conversation/recovery-ru
 import { moderationAssessmentService, type ModerationAssessmentService } from "../conversation-moderation/moderation-assessment.service.js";
 import { moderationConfig } from "../conversation-moderation/moderation-policy.js";
 import { prepareAutomatedTemplateInput } from "../conversation-moderation/automated-template-input.js";
-import type { OutboundAdmissionResult } from "./outbound-whatsapp-admission.types.js";
-import { OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
+import type { InitialOutreachAdmissionScope, OutboundAdmissionResult } from "./outbound-whatsapp-admission.types.js";
+import { initialOutreachDiagnostic, OutboundProviderFailureService } from "./outbound-provider-failure.service.js";
 import { suppressionReason } from "./outbound-delivery-errors.js";
 import { GeneralOutboundSendFenceService } from "./general-outbound-send-fence.service.js";
 import {
   recoveryStoredConsentService, type StoredRecoveryConsentReader,
 } from "../recovery-conversation/recovery-stored-consent.service.js";
-import type { RecoveryMarketingPermit } from "../recovery-conversation/outbound-send-fence.service.js";
+import type { DispatchInput, RecoveryMarketingPermit } from "../recovery-conversation/outbound-send-fence.service.js";
 import { WooInitialSendFenceService, type WooInitialFinalPermitInput } from "../woocommerce-recovery/woo-initial-send-fence.service.js";
 
 const deliveryLogger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
@@ -42,6 +42,20 @@ type AdmittedOutbound = Extract<
   OutboundAdmissionResult,
   { kind: "admitted" }
 >;
+
+type PreparedTemplateInput = Omit<SendTemplateInput, "to"> & {
+  to: string;
+  expectedControlRevision?: number;
+  initialOutreach?: InitialOutreachAdmissionScope;
+  recoveryCreditSourceKey?: string;
+};
+
+export class OutboundPreparationRetryError extends Error {
+  constructor(readonly assessmentId: string, readonly retryAt: Date) {
+    super("Initial template moderation requires retry");
+    this.name = "OutboundPreparationRetryError";
+  }
+}
 
 export class OutboundMessageDeliveryService {
   constructor(
@@ -113,8 +127,9 @@ export class OutboundMessageDeliveryService {
     });
     if (fenced) return fenced;
 
+    let result: Awaited<ReturnType<typeof this.provider.sendWhatsAppText>>;
     try {
-      const result = await this.provider.sendWhatsAppText({
+      result = await this.provider.sendWhatsAppText({
         to,
         text: outboundText,
         ...(previewUrl !== undefined ? { previewUrl } : {}),
@@ -122,24 +137,24 @@ export class OutboundMessageDeliveryService {
           ? { replyToProviderMessageId }
           : {}),
       });
-      await this.markSent(messageId, result.providerMessageId);
-      return {
-        kind: "admitted",
-        shopId,
-        messageId,
-        conversationId,
-        terminal,
-        executionScope,
-      };
     } catch (error) {
       await this.providerFailure.afterProviderError(messageId, to, error);
       throw error;
     }
+    await this.markSent(conversationId, messageId, result.providerMessageId);
+    return {
+      kind: "admitted",
+      shopId,
+      messageId,
+      conversationId,
+      terminal,
+      executionScope,
+    };
   }
 
   async sendPreparedTemplate(
     admission: AdmittedOutbound,
-    input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
+    input: PreparedTemplateInput,
   ): Promise<OutboundAdmissionResult> {
     return this.sendPreparedTemplateInternal(admission, input);
   }
@@ -159,15 +174,24 @@ export class OutboundMessageDeliveryService {
 
   private async sendPreparedTemplateInternal(
     admission: AdmittedOutbound,
-    input: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
+    input: PreparedTemplateInput,
     wooScope?: Omit<WooInitialFinalPermitInput,
       "shopId" | "conversationId" | "messageId" | "recipient" | "expectedContent" | "templateName" | "languageCode" | "verifiedCategory" | "templateRegistration">,
   ): Promise<OutboundAdmissionResult> {
+    const initial = !!(wooScope || input.initialOutreach);
+    const identity = {
+      shopId: admission.shopId, conversationId: admission.conversationId, messageId: admission.messageId,
+      recoveryId: wooScope?.recoveryId ?? input.initialOutreach?.recoveryId,
+      attemptId: wooScope?.attemptId ?? input.initialOutreach?.outreachAttemptId,
+    };
+    if (input.initialOutreach && (input.initialOutreach.shopId !== admission.shopId ||
+        !input.recoveryCreditSourceKey || admission.executionScope !== "recovery"))
+      return { kind: "suppressed", reason: "conversation-invalid" };
     if (await this.hasCompletedPreparation(admission.messageId))
       return { kind: "suppressed", reason: "duplicate" };
     // The Woo initial recovery MUST send an approved Marketing template. Never
     // substitute the hard-limit terminal TEXT message on this path.
-    if (wooScope && admission.terminal) {
+    if (initial && admission.terminal) {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "normal-cap-reached" };
     }
@@ -201,13 +225,14 @@ export class OutboundMessageDeliveryService {
         outboundText = prepared.effectiveText;
       } catch (error) {
         deliveryLogger.error("outbound.template.preparation.failed", {
-          shopId: admission.shopId, conversationId: admission.conversationId,
-          errorType: error instanceof Error ? error.name : "unknown",
+          ...identity, stage: "preparation",
+          ...(initial ? { sourceError: initialOutreachDiagnostic(error) }
+            : { errorType: error instanceof Error ? error.name : "unknown" }),
         });
         // Known local validation failures are refusals, not retryable provider
         // faults. Unexpected exceptions are always logged and propagated so
         // the worker can retry rather than acknowledging a false refusal.
-        await this.failPrepared(admission.messageId);
+        if (!initial) await this.failPrepared(admission.messageId);
         const invalidTemplateInput = error instanceof Error && [
           "automated_template_unsupported", "automated_template_invalid_parameters",
           "automated_template_promise_mismatch", "automated_template_invalid_header",
@@ -224,11 +249,23 @@ export class OutboundMessageDeliveryService {
     try {
       moderationAllowed = await this.approvePreparedOutbound({
         shopId: admission.shopId, conversationId: admission.conversationId,
-        messageId: admission.messageId, outboundText,
+        messageId: admission.messageId, outboundText, initial,
       });
     } catch (error) {
       // Woo has not requested the SQL permit. A failed moderation dependency
       // cannot hold a completed provider admission or count as a refusal.
+      if (initial) {
+        if (error instanceof OutboundPreparationRetryError) {
+          deliveryLogger.warn("outbound.template.moderation.retry", {
+            ...identity, stage: "moderation", assessmentId: error.assessmentId, retryAt: error.retryAt,
+          });
+        } else {
+          deliveryLogger.error("outbound.template.moderation.failed", {
+            ...identity, stage: "moderation", sourceError: initialOutreachDiagnostic(error),
+          });
+        }
+        throw error;
+      }
       try {
         await this.failPrepared(admission.messageId);
       } catch (cleanupError) {
@@ -268,6 +305,13 @@ export class OutboundMessageDeliveryService {
         messageId: admission.messageId, to: input.to, expectedContent: outboundText,
         ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
         deliveryKind: prepared ? "TEMPLATE" : "TEXT",
+        ...(input.initialOutreach ? { initialOutreach: {
+          outreachAttemptId: input.initialOutreach.outreachAttemptId,
+          recoveryId: input.initialOutreach.recoveryId,
+          idempotencyKey: `recovery-outreach:${input.initialOutreach.outreachAttemptId}`,
+          recoveryCreditSourceKey: input.recoveryCreditSourceKey!,
+          expectedContent: outboundText,
+        } } : {}),
         ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
         ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode,
           ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
@@ -275,19 +319,26 @@ export class OutboundMessageDeliveryService {
       if (fenced) return fenced;
     }
 
+    let result: Awaited<ReturnType<typeof this.provider.sendWhatsAppTemplate>>;
     try {
-      const result = prepared
+      result = prepared
         ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
         : await this.provider.sendWhatsAppText({ to: input.to, text: TERMINAL_MESSAGE });
-      await this.markSent(admission.messageId, result.providerMessageId);
-      return admission;
     } catch (error) {
+      if (initial) deliveryLogger.error("outbound.initial.send.failed", {
+        ...identity, stage: "provider_http", sourceError: initialOutreachDiagnostic(error),
+      });
       try {
-        await this.providerFailure.afterProviderError(admission.messageId, input.to, error, wooScope !== undefined);
+        await this.providerFailure.afterProviderError(admission.messageId, input.to, error, initial);
       } catch (reconciliationError) {
         // Retain BOTH the provider/local-send error and the reconciliation
         // failure. The Woo worker must not acknowledge an uncertain outcome.
-        if (wooScope) {
+        if (initial) {
+          deliveryLogger.error("outbound.initial.cleanup.failed", {
+            ...identity, stage: "provider_reconciliation",
+            sendError: initialOutreachDiagnostic(error),
+            reconciliationError: initialOutreachDiagnostic(reconciliationError),
+          });
           throw new AggregateError([error, reconciliationError],
             "WOO_PROVIDER_OUTCOME_RECONCILIATION_FAILED", { cause: reconciliationError });
         }
@@ -295,6 +346,15 @@ export class OutboundMessageDeliveryService {
       }
       throw error;
     }
+    try {
+      await this.markSent(admission.conversationId, admission.messageId, result.providerMessageId);
+    } catch (error) {
+      if (initial) deliveryLogger.error("outbound.initial.send.failed", {
+        ...identity, stage: "receipt_persistence", sourceError: initialOutreachDiagnostic(error),
+      });
+      throw error;
+    }
+    return admission;
   }
 
   /** A read avoids cleanup or moderation side effects on a replay; the guarded
@@ -338,7 +398,7 @@ export class OutboundMessageDeliveryService {
   }
 
   private async approvePreparedOutbound(input: {
-    shopId: string; conversationId: string; messageId: string; outboundText: string;
+    shopId: string; conversationId: string; messageId: string; outboundText: string; initial?: boolean;
   }): Promise<boolean> {
     try {
       const message = await this.database.conversationMessage.findUnique({
@@ -353,13 +413,15 @@ export class OutboundMessageDeliveryService {
         subject, shopId: input.shopId, conversationId: input.conversationId,
         effectiveText: input.outboundText, inputKind: "TEXT", policyVersion, now: new Date(),
       });
+      if (input.initial && outcome.kind === "retry")
+        throw new OutboundPreparationRetryError(outcome.assessmentId, outcome.retryAt);
       return outcome.kind === "allow" && await this.moderation.requireCurrentAllowance({
         subject, effectiveText: input.outboundText, policyVersion,
       });
     } catch (error) {
       // Woo technical dependency failures must retry; only an explicit
       // moderation deny is a known pre-permit suppression.
-      deliveryLogger.error("outbound.template.moderation.failed", {
+      if (!input.initial) deliveryLogger.error("outbound.template.moderation.failed", {
         shopId: input.shopId, conversationId: input.conversationId,
         errorType: error instanceof Error ? error.name : "unknown",
       });
@@ -379,8 +441,11 @@ export class OutboundMessageDeliveryService {
     template?: { name: string; languageCode: string;
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
     deliveryKind: "TEXT" | "TEMPLATE";
+    initialOutreach?: NonNullable<DispatchInput["initialOutreach"]> & { recoveryId: string };
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
+    if (input.initialOutreach && ownership?.recoveryId !== input.initialOutreach.recoveryId)
+      return { kind: "suppressed", reason: "conversation-invalid" };
     if (!ownership) {
       // A recovery-scoped reservation may not bypass the recovery consent/STOP
       // fence merely because ownership resolution returned no row.
@@ -440,6 +505,7 @@ export class OutboundMessageDeliveryService {
       messageId: input.messageId, recipient: input.to, now: new Date(),
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
+      ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
     });
     if (permit.kind === "admitted") return null;
     if (permit.reason !== "already-admitted-or-sent") {
@@ -475,29 +541,38 @@ export class OutboundMessageDeliveryService {
   }
 
   private async markSent(
+    conversationId: string,
     messageId: string,
     providerMessageId: string,
   ): Promise<void> {
+    const receivedAt = new Date();
     await this.database.$transaction(async (transaction) => {
+      // Lock the parent first, matching the final permit transaction.
+      // A failed receipt update rolls back the parent timestamp as well.
+      await transaction.conversation.update({
+        where: { id: conversationId },
+        data: { lastMessageAt: receivedAt },
+      });
       await transaction.conversationMessage.update({
-        where: { id: messageId },
-        data: {
-          providerMessageId,
-          status: MessageStatus.SENT,
-          sentAt: new Date(),
+        where: {
+          id: messageId,
+          AND: {
+            conversationId,
+            direction: "OUTBOUND",
+            senderType: { in: ["AUTOMATION", "AGENT"] },
+            status: MessageStatus.PENDING,
+            providerDispatchKey: { not: null },
+            providerDispatchAdmittedAt: { not: null },
+            providerDispatchControlRevision: { not: null },
+            providerMessageId: null,
+            sentAt: null,
+            deliveredAt: null,
+            readAt: null,
+            failedAt: null,
+          },
         },
+        data: { providerMessageId, status: MessageStatus.SENT, sentAt: receivedAt },
       });
-      const message = await transaction.conversationMessage.findUnique({
-        where: { id: messageId },
-        select: { conversationId: true },
-      });
-      if (message) {
-        await transaction.conversation.update({
-          where: { id: message.conversationId },
-          data: { lastMessageAt: new Date() },
-        });
-      }
     });
   }
-
 }

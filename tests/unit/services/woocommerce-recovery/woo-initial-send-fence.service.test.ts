@@ -36,15 +36,16 @@ function harness() {
     'FROM public."BackgroundRuntimeConfig"': [{ checkoutRecoveryLifetimeDays: 21 }],
     'FROM "commerce"."CheckoutRecoveryStatusHistory"': [],
     'FROM "commerce"."RecoveryOutreachAttempt"': [{ checkoutRecoveryId: "recovery-1",
-      sequence: 1, status: "PENDING", recipient: "+447400123456", sentAt: null,
+      sequence: 1, trigger: "INITIAL", status: "PENDING", recipient: "+447400123456", sentAt: null,
       outboundMessageId: null, followUpDueAt: null }],
     'FROM "commerce"."CustomerPhone"': [{ id: "phone-1", phone: "+447400123456",
       whatsappCanonicalPhone: "447400123456", defaultCountryCode: "GB" }],
-    'FROM "billing"."UsageReservation"': [{ shopId: "shop-1", quantity: 1, status: "RESERVED" }],
+    'FROM "billing"."UsageReservation"': [{ id: "credit", sourceKey: scope.recoveryCreditSourceKey }],
+    'FROM "billing"."UsageReservation" r': [{ id: "credit" }],
     'FROM "billing"."UsageEvent"': [{ sourceId: "message-1", shopId: "shop-1",
-      metric: "OUTBOUND_AUTOMATED_MESSAGE" }],
+      metric: "OUTBOUND_AUTOMATED_MESSAGE", sourceType: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1 }],
     'FROM "whatsapp"."ConversationMessage"': [{ status: "PENDING", content: scope.expectedContent,
-      providerDispatchKey: null, providerDispatchAdmittedAt: null }],
+      providerDispatchKey: null, providerDispatchAdmittedAt: null, providerDispatchControlRevision: null }],
     'UPDATE "whatsapp"."ConversationMessage"': [{ id: "message-1" }],
   };
   const queryRaw = vi.fn(async (sql: string) => {
@@ -54,7 +55,12 @@ function harness() {
     if (sql.includes('WHERE "providerDispatchKey"=$1 LIMIT 1')) {
       return outcomes["prior-provider-dispatch-key"] ?? [];
     }
-    return Object.entries(outcomes).find(([pattern]) => sql.includes(pattern))?.[1] ?? [];
+    if (sql.includes('FROM "billing"."UsageReservation" r')) return outcomes['FROM "billing"."UsageReservation" r']!;
+    const matched = Object.entries(outcomes)
+      .map(([pattern, result]) => ({ index: sql.indexOf(pattern), result }))
+      .filter(({ index }) => index >= 0)
+      .sort((a, b) => a.index - b.index)[0];
+    return matched?.result ?? [];
   });
   const tx = { $queryRawUnsafe: queryRaw, $executeRawUnsafe: vi.fn() };
   const transaction = vi.fn(async (fn: (arg: typeof tx) => Promise<unknown>) => fn(tx));
@@ -189,7 +195,8 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     await expect(f.fence.admitFinalSend(scope)).rejects.toBe(failure);
     expect(f.logger.error).toHaveBeenCalledWith("woocommerce.recovery.initial.sql_permit.failed", {
       shopId: "shop-1", recoveryId: "recovery-1", attemptId: "attempt-1",
-      errorName: "Error", errorCode: "P1001", error: new Error("PERSISTENCE_FAILURE"),
+      conversationId: scope.conversationId, messageId: scope.messageId, stage: "final_permit",
+      sourceError: expect.objectContaining({ name: "Error", code: "P1001", message: failure.message }),
     });
   });
 });

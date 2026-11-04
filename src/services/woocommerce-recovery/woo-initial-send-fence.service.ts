@@ -1,3 +1,5 @@
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
+import { hasExactInitialCredit } from "../recovery-conversation/outbound-send-fence.service.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -54,12 +56,15 @@ type LockedConversation = {
   type: string; controlMode: string; controlRevision: number;
 };
 type LockedAttempt = {
-  checkoutRecoveryId: string; sequence: number; status: string; recipient: string;
+  checkoutRecoveryId: string; sequence: number; trigger: string; status: string; recipient: string;
   sentAt: Date | null; outboundMessageId: string | null; followUpDueAt: Date | null;
 };
 type LockedMessage = {
   status: string; content: string; providerDispatchKey: string | null;
   providerDispatchAdmittedAt: Date | null;
+  providerDispatchControlRevision: number | null;
+  providerMessageId: string | null;
+  sentAt: Date | null; deliveredAt: Date | null; readAt: Date | null; failedAt: Date | null;
 };
 
 /**
@@ -140,11 +145,11 @@ export class WooInitialSendFenceService {
         return { kind: "suppressed", reason: "woo-observed-order-terminal" };
 
       const attempts = await tx.$queryRawUnsafe<LockedAttempt[]>(`
-        SELECT "checkoutRecoveryId","sequence","status"::text,"recipient",
+        SELECT "checkoutRecoveryId","sequence","trigger"::text,"status"::text,"recipient",
           "sentAt","outboundMessageId","followUpDueAt"
         FROM "commerce"."RecoveryOutreachAttempt" WHERE "id"=$1 FOR UPDATE`, input.attemptId);
       const attempt = attempts[0];
-      if (!attempt || attempt.checkoutRecoveryId !== input.recoveryId || attempt.sequence !== 1 ||
+      if (!attempt || attempt.checkoutRecoveryId !== input.recoveryId || attempt.sequence !== 1 || attempt.trigger !== "INITIAL" ||
         !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
         attempt.recipient !== input.recipient || attempt.sentAt ||
         attempt.outboundMessageId || attempt.followUpDueAt)
@@ -180,33 +185,29 @@ export class WooInitialSendFenceService {
       if (matching.length !== 1 || matching[0]?.id !== input.consent.customerPhoneId)
         return { kind: "suppressed", reason: "woo-recipient-ambiguous" };
 
-      // The checkout-recovery credit reservation is separate from outbound
-      // message usage. A released/foreign credit must not admit Meta delivery.
-      const credit = await tx.$queryRawUnsafe<Array<{
-        shopId: string; quantity: number; status: string;
-      }>>(`
-        SELECT "shopId","quantity","status"::text FROM "billing"."UsageReservation"
-        WHERE "sourceKey"=$1 FOR SHARE`, input.recoveryCreditSourceKey);
-      if (credit.length !== 1 || credit[0]?.shopId !== input.shopId ||
-        credit[0]?.quantity !== 1 || credit[0]?.status !== "RESERVED")
-        return { kind: "suppressed", reason: "woo-recovery-credit-not-reserved" };
-
-      const usage = await tx.$queryRawUnsafe<Array<{ sourceId: string | null; shopId: string; metric: string }>>(`
-        SELECT "sourceId","shopId","metric"::text FROM "billing"."UsageEvent"
+      const usage = await tx.$queryRawUnsafe<Array<{ sourceId: string | null; shopId: string; metric: string; sourceType: string; quantity: unknown }>>(`
+        SELECT "sourceId","shopId","metric"::text,"sourceType","quantity" FROM "billing"."UsageEvent"
         WHERE "idempotencyKey"=$1`, input.idempotencyKey);
       if (usage.length !== 1 || usage[0]?.shopId !== input.shopId ||
         usage[0]?.sourceId !== input.messageId ||
-        usage[0]?.metric !== "OUTBOUND_AUTOMATED_MESSAGE")
+        usage[0]?.metric !== "OUTBOUND_AUTOMATED_MESSAGE" ||
+        usage[0]?.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || Number(usage[0]?.quantity) !== 1)
         return { kind: "suppressed", reason: "woo-outbound-reservation-mismatch" };
 
       const messages = await tx.$queryRawUnsafe<LockedMessage[]>(`
-        SELECT "status"::text,"content","providerDispatchKey","providerDispatchAdmittedAt"
+        SELECT "status"::text,"content","providerDispatchKey","providerDispatchAdmittedAt",
+          "providerDispatchControlRevision","providerMessageId","sentAt","deliveredAt","readAt","failedAt"
         FROM "whatsapp"."ConversationMessage"
         WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND'
-          AND "senderType"='AUTOMATION' FOR UPDATE`, input.messageId, input.conversationId);
+          AND "senderType"='AUTOMATION'
+          AND NOT EXISTS (SELECT 1 FROM "whatsapp"."MerchantConversationSendCommand" cmd WHERE cmd."outboundMessageId"=$1)
+          AND NOT EXISTS (SELECT 1 FROM "commerce"."RecoveryOutreachAttempt" other WHERE other."outboundMessageId"=$1)
+        FOR UPDATE`, input.messageId, input.conversationId);
       const message = messages[0];
       if (!message) return { kind: "suppressed", reason: "woo-message-mismatch" };
-      if (message.status !== "PENDING" || message.providerDispatchKey || message.providerDispatchAdmittedAt)
+      if (message.status !== "PENDING" || message.providerDispatchKey || message.providerDispatchAdmittedAt ||
+          message.providerDispatchControlRevision !== null || message.providerMessageId ||
+          message.sentAt || message.deliveredAt || message.readAt || message.failedAt)
         return { kind: "suppressed", reason: "already-admitted-or-sent" };
       if (message.content !== input.expectedContent)
         return { kind: "suppressed", reason: "woo-prepared-content-changed" };
@@ -224,9 +225,10 @@ export class WooInitialSendFenceService {
       let checkoutRecoveryLifetimeDays: number;
       try {
         checkoutRecoveryLifetimeDays = parseCheckoutRecoveryLifetimeDays(policyRows[0]!.checkoutRecoveryLifetimeDays);
-      } catch {
+      } catch (error) {
         this.logger.warn("woocommerce.recovery.initial.lifetime_policy.unavailable", {
           shopId: input.shopId, recoveryId: input.recoveryId, reason: "invalid",
+          stage: "lifetime_policy", sourceError: initialOutreachDiagnostic(error),
         });
         return { kind: "suppressed", reason: "checkout-lifetime-policy-unavailable" };
       }
@@ -254,6 +256,11 @@ export class WooInitialSendFenceService {
         WHERE "providerDispatchKey"=$1 LIMIT 1`, key);
       if (priorPermit.length)
         return { kind: "suppressed", reason: "already-admitted-or-sent" };
+      if (!(await hasExactInitialCredit(tx, {
+        shopId: input.shopId, idempotencyKey: input.idempotencyKey,
+        sourceKey: input.recoveryCreditSourceKey, allowPaid: false, clock: this.clock,
+      }))) return { kind: "suppressed", reason: "woo-recovery-credit-not-reserved" };
+
       const permitted = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
         UPDATE "whatsapp"."ConversationMessage"
         SET "providerDispatchKey"=$2,
@@ -262,7 +269,9 @@ export class WooInitialSendFenceService {
         WHERE "id"=$1 AND "conversationId"=$4
           AND "direction"='OUTBOUND' AND "senderType"='AUTOMATION'
           AND "status"='PENDING' AND "providerDispatchKey" IS NULL
-          AND "providerDispatchAdmittedAt" IS NULL AND "content"=$5
+          AND "providerDispatchAdmittedAt" IS NULL AND "providerDispatchControlRevision" IS NULL
+          AND "providerMessageId" IS NULL AND "sentAt" IS NULL AND "deliveredAt" IS NULL
+          AND "readAt" IS NULL AND "failedAt" IS NULL AND "content"=$5
         RETURNING "id"`, input.messageId, key, conversation.controlRevision,
         input.conversationId, input.expectedContent);
       return permitted.length === 1
@@ -270,17 +279,10 @@ export class WooInitialSendFenceService {
         : { kind: "suppressed", reason: "already-admitted-or-sent" };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     } catch (error) {
-      // The shared Error serializer keeps the original dependency failure bounded.
       this.logger.error("woocommerce.recovery.initial.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
-        errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-          ? error.name : "UnknownError",
-        ...(
-          typeof error === "object" && error !== null && "code" in error &&
-          typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
-            ? { errorCode: error.code } : {}
-        ),
-        error: new Error("PERSISTENCE_FAILURE"),
+        conversationId: input.conversationId, messageId: input.messageId,
+        stage: "final_permit", sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }

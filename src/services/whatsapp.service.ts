@@ -353,7 +353,7 @@ function readProviderError(body: unknown): MetaProviderError | null {
   const message = typeof error.message === "string" ? error.message : undefined;
   const code = safeErrorCode(error.code);
   const subcode = safeErrorCode(error.error_subcode);
-  const traceId = typeof error.fbtrace_id === "string" ? error.fbtrace_id : undefined;
+  const traceId = safeProviderIdentifier(typeof error.fbtrace_id === "string" ? error.fbtrace_id : undefined);
   return {
     ...(message === undefined ? {} : { message }),
     ...(code === undefined ? {} : { code }),
@@ -401,8 +401,12 @@ function safeProviderDetails(value: unknown, depth = 0, state = { redactionAppli
     return { value, redactionApplied: false, truncated: false };
   }
   if (Array.isArray(value)) {
-    const result = value.slice(0, MAX_PROVIDER_ERROR_DETAIL_ITEMS).map((item) =>
-      safeProviderDetails(item, depth + 1, state).value);
+    const result = value.slice(0, MAX_PROVIDER_ERROR_DETAIL_ITEMS).map((item) => {
+      const child = safeProviderDetails(item, depth + 1, state);
+      state.redactionApplied ||= child.redactionApplied;
+      state.truncated ||= child.truncated;
+      return child.value;
+    });
     if (value.length > result.length) state.truncated = true;
     return { value: result, ...state };
   }
@@ -411,6 +415,12 @@ function safeProviderDetails(value: unknown, depth = 0, state = { redactionAppli
   for (const [key, item] of Object.entries(value).slice(0, MAX_PROVIDER_ERROR_DETAIL_ITEMS)) {
     if (/token|secret|password|authorization|cookie|email|phone|address|customer|recipient|url|header|body|prompt|coupon/i.test(key)) {
       state.redactionApplied = true;
+      continue;
+    }
+    if (key === "fbtrace_id") {
+      const trace = safeProviderIdentifier(typeof item === "string" ? item : undefined);
+      if (trace === undefined) state.redactionApplied = true;
+      else result[key] = trace;
       continue;
     }
     const safe = safeProviderDetails(item, depth + 1, state);

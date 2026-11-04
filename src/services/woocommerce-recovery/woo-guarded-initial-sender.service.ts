@@ -1,3 +1,4 @@
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
@@ -7,7 +8,7 @@ import type { WooObservedOrderStateReader } from "./contracts.js";
 import type { WooGuardedInitialSender } from "./woo-recovery-outreach.service.js";
 
 type ExistingAdmission = Pick<typeof outboundWhatsAppAdmissionService,
-  "reserve" | "findExistingAdmission">;
+  "reserve" | "findExistingAdmission" | "inspectInitialOutreachAdmission">;
 type InitialDelivery = Pick<OutboundMessageDeliveryService, "sendPreparedWooInitialTemplate">;
 
 /**
@@ -33,6 +34,10 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
 
   findExistingAdmission(idempotencyKey: string) {
     return this.outbound.findExistingAdmission(idempotencyKey);
+  }
+
+  inspectInitialOutreachAdmission(scope: Parameters<ExistingAdmission["inspectInitialOutreachAdmission"]>[0]) {
+    return this.outbound.inspectInitialOutreachAdmission(scope);
   }
 
   async sendInitial(input: Parameters<WooGuardedInitialSender["sendInitial"]>[0]):
@@ -61,33 +66,29 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
       if (observed.kind !== "none-observed")
         return this.suppress(recovery.shopId, recovery.id, input.attemptId, "woo-observed-order-terminal");
 
-      const previous = await this.outbound.findExistingAdmission(input.idempotencyKey);
-      if (previous) {
-        if (previous.conversationId !== input.conversationId)
-          throw new Error("WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH");
-        if (previous.status === "PENDING") throw new Error("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
+      const scope = { shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: input.attemptId };
+      const previous = await this.inspectInitialOutreachAdmission(scope);
+      if (previous.kind === "held")
+        throw new Error(previous.reason === "lineage-conflict"
+          ? "WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH"
+          : "WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
+      if (previous.kind !== "absent" && previous.message.conversationId !== input.conversationId)
+        throw new Error("WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH");
+      if (previous.kind === "confirmed" || previous.kind === "failed")
         return { kind: "suppressed", reason: "duplicate" };
-      }
-
-      // Existing reservation creates ONE unique UsageEvent + pending message.
-      // It does not admit any provider dispatch. A prepared/denied message may
-      // be cleaned up, but an admitted dispatch key may never be released.
-      const admission = await this.outbound.reserve({
+      const admission = previous.kind === "prepared" ? {
+        kind: "admitted" as const, shopId: recovery.shopId,
+        conversationId: input.conversationId, messageId: previous.message.id, terminal: false,
+        executionScope: "recovery" as const,
+      } : await this.outbound.reserve({
         shopId: recovery.shopId,
         conversationId: input.conversationId,
         senderType: "AUTOMATION",
         idempotencyKey: input.idempotencyKey,
         recoveryCreditSourceKey: input.recoveryCreditSourceKey,
+        initialOutreach: scope,
       });
-      if (admission.kind !== "admitted") {
-        if (admission.reason === "duplicate") {
-          const current = await this.outbound.findExistingAdmission(input.idempotencyKey);
-          if (current?.conversationId !== input.conversationId)
-            throw new Error("WOO_INITIAL_PROVIDER_ADMISSION_OWNERSHIP_MISMATCH");
-          if (current?.status === "PENDING") throw new Error("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
-        }
-        return { kind: "suppressed", reason: admission.reason };
-      }
+      if (admission.kind !== "admitted") return { kind: "suppressed", reason: admission.reason };
 
       const result = await this.delivery.sendPreparedWooInitialTemplate(admission, {
         ...template.sendFields!, to: input.recipient,
@@ -104,19 +105,9 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
         return this.suppress(recovery.shopId, recovery.id, input.attemptId, result.reason);
       return { kind: "admitted" };
     } catch (error) {
-      // Preserve the actual exception message for development diagnostics.
-      // The shared logger remains responsible for serialization and sink isolation.
       this.log.error("woocommerce.recovery.initial.permit.failed", {
         shopId: recovery.shopId, recoveryId: recovery.id, attemptId: input.attemptId,
-        errorName: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-          ? error.name : "UnknownError",
-        ...(
-          typeof error === "object" && error !== null && "code" in error &&
-          typeof error.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code)
-            ? { errorCode: error.code } : {}
-        ),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
+        stage: "guarded_sender", sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }
