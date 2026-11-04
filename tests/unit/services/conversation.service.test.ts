@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   ConversationLanguageService,
 } from "../../../src/services/conversation-language.service.js";
 import { ConversationService } from "../../../src/services/conversation.service.js";
 
-const { prismaMock, txConversationUpdate, txConversationUpdateMany, operationReader } =
+const { prismaMock, txConversationUpdate, txConversationUpdateMany, operationReader, markEngaged } =
   vi.hoisted(() => ({
     operationReader: vi.fn(async () => ({ moderation: { value: { modelId: "omni-moderation-latest" } } })),
+    markEngaged: vi.fn(),
     txConversationUpdate: vi.fn(),
     txConversationUpdateMany: vi.fn(),
     prismaMock: {
@@ -33,6 +35,9 @@ vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
 vi.mock("../../../src/services/conversation-moderation/moderation-operation.js", () => ({
   readModerationOperation: operationReader,
 }));
+vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({
+  recoveryOutreachAttemptService: { markEngagedForConversation: markEngaged },
+}));
 
 describe("ConversationService language persistence", () => {
   it("starts the settle window at receipt time when a provider event is delayed", async () => {
@@ -50,6 +55,12 @@ describe("ConversationService language persistence", () => {
         languageSource: null,
       });
       const create = vi.fn();
+      const queryRaw = vi.fn().mockResolvedValue([{
+        id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+        controlMode: "AI", controlRevision: 0, inboundVersion: 0,
+        lastProcessedVersion: 0, pendingTurnStartedAt: null,
+        recoveryId: null, recoveryShopId: null,
+      }]);
       const executeRaw = vi.fn().mockResolvedValue(1);
       const update = vi.fn().mockResolvedValue({ id: "conversation-1", inboundVersion: 1 });
       const updateMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -57,12 +68,7 @@ describe("ConversationService language persistence", () => {
         callback({
           conversationMessage: { create },
           conversation: { updateMany, update },
-          $queryRaw: vi.fn().mockResolvedValue([{
-            id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
-            controlMode: "AI", controlRevision: 0, inboundVersion: 0,
-            lastProcessedVersion: 0, pendingTurnStartedAt: null,
-            recoveryId: null, recoveryShopId: null,
-          }]),
+          $queryRaw: queryRaw,
           shopSettings: { findUnique: vi.fn() },
           $executeRaw: executeRaw,
         } as any),
@@ -79,6 +85,9 @@ describe("ConversationService language persistence", () => {
       expect(create).toHaveBeenCalledWith({
         data: expect.objectContaining({ createdAt: receivedAt }),
       });
+      expect(queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        create.mock.invocationCallOrder[0]!,
+      );
       expect(update).toHaveBeenCalledWith({
         where: { id: "conversation-1" },
         data: {
@@ -96,6 +105,143 @@ describe("ConversationService language persistence", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each([
+    ["atomic-receive", false],
+    ["post-commit-engagement", true],
+  ])("logs the original %s failure through Shared without changing the thrown error", async (stage, afterCommit) => {
+    const records: string[] = [];
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: "test",
+      sink: (record) => records.push(JSON.stringify(record)),
+    });
+    const sourceError = Object.assign(
+      new Error("arch056-inbound-fixture-source-failure email customer@example.com phone +447700900000 token=secret-value"),
+      { code: "P2002", clientVersion: "6.19.3" },
+    );
+    prismaMock.conversationMessage.findUnique.mockResolvedValueOnce(null);
+    if (afterCommit) {
+      prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
+        inboundVersion: 0,
+        lastProcessedVersion: 0,
+        pendingTurnStartedAt: null,
+        languageTag: null,
+        languageSource: null,
+        checkoutRecoveryId: null,
+      });
+      prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
+        conversationMessage: { create: vi.fn().mockResolvedValue({}) },
+        conversation: {
+          update: vi.fn().mockResolvedValue({ id: "conversation-1", inboundVersion: 1 }),
+          updateMany: vi.fn(),
+        },
+        $queryRaw: vi.fn().mockResolvedValue([{
+          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+          controlMode: "AI", controlRevision: 0, inboundVersion: 0,
+          lastProcessedVersion: 0, pendingTurnStartedAt: null,
+          recoveryId: null, recoveryShopId: null,
+        }]),
+        shopSettings: { findUnique: vi.fn() },
+        $executeRaw: vi.fn().mockResolvedValue(1),
+      } as any));
+      markEngaged.mockRejectedValueOnce(sourceError);
+    } else {
+      prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
+        inboundVersion: 0,
+        lastProcessedVersion: 0,
+        pendingTurnStartedAt: null,
+        languageTag: null,
+        languageSource: null,
+        checkoutRecoveryId: null,
+      });
+      prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
+        conversationMessage: { create: vi.fn().mockRejectedValue(sourceError) },
+        conversation: {
+          update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
+          updateMany: vi.fn(),
+        },
+        $queryRaw: vi.fn().mockResolvedValue([{
+          id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+          controlMode: "AI", controlRevision: 0, inboundVersion: 0,
+          lastProcessedVersion: 0, pendingTurnStartedAt: null,
+          recoveryId: null, recoveryShopId: null,
+        }]),
+        shopSettings: { findUnique: vi.fn() },
+        $executeRaw: vi.fn(),
+      } as any));
+    }
+
+    await expect(new ConversationService(undefined, logger).receiveMessage({
+      conversationId: "conversation-1",
+      providerMessageId: "wamid.arch056-safe-id",
+      inReplyToProviderId: null,
+      content: "not logged",
+    })).rejects.toBe(sourceError);
+
+    const record = JSON.parse(records.find((line) => JSON.parse(line).event === "whatsapp.inbound.persistence_failed")!);
+    expect(record).toMatchObject({
+      level: "error",
+      event: "whatsapp.inbound.persistence_failed",
+      "service.name": "moda-messaging-worker",
+      "deployment.environment.name": "test",
+      data: {
+        conversationId: "conversation-1",
+        providerMessageId: "wamid.arch056-safe-id",
+        stage: afterCommit ? "post-commit-engagement" : "atomic-receive",
+        error: {
+          name: "Error",
+          message: "arch056-inbound-fixture-source-failure email [REDACTED] phone [REDACTED] token=[REDACTED]",
+        },
+        prismaCode: "P2002",
+        prismaClientVersion: "6.19.3",
+        redactionApplied: true,
+      },
+    });
+    expect(JSON.stringify(record)).not.toContain("customer@example.com");
+    expect(JSON.stringify(record)).not.toContain("+447700900000");
+    expect(JSON.stringify(record)).not.toContain("secret-value");
+  });
+
+  it("keeps the original receive error when the Shared logging sink throws", async () => {
+    const sourceError = new Error("arch056-inbound-fixture-source-failure");
+    prismaMock.conversationMessage.findUnique.mockResolvedValueOnce(null);
+    prismaMock.conversation.findUniqueOrThrow.mockResolvedValueOnce({
+      inboundVersion: 0,
+      lastProcessedVersion: 0,
+      pendingTurnStartedAt: null,
+      languageTag: null,
+      languageSource: null,
+      checkoutRecoveryId: null,
+    });
+    prismaMock.$transaction.mockImplementationOnce(async (callback) => callback({
+      conversationMessage: { create: vi.fn().mockRejectedValue(sourceError) },
+      conversation: {
+        update: vi.fn().mockResolvedValue({ inboundVersion: 1 }),
+        updateMany: vi.fn(),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{
+        id: "conversation-1", type: "PRODUCT_SUPPORT", checkoutRecoveryId: null,
+        controlMode: "AI", controlRevision: 0, inboundVersion: 0,
+        lastProcessedVersion: 0, pendingTurnStartedAt: null,
+        recoveryId: null, recoveryShopId: null,
+      }]),
+      shopSettings: { findUnique: vi.fn() },
+      $executeRaw: vi.fn(),
+    } as any));
+    const logger = createLogger({
+      serviceName: "moda-messaging-worker",
+      environment: "test",
+      sink: () => { throw new Error("sink failure"); },
+    });
+
+    await expect(new ConversationService(undefined, logger).receiveMessage({
+      conversationId: "conversation-1",
+      providerMessageId: "wamid.sink-failure",
+      inReplyToProviderId: null,
+      content: "not logged",
+    })).rejects.toBe(sourceError);
   });
 
   it("persists initial language during receipt and applies detection after the agent", async () => {

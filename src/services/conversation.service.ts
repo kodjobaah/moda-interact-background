@@ -25,6 +25,40 @@ const logger = createLogger({
   environment: resolveDeploymentEnvironmentName(),
 });
 
+type InboundFailureStage = "atomic-receive" | "post-commit-engagement";
+
+function projectInboundError(error: unknown) {
+  const source = error instanceof Error ? error : new Error(String(error));
+  let message = source.message;
+  let redactionApplied = false;
+  const redact = (pattern: RegExp, replacement: string) => {
+    message = message.replace(pattern, replacement);
+    redactionApplied ||= message !== source.message;
+  };
+
+  redact(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
+  redact(/\b((?:api[_-]?key|token|password|secret|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  redact(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED]");
+  redact(/\+?\d[\d\s().-]{7,}\d/g, "[REDACTED]");
+
+  const truncated = message.length > 512;
+  return {
+    name: source.name.slice(0, 64),
+    message: message.slice(0, 512),
+    prismaCode: safeErrorCode(source, "code"),
+    prismaClientVersion: safeErrorCode(source, "clientVersion"),
+    redactionApplied,
+    truncated,
+  };
+}
+
+function safeErrorCode(error: Error, key: "code" | "clientVersion"): string | null {
+  const value = (error as Error & Record<string, unknown>)[key];
+  return typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value)
+    ? value
+    : null;
+}
+
 export interface ResolvedIncomingMessage {
   conversationId: string;
 
@@ -75,12 +109,23 @@ export class ConversationService {
     version: number;
     duplicate: boolean;
   }> {
+    const failure = { stage: "atomic-receive" as InboundFailureStage };
     try {
-      return await this.receiveMessageInternal(message);
+      return await this.receiveMessageInternal(message, failure);
     } catch (error) {
+      const projectedError = projectInboundError(error);
       this.serviceLogger.error("whatsapp.inbound.persistence_failed", {
         conversationId: message.conversationId,
-        error,
+        providerMessageId: message.providerMessageId.slice(0, 192),
+        stage: failure.stage,
+        error: {
+          name: projectedError.name,
+          message: projectedError.message,
+        },
+        prismaCode: projectedError.prismaCode,
+        prismaClientVersion: projectedError.prismaClientVersion,
+        redactionApplied: projectedError.redactionApplied,
+        truncated: projectedError.truncated,
       });
       throw error;
     }
@@ -88,6 +133,7 @@ export class ConversationService {
 
   private async receiveMessageInternal(
     message: ResolvedIncomingMessage,
+    failure: { stage: InboundFailureStage },
   ): Promise<{
     conversationId: string;
     version: number;
@@ -117,6 +163,7 @@ export class ConversationService {
 
     if (existing) {
       if (existing.conversationId !== message.conversationId) throw new Error("Inbound message ownership mismatch");
+      failure.stage = "post-commit-engagement";
       await recoveryOutreachAttemptService.markEngagedForConversation(
         existing.conversationId,
         occurredAt,
@@ -160,6 +207,11 @@ export class ConversationService {
      * conversation version together.
      */
     const result = await prisma.$transaction(async (tx) => {
+        const recorded = await recordProcessableInbound(
+          tx,
+          message.conversationId,
+          receivedAt,
+        );
         await tx.conversationMessage.create({
           data: {
             conversationId: message.conversationId,
@@ -173,11 +225,6 @@ export class ConversationService {
           },
         });
 
-        const recorded = await recordProcessableInbound(
-          tx,
-          message.conversationId,
-          receivedAt,
-        );
         await tx.conversation.update({
           where: { id: message.conversationId },
           data: {
@@ -196,6 +243,7 @@ export class ConversationService {
         return { id: message.conversationId, inboundVersion: recorded.version };
       });
 
+    failure.stage = "post-commit-engagement";
     await recoveryOutreachAttemptService.markEngagedForConversation(
       result.id,
       occurredAt,
