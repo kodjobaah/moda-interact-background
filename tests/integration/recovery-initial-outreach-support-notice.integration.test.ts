@@ -1,11 +1,14 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { describe, expect, it, vi } from "vitest";
 import type { ConfirmedInitialRecoveryOutreachInput } from
   "../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.contracts.js";
 import { RecoveryInitialOutreachSupportNoticeService } from
   "../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js";
+import { OutboundSendFenceService } from
+  "../../src/services/recovery-conversation/outbound-send-fence.service.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const withDatabase = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
@@ -65,6 +68,89 @@ async function fixture(db: PrismaClient, options: {
 
 const service = (db: PrismaClient, now = () => new Date("2026-10-27T10:01:00.000Z")) =>
   new RecoveryInitialOutreachSupportNoticeService(db, now, log);
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function addPreparedFenceRecovery(db: PrismaClient, shopId: string) {
+  const suffix = randomUUID();
+  const now = new Date("2026-10-27T10:00:00.000Z");
+  const recovery = await db.checkoutRecovery.create({ data: {
+    shopId, checkoutToken: `fence-checkout-${suffix}`, status: "DETECTED", lastExternalActivityAt: now,
+  } });
+  const conversation = await db.conversation.create({ data: {
+    checkoutRecoveryId: recovery.id, shopId, type: "RECOVERY", controlMode: "AI",
+  } });
+  const attempt = await db.recoveryOutreachAttempt.create({ data: {
+    checkoutRecoveryId: recovery.id, recipient: "447700900123", sequence: 1,
+    trigger: "INITIAL", configuredOfferMode: "NONE",
+  } });
+  const content = "approved initial recovery template";
+  const message = await db.conversationMessage.create({ data: {
+    conversationId: conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION",
+    status: "PENDING", content,
+  } });
+  await db.shopEntitlementCounter.upsert({
+    where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+    create: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 2, reservedQuantity: 2 },
+    update: { grantedQuantity: { increment: 1 }, reservedQuantity: { increment: 1 } },
+  });
+  const idempotencyKey = `recovery-outreach:${attempt.id}`;
+  const sourceKey = createRecoveryIdempotencyKey(shopId, idempotencyKey);
+  const counter = await db.shopEntitlementCounter.findUniqueOrThrow({
+    where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+  });
+  await db.usageReservation.create({ data: {
+    shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+  } });
+  await db.usageEvent.create({ data: {
+    shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1, idempotencyKey,
+    sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id, provider: "SHOPIFY",
+  } });
+  const eligibilityEntered = deferred();
+  const releaseEligibility = deferred();
+  const fence = new OutboundSendFenceService(
+    db,
+    async () => { eligibilityEntered.resolve(); await releaseEligibility.promise; return null; },
+    () => new Date("2026-10-27T10:00:30.000Z"),
+    async () => null,
+  );
+  const dispatch = {
+    senderType: "AUTOMATION" as const,
+    conversationId: conversation.id,
+    shopId,
+    recoveryId: recovery.id,
+    expectedControlRevision: conversation.controlRevision,
+    recipient: attempt.recipient,
+    now,
+    proactive: { consent: null, verifiedCategory: "MARKETING" as const,
+      templateName: "approved_initial", languageCode: "en_GB" },
+    deliveryKind: "TEMPLATE" as const,
+    messageId: message.id,
+    initialOutreach: {
+      outreachAttemptId: attempt.id,
+      idempotencyKey,
+      recoveryCreditSourceKey: sourceKey,
+      expectedContent: content,
+    },
+  };
+  return { recovery, conversation, attempt, message, fence, dispatch,
+    eligibilityEntered: eligibilityEntered.promise, releaseEligibility: () => releaseEligibility.resolve() };
+}
+
+async function waitForLockQuery(db: PrismaClient, fragment: string) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const waiting = await db.$queryRaw<Array<{ query: string }>>`
+      SELECT query FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'`;
+    if (waiting.some(({ query }) => query.includes(fragment))) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for PostgreSQL lock query containing ${fragment}`);
+}
 
 withDatabase("initial recovery outreach Support finalisation — real PostgreSQL", () => {
   it("creates one SYSTEM notice on the enabled first transition and preserves merchant thread state", async () => {
@@ -170,6 +256,81 @@ withDatabase("initial recovery outreach Support finalisation — real PostgreSQL
     } finally {
       if (shopId) await a.shop.deleteMany({ where: { id: shopId } });
       await Promise.all([a.$disconnect(), b.$disconnect()]);
+    }
+  }, 45_000);
+
+  it("orders Support-first finalization before a competing same-Shop final fence", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const lockClient = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, { enabled: true });
+    const releaseAttempt = deferred();
+    const attemptLocked = deferred();
+    const lockHolder = lockClient.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
+        WHERE "id" = ${f.attemptId} FOR UPDATE`;
+      attemptLocked.resolve();
+      await releaseAttempt.promise;
+    });
+    let fenceCase: Awaited<ReturnType<typeof addPreparedFenceRecovery>> | undefined;
+    try {
+      await attemptLocked.promise;
+      expect(await db.merchantSupportThread.count({ where: { shopId: f.shopId } })).toBe(0);
+      fenceCase = await addPreparedFenceRecovery(db, f.shopId);
+      const finalization = service(db).finalizeConfirmedInitial(f.input);
+      await waitForLockQuery(db, "RecoveryOutreachAttempt");
+      const fence = fenceCase.fence.admitFinalSend(fenceCase.dispatch);
+      await waitForLockQuery(db, "FROM \"commerce\".\"Shop\"");
+      releaseAttempt.resolve();
+      await lockHolder;
+      await expect(finalization).resolves.toMatchObject({ outcome: "created", outreachAttemptId: f.attemptId });
+      await fenceCase.eligibilityEntered;
+      fenceCase.releaseEligibility();
+      await expect(fence).resolves.toMatchObject({ kind: "admitted", messageId: fenceCase.message.id });
+
+      expect(await db.merchantSupportThread.count({ where: { shopId: f.shopId } })).toBe(1);
+      expect(await db.merchantSupportMessage.count({
+        where: { sourceKey: `recovery-initial-outreach:v1:${f.attemptId}` },
+      })).toBe(1);
+      expect(await db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } }))
+        .toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: f.messageId });
+      expect(await db.conversationMessage.findUniqueOrThrow({ where: { id: fenceCase.message.id } }))
+        .toMatchObject({ status: "PENDING", providerDispatchAdmittedAt: expect.any(Date) });
+    } finally {
+      releaseAttempt.resolve();
+      fenceCase?.releaseEligibility();
+      await lockHolder.catch(() => undefined);
+      await db.shop.deleteMany({ where: { id: f.shopId } });
+      await Promise.all([db.$disconnect(), lockClient.$disconnect()]);
+    }
+  }, 45_000);
+
+  it("orders a same-Shop final fence before first Support thread and notice insertion", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const f = await fixture(db, { enabled: true });
+    let fenceCase: Awaited<ReturnType<typeof addPreparedFenceRecovery>> | undefined;
+    try {
+      expect(await db.merchantSupportThread.count({ where: { shopId: f.shopId } })).toBe(0);
+      fenceCase = await addPreparedFenceRecovery(db, f.shopId);
+      const fence = fenceCase.fence.admitFinalSend(fenceCase.dispatch);
+      await fenceCase.eligibilityEntered;
+      const finalization = service(db).finalizeConfirmedInitial(f.input);
+      await waitForLockQuery(db, "FOR KEY SHARE");
+      fenceCase.releaseEligibility();
+      await expect(fence).resolves.toMatchObject({ kind: "admitted", messageId: fenceCase.message.id });
+      await expect(finalization).resolves.toMatchObject({ outcome: "created", outreachAttemptId: f.attemptId });
+
+      expect(await db.merchantSupportThread.count({ where: { shopId: f.shopId } })).toBe(1);
+      expect(await db.merchantSupportMessage.count({
+        where: { sourceKey: `recovery-initial-outreach:v1:${f.attemptId}` },
+      })).toBe(1);
+      expect(await db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } }))
+        .toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: f.messageId });
+      expect(await db.conversationMessage.findUniqueOrThrow({ where: { id: fenceCase.message.id } }))
+        .toMatchObject({ status: "PENDING", providerDispatchAdmittedAt: expect.any(Date) });
+    } finally {
+      fenceCase?.releaseEligibility();
+      await db.shop.deleteMany({ where: { id: f.shopId } });
+      await db.$disconnect();
     }
   }, 45_000);
 

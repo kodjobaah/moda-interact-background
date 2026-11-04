@@ -548,6 +548,37 @@ describe("RecoveryInitiationService", () => {
     expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
   });
 
+  it("retains existing credit when final consent revalidation fails technically", async () => {
+    const error = new Error("consent storage unavailable");
+    mocks.consent.evaluateReentry.mockResolvedValueOnce(true).mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(error);
+    const { service, billing } = createInitiation({ billing: {
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "admitted" as const,
+        admission, reservationId: "reservation-1" })),
+    } });
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
+
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
+    expect(mocks.outbound.resumeInitialTemplate).not.toHaveBeenCalled();
+  });
+
+  it("retains existing credit when offer validation fails technically", async () => {
+    const error = new Error("offer source unavailable");
+    mocks.automated.validateAdmission.mockRejectedValueOnce(error);
+    const { service, billing } = createInitiation({ billing: {
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "admitted" as const,
+        admission, reservationId: "reservation-1" })),
+    } });
+
+    await expect(service.handleCheckoutCreated(event)).rejects.toBe(error);
+
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(billing.releaseBeforeProvider).not.toHaveBeenCalled();
+    expect(mocks.outbound.resumeInitialTemplate).not.toHaveBeenCalled();
+  });
+
   it("preserves technical provider errors without inventing a definitive failed attempt", async () => {
     const error = new Error("provider unavailable");
     mocks.outbound.resumeInitialTemplate.mockRejectedValue(error);

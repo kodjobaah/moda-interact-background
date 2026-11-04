@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 import type { ConfirmedInitialRecoveryOutreachInput } from
   "../../../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.contracts.js";
 import { RecoveryInitialOutreachSupportNoticeService } from
   "../../../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js";
+
+const emittedRecords: LogRecord[] = [];
+const sharedPackageJson = JSON.parse(readFileSync(new URL(
+  "../../../../node_modules/@modainteract/moda-interact-shared/package.json", import.meta.url,
+), "utf8")) as { version: string };
+const sharedLoggerResolution = import.meta.resolve("@modainteract/moda-interact-shared/logging");
 
 const sentAt = new Date("2026-10-27T10:00:00.000Z");
 const dueAt = new Date("2026-10-27T11:00:00.000Z");
@@ -16,7 +24,10 @@ const input: ConfirmedInitialRecoveryOutreachInput = {
   followUpDueAt: dueAt,
 };
 
-function context(options: { enabled?: boolean; status?: string; initiatedBy?: string | null; failureCode?: string | null } = {}) {
+function context(options: {
+  enabled?: boolean; status?: string; initiatedBy?: string | null; failureCode?: string | null;
+  sharedLogger?: boolean;
+} = {}) {
   const attempt = {
     id: input.outreachAttemptId,
     checkoutRecoveryId: input.checkoutRecoveryId,
@@ -71,7 +82,11 @@ function context(options: { enabled?: boolean; status?: string; initiatedBy?: st
   const database = {
     $transaction: vi.fn(async (callback: (arg: typeof tx) => Promise<unknown>) => callback(tx)),
   };
-  const logger = { info: vi.fn(), error: vi.fn() };
+  const logger = options.sharedLogger ? createLogger({
+    serviceName: "moda-recovery-worker",
+    environment: "test",
+    sink: (record) => emittedRecords.push(JSON.parse(JSON.stringify(record)) as LogRecord),
+  }) : { info: vi.fn(), error: vi.fn() };
   const now = vi.fn(() => new Date("2026-10-27T10:01:00.000Z"));
   const service = new RecoveryInitialOutreachSupportNoticeService(database as never, now, logger as never);
   return { service, attempt, message, tx, database, logger, now };
@@ -223,9 +238,51 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
       expect.objectContaining({
         outcome: "failed",
         errorCategory: "PERSISTENCE_FAILURE",
-        error: original,
+        sourceError: expect.objectContaining({ name: "Error", message: "database unavailable" }),
       }),
     );
+  });
+
+  it("emits the redacted Support failure and bounded cause through the installed Shared logger", async () => {
+    emittedRecords.length = 0;
+    expect(sharedPackageJson.version).toBe("3.0.0");
+    expect(sharedLoggerResolution).toContain("@modainteract/moda-interact-shared");
+    const f = context({ sharedLogger: true });
+    const cause = Object.assign(new Error("Support database unavailable for phone +447000111222"), {
+      code: "P1001", clientVersion: "6.19.3",
+    });
+    const original = Object.assign(new Error("Support write failed for phone +447000111222 token=private-value"), {
+      code: "P2025", clientVersion: "6.19.3", cause,
+    });
+    f.database.$transaction.mockRejectedValueOnce(original);
+
+    await expect(f.service.finalizeConfirmedInitial(input)).rejects.toBe(original);
+
+    expect(emittedRecords).toContainEqual(expect.objectContaining({
+      event: "recovery.initial_outreach_support_notice.failed",
+      level: "error",
+      "service.name": "moda-recovery-worker",
+      "deployment.environment.name": "test",
+      data: expect.objectContaining({
+        shopId: input.shopId,
+        checkoutRecoveryId: input.checkoutRecoveryId,
+        outreachAttemptId: input.outreachAttemptId,
+        outboundMessageId: input.outboundMessageId,
+        errorCategory: "PERSISTENCE_FAILURE",
+        sourceError: expect.objectContaining({
+          message: "Support write failed for phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+          code: "P2025",
+          clientVersion: "6.19.3",
+          cause: expect.objectContaining({
+            message: "Support database unavailable for phone [REDACTED_PHONE]",
+            code: "P1001",
+            clientVersion: "6.19.3",
+          }),
+        }),
+      }),
+    }));
+    expect(JSON.stringify(emittedRecords)).not.toContain("+447000111222");
+    expect(JSON.stringify(emittedRecords)).not.toContain("private-value");
   });
 
   it("does not turn a committed success into failure when the logger throws", async () => {

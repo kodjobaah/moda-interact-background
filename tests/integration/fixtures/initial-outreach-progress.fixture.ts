@@ -59,8 +59,9 @@ export async function createInitialOutreachProgressFixture() {
     () => new Date("2026-10-27T10:01:00.000Z"),
     logger as Pick<StructuredLogger, "info" | "error">,
   );
+  const billing = new InitialOutreachCreditService(credit.db);
   const finalizer = new RecoveryOutreachFinalizationService(
-    new InitialOutreachCreditService(credit.db), support,
+    billing, support,
     logger as Pick<StructuredLogger, "error">,
     credit.db,
   );
@@ -70,6 +71,9 @@ export async function createInitialOutreachProgressFixture() {
     reservationId: reservation.id,
     sourceKey,
     records,
+    billing,
+    support,
+    logger,
     finalizer,
     recovery: async () => credit.db.checkoutRecovery.findUniqueOrThrow({ where: { id: credit.recoveryId } }),
     attempt: async () => credit.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: credit.attemptId } }),

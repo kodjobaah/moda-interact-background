@@ -15,6 +15,7 @@ import {
   type ConfirmedInitialOutreachSettlement,
   type RecoveryBillingService,
 } from "../recovery-billing.service.js";
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 
 type FinalizationLogger = Pick<StructuredLogger, "error">;
 type FinalizationDatabase = Pick<PrismaClient, "checkoutRecovery" | "recoveryOutreachAttempt">;
@@ -202,7 +203,7 @@ export class RecoveryOutreachFinalizationService {
         outreachAttemptId: input.attempt.id,
         outboundMessageId: input.message.id,
         stage,
-        error,
+        sourceError: initialOutreachDiagnostic(error),
       });
     } catch {
       // A failing logger sink must not mask the original Shopify finalisation error.
@@ -221,7 +222,7 @@ export class RecoveryOutreachFinalizationService {
         outreachAttemptId: input.attempt.id,
         outboundMessageId: input.message.id,
         stage,
-        error,
+        sourceError: initialOutreachDiagnostic(error),
       });
     } catch {
       // Preserve the finalization exception if the logging sink fails.

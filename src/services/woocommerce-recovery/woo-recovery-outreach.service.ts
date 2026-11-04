@@ -467,7 +467,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
           // send must never be refunded. Never mark this attempt FAILED on an
           // uncertain outcome, and never acknowledge the failed job.
           state.stage = "provider-failure-reconciliation";
-          await this.compensateProviderError(attempt.id, source, error);
+          await this.compensateProviderError(attempt.id, source, error, state);
           throw error;
         }
         state.stage = "verify-durable-provider-result";
@@ -579,7 +579,8 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       compensationFailure = { error: compensation };
     }
     if (compensationFailure) {
-      this.logComponents(state, "woocommerce.recovery.outreach.preflight_release_failed", {
+      this.logComponents(state, "woocommerce.recovery.outreach.failed", {
+        diagnosticBoundary: "preflight_release",
         preflightError: safeWooDiagnostic(original),
         releaseError: safeWooDiagnostic(compensationFailure.error),
       });
@@ -590,7 +591,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   }
 
   private async compensateProviderError(
-    attemptId: string, admission: RecoveryBillingAdmission, original: unknown,
+    attemptId: string, admission: RecoveryBillingAdmission, original: unknown, state: RunState,
   ): Promise<void> {
     let compensationFailure: { error: unknown } | undefined;
     try {
@@ -604,8 +605,8 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       compensationFailure = { error: compensation };
     }
     if (compensationFailure) {
-      this.logComponents({ recoveryId: "", attemptId, stage: "provider-failure-reconciliation" },
-        "woocommerce.recovery.outreach.send_compensation_failed", {
+      this.logComponents(state, "woocommerce.recovery.outreach.failed", {
+        diagnosticBoundary: "send_compensation",
           sendError: safeWooDiagnostic(original),
           compensationError: safeWooDiagnostic(compensationFailure.error),
         });
@@ -648,14 +649,18 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
   }
 
   private failed(state: RunState, error: unknown): void {
-    this.log.error("woocommerce.recovery.outreach.failed", {
-      shopId: state.shopId, recoveryId: state.recoveryId, attemptId: state.attemptId,
-      stage: state.stage,
-      errorClass: error instanceof AggregateError ? "aggregate" :
-        error instanceof Error ? "exception" : "unknown",
-      errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
-      sourceError: safeWooDiagnostic(error),
-    });
+    try {
+      this.log.error("woocommerce.recovery.outreach.failed", {
+        shopId: state.shopId, recoveryId: state.recoveryId, attemptId: state.attemptId,
+        stage: state.stage,
+        errorClass: error instanceof AggregateError ? "aggregate" :
+          error instanceof Error ? "exception" : "unknown",
+        errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
+        sourceError: safeWooDiagnostic(error),
+      });
+    } catch {
+      // Logging must not replace a provider, compensation, or preflight failure.
+    }
   }
 
   private logComponents(state: RunState, event: string, components: Record<string, unknown>): void {

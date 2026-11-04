@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
+
+const emittedRecords: LogRecord[] = [];
+const sharedPackageJson = JSON.parse(readFileSync(new URL(
+  "../../../../node_modules/@modainteract/moda-interact-shared/package.json", import.meta.url,
+), "utf8")) as { version: string };
+const sharedLoggerResolution = import.meta.resolve("@modainteract/moda-interact-shared/logging");
 
 const mocks = vi.hoisted(() => ({
   prisma: { checkoutRecovery: { updateMany: vi.fn(), findUnique: vi.fn() } },
@@ -36,6 +44,7 @@ function createFinalizer(options: {
   statusError?: Error;
   followUpError?: Error;
   sinkThrows?: boolean;
+  sharedLogger?: boolean;
   noticeOutcome?: "created" | "disabled" | "replayed";
 } = {}) {
   const billing = {
@@ -54,7 +63,11 @@ function createFinalizer(options: {
       if (options.noticeError) throw options.noticeError;
       return { outcome: options.noticeOutcome ?? "created", outreachAttemptId: input.attempt.id };
     });
-  const logger = { error: vi.fn(() => {
+  const logger = options.sharedLogger ? createLogger({
+    serviceName: "moda-recovery-worker",
+    environment: "test",
+    sink: (record) => emittedRecords.push(JSON.parse(JSON.stringify(record)) as LogRecord),
+  }) : { error: vi.fn(() => {
     if (options.sinkThrows) throw new Error("log sink unavailable");
   }) };
   const finalizer = new RecoveryOutreachFinalizationService(
@@ -71,6 +84,7 @@ function createFinalizer(options: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  emittedRecords.length = 0;
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
   mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue({ shopId: input.recovery.shopId, status: "MESSAGE_SENT" });
   mocks.supportFinalizer.finalizeConfirmedInitial.mockReset().mockResolvedValue({ outcome: "created", outreachAttemptId: input.attempt.id });
@@ -130,9 +144,43 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
         outreachAttemptId: input.attempt.id,
         outboundMessageId: input.message.id,
         stage,
-        error: original,
+        sourceError: expect.objectContaining({ name: "Error", message: `${stage} failed` }),
       },
     );
+  });
+
+  it("emits safe source and cause evidence through the Shared logger and rethrows the original error", async () => {
+    expect(sharedPackageJson.version).toBe("3.0.0");
+    expect(sharedLoggerResolution).toContain("@modainteract/moda-interact-shared");
+    const cause = Object.assign(new Error("database unreachable for phone +447000111222"), {
+      code: "P1001", clientVersion: "6.19.3",
+    });
+    const original = Object.assign(new Error("Support write failed for phone +447000111222"), {
+      code: "P2025", clientVersion: "6.19.3", cause,
+    });
+    const { finalizer } = createFinalizer({ noticeError: original, sharedLogger: true });
+
+    await expect(finalizer.finalizeConfirmedOutreach(input)).rejects.toBe(original);
+
+    expect(emittedRecords).toContainEqual(expect.objectContaining({
+      event: "recovery.initial_outreach_support_notice.shopify_finalization_failed",
+      level: "error",
+      "service.name": "moda-recovery-worker",
+      "deployment.environment.name": "test",
+      data: expect.objectContaining({
+        sourceError: expect.objectContaining({
+          message: "Support write failed for phone [REDACTED_PHONE]",
+          code: "P2025",
+          clientVersion: "6.19.3",
+          cause: expect.objectContaining({
+            message: "database unreachable for phone [REDACTED_PHONE]",
+            code: "P1001",
+            clientVersion: "6.19.3",
+          }),
+        }),
+      }),
+    }));
+    expect(JSON.stringify(emittedRecords)).not.toContain("+447000111222");
   });
 
   it("does not let a failing log sink mask a Support persistence failure or continue status/follow-up work", async () => {
@@ -149,7 +197,7 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
     expect(ensureFollowUp).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
       "recovery.initial_outreach_support_notice.shopify_finalization_failed",
-      expect.objectContaining({ stage: "support_notice", error: original }),
+      expect.objectContaining({ stage: "support_notice", sourceError: expect.any(Object) }),
     );
   });
 

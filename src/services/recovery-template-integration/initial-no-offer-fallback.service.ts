@@ -14,6 +14,7 @@ import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission
 import { recoveryTemplatePreparer } from "../recovery-template-preparation/recovery-template-preparer.service.js";
 import type { PreparedRecoveryTemplate } from "../recovery-template-preparation/recovery-template.types.js";
 import { templateSendFields } from "./prepared-template-send.js";
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 
 export type InitialFallbackTrigger =
   | "MERCHANT_MODE_NONE"
@@ -148,7 +149,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       if (progress.kind === "failed") {
         return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       }
-      if (progress.kind !== "absent") {
+      if (progress.kind !== "absent" && progress.kind !== "prepared") {
         return { kind: "RETRY", reason: "PROVIDER_OUTCOME_UNCERTAIN" };
       }
 
@@ -226,7 +227,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
           trigger: input.trigger,
           reason: "REQUIRED_STATE_UNAVAILABLE",
           errorType: error instanceof Error ? error.name : "unknown",
-          error,
+          sourceError: initialOutreachDiagnostic(error),
         });
       } catch {
         // Logging failure must not replace the retry disposition.

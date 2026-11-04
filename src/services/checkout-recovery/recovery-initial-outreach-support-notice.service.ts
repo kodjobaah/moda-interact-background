@@ -14,6 +14,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import type {
   ConfirmedInitialOutreachFinalizer,
   ConfirmedInitialRecoveryOutreachInput,
@@ -323,8 +324,7 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
         outcome: "failed",
         errorCategory: category,
       };
-      // Shared logging applies its bounded Error serialization to both domain and persistence failures.
-      fields.error = error;
+      fields.sourceError = initialOutreachDiagnostic(error);
       if (inputValidated) {
         fields.shopId = input.shopId;
         fields.checkoutRecoveryId = input.checkoutRecoveryId;

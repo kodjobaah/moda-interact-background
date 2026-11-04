@@ -33,6 +33,7 @@ import {
   type InitialNoOfferFallbackPort,
 } from "./initial-no-offer-fallback.service.js";
 import { classifyInitialOutreachFallback } from "./initial-outreach-fallback-selection.js";
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 
 export type AutomatedTemplateResult =
   | { kind: "prepared"; prepared: PreparedRecoveryTemplate; send: ReturnType<typeof templateSendFields>;
@@ -258,7 +259,7 @@ export class AutomatedRecoveryTemplateService {
           trigger,
           outcome: fallback.kind.toLowerCase(),
           ...(fallback.kind === "BLOCKED" || fallback.kind === "RETRY" ? { reason: fallback.reason } : {}),
-          ...(originatingError !== undefined ? { error: originatingError } : {}),
+          ...(originatingError !== undefined ? { sourceError: initialOutreachDiagnostic(originatingError) } : {}),
         });
       } catch {
         // Optional degradation logging must not change the fallback outcome.
@@ -275,7 +276,7 @@ export class AutomatedRecoveryTemplateService {
         outreachAttemptId: input.outreachAttemptId,
         trigger,
         reason: fallback.reason,
-        ...(originatingError !== undefined ? { error: originatingError } : {}),
+        ...(originatingError !== undefined ? { sourceError: initialOutreachDiagnostic(originatingError) } : {}),
       });
       return unavailable(`INITIAL_FALLBACK_${fallback.reason}`);
     };
@@ -592,8 +593,7 @@ export class AutomatedRecoveryTemplateService {
       this.log.error("recovery_template.integration.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId,
         stage: input.stage, errorType: boundedFailure(error),
-        // Shared logger serializes Error values with bounded, stack-free fields.
-        error,
+        sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }

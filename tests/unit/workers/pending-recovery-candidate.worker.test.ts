@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
   processor: undefined as undefined | ((job: { name: string; data: unknown; id: string; attemptsMade: number; failedReason: string }) => Promise<unknown>),
+  listeners: new Map<string, Array<(...args: unknown[]) => void>>(),
+  records: [] as Array<Record<string, unknown>>,
   materialize: vi.fn(async (_candidate?: unknown, _options?: unknown) => ({
     outcome: "discarded-shop-unavailable",
     checkoutToken: "checkout_1",
@@ -65,11 +67,24 @@ vi.mock("bullmq", () => ({
       hoisted.processor = processor ?? undefined;
     }
 
-    on() {
+    on(event: string, listener: (...args: unknown[]) => void) {
+      const callbacks = hoisted.listeners.get(event) ?? [];
+      callbacks.push(listener);
+      hoisted.listeners.set(event, callbacks);
       return this;
     }
   },
 }));
+vi.mock("@modainteract/moda-interact-shared/logging", async (importOriginal) => {
+  const shared = await importOriginal<typeof import("@modainteract/moda-interact-shared/logging")>();
+  return {
+    ...shared,
+    createLogger: (options: Parameters<typeof shared.createLogger>[0]) => shared.createLogger({
+      ...options,
+      sink: (record) => hoisted.records.push(JSON.parse(JSON.stringify(record)) as Record<string, unknown>),
+    }),
+  };
+});
 vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: vi.fn(() => ({})),
 }));
@@ -130,6 +145,7 @@ vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
 
 import {
   EVALUATE_PENDING_RECOVERY_JOB,
+  PENDING_RECOVERY_CANDIDATE_QUEUE,
 } from "../../../src/domain/pending-recovery-candidate.js";
 import { createPendingRecoveryCandidateWorker } from "../../../src/workers/pending-recovery-candidate.worker.js";
 import { RecoveryMaterializationService } from "../../../src/services/checkout-recovery/recovery-materialization.service.js";
@@ -146,6 +162,7 @@ createPendingRecoveryCandidateWorker();
 
 describe("pending recovery candidate worker", () => {
   beforeEach(() => {
+    hoisted.records.length = 0;
     hoisted.durableRecovery = null;
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
@@ -191,6 +208,66 @@ describe("pending recovery candidate worker", () => {
       retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
+  });
+
+  it("logs both compound candidate failures through Shared and invokes retained worker listeners", async () => {
+    const materializationError = new Error("materialization failed phone +447000111222");
+    const cleanupError = Object.assign(new Error("cleanup failed"), { code: "P2034" });
+    hoisted.materialize.mockRejectedValueOnce(materializationError);
+    hoisted.cleanup.mockRejectedValueOnce(cleanupError);
+    const job = {
+      name: EVALUATE_PENDING_RECOVERY_JOB,
+      id: "candidate-job-1",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 1,
+      failedReason: "",
+    };
+
+    let composite: unknown;
+    try {
+      await hoisted.processor?.(job);
+    } catch (error) {
+      composite = error;
+    }
+
+    expect(composite).toBeInstanceOf(Error);
+    expect((composite as Error).cause).toBeInstanceOf(AggregateError);
+    expect(((composite as Error).cause as AggregateError).errors).toEqual([
+      materializationError, cleanupError,
+    ]);
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.processing_cleanup_failed",
+      level: "error",
+      data: expect.objectContaining({
+        queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+        attempt: 2,
+        shopId: "shop_1",
+        materializationError: expect.objectContaining({
+          message: "materialization failed phone [REDACTED_PHONE]",
+        }),
+        cleanupError: expect.objectContaining({ message: "cleanup failed", code: "P2034" }),
+      }),
+    }));
+    expect(JSON.stringify(hoisted.records)).not.toContain("+447000111222");
+
+    const failed = hoisted.listeners.get("failed") ?? [];
+    const errors = hoisted.listeners.get("error") ?? [];
+    expect(failed.length).toBeGreaterThan(0);
+    expect(errors.length).toBeGreaterThan(0);
+    failed.forEach((listener) => listener(job, composite));
+    errors.forEach((listener) => listener(new Error("worker connection failed")));
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.job_failed",
+      level: "error",
+      data: expect.objectContaining({ attempt: 2, shopId: "shop_1" }),
+    }));
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.worker_error",
+      level: "error",
+      data: expect.objectContaining({ sourceError: expect.objectContaining({
+        message: "worker connection failed",
+      }) }),
+    }));
   });
 
   it("retries a persisted DETECTED recovery after enqueue and version-read failures", async () => {

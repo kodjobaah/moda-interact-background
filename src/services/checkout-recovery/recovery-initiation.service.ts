@@ -531,19 +531,13 @@ export class RecoveryInitiationService {
 
     // Narrow the first-send window once more before provider admission. This
     // stored-only check does not substitute for BACKGROUND-004's final SQL fence.
-    let finalConsentAllowed: boolean;
-    try {
-      finalConsentAllowed = await this.consentAdmission.evaluateReentry({
-        shopId: recovery.shopId,
-        checkoutToken: event.checkoutToken,
-        noticeContext,
-        customerId: customer?.id ?? recovery.customerId,
-        recipient: attempt.recipient,
-      });
-    } catch (error) {
-      await this.billingService.releaseBeforeProvider(billingAdmission);
-      throw error;
-    }
+    const finalConsentAllowed = await this.consentAdmission.evaluateReentry({
+      shopId: recovery.shopId,
+      checkoutToken: event.checkoutToken,
+      noticeContext,
+      customerId: customer?.id ?? recovery.customerId,
+      recipient: attempt.recipient,
+    });
     if (!finalConsentAllowed) {
       await this.billingService.releaseBeforeProvider(billingAdmission);
       await recoveryOutreachAttemptService.markStatus(attempt.id, "FAILED", {
@@ -567,15 +561,9 @@ export class RecoveryInitiationService {
       }
       billingAdmission = revalidated.admission;
       if (selected.admissionToken) {
-        let offerAdmissionValid: boolean;
-        try {
-          offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
-            selected.admissionToken, AbortSignal.timeout(15_000),
-          );
-        } catch (error) {
-            await this.billingService.releaseBeforeProvider(billingAdmission);
-          throw error;
-        }
+        const offerAdmissionValid = await automatedRecoveryTemplateService.validateAdmission(
+          selected.admissionToken, AbortSignal.timeout(15_000),
+        );
         if (!offerAdmissionValid) {
           await this.billingService.releaseBeforeProvider(billingAdmission);
           return recovery;

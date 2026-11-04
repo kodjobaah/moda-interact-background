@@ -152,6 +152,13 @@ function makeFixture() {
   };
 }
 
+function sharedLogger(f: ReturnType<typeof makeFixture>) {
+  const records: unknown[] = [];
+  const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test",
+    sink: (record) => records.push(JSON.parse(JSON.stringify(record))) });
+  return { records, service: new WooRecoveryOutreachService({ ...f.deps, logger }) };
+}
+
 describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
@@ -376,11 +383,16 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
 
   it("surfaces simultaneous provider and compensation faults, retaining original cause", async () => {
     const f = makeFixture();
-    const providerFailure = new Error("provider failed");
-    const compensationFailure = new Error("compensation failed");
+    const { records, service } = sharedLogger(f);
+    const providerFailure = Object.assign(new Error("provider failed for phone +447000111222 token=private-send"), {
+      code: "P1001", clientVersion: "6.19.3",
+    });
+    const compensationFailure = Object.assign(new Error("compensation failed for phone +447000111222 token=private-compensation"), {
+      code: "P2034", clientVersion: "6.19.3",
+    });
     f.send.mockRejectedValueOnce(providerFailure);
     f.compensate.mockRejectedValueOnce(compensationFailure);
-    const failure = await f.service.processInitial("recovery").then(
+    const failure = await service.processInitial("recovery").then(
       () => { throw new Error("expected provider compensation to fail"); },
       (error: unknown) => error,
     );
@@ -389,6 +401,22 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect((failure as AggregateError).cause).toBe(providerFailure);
     expect((failure as AggregateError).errors).toEqual([providerFailure, compensationFailure]);
     expect(f.finalize).not.toHaveBeenCalled();
+    const componentRecord = records.find((entry) => {
+      const record = entry as { event?: string; data?: Record<string, unknown> };
+      return record.event === "woocommerce.recovery.outreach.failed" &&
+        record.data?.diagnosticBoundary === "send_compensation";
+    }) as { data: Record<string, unknown> } | undefined;
+    expect(componentRecord?.data).toMatchObject({
+      shopId: "woo-shop", recoveryId: "recovery", attemptId: "attempt-1",
+      stage: "provider-failure-reconciliation",
+      sendError: { message: "provider failed for phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+        code: "P1001", clientVersion: "6.19.3" },
+      compensationError: { message: "compensation failed for phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+        code: "P2034", clientVersion: "6.19.3" },
+    });
+    expect(JSON.stringify(records)).not.toContain("+447000111222");
+    expect(JSON.stringify(records)).not.toContain("private-send");
+    expect(JSON.stringify(records)).not.toContain("private-compensation");
   });
 
   it.each(["admit", "revalidateBeforeProvider"] as const)(
@@ -430,15 +458,20 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
 
   it("surfaces preflight and release failures together, without sending", async () => {
     const f = makeFixture();
-    const preflightFailure = new Error("revocation reader outage");
-    const releaseFailure = new Error("release outage");
+    const { records, service } = sharedLogger(f);
+    const preflightFailure = Object.assign(new Error("revocation reader outage for phone +447000111222 token=private-read"), {
+      code: "P1001", clientVersion: "6.19.3",
+    });
+    const releaseFailure = Object.assign(new Error("release outage for phone +447000111222 token=private-release"), {
+      code: "P2034", clientVersion: "6.19.3",
+    });
     // The guard runs twice, so the failure must occur after the first grant.
     f.consent.mockResolvedValueOnce({ status: "ALLOWED", snapshot,
       customerPhoneId: snapshot.customerPhoneId, canonicalRecipient: snapshot.canonicalRecipient,
       consentRevision: 3n, noContactRevision: 0n });
     f.consent.mockRejectedValueOnce(preflightFailure);
     f.release.mockRejectedValueOnce(releaseFailure);
-    const failure = await f.service.processInitial("recovery").then(
+    const failure = await service.processInitial("recovery").then(
       () => { throw new Error("expected pre-send release to fail"); },
       (error: unknown) => error,
     );
@@ -447,6 +480,42 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect((failure as AggregateError).cause).toBe(preflightFailure);
     expect((failure as AggregateError).errors).toEqual([preflightFailure, releaseFailure]);
     expect(f.send).not.toHaveBeenCalled();
+    const componentRecord = records.find((entry) => {
+      const record = entry as { event?: string; data?: Record<string, unknown> };
+      return record.event === "woocommerce.recovery.outreach.failed" &&
+        record.data?.diagnosticBoundary === "preflight_release";
+    }) as { data: Record<string, unknown> } | undefined;
+    expect(componentRecord?.data).toMatchObject({
+      shopId: "woo-shop", recoveryId: "recovery", attemptId: "attempt-1",
+      stage: "revalidate-final-preflight",
+      preflightError: { message: "revocation reader outage for phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+        code: "P1001", clientVersion: "6.19.3" },
+      releaseError: { message: "release outage for phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+        code: "P2034", clientVersion: "6.19.3" },
+    });
+    expect(JSON.stringify(records)).not.toContain("+447000111222");
+    expect(JSON.stringify(records)).not.toContain("private-read");
+    expect(JSON.stringify(records)).not.toContain("private-release");
+  });
+
+  it("preserves both source errors when the installed Shared sink throws during aggregation", async () => {
+    const f = makeFixture();
+    const providerFailure = new Error("provider failure");
+    const compensationFailure = new Error("compensation failure");
+    f.send.mockRejectedValueOnce(providerFailure);
+    f.compensate.mockRejectedValueOnce(compensationFailure);
+    const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test",
+      sink: () => { throw new Error("Shared sink unavailable"); } });
+    const service = new WooRecoveryOutreachService({ ...f.deps, logger });
+
+    const failure = await service.processInitial("recovery").then(
+      () => { throw new Error("expected provider compensation to fail"); },
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([providerFailure, compensationFailure]);
+    expect((failure as AggregateError).cause).toBe(providerFailure);
   });
 
   it("releases credits if STOP changes during the final preflight", async () => {
