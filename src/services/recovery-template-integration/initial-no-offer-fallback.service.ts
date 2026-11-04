@@ -6,7 +6,6 @@ import {
   formatCheckoutItemsSummary,
 } from "../recovery-template-preparation/recovery-template-items-summary.js";
 import {
-  CheckoutRecoveryLifetimePolicyUnavailableError,
   isCheckoutRecoveryWithinLifetime,
   PersistedCheckoutRecoveryLifetimeReader,
   type CheckoutRecoveryLifetimeReader,
@@ -55,7 +54,7 @@ export interface InitialNoOfferFallbackPort {
 }
 
 type FallbackDatabase = Pick<PrismaClient,
-  "checkoutRecovery" | "recoveryOutreachAttempt" | "conversationMessage" |
+  "checkoutRecovery" | "recoveryOutreachAttempt" |
   "backgroundRuntimeConfig" | "checkoutRecoveryStatusHistory">;
 type FallbackPreparer = Pick<typeof recoveryTemplatePreparer, "prepare">;
 type FallbackSenderResolver = () => Promise<string | null>;
@@ -141,19 +140,15 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
         return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       }
 
-      const [linkedMessage, dispatchedMessage] = await Promise.all([
-        attempt.outboundMessageId
-          ? this.database.conversationMessage.findUnique({
-              where: { id: attempt.outboundMessageId },
-              select: { id: true },
-            })
-          : Promise.resolve(null),
-        this.database.conversationMessage.findFirst({
-          where: { providerDispatchKey: `recovery-outreach:${attempt.id}` },
-          select: { id: true },
-        }),
-      ]);
-      if (linkedMessage || dispatchedMessage) {
+      const progress = await outboundWhatsAppAdmissionService.inspectInitialOutreachAdmission({
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        outreachAttemptId: input.outreachAttemptId,
+      });
+      if (progress.kind === "failed") {
+        return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
+      }
+      if (progress.kind !== "absent") {
         return { kind: "RETRY", reason: "PROVIDER_OUTCOME_UNCERTAIN" };
       }
 
@@ -163,13 +158,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       const summary = formatCheckoutItemsSummary(recovery.lineItems, recovery.shop.defaultLanguageTag ?? "en");
       if (!summary) return { kind: "BLOCKED", reason: "CHECKOUT_ITEMS_UNAVAILABLE" };
 
-      let lifetimeDays: number;
-      try {
-        lifetimeDays = await this.lifetimeReader.read();
-      } catch (error) {
-        if (!(error instanceof CheckoutRecoveryLifetimePolicyUnavailableError)) throw error;
-        return { kind: "RETRY", reason: "REQUIRED_STATE_UNAVAILABLE" };
-      }
+      const lifetimeDays = await this.lifetimeReader.read();
       const now = this.clock();
       if (!isCheckoutRecoveryWithinLifetime({
         lastExternalActivityAt: recovery.lastExternalActivityAt,
@@ -242,7 +231,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       } catch {
         // Logging failure must not replace the retry disposition.
       }
-      return { kind: "RETRY", reason: "REQUIRED_STATE_UNAVAILABLE" };
+      throw error;
     }
   }
 }

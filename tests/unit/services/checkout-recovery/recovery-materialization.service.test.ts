@@ -37,6 +37,14 @@ function createHarness(options: {
   orderProcessed?: boolean;
   latestRecovery?: { status: string; generation: number } | null;
   lookupOutcome?: unknown;
+  continueProgress?: boolean;
+  progress?: {
+    kind: "needs-preparation" | "reconciled" | "blocked" | "held";
+    recoveryId: string;
+    outreachAttemptId?: string | null;
+    outboundMessageId?: string | null;
+    reason?: string;
+  };
 } = {}) {
   const order: string[] = [];
   let eligibilityCall = 0;
@@ -71,7 +79,16 @@ function createHarness(options: {
   };
   const findLatestRecovery = vi.fn(async () => {
     order.push("latest-generation");
-    return options.latestRecovery ?? null;
+    return options.latestRecovery ? { id: "recovery-existing", ...options.latestRecovery } : null;
+  });
+  const continueInitialOutreach = vi.fn(async ({ recoveryId }: { shopId: string; recoveryId: string }) => {
+    order.push("continue-progress");
+    return options.progress ?? {
+      kind: "needs-preparation" as const,
+      recoveryId,
+      outreachAttemptId: null,
+      outboundMessageId: null,
+    };
   });
   const snapshotBuilder = {
     build: vi.fn(async () => {
@@ -95,6 +112,7 @@ function createHarness(options: {
     findLatestRecovery,
     snapshotBuilder,
     recipientResolver,
+    ...(options.continueProgress ? { continueInitialOutreach } : {}),
     initiate,
   });
   return {
@@ -104,6 +122,7 @@ function createHarness(options: {
     abandonedCheckoutLookup,
     pendingRecoveryCandidate,
     findLatestRecovery,
+    continueInitialOutreach,
     snapshotBuilder,
     recipientResolver,
     initiate,
@@ -113,19 +132,18 @@ function createHarness(options: {
 describe("RecoveryMaterializationService", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("preserves eligibility, lock, order tombstone, latest-generation, lookup, snapshot and initiation order", async () => {
+  it("checks existing generation before eligibility, order tombstone, lookup, snapshot and initiation", async () => {
     const harness = createHarness();
 
     const result = await harness.service.materialize(candidate);
 
     expect(result).toEqual({ outcome: "recovery-created", checkoutToken: candidate.checkoutToken });
     expect(harness.order).toEqual([
-      "eligibility",
-      "resolve-domain",
       "checkout-lock",
+      "latest-generation",
       "eligibility",
       "order-tombstone",
-      "latest-generation",
+      "resolve-domain",
       "provider-lookup",
       "snapshot",
       "recipient",
@@ -149,7 +167,7 @@ describe("RecoveryMaterializationService", () => {
     );
   });
 
-  it("discards before domain resolution when initial eligibility fails", async () => {
+  it("discards before domain resolution when eligibility fails under the checkout lock", async () => {
     const harness = createHarness({
       firstEligibility: { allowed: false, shopId: candidate.shopId, reason: "SUBSCRIPTION_FROZEN" },
     });
@@ -159,7 +177,7 @@ describe("RecoveryMaterializationService", () => {
       checkoutToken: candidate.checkoutToken,
       reason: "SUBSCRIPTION_FROZEN",
     });
-    expect(harness.order).toEqual(["eligibility"]);
+    expect(harness.order).toEqual(["checkout-lock", "latest-generation", "eligibility"]);
     expect(harness.abandonedCheckoutLookup.resolveShopDomain).not.toHaveBeenCalled();
   });
 
@@ -195,9 +213,9 @@ describe("RecoveryMaterializationService", () => {
     expect(harness.initiate).toHaveBeenCalledOnce();
   });
 
-  it("rechecks eligibility under the checkout lock before reading the order tombstone", async () => {
+  it("checks eligibility under the checkout lock before reading the order tombstone", async () => {
     const harness = createHarness({
-      secondEligibility: { allowed: false, shopId: candidate.shopId, reason: "CONTRACT_REQUIRED" },
+      firstEligibility: { allowed: false, shopId: candidate.shopId, reason: "CONTRACT_REQUIRED" },
     });
 
     await expect(harness.service.materialize(candidate)).resolves.toEqual({
@@ -205,20 +223,20 @@ describe("RecoveryMaterializationService", () => {
       checkoutToken: candidate.checkoutToken,
       reason: "CONTRACT_REQUIRED",
     });
-    expect(harness.order).toEqual(["eligibility", "resolve-domain", "checkout-lock", "eligibility"]);
+    expect(harness.order).toEqual(["checkout-lock", "latest-generation", "eligibility"]);
     expect(harness.pendingRecoveryCandidate.hasOrderProcessed).not.toHaveBeenCalled();
     expect(harness.abandonedCheckoutLookup.lookup).not.toHaveBeenCalled();
   });
 
-  it("discards an order tombstone before reading generation or Shopify", async () => {
+  it("discards a new candidate on an order tombstone before Shopify lookup", async () => {
     const harness = createHarness({ orderProcessed: true });
 
     await expect(harness.service.materialize(candidate)).resolves.toEqual({
       outcome: "discarded-order-completed",
       checkoutToken: candidate.checkoutToken,
     });
-    expect(harness.order).toEqual(["eligibility", "resolve-domain", "checkout-lock", "eligibility", "order-tombstone"]);
-    expect(harness.findLatestRecovery).not.toHaveBeenCalled();
+    expect(harness.order).toEqual(["checkout-lock", "latest-generation", "eligibility", "order-tombstone"]);
+    expect(harness.findLatestRecovery).toHaveBeenCalledOnce();
     expect(harness.abandonedCheckoutLookup.lookup).not.toHaveBeenCalled();
   });
 
@@ -232,6 +250,39 @@ describe("RecoveryMaterializationService", () => {
     });
     expect(harness.abandonedCheckoutLookup.lookup).not.toHaveBeenCalled();
     expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
+  it("classifies existing DETECTED progress before new-send gates and continues its generation when preparation is needed", async () => {
+    const harness = createHarness({
+      latestRecovery: { status: "DETECTED", generation: 4 },
+      continueProgress: true,
+    });
+
+    await expect(harness.service.materialize(candidate)).resolves.toEqual({
+      outcome: "recovery-reentered",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.order).toEqual([
+      "checkout-lock",
+      "latest-generation",
+      "continue-progress",
+      "eligibility",
+      "order-tombstone",
+      "resolve-domain",
+      "provider-lookup",
+      "snapshot",
+      "recipient",
+      "initiate",
+    ]);
+    expect(harness.continueInitialOutreach).toHaveBeenCalledExactlyOnceWith({
+      shopId: candidate.shopId,
+      recoveryId: "recovery-existing",
+    });
+    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+      4,
+      "15551234567",
+    );
   });
 
   it.each(["COMPLETED", "CANCELLED"])("does not reopen terminal generation %s", async (status) => {

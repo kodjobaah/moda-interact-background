@@ -33,6 +33,8 @@ const hoisted = vi.hoisted(() => ({
   }),
   findLatestRecovery: vi.fn(async () => hoisted.durableRecovery),
   findRecovery: vi.fn(async () => hoisted.durableRecovery),
+  findShop: vi.fn(async () => ({ id: "shop_1", platform: "SHOPIFY" })),
+  findInitialAttempt: vi.fn(async () => null),
   suppressUntil: new Date(),
   findSuppression: vi.fn(async () => ({ suppressUntil: new Date("2026-10-12T00:00:00Z") })),
   scheduleResume: vi.fn(async () => "resume-job"),
@@ -54,6 +56,7 @@ const hoisted = vi.hoisted(() => ({
   attemptGetOrCreate: vi.fn(async () => ({ id: "attempt-1" })),
   billingAdmit: vi.fn(async () => ({ kind: "admitted", admission: { kind: "paid", sourceKey: "recovery:test" } })),
   providerSend: vi.fn(async () => ({ kind: "admitted" })),
+  inspectInitialAdmission: vi.fn(async () => ({ kind: "absent" })),
 }));
 
 vi.mock("bullmq", () => ({
@@ -73,13 +76,14 @@ vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: hoisted.redis }));
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
-    shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })) },
+    shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })), findUnique: hoisted.findShop },
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
       findUnique: hoisted.findRecovery,
       updateMany: hoisted.updateRecoveryMany,
     },
+    recoveryOutreachAttempt: { findFirst: hoisted.findInitialAttempt },
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
   },
 }));
@@ -97,6 +101,8 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
     getProviderAccountId: vi.fn(() => "provider-1"),
     sendTemplate: hoisted.providerSend,
     findExistingAdmission: vi.fn(),
+    inspectInitialOutreachAdmission: hoisted.inspectInitialAdmission,
+    resumeInitialTemplate: vi.fn(async () => ({ kind: "admitted" })),
   },
 }));
 vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
@@ -145,6 +151,9 @@ describe("pending recovery candidate worker", () => {
     hoisted.updateRecoveryMany.mockClear();
     hoisted.findLatestRecovery.mockClear();
     hoisted.findRecovery.mockReset().mockImplementation(async () => hoisted.durableRecovery);
+    hoisted.findShop.mockReset().mockResolvedValue({ id: "shop_1", platform: "SHOPIFY" });
+    hoisted.findInitialAttempt.mockReset().mockResolvedValue(null);
+    hoisted.inspectInitialAdmission.mockReset().mockResolvedValue({ kind: "absent" });
     hoisted.suppressUntil = new Date(Date.now() + 60 * 60_000);
     hoisted.findSuppression.mockReset().mockResolvedValue({
       suppressUntil: hoisted.suppressUntil,
@@ -194,6 +203,8 @@ describe("pending recovery candidate worker", () => {
     } as never);
     const billing = {
       admit: hoisted.billingAdmit,
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
+      settleConfirmedInitialOutreach: vi.fn(async () => ({ kind: "held", reason: "settlement-not-committed" })),
       revalidateBeforeProvider: vi.fn(),
       releaseBeforeProvider: vi.fn(),
       handleProviderFailure: vi.fn(),

@@ -16,7 +16,7 @@ const input: ConfirmedInitialRecoveryOutreachInput = {
   followUpDueAt: dueAt,
 };
 
-function context(options: { enabled?: boolean; status?: string; initiatedBy?: string | null } = {}) {
+function context(options: { enabled?: boolean; status?: string; initiatedBy?: string | null; failureCode?: string | null } = {}) {
   const attempt = {
     id: input.outreachAttemptId,
     checkoutRecoveryId: input.checkoutRecoveryId,
@@ -24,6 +24,8 @@ function context(options: { enabled?: boolean; status?: string; initiatedBy?: st
     trigger: "INITIAL",
     initiatedBy: options.initiatedBy ?? "AUTOMATION",
     status: options.status ?? "PENDING",
+    failureCode: options.failureCode ?? null,
+    closedAt: null,
     sentAt: null as Date | null,
     outboundMessageId: null as string | null,
     followUpDueAt: null as Date | null,
@@ -42,7 +44,9 @@ function context(options: { enabled?: boolean; status?: string; initiatedBy?: st
   };
   const thread = { id: "thread-1" };
   const tx = {
-    $queryRaw: vi.fn(async () => [{ id: attempt.id }]),
+    $queryRaw: vi.fn()
+      .mockResolvedValueOnce([{ id: input.shopId }])
+      .mockResolvedValueOnce([{ id: attempt.id }]),
     recoveryOutreachAttempt: {
       findUnique: vi.fn(async () => attempt),
       updateMany: vi.fn(async ({ data }: { data: Partial<typeof attempt> }) => {
@@ -51,6 +55,9 @@ function context(options: { enabled?: boolean; status?: string; initiatedBy?: st
       }),
     },
     conversationMessage: { findUnique: vi.fn(async () => message) },
+    usageEvent: { findUnique: vi.fn(async () => ({ id: "usage-1", shopId: input.shopId,
+      metric: "OUTBOUND_AUTOMATED_MESSAGE", sourceType: "OUTBOUND_AUTOMATED_MESSAGE",
+      sourceId: input.outboundMessageId, quantity: 1 })) },
     shopSettings: { findUnique: vi.fn(async () => ({ notifyOnInitialRecoveryOutreach: options.enabled ?? true })) },
     merchantSupportThread: {
       createMany: vi.fn(async () => ({ count: 1 })),
@@ -76,7 +83,8 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
     await expect(f.service.finalizeConfirmedInitial(input)).resolves.toEqual({
       outcome: "created", outreachAttemptId: input.outreachAttemptId,
     });
-    expect(f.tx.$queryRaw).toHaveBeenCalledOnce();
+    expect(f.tx.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(f.tx.recoveryOutreachAttempt.findUnique).toHaveBeenCalledTimes(2);
     expect(f.tx.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ id: input.outreachAttemptId, sentAt: null, outboundMessageId: null }),
       data: expect.objectContaining({ status: "WAITING_FOR_RESPONSE", sentAt, outboundMessageId: input.outboundMessageId, followUpDueAt: dueAt }),
@@ -154,7 +162,7 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
   it("rejects mismatched persisted lineage and never samples a preference", async () => {
     const f = context();
     f.attempt.checkoutRecovery.shopId = "other-shop";
-    await expect(f.service.finalizeConfirmedInitial(input)).rejects.toThrow("tenant or conversation lineage");
+    await expect(f.service.finalizeConfirmedInitial(input)).rejects.toThrow("routing pointer");
     expect(f.tx.shopSettings.findUnique).not.toHaveBeenCalled();
     expect(f.logger.error).toHaveBeenCalledWith(
       "recovery.initial_outreach_support_notice.failed",
@@ -182,6 +190,25 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
     await expect(wrongSequence.service.finalizeConfirmedInitial(input)).rejects.toThrow("attempt lineage");
     const cancelled = context({ status: "CANCELLED" });
     await expect(cancelled.service.finalizeConfirmedInitial(input)).rejects.toThrow("current state");
+  });
+
+  it("repairs only the exact legacy provider-failure state from canonical confirmed usage", async () => {
+    const f = context({ status: "FAILED", failureCode: "PROVIDER_FAILURE" });
+    await expect(f.service.finalizeConfirmedInitial(input)).resolves.toEqual({
+      outcome: "created", outreachAttemptId: input.outreachAttemptId,
+    });
+    expect(f.tx.usageEvent.findUnique).toHaveBeenCalledWith({
+      where: { idempotencyKey: `recovery-outreach:${input.outreachAttemptId}` },
+      select: { id: true, shopId: true, metric: true, sourceType: true, sourceId: true, quantity: true },
+    });
+    expect(f.tx.recoveryOutreachAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        status: "FAILED", failureCode: "PROVIDER_FAILURE", closedAt: null,
+        sentAt: null, outboundMessageId: null, followUpDueAt: null,
+      }),
+      data: expect.objectContaining({ status: "WAITING_FOR_RESPONSE", failureCode: null,
+        sentAt, outboundMessageId: input.outboundMessageId, followUpDueAt: dueAt }),
+    }));
   });
 
   it("rethrows the exact transaction error and emits one failed event even when the sink throws", async () => {

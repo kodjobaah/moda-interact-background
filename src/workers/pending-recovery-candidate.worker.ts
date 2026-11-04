@@ -26,6 +26,7 @@ import {
   RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED,
   RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED,
 } from "../services/checkout-recovery/recovery-recipient-suppression-admission.service.js";
+import { initialOutreachDiagnostic } from "../services/outbound-whatsapp-admission/outbound-provider-failure.service.js";
 
 const bullMQTelemetry = createBullMQTelemetry({
   serviceName: "moda-recovery-worker",
@@ -105,14 +106,15 @@ async function processWooJob(
       ...fields, shopId, ...(eventId ? { eventId } : {}), outcome: outcome.kind,
     });
   } catch (error) {
+    const sourceError = initialOutreachDiagnostic(error);
     logger.error("woocommerce.recovery.job.failed", {
       ...fields,
       ...(typeof shopId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(shopId) ? { shopId } : {}),
       ...(eventId ? { eventId } : {}),
       reason: "processing_failure",
-      errorName: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      error: error,
+      errorName: sourceError.name,
+      errorMessage: sourceError.message,
+      sourceError,
     });
     throw error;
   }
@@ -193,6 +195,18 @@ export function createPendingRecoveryCandidateWorker(
             const cleanupMessage = cleanupError instanceof Error
               ? cleanupError.message
               : String(cleanupError);
+            try {
+              logger.error("recovery.pending_candidate.processing_cleanup_failed", {
+                queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+                jobId: typeof job.id === "string" ? createHash("sha256").update(job.id).digest("hex") : null,
+                attempt: job.attemptsMade + 1,
+                shopId: typeof shopifyCandidate.shopId === "string" ? shopifyCandidate.shopId : null,
+                materializationError: initialOutreachDiagnostic(materializationError),
+                cleanupError: initialOutreachDiagnostic(cleanupError),
+              });
+            } catch {
+              // Preserve both failures and the established retry behavior if the sink throws.
+            }
             throw new Error(
               `${primaryMessage}: candidate index cleanup failed: ${cleanupMessage}`,
               { cause: new AggregateError([materializationError, cleanupError], "Materialization and candidate cleanup failed") },
@@ -218,19 +232,28 @@ export function createPendingRecoveryCandidateWorker(
     // event covers the pre-existing Shopify path without printing job payloads.
     if (job?.name !== EVALUATE_PENDING_RECOVERY_JOB ||
       (job.data as { source?: unknown } | undefined)?.source !== "woocommerce") {
+      const sourceError = initialOutreachDiagnostic(error);
       logger.error("recovery.pending_candidate.job_failed", {
+        queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
         jobId: job?.id ? createHash("sha256").update(job.id).digest("hex") : null,
-        errorName: error.name.slice(0, 64),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        error: error,
+        attempt: job ? job.attemptsMade + 1 : null,
+        shopId: typeof (job?.data as { shopId?: unknown } | undefined)?.shopId === "string"
+          ? (job!.data as { shopId: string }).shopId : null,
+        errorName: sourceError.name,
+        errorMessage: sourceError.message,
+        sourceError,
       });
     }
   });
-  worker.on("error", (error) => logger.error("recovery.pending_candidate.worker_error", {
-    errorName: error.name.slice(0, 64),
-    errorMessage: error instanceof Error ? error.message : String(error),
-    error: error,
-}));
+  worker.on("error", (error) => {
+    const sourceError = initialOutreachDiagnostic(error);
+    logger.error("recovery.pending_candidate.worker_error", {
+      queue: PENDING_RECOVERY_CANDIDATE_QUEUE,
+      errorName: sourceError.name,
+      errorMessage: sourceError.message,
+      sourceError,
+    });
+  });
   return worker;
 }
 

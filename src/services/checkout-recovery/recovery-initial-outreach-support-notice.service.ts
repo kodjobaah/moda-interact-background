@@ -8,6 +8,7 @@ import {
   RecoveryOutreachInitiator,
   RecoveryOutreachStatus,
   RecoveryOutreachTrigger,
+  UsageMetric,
 } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -113,6 +114,24 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
       validateInput(input);
       inputValidated = true;
       const result = await this.database.$transaction(async (tx): Promise<InitialOutreachNoticeResult> => {
+        const pointer = await tx.recoveryOutreachAttempt.findUnique({
+          where: { id: input.outreachAttemptId },
+          select: { id: true, checkoutRecoveryId: true, checkoutRecovery: { select: { shopId: true } } },
+        });
+        if (!pointer || pointer.id !== input.outreachAttemptId ||
+            pointer.checkoutRecoveryId !== input.checkoutRecoveryId ||
+            pointer.checkoutRecovery.shopId !== input.shopId) {
+          lineageMismatch("Initial outreach routing pointer did not match");
+        }
+        const lockedShop = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT "id"
+          FROM "commerce"."Shop"
+          WHERE "id" = ${pointer.checkoutRecovery.shopId}
+          FOR KEY SHARE
+        `);
+        if (lockedShop.length !== 1 || lockedShop[0]?.id !== input.shopId) {
+          lineageMismatch("Initial outreach Shop pointer was not found");
+        }
         const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
           SELECT "id"
           FROM "commerce"."RecoveryOutreachAttempt"
@@ -130,6 +149,8 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
             trigger: true,
             initiatedBy: true,
             status: true,
+            failureCode: true,
+            closedAt: true,
             sentAt: true,
             outboundMessageId: true,
             followUpDueAt: true,
@@ -144,7 +165,8 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
         if (!attempt || attempt.id !== input.outreachAttemptId ||
             attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
             attempt.sequence !== 1 || attempt.trigger !== RecoveryOutreachTrigger.INITIAL ||
-            attempt.initiatedBy === RecoveryOutreachInitiator.HUMAN) {
+            (attempt.initiatedBy !== null && attempt.initiatedBy !== RecoveryOutreachInitiator.AUTOMATION) ||
+            attempt.checkoutRecovery.shopId !== pointer.checkoutRecovery.shopId) {
           lineageMismatch("Initial outreach attempt lineage did not match");
         }
         const recovery = attempt.checkoutRecovery;
@@ -163,11 +185,13 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
             senderType: true,
             status: true,
             sentAt: true,
+            recoveryOutreachAttempt: { select: { id: true } },
           },
         });
         if (!outboundMessage || outboundMessage.conversationId !== conversation.id ||
             outboundMessage.direction !== MessageDirection.OUTBOUND ||
             outboundMessage.senderType !== MessageSenderType.AUTOMATION ||
+            (outboundMessage.recoveryOutreachAttempt && outboundMessage.recoveryOutreachAttempt.id !== attempt.id) ||
             !confirmedMessageStatuses.includes(outboundMessage.status) ||
             !outboundMessage.sentAt || outboundMessage.sentAt.getTime() !== input.sentAt.getTime()) {
           lineageMismatch("Confirmed outbound message lineage did not match");
@@ -181,20 +205,49 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
           }
           return { outcome: "replayed", outreachAttemptId: attempt.id };
         }
-        if (!initialPendingStatuses.includes(attempt.status) ||
-            attempt.sentAt !== null || attempt.outboundMessageId !== null) {
+        const repairingFalseFailure = attempt.status === RecoveryOutreachStatus.FAILED &&
+          attempt.failureCode === "PROVIDER_FAILURE" && attempt.closedAt === null &&
+          attempt.sentAt === null && attempt.outboundMessageId === null && attempt.followUpDueAt === null &&
+          attempt.initiatedBy === RecoveryOutreachInitiator.AUTOMATION;
+        if (!initialPendingStatuses.includes(attempt.status) && !repairingFalseFailure) {
           finalizationConflict("Initial outreach attempt cannot be finalised from its current state");
+        }
+        if (attempt.sentAt !== null || attempt.outboundMessageId !== null || attempt.followUpDueAt !== null) {
+          finalizationConflict("Initial outreach attempt already has a conflicting receipt");
+        }
+        if (repairingFalseFailure) {
+          const usage = await tx.usageEvent.findUnique({
+            where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
+            select: { id: true, shopId: true, metric: true, sourceType: true, sourceId: true, quantity: true },
+          });
+          if (!usage || usage.shopId !== input.shopId ||
+              usage.metric !== UsageMetric.OUTBOUND_AUTOMATED_MESSAGE ||
+              usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || Number(usage.quantity) !== 1 ||
+              usage.sourceId !== input.outboundMessageId) {
+            finalizationConflict("Failed initial attempt has no exact confirmed usage lineage");
+          }
         }
 
         const transitioned = await tx.recoveryOutreachAttempt.updateMany({
           where: {
             id: attempt.id,
-            status: { in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.CAPACITY_BLOCKED] },
+            status: repairingFalseFailure
+              ? RecoveryOutreachStatus.FAILED
+              : { in: [RecoveryOutreachStatus.PENDING, RecoveryOutreachStatus.CAPACITY_BLOCKED] },
+            failureCode: repairingFalseFailure ? "PROVIDER_FAILURE" : null,
+            closedAt: null,
+            OR: repairingFalseFailure
+              ? [{ initiatedBy: RecoveryOutreachInitiator.AUTOMATION }]
+              : [{ initiatedBy: null }, { initiatedBy: RecoveryOutreachInitiator.AUTOMATION }],
+            sequence: 1,
+            trigger: RecoveryOutreachTrigger.INITIAL,
             sentAt: null,
             outboundMessageId: null,
+            followUpDueAt: null,
           },
           data: {
             status: RecoveryOutreachStatus.WAITING_FOR_RESPONSE,
+            failureCode: null,
             sentAt: input.sentAt,
             outboundMessageId: input.outboundMessageId,
             followUpDueAt: input.followUpDueAt,

@@ -21,7 +21,6 @@ import type {
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
 import {
-  CheckoutRecoveryLifetimePolicyUnavailableError,
   isCheckoutRecoveryWithinLifetime,
   PersistedCheckoutRecoveryLifetimeReader,
   type CheckoutRecoveryLifetimeReader,
@@ -250,11 +249,25 @@ export class AutomatedRecoveryTemplateService {
         outreachAttemptId: input.outreachAttemptId!,
         trigger: decision.trigger,
       });
+      try {
+        this.log.warn("recovery_template.initial_fallback.degraded", {
+          shopId: input.shopId,
+          recoveryId: input.recoveryId,
+          outreachAttemptId: input.outreachAttemptId,
+          stage: input.stage,
+          trigger,
+          outcome: fallback.kind.toLowerCase(),
+          ...(fallback.kind === "BLOCKED" || fallback.kind === "RETRY" ? { reason: fallback.reason } : {}),
+          ...(originatingError !== undefined ? { error: originatingError } : {}),
+        });
+      } catch {
+        // Optional degradation logging must not change the fallback outcome.
+      }
       if (fallback.kind === "PREPARED") {
         return { kind: "prepared", prepared: fallback.prepared, send: fallback.send };
       }
       if (fallback.kind === "RETRY") {
-        throw new Error(`INITIAL_FALLBACK_${fallback.reason}`, { cause: originatingError });
+        throw new Error(`INITIAL_FALLBACK_${fallback.reason}`);
       }
       this.log.warn("recovery_template.initial_fallback.blocked", {
         shopId: input.shopId,
@@ -330,14 +343,7 @@ export class AutomatedRecoveryTemplateService {
       }
       let checkoutRecoveryLifetimeDays: number | null = null;
       if (recovery.checkoutUrl) {
-        try {
-          checkoutRecoveryLifetimeDays = await this.lifetimeReader.read();
-        } catch (error) {
-          if (error instanceof CheckoutRecoveryLifetimePolicyUnavailableError) {
-            return unavailable("CHECKOUT_UNAVAILABLE");
-          }
-          throw error;
-        }
+        checkoutRecoveryLifetimeDays = await this.lifetimeReader.read();
         if (!isCheckoutRecoveryWithinLifetime({
           lastExternalActivityAt: recovery.lastExternalActivityAt,
           now,
@@ -372,7 +378,7 @@ export class AutomatedRecoveryTemplateService {
       if (input.stage === "INITIAL") {
         if (!input.outreachAttemptId) return unavailable("OUTREACH_ATTEMPT_UNAVAILABLE");
         if (input.policy.recoveryOfferMode === "NONE") {
-          return prepareFallback("MERCHANT_MODE_NONE");
+          return await prepareFallback("MERCHANT_MODE_NONE");
         }
         let selected: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>;
         try {
@@ -382,14 +388,14 @@ export class AutomatedRecoveryTemplateService {
           });
         } catch (error) {
           if (error instanceof InitialOfferEnrichmentError) {
-            return prepareFallback(error.trigger, error.cause);
+            return await prepareFallback(error.trigger, error.cause);
           }
           throw error;
         }
         const { result, context, currentContext } = selected;
         if (result.kind === "FAILURE") {
           const trigger = failureTrigger(result);
-          if (trigger) return prepareFallback(trigger);
+          if (trigger) return await prepareFallback(trigger);
           return unavailable(result.reasonCode);
         }
         admissionToken = selected.admissionToken;
@@ -402,14 +408,14 @@ export class AutomatedRecoveryTemplateService {
         }
         if (!fingerprint || !sameCurrentOfferContext(context, currentContext) ||
             context.basket.generation !== recovery.generation || context.basket.fingerprint !== fingerprint) {
-          return prepareFallback("DISCOUNT_REVALIDATION_UNAVAILABLE");
+          return await prepareFallback("DISCOUNT_REVALIDATION_UNAVAILABLE");
         }
         if (context.mode !== input.policy.recoveryOfferMode ||
             (context.mode === "FIXED" && context.authorisedDiscountIds[0] !== input.policy.fixedShopifyDiscountId)) {
           return unavailable("INITIAL_OFFER_POLICY_CHANGED");
         }
         if (result.kind === "NO_VERIFIED_OFFER") {
-          if (result.discoveryIncomplete) return prepareFallback(noOfferTrigger(result.reason));
+          if (result.discoveryIncomplete) return await prepareFallback(noOfferTrigger(result.reason));
           offerPresentation = "NO_OFFER";
           recoveryPromise = { kind: "NO_OFFER" };
         } else if (result.kind === "CHECKOUT_DISCOUNT") {
@@ -422,7 +428,7 @@ export class AutomatedRecoveryTemplateService {
               !samePriceEvidence(result.priceReconciliation, context.priceReconciliation) ||
               result.group.offerIds.length !== result.offerSet.offers.length ||
               result.members.length !== result.offerSet.offers.length) {
-            return prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
+            return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
           }
           const ordered = result.offerSet.offers.map((offer, index) => {
             const member = result.members[index];
@@ -432,7 +438,7 @@ export class AutomatedRecoveryTemplateService {
                 member.eligibility.verdict !== "SUPPORTED") return null;
             return { offer, member };
           });
-          if (ordered.some((entry) => entry === null)) return prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
+          if (ordered.some((entry) => entry === null)) return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
           const validOrdered: Array<NonNullable<(typeof ordered)[number]>> = ordered.filter(
             (entry): entry is NonNullable<(typeof ordered)[number]> => entry !== null,
           );
@@ -450,7 +456,7 @@ export class AutomatedRecoveryTemplateService {
           const codes = sendable.map(({ offer }) => offer.code);
           const description = sendable.map(({ member }) => member.description).join(", ");
           if (sendable[0]!.offer.method === "CODE" && codes.some((code) => !code)) {
-            return prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
+            return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
           }
           offerPresentation = sendable[0]!.offer.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
           verifiedOffer = {
@@ -471,12 +477,12 @@ export class AutomatedRecoveryTemplateService {
               result.product.authenticatedShopId !== input.shopId || result.product.shopId !== input.shopId ||
               result.product.product.productId !== result.productId ||
               result.product.product.variantId !== result.variantId) {
-            return prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
+            return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
           }
           promotionTarget = "ALTERNATIVE_PRODUCT";
           offerPresentation = result.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
           if (offerPresentation === "CODE_OFFER" && !result.code) {
-            return prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
+            return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
           }
           verifiedOffer = {
             shopId: input.shopId, kind: offerPresentation, verified: true,
@@ -576,7 +582,7 @@ export class AutomatedRecoveryTemplateService {
         if (input.stage === "INITIAL" && promotionTarget === "ALTERNATIVE_PRODUCT" &&
             !["SENDER_UNAVAILABLE", "SENDER_MISMATCH", "SHOP_UNAVAILABLE", "IDENTITY_MISMATCH"]
               .includes(prepared.reason)) {
-          return prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
+          return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
         }
         return unavailable(prepared.reason);
       }

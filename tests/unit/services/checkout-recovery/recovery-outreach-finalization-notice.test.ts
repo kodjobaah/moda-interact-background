@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  prisma: { checkoutRecovery: { updateMany: vi.fn() } },
+  prisma: { checkoutRecovery: { updateMany: vi.fn(), findUnique: vi.fn() } },
   attempt: { markWaitingAfterConfirmedSend: vi.fn(), findUnique: vi.fn() },
   followUp: { schedule: vi.fn() },
+  supportFinalizer: { finalizeConfirmedInitial: vi.fn() },
 }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
@@ -22,7 +23,8 @@ const sentAt = new Date("2026-10-27T10:00:00.000Z");
 const followUpDueAt = new Date("2026-10-27T11:00:00.000Z");
 const input = {
   recovery: { id: "recovery-1", shopId: "shop-1", status: "DETECTED" },
-  attempt: { id: "attempt-1", sequence: 1, followUpDueAt: null },
+  attempt: { id: "attempt-1", sequence: 1, status: "PENDING", sentAt: null,
+    outboundMessageId: null, followUpDueAt: null },
   admission: { kind: "paid", sourceKey: "recovery:shop-1:recovery-1" },
   message: { id: "message-1", conversationId: "conversation-1", status: "SENT", sentAt },
   policy: { followUpEnabled: true, followUpDelayMinutes: 60 },
@@ -37,16 +39,21 @@ function createFinalizer(options: {
   noticeOutcome?: "created" | "disabled" | "replayed";
 } = {}) {
   const billing = {
+    settleConfirmedInitialOutreach: vi.fn(async () => {
+      if (options.billingError) throw options.billingError;
+      return { kind: "settled" as const, disposition: "committed" as const, sourceKind: "paid" as const,
+        sourceKey: "source-1", reservationId: "reservation-1", committedUsageEventId: "usage-1",
+        outboundMessageId: input.message.id, sentAt };
+    }),
     commitSuccessfulInitiation: vi.fn(async () => {
       if (options.billingError) throw options.billingError;
     }),
   } as unknown as RecoveryBillingService;
-  const initialOutreachFinalizer = {
-    finalizeConfirmedInitial: vi.fn(async () => {
+  const initialOutreachFinalizer = mocks.supportFinalizer;
+  initialOutreachFinalizer.finalizeConfirmedInitial.mockImplementation(async () => {
       if (options.noticeError) throw options.noticeError;
       return { outcome: options.noticeOutcome ?? "created", outreachAttemptId: input.attempt.id };
-    }),
-  };
+    });
   const logger = { error: vi.fn(() => {
     if (options.sinkThrows) throw new Error("log sink unavailable");
   }) };
@@ -65,6 +72,8 @@ function createFinalizer(options: {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
+  mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue({ shopId: input.recovery.shopId, status: "MESSAGE_SENT" });
+  mocks.supportFinalizer.finalizeConfirmedInitial.mockReset().mockResolvedValue({ outcome: "created", outreachAttemptId: input.attempt.id });
   mocks.attempt.markWaitingAfterConfirmedSend.mockResolvedValue({ count: 1 });
   mocks.attempt.findUnique.mockResolvedValue({ id: input.attempt.id, outboundMessageId: input.message.id, status: "WAITING_FOR_RESPONSE" });
   mocks.followUp.schedule.mockResolvedValue(undefined);
@@ -76,8 +85,9 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
 
     await expect(finalizer.finalizeConfirmedOutreach(input)).resolves.toBeUndefined();
 
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledWith({
-      admission: input.admission, recoveryId: input.recovery.id, occurredAt: sentAt,
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledWith({
+      shopId: input.recovery.shopId, recoveryId: input.recovery.id,
+      outreachAttemptId: input.attempt.id, outboundMessageId: input.message.id,
     });
     expect(initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledWith({
       shopId: input.recovery.shopId,
@@ -87,10 +97,10 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
       sentAt,
       followUpDueAt,
     });
-    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledBefore(initialOutreachFinalizer.finalizeConfirmedInitial);
+    expect(billing.settleConfirmedInitialOutreach).toHaveBeenCalledBefore(initialOutreachFinalizer.finalizeConfirmedInitial);
     expect(initialOutreachFinalizer.finalizeConfirmedInitial).toHaveBeenCalledBefore(mocks.prisma.checkoutRecovery.updateMany);
     expect(mocks.prisma.checkoutRecovery.updateMany).toHaveBeenCalledWith({
-      where: { id: input.recovery.id, status: "DETECTED" },
+      where: { id: input.recovery.id, shopId: input.recovery.shopId, status: "DETECTED" },
       data: {
         status: "MESSAGE_SENT", messageSentAt: sentAt,
         admissionBlockedAt: null, admissionBlockReason: null,
@@ -153,6 +163,7 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
     await expect(finalizer.finalizeConfirmedOutreach(sequenceTwo)).resolves.toBeUndefined();
 
     expect(billing.commitSuccessfulInitiation).toHaveBeenCalledOnce();
+    expect(billing.settleConfirmedInitialOutreach).not.toHaveBeenCalled();
     expect(mocks.attempt.markWaitingAfterConfirmedSend).toHaveBeenCalledWith("attempt-2", {
       sentAt, outboundMessageId: input.message.id, followUpDueAt: null,
     });

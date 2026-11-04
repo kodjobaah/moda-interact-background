@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import type { RecoveryBillingAdmission } from "../../../../src/services/recovery-billing.service.js";
 import type { RecoveryPolicySnapshot } from "../../../../src/services/recovery-policy.service.js";
 import type { WooRecoveryConsentSnapshot } from "../../../../src/services/woocommerce-recovery-consent.service.js";
@@ -69,6 +71,7 @@ function makeFixture() {
     attempt = { ...attempt!, status: "WAITING_FOR_RESPONSE", sentAt: new Date("2026-10-24T01:00:00Z"),
       outboundMessageId: "message", followUpDueAt: null };
     recovery = { ...recovery, status: "MESSAGE_SENT" };
+    return { kind: "finalized" as const, outboundMessageId: "message", sentAt: new Date("2026-10-24T01:00:00Z") };
   });
   const markFailed = vi.fn(async () => {
     attempt = { ...attempt!, status: "FAILED" };
@@ -259,7 +262,11 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
         recoveryCreditSourceKey: "woo-reservation-1", template: expect.objectContaining({ verifiedCategory: "MARKETING" }),
         consent: snapshot,
       }));
-      expect(f.finalize).toHaveBeenCalledWith(expect.objectContaining({ admission: f.admission }));
+      expect(f.finalize).toHaveBeenCalledWith(expect.objectContaining({
+        recovery: expect.objectContaining({ id: "recovery" }),
+        attempt: expect.objectContaining({ id: "attempt-1" }),
+        message: expect.objectContaining({ id: "message" }),
+      }));
       expect(await f.service.processInitial("recovery")).toEqual({ kind: "already-initialized", attemptId: "attempt-1" });
       expect(f.send).toHaveBeenCalledTimes(1);
       expect(f.admit).toHaveBeenCalledTimes(1);
@@ -351,7 +358,7 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     await expect(f.service.processInitial("recovery")).rejects.toThrow("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
     expect(f.send).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(f.logs)).not.toContain("+447000111222");
-    expect(JSON.stringify(f.logs)).not.toContain("provider timeout containing");
+    expect(JSON.stringify(f.logs)).toContain("provider timeout containing [REDACTED_PHONE]");
   });
 
   it("does not compensate a provider-confirmed send even when a sender exception surfaces", async () => {
@@ -393,6 +400,33 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
       expect(f.logs.at(-1)?.event).toBe("woocommerce.recovery.outreach.failed");
     },
   );
+
+  it("emits the safe original failure through the installed Shared logger", async () => {
+    const f = makeFixture();
+    const records: unknown[] = [];
+    const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test",
+      sink: (record) => records.push(JSON.parse(JSON.stringify(record))) });
+    const service = new WooRecoveryOutreachService({ ...f.deps, logger });
+    const sourceFailure = new Error("woo settlement source outage phone +447000111222 token=private-value");
+    f.deps.policies.resolve = vi.fn(async () => { throw sourceFailure; });
+
+    await expect(service.processInitial("recovery")).rejects.toBe(sourceFailure);
+
+    const record = records.find((entry) => (entry as { event?: string }).event === "woocommerce.recovery.outreach.failed") as {
+      event: string; level: string; data: Record<string, unknown>;
+    } | undefined;
+    expect(record).toMatchObject({ event: "woocommerce.recovery.outreach.failed", level: "error",
+      data: { recoveryId: "recovery", stage: "locked-eligibility" } });
+    expect(JSON.stringify(record)).toContain('"service.name":"moda-recovery-worker"');
+    expect(record?.data.sourceError).toMatchObject({ name: "Error",
+      message: "woo settlement source outage phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+      redactionApplied: true });
+    expect(JSON.stringify(record)).not.toContain("+447000111222");
+    expect(JSON.stringify(record)).not.toContain("private-value");
+    const installed = JSON.parse(readFileSync(new URL("../../../../node_modules/@modainteract/moda-interact-shared/package.json", import.meta.url), "utf8")) as { version: string };
+    expect(installed.version).toBe("3.0.0");
+    expect(import.meta.resolve("@modainteract/moda-interact-shared/logging")).toContain("@modainteract/moda-interact-shared");
+  });
 
   it("surfaces preflight and release failures together, without sending", async () => {
     const f = makeFixture();
@@ -537,7 +571,7 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.releaseReservedCredit).toHaveBeenCalledTimes(2);
   });
 
-  it("logs bounded failure metadata without the raw error and rethrows the same exception", async () => {
+  it("logs safe source wording without sensitive details and rethrows the same exception", async () => {
     const f = makeFixture();
     f.setRecovery({ status: "CANCELLED" });
     f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
@@ -556,6 +590,9 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
       errorCode: "WOO_RECOVERY_OUTREACH_FAILED",
     });
     expect(failedLog?.data).not.toHaveProperty("error");
+    expect(failedLog?.data.sourceError).toMatchObject({
+      name: "Error", message: "phone=[REDACTED_PHONE] SQL=[REDACTED_SQL]", redactionApplied: true,
+    });
     expect(JSON.stringify(failedLog?.data)).not.toContain("447000111222");
     expect(JSON.stringify(failedLog?.data)).not.toContain("private_customer_data");
     expect(JSON.stringify(failedLog?.data)).not.toContain("stack");
@@ -594,7 +631,7 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     } });
     await f.service.settleResumed("recovery");
     expect(f.finalize).toHaveBeenCalledOnce();
-    expect(f.admit).toHaveBeenCalledOnce();
+    expect(f.admit).not.toHaveBeenCalled();
     expect(f.releaseReservedCredit).not.toHaveBeenCalled();
     expect(f.send).not.toHaveBeenCalled();
   });

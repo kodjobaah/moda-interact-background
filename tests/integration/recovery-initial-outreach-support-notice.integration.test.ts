@@ -179,7 +179,7 @@ withDatabase("initial recovery outreach Support finalisation — real PostgreSQL
     try {
       const spoof = await fixture(db, { enabled: true }); shopIds.push(spoof.shopId);
       await expect(service(db).finalizeConfirmedInitial({ ...spoof.input, shopId: "other-shop" }))
-        .rejects.toThrow("tenant or conversation lineage");
+        .rejects.toThrow("routing pointer did not match");
 
       const conversationTenant = await fixture(db, { enabled: true }); shopIds.push(conversationTenant.shopId);
       const otherShopId = `initial-notice-other-${randomUUID()}`;

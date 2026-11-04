@@ -138,8 +138,10 @@ async function fixture(consentAllowed = true) {
 withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)", () => {
   it("sends the prepared fallback once under its attempt identity and finalizes one credit", async () => {
     const f = await fixture();
+    const resumeInitialTemplate = vi.spyOn(outboundWhatsAppAdmissionService, "resumeInitialTemplate");
 
     await f.service.handleCheckoutCreated(f.event, 1, f.phone);
+    expect(resumeInitialTemplate).toHaveBeenCalledOnce();
 
     const recovery = await f.db.checkoutRecovery.findFirstOrThrow({
       where: { shopId: f.shopId, checkoutToken: f.checkoutToken },
@@ -147,10 +149,16 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
     const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
       where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: recovery.id, sequence: 1 } },
     });
-    const message = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: attempt.outboundMessageId! } });
-    const admissionEvent = await f.db.usageEvent.findUniqueOrThrow({
+    const admissionEvent = await f.db.usageEvent.findUnique({
       where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
     });
+    expect(admissionEvent).not.toBeNull();
+    expect(resumeInitialTemplate).toHaveBeenCalledOnce();
+    expect(await resumeInitialTemplate.mock.results[0]!.value)
+      .toMatchObject({ kind: "admitted", executionScope: "recovery" });
+    expect(f.providerSend).toHaveBeenCalledOnce();
+    expect(attempt).toMatchObject({ status: "WAITING_FOR_RESPONSE", outboundMessageId: expect.any(String) });
+    const message = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: attempt.outboundMessageId! } });
     const reservation = await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId } });
     const counter = await f.db.shopEntitlementCounter.findUniqueOrThrow({
       where: { shopId_counter: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },

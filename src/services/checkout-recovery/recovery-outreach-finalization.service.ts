@@ -1,4 +1,5 @@
 import prisma from "../../lib/db.js";
+import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
@@ -8,14 +9,15 @@ import {
 } from "./recovery-initial-outreach-support-notice.service.js";
 import type {
   ConfirmedInitialOutreachFinalizer,
-  ConfirmedInitialRecoveryOutreachInput,
 } from "./recovery-initial-outreach-support-notice.contracts.js";
 import {
   recoveryBillingService,
+  type ConfirmedInitialOutreachSettlement,
   type RecoveryBillingService,
 } from "../recovery-billing.service.js";
 
 type FinalizationLogger = Pick<StructuredLogger, "error">;
+type FinalizationDatabase = Pick<PrismaClient, "checkoutRecovery" | "recoveryOutreachAttempt">;
 type FinalizationStage = "billing" | "support_notice" | "recovery_status" | "follow_up";
 
 const defaultFinalizationLogger = createLogger({
@@ -35,6 +37,7 @@ export class RecoveryOutreachFinalizationService {
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
     private readonly initialOutreachFinalizer: ConfirmedInitialOutreachFinalizer = recoveryInitialOutreachSupportNoticeService,
     private readonly logger: FinalizationLogger = defaultFinalizationLogger,
+    private readonly database: FinalizationDatabase = prisma,
   ) {}
 
   requireConfirmedMessage(
@@ -52,15 +55,93 @@ export class RecoveryOutreachFinalizationService {
     }
   }
 
+  async finalizeConfirmedInitialOutreach(input: {
+    recovery: { id: string; shopId: string; status: string };
+    attempt: {
+      id: string;
+      sequence: number;
+      status: string;
+      sentAt: Date | null;
+      outboundMessageId: string | null;
+      followUpDueAt: Date | null;
+    };
+    message: ConfirmedMessage;
+    policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null };
+  }): Promise<
+    | { kind: "finalized"; outboundMessageId: string; sentAt: Date }
+    | { kind: "held"; reason: Extract<ConfirmedInitialOutreachSettlement, { kind: "held" }>["reason"] }
+  > {
+    let stage: FinalizationStage = "billing";
+    try {
+      if (input.attempt.sequence !== 1) return { kind: "held", reason: "lineage-conflict" };
+      const settlement = await this.billingService.settleConfirmedInitialOutreach({
+        shopId: input.recovery.shopId,
+        recoveryId: input.recovery.id,
+        outreachAttemptId: input.attempt.id,
+        outboundMessageId: input.message.id,
+      });
+      if (settlement.kind === "held") return settlement;
+      if (settlement.outboundMessageId !== input.message.id ||
+          settlement.sentAt.getTime() !== input.message.sentAt.getTime()) {
+        return { kind: "held", reason: "lineage-conflict" };
+      }
+
+      const alreadyFinalized = input.attempt.outboundMessageId === input.message.id &&
+        input.attempt.sentAt?.getTime() === input.message.sentAt.getTime();
+      const followUpDueAt = alreadyFinalized
+        ? input.attempt.followUpDueAt
+        : input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
+          ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
+          : null;
+
+      stage = "support_notice";
+      await this.initialOutreachFinalizer.finalizeConfirmedInitial({
+        shopId: input.recovery.shopId,
+        checkoutRecoveryId: input.recovery.id,
+        outreachAttemptId: input.attempt.id,
+        outboundMessageId: input.message.id,
+        sentAt: input.message.sentAt,
+        followUpDueAt,
+      });
+
+      stage = "recovery_status";
+      const transitioned = await this.database.checkoutRecovery.updateMany({
+        where: { id: input.recovery.id, shopId: input.recovery.shopId, status: "DETECTED" },
+        data: { status: "MESSAGE_SENT", messageSentAt: input.message.sentAt,
+          admissionBlockedAt: null, admissionBlockReason: null },
+      });
+      if (transitioned.count !== 1) {
+        const current = await this.database.checkoutRecovery.findUnique({
+          where: { id: input.recovery.id },
+          select: { shopId: true, status: true },
+        });
+        if (current?.shopId !== input.recovery.shopId ||
+            !["MESSAGE_SENT", "ENGAGED", "COMPLETED", "CANCELLED", "EXPIRED"].includes(current.status)) {
+          throw new Error(`Recovery status changed during confirmed initial finalization for ${input.recovery.id}`);
+        }
+      }
+
+      stage = "follow_up";
+      await this.ensureScheduledInitialFollowUp(input.recovery.id);
+      return { kind: "finalized", outboundMessageId: input.message.id, sentAt: input.message.sentAt };
+    } catch (error) {
+      this.logConfirmedFinalizationFailure(input, stage, error);
+      throw error;
+    }
+  }
+
   async finalizeConfirmedOutreach(input: {
     recovery: { id: string; shopId: string; status: string };
-    attempt: { id: string; sequence: number; followUpDueAt?: Date | null };
+    attempt: { id: string; sequence: number; status: string; followUpDueAt?: Date | null; sentAt?: Date | null; outboundMessageId?: string | null };
     admission: Parameters<RecoveryBillingService["commitSuccessfulInitiation"]>[0]["admission"];
     message: ConfirmedMessage;
     policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null };
   }) {
+    const alreadyFinalized = input.attempt.sequence === 1 &&
+      input.attempt.outboundMessageId === input.message.id &&
+      input.attempt.sentAt?.getTime() === input.message.sentAt.getTime();
     const followUpDueAt = input.attempt.sequence === 1
-      ? input.attempt.followUpDueAt ?? (
+      ? alreadyFinalized ? input.attempt.followUpDueAt ?? null : (
           input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
             ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
             : null
@@ -68,39 +149,20 @@ export class RecoveryOutreachFinalizationService {
       : null;
 
     if (input.attempt.sequence === 1) {
-      let stage: FinalizationStage = "billing";
-      try {
-        await this.billingService.commitSuccessfulInitiation({
-          admission: input.admission,
-          recoveryId: input.recovery.id,
-          occurredAt: input.message.sentAt,
-        });
-
-        stage = "support_notice";
-        const noticeInput: ConfirmedInitialRecoveryOutreachInput = {
-          shopId: input.recovery.shopId,
-          checkoutRecoveryId: input.recovery.id,
-          outreachAttemptId: input.attempt.id,
-          outboundMessageId: input.message.id,
-          sentAt: input.message.sentAt,
-          followUpDueAt,
-        };
-        await this.initialOutreachFinalizer.finalizeConfirmedInitial(noticeInput);
-
-        stage = "recovery_status";
-        if (input.recovery.status === "DETECTED") {
-          await prisma.checkoutRecovery.updateMany({
-            where: { id: input.recovery.id, status: "DETECTED" },
-            data: { status: "MESSAGE_SENT", messageSentAt: input.message.sentAt, admissionBlockedAt: null, admissionBlockReason: null },
-          });
-        }
-
-        stage = "follow_up";
-        await this.ensureScheduledInitialFollowUp(input.recovery.id);
-      } catch (error) {
-        this.logFinalizationFailure(input, stage, error);
-        throw error;
-      }
+      const result = await this.finalizeConfirmedInitialOutreach({
+        recovery: input.recovery,
+        attempt: {
+          id: input.attempt.id,
+          sequence: input.attempt.sequence,
+          status: input.attempt.status,
+          sentAt: input.attempt.sentAt ?? null,
+          outboundMessageId: input.attempt.outboundMessageId ?? null,
+          followUpDueAt: input.attempt.followUpDueAt ?? null,
+        },
+        message: input.message,
+        ...(input.policy ? { policy: input.policy } : {}),
+      });
+      if (result.kind === "held") throw new Error(`INITIAL_OUTREACH_FINALIZATION_HELD:${result.reason}`);
       return;
     }
 
@@ -147,12 +209,31 @@ export class RecoveryOutreachFinalizationService {
     }
   }
 
+  private logConfirmedFinalizationFailure(
+    input: Parameters<RecoveryOutreachFinalizationService["finalizeConfirmedInitialOutreach"]>[0],
+    stage: FinalizationStage,
+    error: unknown,
+  ): void {
+    try {
+      this.logger.error("recovery.initial_outreach_support_notice.shopify_finalization_failed", {
+        shopId: input.recovery.shopId,
+        checkoutRecoveryId: input.recovery.id,
+        outreachAttemptId: input.attempt.id,
+        outboundMessageId: input.message.id,
+        stage,
+        error,
+      });
+    } catch {
+      // Preserve the finalization exception if the logging sink fails.
+    }
+  }
+
   async ensureScheduledInitialFollowUp(recoveryId: string) {
-    const recovery = await prisma.checkoutRecovery.findUnique({
+    const recovery = await this.database.checkoutRecovery.findUnique({
       where: { id: recoveryId },
       include: { outreachAttempts: { orderBy: { sequence: "asc" } } },
     });
-    const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
+    const initial = recovery?.outreachAttempts?.find((item) => item.sequence === 1);
     if (
       !recovery ||
       !["MESSAGE_SENT", "ENGAGED"].includes(recovery.status) ||
