@@ -208,12 +208,11 @@ withDatabase("ARCH-046 Woo final permit: PostgreSQL lock and fault races", () =>
     await expect(guarded.admitFinalSend(input)).rejects.toBe(injected);
     expect(error).toHaveBeenCalledWith("woocommerce.recovery.initial.sql_permit.failed", {
       shopId: input.shopId, recoveryId: input.recoveryId, attemptId: input.attemptId,
-      errorName: "Error", error: new Error("PERSISTENCE_FAILURE"),
+      conversationId: input.conversationId, messageId: input.messageId, stage: "final_permit",
+      sourceError: {
+        name: "Error", message: injected.message, redactionApplied: false, truncated: false,
+      },
     });
-    const loggedError = error.mock.calls[0]?.[1].error;
-    expect(loggedError).toBeInstanceOf(Error);
-    expect(loggedError.message).toBe("PERSISTENCE_FAILURE");
-    expect(loggedError.message).not.toContain("simulated commit failure");
     const message = await db.conversationMessage.findUniqueOrThrow({ where: { id: input.messageId } });
     expect(message).toMatchObject({ status: "PENDING", providerDispatchKey: null,
       providerDispatchAdmittedAt: null });

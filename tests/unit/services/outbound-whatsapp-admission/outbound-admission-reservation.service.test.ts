@@ -68,6 +68,7 @@ describe("OutboundAdmissionReservationService", () => {
     expect(test.transaction.recoveryOutreachAttempt.findUnique).toHaveBeenCalledWith({
       where: { id: "attempt-old" },
       select: {
+        failureCode: true, sequence: true, trigger: true,
         checkoutRecovery: { select: { shopId: true } },
         outboundMessage: { select: {
           id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true,

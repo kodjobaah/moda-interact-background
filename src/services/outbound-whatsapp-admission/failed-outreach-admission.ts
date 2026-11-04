@@ -16,6 +16,7 @@ export async function failedRecipientOutreach(
   const attempt = await database.recoveryOutreachAttempt.findUnique({
     where: { id: attemptId },
     select: {
+      failureCode: true, sequence: true, trigger: true,
       checkoutRecovery: { select: { shopId: true } },
       outboundMessage: { select: {
         id: true, conversationId: true, status: true, sentAt: true, providerFailureCode: true,
@@ -24,7 +25,9 @@ export async function failedRecipientOutreach(
   });
   if (!attempt) return null;
   const message = attempt.outboundMessage;
-  if (!message || message.status !== "FAILED" || message.providerFailureCode !== "131026") {
+  if (!message || message.status !== "FAILED" || (message.providerFailureCode !== "131026" &&
+      !(attempt.sequence === 1 && attempt.trigger === "INITIAL" &&
+        (attempt.failureCode === "PRE_PROVIDER_REFUSED" || attempt.failureCode === "PROVIDER_REJECTED")))) {
     return null;
   }
   return { shopId: attempt.checkoutRecovery.shopId, message };

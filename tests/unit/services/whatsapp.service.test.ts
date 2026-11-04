@@ -1,3 +1,4 @@
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_WHATSAPP_API_BASE_URL,
@@ -334,6 +335,29 @@ describe("WhatsAppService API base URL", () => {
     expect(JSON.stringify(fields)).not.toContain("secret-value");
     expect(JSON.stringify(fields)).not.toContain("shop.test");
     expect(JSON.stringify(fields)).not.toContain("+447700900123");
+  });
+
+  it("emits nested Meta details with honest array flags and validated trace IDs", async () => {
+    const records: unknown[] = [];
+    const logger = createLogger({ serviceName: "meta-fixture", environment: "test",
+      sink: (record) => { records.push(JSON.parse(JSON.stringify(record))); throw new Error("sink unavailable"); } });
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: {
+      message: "harmless Meta marker", code: 131026,
+      fbtrace_id: "trace-valid",
+      error_data: { fbtrace_id: "invalid trace!", nested: [["token=private-value", "x".repeat(240)]] },
+    } }), { status: 400, headers: { "x-fb-request-id": "fixture-request" } }));
+
+    await expect(new WhatsAppService(fetchMock, logger).sendWhatsAppText(input))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: "131026" });
+    expect(records).toContainEqual(expect.objectContaining({
+      event: "whatsapp.meta.send.failed", level: "error", "service.name": "meta-fixture",
+      data: expect.objectContaining({
+        providerRequestId: "fixture-request", httpStatus: 400, redactionApplied: true, truncated: true,
+        providerError: expect.objectContaining({ message: "harmless Meta marker", code: 131026,
+          fbtrace_id: "trace-valid" }),
+      }),
+    }));
+    expect(JSON.stringify(records)).not.toMatch(/private-value|invalid trace!/);
   });
 
   it("logs the original SDK cause chain without inventing a provider error", async () => {
