@@ -27,6 +27,45 @@ describe.runIf(enabled)("initial outreach durable resume", () => {
     expect((await fixture.service(b).inspectInitialOutreachAdmission(scope)).kind).toBe("confirmed");
   }, 45_000);
 
+  it.each(["unpermitted", "permitted", "uncertain", "conflicting"] as const)(
+    "guards sequence-two cleanup with %s evidence", async (evidence) => {
+      const fixture = await seed(a);
+      const { input } = fixture;
+      const attempt = await a.recoveryOutreachAttempt.create({ data: {
+        checkoutRecoveryId: input.recoveryId, recipient: input.recipient,
+        sequence: 2, trigger: "NO_RESPONSE_FOLLOW_UP", configuredOfferMode: "NONE", status: "PENDING",
+      } });
+      const message = await a.conversationMessage.create({ data: {
+        conversationId: input.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
+        status: "PENDING", content: "follow-up prepared content",
+        ...(evidence === "permitted" ? {
+          providerDispatchKey: `arch040-auto-follow-up-${attempt.id}`,
+          providerDispatchAdmittedAt: new Date(), providerDispatchControlRevision: 0,
+        } : {}),
+        ...(evidence === "uncertain" ? { deliveredAt: new Date() } : {}),
+      } });
+      const usage = await a.usageEvent.create({ data: {
+        shopId: input.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
+        idempotencyKey: `recovery-outreach:${evidence === "conflicting" ? "missing-" : ""}${attempt.id}`,
+        sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id,
+      } });
+
+      await fixture.service(a).failPrepared(message.id);
+
+      const current = await b.conversationMessage.findUniqueOrThrow({ where: { id: message.id } });
+      const currentUsage = await b.usageEvent.findUnique({ where: { id: usage.id } });
+      if (evidence === "unpermitted") {
+        expect(current.status).toBe("FAILED");
+        expect(currentUsage).toBeNull();
+      } else {
+        expect(current).toEqual(message);
+        expect(currentUsage).toEqual(usage);
+      }
+      expect(await b.usageEvent.count({ where: { idempotencyKey: input.idempotencyKey } })).toBe(1);
+      expect(await b.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).toEqual(attempt);
+    }, 45_000,
+  );
+
   it("holds inconsistent PENDING receipts without provider calls", async () => {
     const fixture = await seed(a);
     const { input, scope } = fixture;

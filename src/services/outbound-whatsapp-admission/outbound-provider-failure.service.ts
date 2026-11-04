@@ -15,9 +15,28 @@ export class OutboundProviderFailureService {
     await this.database.$transaction(async (tx) => {
       const owned = await this.readOwnedUsage(tx, messageId);
       if (!owned) return;
-      const initial = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(owned.usage?.idempotencyKey ?? "")?.[1];
       if (!owned.usage && owned.message.senderType === "AUTOMATION" && owned.message.conversation.checkoutRecoveryId) return;
-      if (initial && !await this.lockInitial(tx, owned, initial)) return;
+      let initial: string | undefined;
+      if (owned.usage?.idempotencyKey.startsWith("recovery-outreach:")) {
+        const attemptId = /^recovery-outreach:([A-Za-z0-9_-]+)$/.exec(owned.usage.idempotencyKey)?.[1];
+        const recoveryId = owned.message.conversation.checkoutRecoveryId;
+        if (!attemptId || !recoveryId || owned.message.senderType !== "AUTOMATION" ||
+            owned.usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE") return;
+        const attempt = await tx.recoveryOutreachAttempt.findUnique({
+          where: { id: attemptId },
+          select: { checkoutRecoveryId: true, sequence: true, trigger: true, outboundMessageId: true },
+        });
+        if (!attempt || attempt.checkoutRecoveryId !== recoveryId ||
+            (attempt.outboundMessageId && attempt.outboundMessageId !== messageId) ||
+            (owned.message.recoveryOutreachAttempt && owned.message.recoveryOutreachAttempt.id !== attemptId)) return;
+        if (attempt.sequence === 1 && attempt.trigger === "INITIAL") {
+          if (!await this.lockInitial(tx, owned, attemptId)) return;
+          initial = attemptId;
+        } else if (attempt.sequence !== 2 ||
+            (attempt.trigger !== "NO_RESPONSE_FOLLOW_UP" && attempt.trigger !== "POST_WINDOW_FOLLOW_UP")) {
+          return;
+        }
+      }
       const where: Prisma.ConversationMessageWhereInput = {
         id: messageId, conversationId: owned.message.conversationId, direction: "OUTBOUND",
         senderType: initial ? "AUTOMATION" : { in: ["AUTOMATION", "AGENT"] },
@@ -40,6 +59,7 @@ export class OutboundProviderFailureService {
     const message = await tx.conversationMessage.findUnique({
       where: { id: messageId },
       include: { merchantSendCommand: { select: { id: true } },
+        recoveryOutreachAttempt: { select: { id: true } },
         conversation: { include: { checkoutRecovery: { select: { shopId: true } } } } },
     });
     if (!message || message.direction !== "OUTBOUND" || message.merchantSendCommand ||
