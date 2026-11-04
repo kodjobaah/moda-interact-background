@@ -55,7 +55,8 @@ describe.runIf(enabled)("initial outreach permit lock races", () => {
       .toMatchObject({ status: "FAILED", providerDispatchKey: null });
   }, 45_000);
 
-  it("observes a released credit after a concurrent owner transaction", async () => {
+  it.each(["RELEASED", "COMMITTED"] as const)(
+    "observes %s credit after a concurrent owner transaction", async (status) => {
     const { input } = await seed(a);
     const locked = barrier();
     const release = barrier();
@@ -66,10 +67,17 @@ describe.runIf(enabled)("initial outreach permit lock races", () => {
       await release.wait;
       await tx.shopEntitlementCounter.update({
         where: { shopId_counter: { shopId: input.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
-        data: { reservedQuantity: { decrement: 1 } },
+        data: { reservedQuantity: { decrement: 1 },
+          ...(status === "COMMITTED" ? { committedQuantity: { increment: 1 } } : {}) },
       });
+      // Settlement inserts a ledger row whose FK requires the Shop key-share.
+      const ledger = status === "COMMITTED" ? await tx.usageEvent.create({ data: {
+        shopId: input.shopId, idempotencyKey: `fixture-settlement:${input.attemptId}`,
+        metric: "RECOVERY_CONVERSATION", quantity: 1,
+      } }) : null;
       await tx.usageReservation.update({
-        where: { sourceKey: input.recoveryCreditSourceKey }, data: { status: "RELEASED" },
+        where: { sourceKey: input.recoveryCreditSourceKey },
+        data: { status, ...(ledger ? { committedUsageEventId: ledger.id } : {}) },
       });
     }, { timeout: 20_000 });
     let permit: ReturnType<WooInitialSendFenceService["admitFinalSend"]> | undefined;
@@ -88,6 +96,10 @@ describe.runIf(enabled)("initial outreach permit lock races", () => {
       release.release();
       await counterparty;
       expect(await permit).toEqual({ kind: "suppressed", reason: "woo-recovery-credit-not-reserved" });
+      const credit = await b.usageReservation.findUniqueOrThrow({ where: { sourceKey: input.recoveryCreditSourceKey } });
+      expect(credit.status).toBe(status);
+      expect(await b.usageEvent.count({ where: { idempotencyKey: `fixture-settlement:${input.attemptId}` } }))
+        .toBe(status === "COMMITTED" ? 1 : 0);
       expect(await b.conversationMessage.findUniqueOrThrow({ where: { id: input.messageId } }))
         .toMatchObject({ status: "PENDING", providerDispatchKey: null });
     } finally {

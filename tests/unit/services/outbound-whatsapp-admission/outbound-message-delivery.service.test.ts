@@ -135,6 +135,33 @@ const wooScope = { recoveryId: "recovery-1", attemptId: "attempt-1" } as
 describe("scoped initial template diagnostics", () => {
   const permit = () => ({ admitFinalSend: vi.fn().mockResolvedValue({ kind: "admitted" }) });
 
+  it.each(["preparation", "moderation"] as const)("emits the original %s failure safely", async (stage) => {
+    capture.records.length = 0;
+    const wooFence = permit();
+    const test = harness({ wooFence });
+    const marker = `distinct ${stage} failure marker`;
+    const error = new Error(`${marker} +447400123456`);
+    const template = { ...wooTemplate };
+    if (stage === "preparation") {
+      Object.defineProperty(template, "bodyParameters", { get: () => { throw error; } });
+    } else {
+      test.moderationMock.assessText.mockRejectedValueOnce(error);
+    }
+    await expect(test.service.sendPreparedWooInitialTemplate(admission, template, wooScope)).rejects.toBe(error);
+    expect(wooFence.admitFinalSend).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(capture.records).toContainEqual(expect.objectContaining({
+      event: `outbound.template.${stage}.failed`, level: "error",
+      data: expect.objectContaining({
+        stage, shopId: "shop-1", conversationId: "conversation-1", messageId: "message-1",
+        recoveryId: "recovery-1", attemptId: "attempt-1",
+        sourceError: expect.objectContaining({ message: expect.stringContaining(marker), redactionApplied: true }),
+      }),
+    }));
+    expect(JSON.stringify(capture.records)).not.toMatch(/447400123456|provider_http|providerError/);
+  });
+
   it("preserves the prepared message for typed moderation retry", async () => {
     capture.records.length = 0;
     const test = harness({ moderationOutcome: "retry", wooFence: permit() });

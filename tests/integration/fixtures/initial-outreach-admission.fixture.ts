@@ -1,3 +1,5 @@
+import { OutboundSendFenceService } from "../../../src/services/recovery-conversation/outbound-send-fence.service.js";
+import { AiTurnOwnershipService } from "../../../src/services/recovery-conversation/ai-turn-ownership.service.js";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { vi } from "vitest";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -62,5 +64,27 @@ export async function seed(db: PrismaClient) {
       requireCurrentAllowance: async () => true,
     } as never, undefined, undefined, undefined, new WooInitialSendFenceService(client)),
   );
-  return { input, scope, requests, sendInput, service, sender };
+  return { input, scope, requests, sendInput, service, sender, template };
+}
+
+export async function seedShopify(db: PrismaClient) {
+  const fixture = await seed(db);
+  const { input } = fixture;
+  // Reuse the approved registration and durable prepared rows. Inject the
+  // policy decision separately so this test isolates resume and SQL dispatch.
+  await db.shop.update({ where: { id: input.shopId }, data: { platform: "SHOPIFY" } });
+  const service = (client: PrismaClient) => new OutboundWhatsAppAdmissionService(
+    client, undefined, {
+      sendWhatsAppTemplate: fixture.requests, getProviderAccountId: async () => input.templateRegistration.senderWabaId,
+    } as never, undefined, { evaluate: async () => ({ allowed: true, shopId: input.shopId }) },
+    undefined, { assessText: async () => ({ kind: "allow" }),
+      requireCurrentAllowance: async () => true } as never,
+    new AiTurnOwnershipService(client),
+    new OutboundSendFenceService(client, async () => null),
+    { preflight: async () => ({ kind: "allowed", snapshot: null }) },
+  );
+  const resume = { ...fixture.scope, messageId: input.messageId,
+    recoveryCreditSourceKey: input.recoveryCreditSourceKey,
+    template: { ...fixture.template.sendFields, to: input.recipient } };
+  return { ...fixture, service, resume };
 }

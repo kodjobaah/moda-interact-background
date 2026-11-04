@@ -31,6 +31,8 @@ export type {
   OutboundSuppressionReason,
 } from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
 
+import { recoveryStoredConsentService, type StoredRecoveryConsentReader } from "./recovery-conversation/recovery-stored-consent.service.js";
+
 const MAX_TRANSACTION_RETRIES = 3;
 type AdmissionDatabase = Pick<
   PrismaClient,
@@ -63,6 +65,7 @@ export class OutboundWhatsAppAdmissionService {
     moderation: ModerationAssessmentService = moderationAssessmentService,
     ownership = new AiTurnOwnershipService(),
     recoveryFence = new OutboundSendFenceService(undefined, recoveryRuntimeEligibility),
+    recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
   ) {
     this.reservation = new OutboundAdmissionReservationService(
       database,
@@ -77,6 +80,9 @@ export class OutboundWhatsAppAdmissionService {
       ownership,
       recoveryFence,
       moderation,
+      undefined,
+      undefined,
+      recoveryConsent,
     );
   }
 
