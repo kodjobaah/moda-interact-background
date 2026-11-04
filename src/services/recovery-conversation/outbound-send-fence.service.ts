@@ -1,3 +1,5 @@
+import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createHash, randomUUID } from "node:crypto";
 import { FollowUpClaimKeyIntegrityError } from "./merchant-send-command.service.js";
@@ -35,6 +37,12 @@ export type DispatchInput = {
   proactive?: RecoveryMarketingPermit;
   /** Explicitly distinguish approved Meta templates from automated free text. */
   deliveryKind?: "TEXT" | "TEMPLATE";
+  initialOutreach?: {
+    outreachAttemptId: string;
+    idempotencyKey: string;
+    recoveryCreditSourceKey: string;
+    expectedContent: string;
+  };
 };
 
 /** BG002 injects synchronous, database-only checks for shop entitlement, recovery
@@ -61,9 +69,14 @@ export class OutboundSendFenceService {
       return { kind: "suppressed", reason: "invalid-lease" };
     if (input.senderType !== "HUMAN" && !input.messageId)
       return { kind: "suppressed", reason: "missing-prepared-message" };
+    if (input.initialOutreach && (input.senderType !== "AUTOMATION" ||
+        input.deliveryKind !== "TEMPLATE" || !input.proactive ||
+        input.initialOutreach.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}`))
+      return { kind: "suppressed", reason: "invalid-initial-scope" };
     const durableEligibility = this.durableEligibility;
     if (!durableEligibility) return { kind: "suppressed", reason: "durable-eligibility-unavailable" };
-    return this.database.$transaction(async (tx) => {
+    try {
+    return await this.database.$transaction(async (tx) => {
       // Linearization point: the commit of this short transaction. Shop row
       // serializes initial restriction INSERT (restriction row may be absent).
       const context = await lockRecoveryContext(tx, input.conversationId);
@@ -80,8 +93,8 @@ export class OutboundSendFenceService {
         return { kind: "suppressed", reason: "stale-control-revision" } as const;
       if (context.mode !== (input.senderType === "HUMAN" ? "HUMAN" : "AI"))
         return { kind: "suppressed", reason: input.senderType === "HUMAN" ? "human-inactive" : "human-controlled" } as const;
-      const shop = await first<{ status: string }>(tx,
-        `SELECT "status"::text FROM "commerce"."Shop" WHERE "id"=$1`, context.shopId);
+      const shop = await first<{ status: string; platform: string }>(tx,
+        `SELECT "status"::text,"platform"::text FROM "commerce"."Shop" WHERE "id"=$1`, context.shopId);
       if (shop?.status !== "ACTIVE") return { kind: "suppressed", reason: "shop-inactive" } as const;
       const restriction = await first<{ status: string; revision: number }>(tx, `
         SELECT "status"::text,"revision" FROM "commerce"."ShopHumanMessagingRestriction"
@@ -174,6 +187,39 @@ export class OutboundSendFenceService {
       }
       const furtherDenial = await durableEligibility(tx, input, context);
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
+
+      const initial = input.initialOutreach;
+      if (initial) {
+        if (shop.platform !== "SHOPIFY") return { kind: "suppressed", reason: "invalid-initial-platform" } as const;
+        const attempt = await first<{ id: string }>(tx, `
+          SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
+          WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=1
+            AND "trigger"='INITIAL' AND "recipient"=$3 AND "status" IN ('PENDING','CAPACITY_BLOCKED')
+            AND "sentAt" IS NULL AND "outboundMessageId" IS NULL AND "followUpDueAt" IS NULL
+          FOR UPDATE`, initial.outreachAttemptId, input.recoveryId, input.recipient);
+        if (!attempt || context.recoveryStatus !== "DETECTED")
+          return { kind: "suppressed", reason: "initial-attempt-unavailable" } as const;
+        const message = await first<{ id: string }>(tx, `
+          SELECT "id" FROM "whatsapp"."ConversationMessage"
+          WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"='AUTOMATION'
+            AND "status"='PENDING' AND "content"=$3 AND "providerDispatchKey" IS NULL
+            AND "providerDispatchAdmittedAt" IS NULL AND "providerDispatchControlRevision" IS NULL
+            AND "providerMessageId" IS NULL AND "sentAt" IS NULL AND "deliveredAt" IS NULL
+            AND "readAt" IS NULL AND "failedAt" IS NULL
+            AND NOT EXISTS (SELECT 1 FROM "whatsapp"."MerchantConversationSendCommand" cmd WHERE cmd."outboundMessageId"=$1)
+            AND NOT EXISTS (SELECT 1 FROM "commerce"."RecoveryOutreachAttempt" other WHERE other."outboundMessageId"=$1)
+          FOR UPDATE`, input.messageId!, context.id, initial.expectedContent);
+        if (!message) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
+        const usage = await first<{ id: string }>(tx, `
+          SELECT "id" FROM "billing"."UsageEvent"
+          WHERE "idempotencyKey"=$1 AND "shopId"=$2 AND "sourceId"=$3 AND "quantity"=1
+            AND "sourceType"='OUTBOUND_AUTOMATED_MESSAGE' AND "metric"='OUTBOUND_AUTOMATED_MESSAGE'`,
+          initial.idempotencyKey, input.shopId, message.id);
+        if (!usage || !(await hasExactInitialCredit(tx, {
+          shopId: input.shopId, idempotencyKey: initial.idempotencyKey,
+          sourceKey: initial.recoveryCreditSourceKey, allowPaid: true, clock: this.clock,
+        }))) return { kind: "suppressed", reason: "initial-credit-unavailable" } as const;
+      }
 
       // This is the last reversible policy decision before the irreversible
       // provider permit. Sample time after all potentially blocking row locks
@@ -278,10 +324,76 @@ export class OutboundSendFenceService {
         WHERE "id"=$1 AND "conversationId"=$4 AND "direction"='OUTBOUND'
           AND "senderType"=$5::"whatsapp"."MessageSenderType"
           AND "providerDispatchKey" IS NULL AND "status"='PENDING'
+          ${initial ? `AND "content"=$6 AND "providerDispatchAdmittedAt" IS NULL
+            AND "providerDispatchControlRevision" IS NULL AND "providerMessageId" IS NULL
+            AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : ""}
         RETURNING "providerDispatchAdmittedAt"`,
-        messageId, dispatchKey, context.revision, context.id, input.senderType);
+        messageId, dispatchKey, context.revision, context.id, input.senderType,
+        ...(initial ? [initial.expectedContent] : []));
       if (!message.length) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
       return { kind: "admitted", messageId, dispatchKey, admittedAt: message[0]!.providerDispatchAdmittedAt } as const;
     });
+    } catch (error) {
+      if (input.initialOutreach) logger.error("recovery.initial_outreach.sql_permit.failed", {
+        shopId: input.shopId, recoveryId: input.recoveryId, conversationId: input.conversationId,
+        attemptId: input.initialOutreach.outreachAttemptId, messageId: input.messageId,
+        stage: "final_permit", sourceError: initialOutreachDiagnostic(error),
+      });
+      throw error;
+    }
   }
+}
+
+// Called only after the initial attempt and prepared message have been locked.
+export async function hasExactInitialCredit(tx: SqlTransaction, input: {
+  shopId: string; idempotencyKey: string; sourceKey: string; allowPaid: boolean;
+  clock: () => Date;
+}): Promise<boolean> {
+  const logical = createRecoveryIdempotencyKey(input.shopId, input.idempotencyKey);
+  const candidates = await rows<{ id: string; sourceKey: string }>(tx, `
+    SELECT "id","sourceKey" FROM "billing"."UsageReservation"
+    WHERE "sourceKey"=$1 OR (
+      "shopId"=$2 AND "sourceKey" LIKE 'paid-included:%' AND right("sourceKey", length($1::text)+1)=':'||$1
+    )
+    ORDER BY "id" LIMIT 2 FOR SHARE`, logical, input.shopId);
+  if (candidates.length !== 1 || candidates[0]?.sourceKey !== input.sourceKey) return false;
+  const now = input.clock();
+  if (!Number.isFinite(now.getTime())) return false;
+  const valid = await first<{ id: string }>(tx, `
+    SELECT r."id" FROM "billing"."UsageReservation" r
+    LEFT JOIN "billing"."ShopEntitlementCounter" c ON c."id"=r."counterId"
+    LEFT JOIN "billing"."RecoveryCreditPurchase" l ON l."id"=r."purchasedCreditPurchaseId"
+    LEFT JOIN "billing"."BillingPeriodEntitlementCounter" pc ON pc."id"=r."billingPeriodEntitlementCounterId"
+    LEFT JOIN "billing"."BillingPeriod" p ON p."id"=pc."billingPeriodId"
+    LEFT JOIN "billing"."Subscription" sub ON sub."shopId"=r."shopId"
+    LEFT JOIN "billing"."PromotionalCreditGrant" g ON g."id"=r."promotionalCreditGrantId"
+    LEFT JOIN "billing"."PromotionCampaign" campaign ON campaign."id"=g."campaignId"
+    LEFT JOIN "billing"."MerchantPromotionSelection" sel ON sel."shopId"=r."shopId"
+    WHERE r."id"=$1 AND r."shopId"=$2 AND r."status"='RESERVED' AND r."quantity"=1
+      AND r."committedUsageEventId" IS NULL AND r."compensationUsageEventId" IS NULL
+      AND r."compensationReason" IS NULL AND r."compensationDisposition" IS NULL AND r."compensatedAt" IS NULL
+      AND (r."expiresAt" IS NULL OR r."expiresAt">$3)
+      AND (
+        (r."sourceKey"=$4 AND (
+          (r."billingPeriodEntitlementCounterId" IS NULL AND r."promotionalCreditGrantId" IS NULL
+            AND c."shopId"=$2 AND (
+              (c."counter"='LIFETIME_FREE_RECOVERY_CREDITS' AND r."purchasedCreditPurchaseId" IS NULL)
+              OR (c."counter"='PURCHASED_RECOVERY_CREDITS' AND l."shopId"=$2 AND l."status"='ACTIVE')
+            ))
+          OR (r."counterId" IS NULL AND r."purchasedCreditPurchaseId" IS NULL
+            AND r."billingPeriodEntitlementCounterId" IS NULL AND g."shopId"=$2
+            AND sel."promotionalCreditGrantId"=g."id" AND campaign."status"='ACTIVE'
+            AND campaign."startsAt"<=$3 AND campaign."expiresAt">$3
+            AND ((campaign."scope"='SHOP' AND campaign."targetShopId"=$2)
+              OR (campaign."scope"='PLAN' AND campaign."targetPlanId"=sub."planId")
+              OR (campaign."scope"='GLOBAL' AND campaign."targetShopId" IS NULL AND campaign."targetPlanId" IS NULL)))
+        ))
+        OR ($5 AND r."counterId" IS NULL AND r."purchasedCreditPurchaseId" IS NULL
+          AND r."promotionalCreditGrantId" IS NULL AND pc."shopId"=$2
+          AND pc."counter"='INCLUDED_RECOVERY_CREDITS' AND p."shopId"=$2
+          AND p."subscriptionId"=sub."id" AND sub."billingPeriodId"=p."id"
+          AND p."status"='OPEN' AND p."periodStart"<=$3 AND p."periodEnd">$3
+          AND r."sourceKey"='paid-included:'||p."id"||':'||$4)
+      )`, candidates[0].id, input.shopId, now, logical, input.allowPaid);
+  return valid !== null;
 }

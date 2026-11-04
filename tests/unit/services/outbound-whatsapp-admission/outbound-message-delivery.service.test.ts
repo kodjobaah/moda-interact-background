@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
+const capture = vi.hoisted(() => ({ records: [] as unknown[] }));
+vi.mock("@modainteract/moda-interact-shared/logging", async (importOriginal) => {
+  const shared = await importOriginal<typeof import("@modainteract/moda-interact-shared/logging")>();
+  return { ...shared, createLogger: (options: Parameters<typeof shared.createLogger>[0]) =>
+    shared.createLogger({ ...options, sink: (record) => {
+      capture.records.push(JSON.parse(JSON.stringify(record)));
+    } }) };
+});
+
 import {
-  OutboundMessageDeliveryService,
+  OutboundMessageDeliveryService, OutboundPreparationRetryError,
   TERMINAL_MESSAGE,
 } from "../../../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import { prepareAutomatedTemplateInput } from "../../../../src/services/conversation-moderation/automated-template-input.js";
@@ -14,12 +23,14 @@ function harness({
   moderationOutcome = "allow",
   currentAllowance = true,
   generalFence,
+  wooFence,
 }: {
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
   moderationOutcome?: "allow" | "block" | "retry";
   currentAllowance?: boolean;
   generalFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
+  wooFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
 } = {}) {
   let currentText = "Hello";
   const conversationMessageUpdate = vi.fn().mockImplementation(async ({ data }: { data: { content?: string } }) => {
@@ -27,7 +38,8 @@ function harness({
     return {};
   });
   const conversationMessageFindUnique = vi.fn().mockImplementation(async () => ({
-    conversationId: "conversation-1", senderType: "AGENT", content: currentText,
+    conversationId: "conversation-1", senderType: "AGENT", direction: "OUTBOUND", content: currentText,
+    conversation: { shopId: "shop-1", checkoutRecovery: null },
     status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
   }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
@@ -48,9 +60,13 @@ function harness({
     $queryRawUnsafe: queryRawUnsafe,
     conversationMessage: {
       update: conversationMessageUpdate,
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       findUnique: conversationMessageFindUnique,
     },
     conversation: { update: conversationUpdate },
+    usageEvent: { deleteMany: usageDeleteMany, findMany: vi.fn().mockResolvedValue([
+      { id: "usage-1", shopId: "shop-1", sourceId: "message-1", quantity: 1, idempotencyKey: "general" },
+    ]) },
   };
   const database = {
     $queryRawUnsafe: queryRawUnsafe,
@@ -71,7 +87,9 @@ function harness({
   };
 
   const moderationMock = {
-    assessText: vi.fn(async () => ({ kind: moderationOutcome })),
+    assessText: vi.fn(async () => moderationOutcome === "retry"
+      ? { kind: moderationOutcome, assessmentId: "assessment-1", retryAt: new Date("2026-11-04T01:00:00Z") }
+      : { kind: moderationOutcome }),
     requireCurrentAllowance: vi.fn(async () => currentAllowance),
   };
   return {
@@ -87,7 +105,7 @@ function harness({
       undefined,
       moderationMock as never,
       undefined, // providerFailure uses its production adapter
-      generalFence as never,
+      generalFence as never, undefined, wooFence as never,
     ),
   };
 }
@@ -100,6 +118,72 @@ const admission = {
   terminal: false,
   executionScope: "general" as const,
 };
+
+const wooTemplate = {
+  to: "+447400123456", templateName: "recovery", languageCode: "en",
+  bodyParameters: ["Fixture shop"],
+  templateRegistration: {
+    shopId: "shop-1", senderWabaId: "phone-number-id", purpose: "INITIAL_NO_OFFER" as const,
+    variantId: "variant", registrationId: "registration", definitionId: "definition",
+    providerTemplateId: "provider", providerTemplateName: "recovery", providerLanguageCode: "en",
+    submittedContentHash: "a".repeat(64), bindingFingerprint: "b".repeat(64),
+  },
+};
+const wooScope = { recoveryId: "recovery-1", attemptId: "attempt-1" } as
+  Parameters<OutboundMessageDeliveryService["sendPreparedWooInitialTemplate"]>[2];
+
+describe("scoped initial template diagnostics", () => {
+  const permit = () => ({ admitFinalSend: vi.fn().mockResolvedValue({ kind: "admitted" }) });
+
+  it("preserves the prepared message for typed moderation retry", async () => {
+    capture.records.length = 0;
+    const test = harness({ moderationOutcome: "retry", wooFence: permit() });
+    await expect(test.service.sendPreparedWooInitialTemplate(admission, wooTemplate, wooScope))
+      .rejects.toMatchObject({ name: OutboundPreparationRetryError.name, assessmentId: "assessment-1" });
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(JSON.stringify(capture.records)).toContain("assessment-1");
+  });
+
+  it("emits receipt failure without reclassifying it as provider HTTP rejection", async () => {
+    capture.records.length = 0;
+    const test = harness({ wooFence: permit() });
+    const error = new Error("distinct receipt failure marker");
+    test.database.$transaction.mockRejectedValueOnce(error);
+    await expect(test.service.sendPreparedWooInitialTemplate(admission, wooTemplate, wooScope)).rejects.toBe(error);
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(capture.records).toContainEqual(expect.objectContaining({
+      event: "outbound.initial.send.failed", level: "error",
+      data: expect.objectContaining({
+        stage: "receipt_persistence", messageId: "message-1", attemptId: "attempt-1",
+        sourceError: expect.objectContaining({ message: "distinct receipt failure marker" }),
+      }),
+    }));
+    expect(JSON.stringify(capture.records)).not.toContain("provider_http");
+  });
+
+  it("preserves both original provider and reconciliation failures", async () => {
+    capture.records.length = 0;
+    const error = Object.assign(new Error("distinct provider failure marker"), {
+      name: "WhatsAppServiceError", code: "provider-rejected", providerCode: "2",
+    });
+    const reconciliation = new Error("distinct reconciliation failure marker");
+    const test = harness({
+      wooFence: permit(), provider: { sendWhatsAppTemplate: vi.fn().mockRejectedValue(error) },
+    });
+    test.database.$transaction.mockRejectedValueOnce(reconciliation);
+    await expect(test.service.sendPreparedWooInitialTemplate(admission, wooTemplate, wooScope))
+      .rejects.toMatchObject({ errors: [error, reconciliation] });
+    expect(capture.records).toContainEqual(expect.objectContaining({
+      event: "outbound.initial.cleanup.failed",
+      data: expect.objectContaining({
+        sendError: expect.objectContaining({ message: "distinct provider failure marker" }),
+        reconciliationError: expect.objectContaining({ message: "distinct reconciliation failure marker" }),
+      }),
+    }));
+  });
+});
 
 describe("OutboundMessageDeliveryService", () => {
   it("moderates all BG008 rendered text before admitting a provider send", async () => {
@@ -152,8 +236,8 @@ describe("OutboundMessageDeliveryService", () => {
       ...admission, to: "+447400123456", text: "Don't send this",
     })).resolves.toEqual({ kind: "suppressed", reason: "conversation-invalid" });
     expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
-    expect(test.database.conversationMessage.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "message-1" }, data: { status: "FAILED" },
+    expect(test.transaction.conversationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "message-1", status: "PENDING" }), data: { status: "FAILED" },
     }));
   });
 
@@ -283,7 +367,10 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        where: { id: "message-1" },
+        where: { id: "message-1", AND: expect.objectContaining({
+          conversationId: "conversation-1", status: "PENDING",
+          providerDispatchAdmittedAt: { not: null },
+        }) },
         data: expect.objectContaining({
           providerMessageId: "wamid-1",
           status: "SENT",
@@ -295,6 +382,22 @@ describe("OutboundMessageDeliveryService", () => {
       where: { id: "conversation-1" },
       data: { lastMessageAt: expect.any(Date) },
     });
+  });
+
+  it("propagates receipt persistence failure without treating it as provider rejection", async () => {
+    const test = harness();
+    const failure = new Error("receipt database write failed");
+    test.database.conversationMessage.update.mockResolvedValueOnce({});
+    test.database.conversationMessage.update.mockRejectedValueOnce(failure);
+
+    await expect(test.service.sendPreparedText({
+      ...admission, to: "+15551234567", text: "Hello",
+    })).rejects.toBe(failure);
+    expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledTimes(1);
+    expect(test.database.usageEvent.deleteMany).not.toHaveBeenCalled();
+    expect(test.database.conversationMessage.update).toHaveBeenCalledTimes(2);
+    expect(test.transaction.conversation.update.mock.invocationCallOrder[0])
+      .toBeLessThan(test.database.conversationMessage.update.mock.invocationCallOrder[1]!);
   });
 
   it("uses recovery execution scope immediately before provider delivery", async () => {
@@ -478,15 +581,12 @@ describe("OutboundMessageDeliveryService", () => {
     ).resolves.toEqual({ kind: "suppressed", reason: "subscription-frozen" });
 
     expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
-    expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
-      where: { id: "message-1" },
+    expect(test.transaction.conversationMessage.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "message-1", status: "PENDING" }),
       data: { status: "FAILED" },
     });
     expect(test.database.usageEvent.deleteMany).toHaveBeenCalledWith({
-      where: {
-        sourceId: "message-1",
-        metric: "OUTBOUND_AUTOMATED_MESSAGE",
-      },
+      where: expect.objectContaining({ sourceId: "message-1", metric: "OUTBOUND_AUTOMATED_MESSAGE" }),
     });
   });
 

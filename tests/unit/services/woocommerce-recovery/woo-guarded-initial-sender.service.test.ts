@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
-import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { WooGuardedInitialSenderService } from "../../../../src/services/woocommerce-recovery/woo-guarded-initial-sender.service.js";
 
-const logger = { child() { return this; }, warn: vi.fn(), error: vi.fn(), info: vi.fn() } as unknown as StructuredLogger;
+
 const attemptId = "woo-attempt-1";
 const idempotencyKey = `recovery-outreach:${attemptId}`;
 const recoveryCreditSourceKey = createRecoveryIdempotencyKey("shop-1", idempotencyKey);
@@ -27,6 +27,10 @@ const input = {
 };
 
 function harness() {
+  const records: unknown[] = [];
+  const logger = createLogger({ serviceName: "test-background", environment: "test",
+    sink: (record) => { records.push(JSON.parse(JSON.stringify(record))); } });
+  const inspectInitialOutreachAdmission = vi.fn().mockResolvedValue({ kind: "absent" });
   const read = vi.fn(async () => ({ kind: "none-observed" as const }));
   const findExistingAdmission = vi.fn(async () => null as null | {
     id: string; conversationId: string; status: string; sentAt: Date | null;
@@ -36,8 +40,8 @@ function harness() {
   const sendPreparedWooInitialTemplate = vi.fn(async () => ({ kind: "admitted" as const,
     shopId: "shop-1", conversationId: "conversation-1", messageId: "message-1", terminal: false }));
   const service = new WooGuardedInitialSenderService({ read }, logger,
-    { findExistingAdmission, reserve } as never, { sendPreparedWooInitialTemplate } as never);
-  return { read, findExistingAdmission, reserve, sendPreparedWooInitialTemplate, service };
+    { findExistingAdmission, inspectInitialOutreachAdmission, reserve } as never, { sendPreparedWooInitialTemplate } as never);
+  return { read, records, inspectInitialOutreachAdmission, reserve, sendPreparedWooInitialTemplate, service };
 }
 
 describe("ARCH-046-BACKGROUND-004 Woo initial sender adapter", () => {
@@ -47,6 +51,7 @@ describe("ARCH-046-BACKGROUND-004 Woo initial sender adapter", () => {
     expect(f.reserve).toHaveBeenCalledWith({
       shopId: "shop-1", conversationId: "conversation-1", senderType: "AUTOMATION",
       idempotencyKey, recoveryCreditSourceKey,
+      initialOutreach: { shopId: "shop-1", recoveryId: "recovery-1", outreachAttemptId: attemptId },
     });
     expect(f.sendPreparedWooInitialTemplate).toHaveBeenCalledWith(
       expect.objectContaining({ messageId: "message-1" }),
@@ -81,33 +86,33 @@ describe("ARCH-046-BACKGROUND-004 Woo initial sender adapter", () => {
     expect(f.reserve).not.toHaveBeenCalled();
   });
 
-  it("never re-sends an existing confirmed, pending, or failed provider admission", async () => {
+  it("resumes the prepared message without reserving, and holds a permitted message", async () => {
     const f = harness();
-    f.findExistingAdmission.mockResolvedValueOnce({ id: "m", conversationId: "conversation-1",
-      status: "SENT", sentAt: new Date() });
-    expect(await f.service.sendInitial(input)).toEqual({ kind: "suppressed", reason: "duplicate" });
-    f.findExistingAdmission.mockResolvedValueOnce({ id: "m", conversationId: "conversation-1",
-      status: "PENDING", sentAt: null });
+    f.inspectInitialOutreachAdmission.mockResolvedValueOnce({
+      kind: "prepared", message: { id: "original", conversationId: "conversation-1" },
+    });
+    await expect(f.service.sendInitial(input)).resolves.toEqual({ kind: "admitted" });
+    expect(f.sendPreparedWooInitialTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "original" }), expect.anything(), expect.anything(),
+    );
+    f.inspectInitialOutreachAdmission.mockResolvedValueOnce({
+      kind: "held", reason: "provider-outcome-unknown",
+    });
     await expect(f.service.sendInitial(input)).rejects.toThrow("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
-    f.findExistingAdmission.mockResolvedValueOnce({ id: "m", conversationId: "conversation-1",
-      status: "FAILED", sentAt: null });
-    expect(await f.service.sendInitial(input)).toEqual({ kind: "suppressed", reason: "duplicate" });
-    f.findExistingAdmission.mockResolvedValueOnce({ id: "m", conversationId: "other",
-      status: "SENT", sentAt: new Date() });
-    await expect(f.service.sendInitial(input)).rejects.toThrow("OWNERSHIP_MISMATCH");
     expect(f.reserve).not.toHaveBeenCalled();
   });
 
-  it("logs bounded exception identity via the shared logger and rethrows unchanged", async () => {
+  it("emits bounded source evidence through Shared and rethrows unchanged", async () => {
     const f = harness();
-    const error = Object.assign(new Error("recipient +447400123456 must remain private"), { code: "P1001" });
+    const error = Object.assign(new Error("harmless marker +447400123456 token=private https://example.test/private"), {
+      code: "P1001",
+    });
     f.sendPreparedWooInitialTemplate.mockRejectedValueOnce(error);
     await expect(f.service.sendInitial(input)).rejects.toBe(error);
-    expect(logger.error).toHaveBeenCalledWith("woocommerce.recovery.initial.permit.failed", {
-      shopId: "shop-1", recoveryId: "recovery-1", attemptId,
-      errorName: "Error", errorCode: "P1001",
-      errorMessage: error.message, error,
-    });
-    expect((logger.error as ReturnType<typeof vi.fn>).mock.lastCall?.[1].errorMessage).toContain("447400123456");
+    const serialized = JSON.stringify(f.records);
+    expect(serialized).toContain("woocommerce.recovery.initial.permit.failed");
+    expect(serialized).toContain("harmless marker");
+    expect(serialized).toContain("P1001");
+    expect(serialized).not.toMatch(/447400123456|private|example\.test/);
   });
 });

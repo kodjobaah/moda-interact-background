@@ -17,12 +17,15 @@ import { OutboundAdmissionReservationService } from "./outbound-whatsapp-admissi
 import {
   OutboundMessageDeliveryService,
   TERMINAL_MESSAGE,
+  OutboundPreparationRetryError,
 } from "./outbound-whatsapp-admission/outbound-message-delivery.service.js";
 import type {
+  InitialOutreachAdmissionScope,
   OutboundAdmissionInput,
   OutboundAdmissionResult,
 } from "./outbound-whatsapp-admission/outbound-whatsapp-admission.types.js";
 export type {
+  InitialOutreachAdmissionScope, InitialOutreachMessageEvidence, InitialOutreachAdmissionLookup,
   OutboundAdmissionInput,
   OutboundAdmissionResult,
   OutboundSuppressionReason,
@@ -85,6 +88,12 @@ export class OutboundWhatsAppAdmissionService {
     return this.reservation.findExistingAdmission(idempotencyKey);
   }
 
+  inspectInitialOutreachAdmission(
+    scope: InitialOutreachAdmissionScope,
+  ) {
+    return this.reservation.inspectInitialOutreachAdmission(scope);
+  }
+
   async reserve(input: OutboundAdmissionInput): Promise<OutboundAdmissionResult> {
     return this.reservation.reserve(input);
   }
@@ -107,10 +116,29 @@ export class OutboundWhatsAppAdmissionService {
     });
   }
 
+  async resumeInitialTemplate(input: InitialOutreachAdmissionScope & {
+    messageId: string;
+    recoveryCreditSourceKey: string;
+    template: Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number };
+  }): Promise<OutboundAdmissionResult> {
+    const existing = await this.inspectInitialOutreachAdmission(input);
+    if (existing.kind !== "prepared" || existing.message.id !== input.messageId)
+      return { kind: "suppressed", reason: "duplicate" };
+    return this.delivery.sendPreparedTemplate({
+      kind: "admitted", shopId: input.shopId, messageId: existing.message.id,
+      conversationId: existing.message.conversationId, terminal: false, executionScope: "recovery",
+    }, { ...input.template, initialOutreach: input, recoveryCreditSourceKey: input.recoveryCreditSourceKey });
+  }
+
   async sendTemplate(
     input: OutboundAdmissionInput &
       Omit<SendTemplateInput, "to"> & { to: string; expectedControlRevision?: number },
   ): Promise<OutboundAdmissionResult> {
+    if (input.initialOutreach && (
+      input.senderType !== "AUTOMATION" || input.shopId !== input.initialOutreach.shopId ||
+      input.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}` ||
+      !input.recoveryCreditSourceKey
+    )) return { kind: "suppressed", reason: "conversation-invalid" };
     const admission = await this.reserve(input);
     if (admission.kind !== "admitted") return admission;
 
@@ -175,4 +203,4 @@ export async function runCommerceAgentAfterAdmission<TContext, TResult>({
   }
 }
 
-export { TERMINAL_MESSAGE };
+export { TERMINAL_MESSAGE, OutboundPreparationRetryError };
