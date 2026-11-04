@@ -83,6 +83,77 @@ suite("ARCH-056 initial outreach credit (PostgreSQL)", () => {
     }
   });
 
+
+  it("holds null-message absence when an unlinked outbound automated message exists in the recovery conversation", async () => {
+    const f = await createInitialOutreachCreditFixture({ withCredit: false });
+    try {
+      const conversation = await f.db.conversation.findUniqueOrThrow({
+        where: { checkoutRecoveryId: f.recoveryId },
+        select: { id: true },
+      });
+      await f.db.conversationMessage.create({ data: {
+        conversationId: conversation.id,
+        direction: "OUTBOUND",
+        senderType: "AUTOMATION",
+        status: "PENDING",
+        content: "unlinked pending initial message",
+      } });
+
+      await expect(f.service.revalidateExistingInitialOutreach({
+        shopId: f.shopId,
+        recoveryId: f.recoveryId,
+        outreachAttemptId: f.attemptId,
+        outboundMessageId: null,
+      })).resolves.toMatchObject({ kind: "held", reason: "lineage-conflict" });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("holds null-message absence when a merchant command is linked to the initial attempt", async () => {
+    const f = await createInitialOutreachCreditFixture({ withCredit: false });
+    try {
+      const conversation = await f.db.conversation.findUniqueOrThrow({
+        where: { checkoutRecoveryId: f.recoveryId },
+        select: { id: true },
+      });
+      const command = await f.db.$transaction(async (tx) => {
+        const created = await tx.merchantConversationSendCommand.create({ data: {
+          shopId: f.shopId,
+          conversationId: conversation.id,
+          kind: "RECOVERY_FOLLOW_UP_TEMPLATE",
+          recipientSnapshot: "15551234567",
+          idempotencyKey: `initial-attempt-command:${f.attemptId}`,
+          payloadSha256: "a".repeat(64),
+          expectedControlRevision: 0,
+          templateName: "recovery_follow_up",
+          templateLanguageCode: "en_US",
+          recoveryOutreachAttemptId: f.attemptId,
+        } });
+        return tx.merchantConversationSendCommand.update({
+          where: { id: created.id },
+          data: {
+            state: "CANCELLED", failureCode: "fixture_lineage_only",
+            completedAt: new Date(), outboundMessageId: null,
+          },
+        });
+      });
+
+      await expect(f.service.revalidateExistingInitialOutreach({
+        shopId: f.shopId,
+        recoveryId: f.recoveryId,
+        outreachAttemptId: f.attemptId,
+        outboundMessageId: null,
+      })).resolves.toMatchObject({ kind: "held", reason: "lineage-conflict" });
+      await expect(f.db.merchantConversationSendCommand.findUniqueOrThrow({
+        where: { id: command.id },
+        select: { state: true, outboundMessageId: true, dispatchAttemptCount: true },
+      })).resolves.toEqual({ state: "CANCELLED", outboundMessageId: null, dispatchAttemptCount: 0 });
+    } finally {
+      await f.close();
+    }
+  });
+
   it.each(["free", "paid", "purchased", "promotional"] as const)(
     "revalidates the same retained %s source without changing accounting",
     async (source) => {

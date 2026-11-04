@@ -83,4 +83,30 @@ describe("initial outreach credit evidence", () => {
       outboundMessageId: null,
     }, sentAttempt)).rejects.toThrow("lineage");
   });
+
+  it("rejects an unlinked outbound automated message in the recovery conversation", async () => {
+    const tx = transactionForAttempt({
+      conversationMessage: {
+        findUnique: async () => null,
+        findFirst: async () => ({ id: "orphan-message" }),
+      },
+      usageEvent: { findUnique: async () => null, findMany: async () => [] },
+    });
+
+    await expect(assertNoInitialMessageEvidence(tx as never, {
+      ...input,
+      outboundMessageId: null,
+    }, attemptEvidence())).rejects.toThrow("discoverable message, command or automated usage event");
+  });
+
+  it("rejects a merchant command linked to a null-message initial attempt", async () => {
+    const tx = transactionForAttempt({
+      merchantConversationSendCommand: { findFirst: async () => ({ id: "command-1" }) },
+    });
+
+    await expect(assertNoInitialMessageEvidence(tx as never, {
+      ...input,
+      outboundMessageId: null,
+    }, attemptEvidence())).rejects.toThrow("discoverable message, command or automated usage event");
+  });
 });

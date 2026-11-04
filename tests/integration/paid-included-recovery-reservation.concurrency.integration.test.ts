@@ -30,9 +30,6 @@ describeWithDatabase("Paid included recovery reservation PostgreSQL concurrency"
           kind: "PAID_METERED",
           shopifyUsageEventHandle: "paid-recovery-meter",
           includedRecoveryConversationAllowance: 1,
-          defaultOutboundSoftLimit: 10,
-          defaultOutboundHardLimit: 20,
-          terminalMessageReservedSlots: 1,
         },
       });
       await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
@@ -63,8 +60,20 @@ describeWithDatabase("Paid included recovery reservation PostgreSQL concurrency"
       });
       await database.platformBillingPolicy.upsert({
         where: { id: "default" },
-        update: { absoluteOutboundHardLimit: 20, defaultWarningPercent: 80 },
-        create: { absoluteOutboundHardLimit: 20, defaultWarningPercent: 80 },
+        update: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
+        create: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
       });
       await database.shopEntitlementCounter.create({
         data: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 0 },

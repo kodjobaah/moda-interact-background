@@ -31,12 +31,26 @@ describeWithDatabase("same-plan billing-period rollover PostgreSQL concurrency",
           kind: "PAID_METERED",
           shopifyUsageEventHandle: "recovery-meter",
           includedRecoveryConversationAllowance: 10,
+        },
+      });
+      await cleanupClient.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
+      await cleanupClient.platformBillingPolicy.upsert({
+        where: { id: "default" },
+        update: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
+        create: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
           defaultOutboundSoftLimit: 10,
           defaultOutboundHardLimit: 20,
           terminalMessageReservedSlots: 1,
         },
       });
-      await cleanupClient.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
       const subscription = await cleanupClient.subscription.create({
         data: {
           shopId,

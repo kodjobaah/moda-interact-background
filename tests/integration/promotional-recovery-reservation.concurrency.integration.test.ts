@@ -28,9 +28,6 @@ describeWithDatabase("Promotional recovery reservation PostgreSQL concurrency", 
           shopifyPlanHandle: `promo-${shopId}`,
           name: "Promotional integration plan",
           kind: "FREE",
-          defaultOutboundSoftLimit: 10,
-          defaultOutboundHardLimit: 20,
-          terminalMessageReservedSlots: 1,
         },
       });
       planId = plan.id;
@@ -43,8 +40,20 @@ describeWithDatabase("Promotional recovery reservation PostgreSQL concurrency", 
       });
       await database.platformBillingPolicy.upsert({
         where: { id: "default" },
-        update: {},
-        create: { absoluteOutboundHardLimit: 20, defaultWarningPercent: 80 },
+        update: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
+        create: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
       });
       const admin = await database.platformAdmin.create({ data: { email: `${shopId}@test.invalid` } });
       adminId = admin.id;
@@ -111,9 +120,6 @@ describeWithDatabase("Promotional recovery reservation PostgreSQL concurrency", 
           shopifyPlanHandle: `same-source-${shopId}`,
           name: "Same-source concurrency plan",
           kind: "FREE",
-          defaultOutboundSoftLimit: 10,
-          defaultOutboundHardLimit: 20,
-          terminalMessageReservedSlots: 1,
         },
       });
       planId = plan.id;
@@ -126,8 +132,20 @@ describeWithDatabase("Promotional recovery reservation PostgreSQL concurrency", 
       });
       await database.platformBillingPolicy.upsert({
         where: { id: "default" },
-        update: {},
-        create: { absoluteOutboundHardLimit: 20, defaultWarningPercent: 80 },
+        update: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
+        create: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
       });
       const admin = await database.platformAdmin.create({ data: { email: `${shopId}@test.invalid` } });
       adminId = admin.id;

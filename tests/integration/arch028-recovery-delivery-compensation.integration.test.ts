@@ -37,6 +37,7 @@ async function fixture(input: TestCase = {}) {
   const active = input.active !== false;
   const sender = input.sender ?? "AUTOMATION";
   const linked = input.linkMessage !== false;
+  const humanCommandIds: string[] = [];
   const now = new Date();
   // Closed source windows must still have a positive duration. Making start=end
   // would fail the database boundary checks before compensation is exercised.
@@ -81,20 +82,29 @@ async function fixture(input: TestCase = {}) {
     } });
   } else {
     // ARCH-040 requires an INSERT to be an accepted intent with no outbound
-    // identity. Link the produced message in a separate guarded UPDATE.
-    const command = await db.merchantConversationSendCommand.create({ data: {
-      shopId, conversationId: conversation.id,
-      kind: input.humanKind ?? "RECOVERY_FOLLOW_UP_TEMPLATE",
-      recipientSnapshot: "15551234567", idempotencyKey: `human-${id}`,
-      payloadSha256: "0".repeat(64), expectedControlRevision: 1,
-      ...(input.humanKind === "HUMAN_TEXT"
-        ? { textBody: "Ordinary merchant reply" }
-        : { templateName: "recovery_follow_up", templateLanguageCode: "en",
-          recoveryOutreachAttemptId: attemptId }),
-    } });
-    await db.merchantConversationSendCommand.update({
-      where: { id: command.id }, data: { outboundMessageId: messageId },
+    // identity. This fixture represents existing lineage, not pending work, so
+    // cancel and link it atomically before any parallel suite can claim it.
+    const command = await db.$transaction(async (tx) => {
+      const created = await tx.merchantConversationSendCommand.create({ data: {
+        shopId, conversationId: conversation.id,
+        kind: input.humanKind ?? "RECOVERY_FOLLOW_UP_TEMPLATE",
+        recipientSnapshot: "15551234567", idempotencyKey: `human-${id}`,
+        payloadSha256: "0".repeat(64), expectedControlRevision: 1,
+        ...(input.humanKind === "HUMAN_TEXT"
+          ? { textBody: "Ordinary merchant reply" }
+          : { templateName: "recovery_follow_up", templateLanguageCode: "en",
+            recoveryOutreachAttemptId: attemptId }),
+      } });
+      await tx.merchantConversationSendCommand.update({
+        where: { id: created.id },
+        data: {
+          state: "CANCELLED", failureCode: "fixture_lineage_only",
+          nextAttemptAt: null, completedAt: new Date(), outboundMessageId: messageId,
+        },
+      });
+      return created;
     });
+    humanCommandIds.push(command.id);
   }
   const logicalKey = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${attemptId}`);
   let sourceKey = logicalKey;
@@ -214,7 +224,21 @@ async function fixture(input: TestCase = {}) {
     reservationId: reservation.id, counterId, billingPeriodEntitlementCounterId,
     promotionalCreditGrantId, purchasedCreditPurchaseId, sourceKey,
     compensate: new RecoveryDeliveryCompensationService(db),
-    close: () => db.$disconnect(),
+    async close() {
+      try {
+        if (humanCommandIds.length) {
+          await db.merchantConversationSendCommand.updateMany({
+            where: {
+              id: { in: humanCommandIds }, shopId, state: "ACCEPTED",
+              providerDispatchKey: null, leaseToken: null, leaseExpiresAt: null,
+            },
+            data: { state: "CANCELLED", nextAttemptAt: null, completedAt: new Date() },
+          });
+        }
+      } finally {
+        await db.$disconnect();
+      }
+    },
   };
 }
 

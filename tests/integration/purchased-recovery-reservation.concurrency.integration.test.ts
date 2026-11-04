@@ -35,8 +35,6 @@ describeWithDatabase("Purchased recovery reservation PostgreSQL concurrency", ()
           shopifyPlanHandle: `purchased-${shopId}`,
           name: "Purchased integration plan",
           kind: "PAID_METERED",
-          defaultOutboundSoftLimit: 10,
-          defaultOutboundHardLimit: 20,
         },
       });
       await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
@@ -263,8 +261,25 @@ async function createFixture(
   const reservationClient = new PrismaClient();
   const refundClient = new PrismaClient();
   const shopId = randomUUID();
-  const plan = await database.billingPlan.create({ data: { shopifyPlanHandle: `fixture-${shopId}`, name: "Fixture plan", kind: "PAID_METERED", defaultOutboundSoftLimit: 10, defaultOutboundHardLimit: 20 } });
+  const plan = await database.billingPlan.create({ data: { shopifyPlanHandle: `fixture-${shopId}`, name: "Fixture plan", kind: "PAID_METERED" } });
   await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
+  await database.platformBillingPolicy.upsert({
+    where: { id: "default" },
+    update: {
+      absoluteOutboundHardLimit: 20,
+      defaultWarningPercent: 80,
+      defaultOutboundSoftLimit: 10,
+      defaultOutboundHardLimit: 20,
+      terminalMessageReservedSlots: 1,
+    },
+    create: {
+      absoluteOutboundHardLimit: 20,
+      defaultWarningPercent: 80,
+      defaultOutboundSoftLimit: 10,
+      defaultOutboundHardLimit: 20,
+      terminalMessageReservedSlots: 1,
+    },
+  });
   const subscription = await database.subscription.create({ data: { shopId, planId: plan.id, status: "ACTIVE", observedShopifyPlanHandle: plan.shopifyPlanHandle, currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") } });
   const billingPeriod = await database.billingPeriod.create({ data: { shopId, subscriptionId: subscription.id, planId: plan.id, planKindSnapshot: "PAID_METERED", periodStart: new Date("2026-09-01T00:00:00.000Z"), periodEnd: new Date("2026-10-01T00:00:00.000Z"), status: "OPEN" } });
   await database.shopEntitlementCounter.create({ data: { shopId, counter: "PURCHASED_RECOVERY_CREDITS", grantedQuantity } });

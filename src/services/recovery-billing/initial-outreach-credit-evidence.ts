@@ -186,16 +186,27 @@ export async function assertNoInitialMessageEvidence(
     attempt.outboundMessageId === null && attempt.sentAt === null &&
     attempt.failureCode === null,
   "initial attempt has existing message or send evidence");
-  const [linkedMessage, canonicalUsage] = await Promise.all([
+  const [linkedMessage, canonicalUsage, linkedCommand] = await Promise.all([
     tx.conversationMessage.findFirst({
-      where: { recoveryOutreachAttempt: { is: { id: attempt.id } } },
+      where: { OR: [
+        { recoveryOutreachAttempt: { is: { id: attempt.id } } },
+        {
+          conversation: { is: { checkoutRecoveryId: input.recoveryId } },
+          direction: "OUTBOUND",
+          senderType: "AUTOMATION",
+        },
+      ] },
       select: { id: true },
     }),
     tx.usageEvent.findUnique({
       where: { idempotencyKey: `recovery-outreach:${attempt.id}` },
       select: { id: true },
     }),
+    tx.merchantConversationSendCommand.findFirst({
+      where: { recoveryOutreachAttemptId: attempt.id },
+      select: { id: true },
+    }),
   ]);
-  requireLineage(!linkedMessage && !canonicalUsage,
-    "initial attempt has a discoverable message or automated usage event");
+  requireLineage(!linkedMessage && !canonicalUsage && !linkedCommand,
+    "initial attempt has a discoverable message, command or automated usage event");
 }

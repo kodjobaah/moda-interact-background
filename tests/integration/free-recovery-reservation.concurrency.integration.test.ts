@@ -27,9 +27,6 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
           shopifyPlanHandle: `free-${shopId}`,
           name: "Free integration plan",
           kind: "FREE",
-          defaultOutboundSoftLimit: 10,
-          defaultOutboundHardLimit: 20,
-          terminalMessageReservedSlots: 1,
         },
       });
       await database.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
@@ -43,10 +40,19 @@ describeWithDatabase("Free recovery reservation PostgreSQL concurrency", () => {
       });
       await database.platformBillingPolicy.upsert({
         where: { id: "default" },
-        update: {},
+        update: {
+          absoluteOutboundHardLimit: 20,
+          defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
+        },
         create: {
           absoluteOutboundHardLimit: 20,
           defaultWarningPercent: 80,
+          defaultOutboundSoftLimit: 10,
+          defaultOutboundHardLimit: 20,
+          terminalMessageReservedSlots: 1,
         },
       });
       await database.shopEntitlementCounter.create({
