@@ -82,7 +82,17 @@ export async function resolveExactRecoverySource(
       "unlinked automated recovery message");
   }
 
-  const logicalSource = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${attempt.id}`);
+  const source = await findExactRecoveryReservationSource(tx, shopId, attempt.id);
+  requireLineage(source, "missing or ambiguous reservation");
+  return source;
+}
+
+export async function findExactRecoveryReservationSource(
+  tx: CompensationTransaction,
+  shopId: string,
+  outreachAttemptId: string,
+): Promise<RecoverySource | null> {
+  const logicalSource = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${outreachAttemptId}`);
   const reservations = await tx.usageReservation.findMany({
     where: { OR: [
       { sourceKey: logicalSource },
@@ -90,7 +100,9 @@ export async function resolveExactRecoverySource(
     ] },
     take: 2,
   });
-  requireLineage(reservations.length === 1, "missing or ambiguous reservation");
+  requireLineage(reservations.length <= 1, "missing or ambiguous reservation");
+  if (reservations.length === 0) return null;
+
   const reservation = reservations[0]!;
   requireLineage(reservation.shopId === shopId && reservation.quantity === 1,
     "reservation shop/quantity mismatch");
@@ -103,6 +115,20 @@ export async function resolveExactRecoverySource(
     requireLineage(counter?.shopId === shopId &&
       counter.counter === (kind === "free" ? "LIFETIME_FREE_RECOVERY_CREDITS" : "PURCHASED_RECOVERY_CREDITS"),
       "source-owned Shop credit counter mismatch");
+  }
+  if (kind === "purchased") {
+    const purchase = await tx.recoveryCreditPurchase.findUnique({
+      where: { id: reservation.purchasedCreditPurchaseId! },
+      select: { shopId: true },
+    });
+    requireLineage(purchase?.shopId === shopId, "purchased lot Shop mismatch");
+  }
+  if (kind === "promotional") {
+    const grant = await tx.promotionalCreditGrant.findUnique({
+      where: { id: reservation.promotionalCreditGrantId! },
+      select: { shopId: true },
+    });
+    requireLineage(grant?.shopId === shopId, "promotional grant Shop mismatch");
   }
   if (kind === "paid") {
     const periodCounter = await tx.billingPeriodEntitlementCounter.findUnique({
@@ -120,17 +146,20 @@ export async function resolveExactRecoverySource(
 }
 
 function sourceKind(source: UsageReservation): RecoverySourceKind {
-  const count = [source.counterId, source.billingPeriodEntitlementCounterId,
-    source.purchasedCreditPurchaseId, source.promotionalCreditGrantId].filter(Boolean).length;
-  // Purchased reservations have both a counter AND an immutable purchase-lot FK.
-  requireLineage(count === (source.purchasedCreditPurchaseId ? 2 : 1),
-    "reservation has invalid source ownership");
   if (source.purchasedCreditPurchaseId) {
-    requireLineage(!!source.counterId, "purchased source counter missing");
+    requireLineage(!!source.counterId && !source.billingPeriodEntitlementCounterId &&
+      !source.promotionalCreditGrantId, "reservation has invalid purchased ownership");
     return "purchased";
   }
-  if (source.billingPeriodEntitlementCounterId) return "paid";
-  if (source.promotionalCreditGrantId) return "promotional";
+  if (source.billingPeriodEntitlementCounterId) {
+    requireLineage(!source.counterId && !source.promotionalCreditGrantId,
+      "reservation has invalid paid ownership");
+    return "paid";
+  }
+  if (source.promotionalCreditGrantId) {
+    requireLineage(!source.counterId, "reservation has invalid promotional ownership");
+    return "promotional";
+  }
   requireLineage(!!source.counterId, "free source counter missing");
   return "free";
 }

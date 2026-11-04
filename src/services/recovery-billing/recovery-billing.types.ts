@@ -48,3 +48,66 @@ export type RecoveryBillingAdmissionResult =
     };
 
 export type RecoveryProviderFailureDisposition = "definitive" | "ambiguous";
+
+export type InitialOutreachCreditIdentity = {
+  shopId: string;
+  recoveryId: string;
+  outreachAttemptId: string;
+};
+
+export type ConfirmedInitialOutreachCreditInput = InitialOutreachCreditIdentity & {
+  outboundMessageId: string;
+};
+
+export type ExistingInitialOutreachCreditInput = InitialOutreachCreditIdentity & {
+  outboundMessageId: string | null;
+};
+
+export type ConfirmedInitialOutreachSettlement =
+  | {
+      kind: "settled";
+      disposition: "committed" | "already-committed";
+      sourceKind: "free" | "paid" | "purchased" | "promotional";
+      sourceKey: string;
+      reservationId: string;
+      committedUsageEventId: string;
+      outboundMessageId: string;
+      sentAt: Date;
+    }
+  | {
+      kind: "held";
+      reason:
+        | "message-not-confirmed"
+        | "lineage-conflict"
+        | "reservation-ambiguous"
+        | "reservation-released"
+        | "reservation-compensated"
+        | "paid-period-not-current"
+        | "settlement-not-committed";
+      reservationId?: string;
+      sourceKey?: string;
+    };
+
+export type ExistingInitialOutreachCredit =
+  | {
+      kind: "admitted";
+      admission: RecoveryBillingAdmission;
+      reservationId: string;
+    }
+  | { kind: "absent" }
+  | {
+      kind: "held";
+      reason:
+        | "message-not-pre-permit"
+        | "lineage-conflict"
+        | "reservation-not-reserved"
+        | "reservation-expired"
+        | "source-policy-mismatch"
+        | "paused"
+        | "feature-unavailable"
+        | "contract-required"
+        | "subscription-frozen"
+        | "paid-period-not-current";
+      reservationId?: string;
+      sourceKey?: string;
+    };

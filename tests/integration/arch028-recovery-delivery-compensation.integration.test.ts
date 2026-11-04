@@ -2,6 +2,7 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 import { describe, expect, it } from "vitest";
 import { RecoveryDeliveryCompensationService } from
   "../../src/services/recovery-delivery-compensation/reconcile.service.js";
@@ -321,9 +322,17 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
   it("fails closed when a matched credit has no durable source, without deleting its hard-limit entry", async () => {
     const f = await fixture();
     try {
+      const records: LogRecord[] = [];
+      const logger = createLogger({ serviceName: "compensation-test", environment: "test", sink: (record) => records.push(record) });
+      const compensation = new RecoveryDeliveryCompensationService(f.db, () => new Date(), logger);
       await f.db.usageReservation.update({ where: { id: f.reservationId },
         data: { sourceKey: `invalid-${f.sourceKey}` } });
-      await expect(f.compensate.reconcile(f.providerMessageId)).rejects.toThrow(/missing or ambiguous reservation/);
+      await expect(compensation.reconcile(f.providerMessageId)).rejects.toThrow(/missing or ambiguous reservation/);
+      const emitted = JSON.stringify(records);
+      expect(emitted).toContain("recovery.delivery_compensation.failed");
+      expect(emitted).toContain("missing or ambiguous reservation");
+      expect(emitted).toContain('"stage":"source_lookup"');
+      expect(emitted).toContain(`"providerMessageId":"${f.providerMessageId}"`);
       expect(await f.db.usageEvent.count({ where: { sourceId: f.messageId,
         metric: "OUTBOUND_AUTOMATED_MESSAGE" } })).toBe(1);
     } finally { await f.close(); }

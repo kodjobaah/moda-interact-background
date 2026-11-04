@@ -125,6 +125,18 @@ function createHarness(
 }
 
 describe("PurchasedRecoveryReservationService", () => {
+  it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
+    const { service, database } = createHarness();
+    const original = new Error("owner transaction failed");
+    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+
+    await expect(service.commitInExistingTransaction(transaction as never, {
+      shopId: "shop-1",
+      sourceKey: "purchased:existing-transaction",
+    })).rejects.toBe(original);
+    expect(database.$transaction).not.toHaveBeenCalled();
+  });
+
   it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("commits one purchased credit with explicit %s provider", async (provider) => {
     const { service, transaction, state } = createHarness(1, undefined, null, provider);
 

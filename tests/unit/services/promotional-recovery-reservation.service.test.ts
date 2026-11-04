@@ -87,7 +87,9 @@ function createHarness(options: HarnessOptions = {}) {
       }),
     },
     usageReservation: {
-      findUnique: vi.fn(async (args: any) => state.reservations.get(args.where.sourceKey) ?? null),
+      findUnique: vi.fn(async (args: any) => args.where.sourceKey
+        ? state.reservations.get(args.where.sourceKey) ?? null
+        : [...state.reservations.values()].find((reservation) => reservation.id === args.where.id) ?? null),
       create: vi.fn(async ({ data }: any) => {
         const reservation = { id: `reservation-${state.nextReservationId++}`, ...data, status: "RESERVED", committedUsageEventId: null };
         state.reservations.set(data.sourceKey, reservation);
@@ -136,6 +138,40 @@ function prismaConflict(code: "P2002" | "P2034") {
 }
 
 describe("PromotionalRecoveryReservationService", () => {
+  it("revalidates only the same reserved selected grant without reserving another unit", async () => {
+    const harness = createHarness();
+    const reservation = await harness.service.reserve(input());
+    expect(reservation.kind).toBe("reserved");
+    if (reservation.kind !== "reserved") throw new Error("reservation fixture failed");
+    const reservedBefore = harness.state.grant.reservedQuantity;
+
+    await expect(harness.service.isReservedSourceEligibleInExistingTransaction(
+      harness.transaction as never,
+      { shopId, reservationId: reservation.reservation.id, sourceKey: reservation.sourceKey, now },
+    )).resolves.toBe(true);
+    expect(harness.state.grant.reservedQuantity).toBe(reservedBefore);
+    expect(harness.database.$transaction).toHaveBeenCalledTimes(1);
+
+    harness.transaction.merchantPromotionSelection.findUnique.mockResolvedValue(null);
+    await expect(harness.service.isReservedSourceEligibleInExistingTransaction(
+      harness.transaction as never,
+      { shopId, reservationId: reservation.reservation.id, sourceKey: reservation.sourceKey, now },
+    )).resolves.toBe(false);
+    expect(harness.state.grant.reservedQuantity).toBe(reservedBefore);
+  });
+
+  it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
+    const harness = createHarness();
+    const original = new Error("owner transaction failed");
+    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+
+    await expect(harness.service.commitInExistingTransaction(transaction as never, {
+      shopId,
+      sourceKey: "recovery:existing-transaction",
+    })).rejects.toBe(original);
+    expect(harness.database.$transaction).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["GLOBAL", {}],
     ["SHOP", { targetShopId: shopId }],

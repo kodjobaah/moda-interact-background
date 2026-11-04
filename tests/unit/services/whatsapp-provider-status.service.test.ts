@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
 vi.mock("../../../src/services/recovery-delivery-compensation/reconcile.service.js", () => ({
@@ -52,6 +53,7 @@ function harness(
     : { id: "command-1", state: commandState };
   const message = {
     id: "message-1",
+    providerMessageId: "wamid-1",
     direction: "OUTBOUND",
     status,
     sentAt: new Date("2026-09-08T14:59:00.000Z"),
@@ -68,8 +70,11 @@ function harness(
   };
   const usageEvents: Array<Record<string, unknown>> = [];
   const transaction = {
+    $queryRaw: vi.fn(async () => [{ id: "shop-1" }]),
     conversationMessage: {
-      findUnique: vi.fn().mockResolvedValue(message),
+      findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id?: string; providerMessageId?: string } }) =>
+        (!where.id || where.id === message.id) && (!where.providerMessageId || where.providerMessageId === message.providerMessageId)
+          ? message : null),
       updateMany: vi
         .fn()
         .mockImplementation(
@@ -151,13 +156,12 @@ function harness(
   const failureReachability = { afterCorrection: vi.fn().mockResolvedValue("not-applicable") };
   const positiveReachability = { fromProviderDelivery: vi.fn().mockResolvedValue("unchanged") };
   const notification = { notify: vi.fn().mockResolvedValue("skipped") };
-  const serviceLogger = {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    child: vi.fn(),
-  };
+  const records: LogRecord[] = [];
+  const serviceLogger = createLogger({
+    serviceName: "provider-status-test",
+    environment: "test",
+    sink: (record) => records.push(record),
+  });
 
   return {
     message,
@@ -167,6 +171,7 @@ function harness(
     transaction,
     database,
     serviceLogger,
+    records,
     compensation,
     failureReachability,
     positiveReachability,
@@ -184,6 +189,40 @@ function harness(
 }
 
 describe("WhatsAppProviderStatusService", () => {
+  it("does not emit applied when the status transaction fails at commit", async () => {
+    const test = harness();
+    const original = new Error("status commit failed");
+    test.database.$transaction.mockImplementationOnce(async (operation) => {
+      await operation(test.transaction);
+      throw original;
+    });
+
+    await expect(test.service.process(baseEvent)).rejects.toBe(original);
+    const emitted = JSON.stringify(test.records);
+    expect(emitted).toContain("whatsapp.provider_status.failed");
+    expect(emitted).toContain("status commit failed");
+    expect(emitted).not.toContain("whatsapp.provider_status.applied");
+  });
+
+  it("marks continuation failures as occurring after committed status persistence", async () => {
+    const test = harness();
+    const original = new Error("compensation unavailable");
+    test.compensation.reconcile.mockRejectedValueOnce(original);
+
+    await expect(test.service.process({
+      ...baseEvent,
+      status: "FAILED",
+      schemaVersion: 3,
+      failure: { providerCode: "131026" },
+    })).rejects.toBe(original);
+    const emitted = JSON.stringify(test.records);
+    expect(emitted).toContain("whatsapp.provider_status.applied");
+    expect(emitted).toContain("whatsapp.provider_status.downstream_failed");
+    expect(emitted).toContain('"statusTransactionCommitted":true');
+    expect(emitted).toContain('"sourceDiagnosticEvent":"recovery.delivery_compensation.failed"');
+    expect(emitted).toContain('"providerMessageId":"wamid-1"');
+  });
+
   it("records one delivered usage event for duplicate delivery notifications", async () => {
     const test = harness();
 

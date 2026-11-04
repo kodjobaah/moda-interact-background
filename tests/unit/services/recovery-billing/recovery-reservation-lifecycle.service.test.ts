@@ -1,13 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  createLogger,
+  type StructuredLogger,
+} from "@modainteract/moda-interact-shared/logging";
 
-import { RecoveryReservationLifecycleService } from "../../../../src/services/recovery-billing/recovery-reservation-lifecycle.service.js";
+import {
+  RecoveryCreditNotCommittedError,
+  RecoveryReservationLifecycleService,
+} from "../../../../src/services/recovery-billing/recovery-reservation-lifecycle.service.js";
 import type { RecoveryBillingAdmission } from "../../../../src/services/recovery-billing/recovery-billing.types.js";
 
-function lifecycleService() {
-  const free = { commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
-  const purchased = { commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
-  const paid = { commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
-  const promotional = { commit: vi.fn(), release: vi.fn(), markAmbiguous: vi.fn() };
+function lifecycleService(serviceLogger?: StructuredLogger) {
+  const commit = (kind: string) => vi.fn(async (input: { shopId: string; sourceKey: string }) => ({
+    kind: "committed" as const,
+    reservation: {
+      id: `reservation-${kind}`,
+      shopId: input.shopId,
+      sourceKey: input.sourceKey,
+      quantity: 1,
+      status: "COMMITTED",
+      committedUsageEventId: `usage-${kind}`,
+    },
+  }));
+  const free = { commit: commit("free"), release: vi.fn(), markAmbiguous: vi.fn() };
+  const purchased = { commit: commit("purchased"), release: vi.fn(), markAmbiguous: vi.fn() };
+  const paid = { commit: commit("paid"), release: vi.fn(), markAmbiguous: vi.fn() };
+  const promotional = { commit: commit("promotional"), release: vi.fn(), markAmbiguous: vi.fn() };
 
   return {
     service: new RecoveryReservationLifecycleService(
@@ -15,6 +33,7 @@ function lifecycleService() {
       purchased as never,
       paid as never,
       promotional as never,
+      serviceLogger,
     ),
     free,
     purchased,
@@ -121,6 +140,80 @@ describe("RecoveryReservationLifecycleService", () => {
       sourceKey: "source:promotional",
       planId: "plan-1",
     });
+  });
+
+  it("rejects an owner result that does not prove a committed reservation", async () => {
+    const harness = lifecycleService();
+    harness.free.commit.mockResolvedValue(undefined as never);
+
+    await expect(harness.service.commit({
+      admission: admission("free"),
+      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+    })).rejects.toMatchObject<Partial<RecoveryCreditNotCommittedError>>({
+      name: "RecoveryCreditNotCommittedError",
+      shopId: "shop-1",
+      sourceKey: "source:free",
+      sourceKind: "free",
+      outcomeKind: null,
+      reservationStatus: null,
+    });
+  });
+
+  it("emits the nonpositive legacy commit failure through the installed Shared logger", async () => {
+    const records: string[] = [];
+    const serviceLogger = createLogger({
+      serviceName: "moda-recovery-worker",
+      environment: "test",
+      sink: (record) => records.push(JSON.stringify(record)),
+    });
+    const harness = lifecycleService(serviceLogger);
+    harness.free.commit.mockResolvedValue(undefined as never);
+
+    await expect(harness.service.commit({
+      admission: admission("free"),
+      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+    })).rejects.toBeInstanceOf(RecoveryCreditNotCommittedError);
+
+    const [record] = records.map((entry) => JSON.parse(entry) as {
+      event: string;
+      level: string;
+      "service.name": string;
+      "deployment.environment.name": string;
+      data: Record<string, unknown>;
+    });
+    expect(record).toMatchObject({
+      event: "recovery.credit_commit.failed",
+      level: "error",
+      "service.name": "moda-recovery-worker",
+      "deployment.environment.name": "test",
+      data: {
+        operation: "commitSuccessfulInitiation",
+        sourceKind: "free",
+        shopId: "shop-1",
+        sourceKey: "source:free",
+        error: {
+          name: "RecoveryCreditNotCommittedError",
+          message: "Recovery reservation owner did not confirm a committed credit",
+        },
+      },
+    });
+    expect(record.data).not.toHaveProperty("providerError");
+  });
+
+  it("preserves an owner exception when the Shared logging sink throws", async () => {
+    const injectedError = new Error("owner diagnostic sentinel");
+    const serviceLogger = createLogger({
+      serviceName: "moda-recovery-worker",
+      environment: "test",
+      sink: () => { throw new Error("sink failure"); },
+    });
+    const harness = lifecycleService(serviceLogger);
+    harness.free.commit.mockRejectedValue(injectedError);
+
+    await expect(harness.service.commit({
+      admission: admission("free"),
+      occurredAt: new Date("2026-10-07T12:00:00.000Z"),
+    })).rejects.toBe(injectedError);
   });
 
   it.each([

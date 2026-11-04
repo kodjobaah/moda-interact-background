@@ -84,6 +84,15 @@ export class PurchasedRecoveryReservationService {
     );
   }
 
+  async commitInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: PurchasedRecoveryReservationInput,
+  ): Promise<PurchasedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new PurchasedRecoveryReservationError(message));
+    return this.commitInTransaction(transaction, input, quantity);
+  }
+
   async release(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
     const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>

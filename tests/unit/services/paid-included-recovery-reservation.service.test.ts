@@ -157,6 +157,18 @@ async function reserve(harness: Harness, recoveryId = "recovery-1") {
 }
 
 describe("PaidIncludedRecoveryReservationService", () => {
+  it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
+    const harness = createHarness();
+    const original = new Error("owner transaction failed");
+    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+
+    await expect(harness.service.commitInExistingTransaction(transaction as never, {
+      shopId,
+      sourceKey: "paid-included:period-1:existing-transaction",
+    })).rejects.toBe(original);
+    expect(harness.database.$transaction).not.toHaveBeenCalled();
+  });
+
   it("derives the period-scoped source key after current period validation", async () => {
     const harness = createHarness();
     await expect(reserve(harness)).resolves.toMatchObject({ sourceKey: "paid-included:period-1:recovery-1" });
@@ -262,6 +274,22 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await expect(reserve(harness)).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
   });
 
+  it("marks an existing paid reservation whose period is no longer current/open with the typed reason", async () => {
+    const harness = createHarness();
+    await reserve(harness);
+    harness.state.period.status = "CLOSED" as never;
+
+    const error = await harness.service.commitInExistingTransaction(
+      harness.transaction as never,
+      { shopId, sourceKey: "paid-included:period-1:recovery-1" },
+    ).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(PaidIncludedRecoveryReservationError);
+    expect(error).toMatchObject({ reason: "PERIOD_NOT_CURRENT_OPEN" });
+    expect((error as Error).message).toContain("no longer current and open");
+    expect(harness.state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
+  });
+
   it("rejects direct Woo reservations while FROZEN without changing capacity", async () => {
     const harness = createHarness(1, null, "WOOCOMMERCE");
     harness.policy.subscriptionStatus = "FROZEN";
@@ -303,9 +331,11 @@ describe("PaidIncludedRecoveryReservationService", () => {
   it("moves a reserved row to committed exactly once", async () => {
     const harness = createHarness();
     await reserve(harness);
+    harness.transaction.subscription.findUnique.mockClear();
     await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "committed" });
     await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "already-committed" });
     expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+    expect(harness.transaction.subscription.findUnique).toHaveBeenCalledTimes(2);
   });
 
   it.each([
