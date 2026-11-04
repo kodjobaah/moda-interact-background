@@ -75,12 +75,31 @@ export class WhatsAppProviderStatusService {
     event: NormalizedWhatsAppStatus,
   ): Promise<ProviderStatusOutcome> {
     const occurredAt = new Date(event.occurredAt);
+    let appliedInfo: { messageId: string; status: string; outcome: string } | null = null;
 
-    const outcome = await this.withRetry(() => this.database.$transaction(async (transaction) => {
-      const message = await transaction.conversationMessage.findUnique({
+    const outcome = await this.withRetry(event, () => this.database.$transaction(async (transaction) => {
+      appliedInfo = null;
+      const pointer = await transaction.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
+        select: { id: true, providerMessageId: true, conversation: { select: { shopId: true, checkoutRecovery: { select: { shopId: true } } } } },
+      });
+      if (!pointer) {
+        this.serviceLogger.warn("whatsapp.provider_status.unknown_message", { providerMessageId: event.providerMessageId });
+        return "unknown-message";
+      }
+      const pointerShopId = pointer.conversation.shopId ?? pointer.conversation.checkoutRecovery?.shopId;
+      if (!pointerShopId) {
+        this.serviceLogger.warn("whatsapp.provider_status.unowned_message", { providerMessageId: event.providerMessageId, messageId: pointer.id });
+        return "ignored";
+      }
+      const lockedShop = await transaction.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "commerce"."Shop" WHERE "id"=${pointerShopId} FOR KEY SHARE`;
+      if (lockedShop.length !== 1) throw new ProviderStatusConcurrencyConflict();
+      await transaction.$queryRaw`SELECT "id" FROM "whatsapp"."ConversationMessage" WHERE "id"=${pointer.id} FOR UPDATE`;
+      const message = await transaction.conversationMessage.findUnique({
+        where: { id: pointer.id },
         select: {
           id: true,
+          providerMessageId: true,
           direction: true,
           status: true,
           sentAt: true,
@@ -100,11 +119,16 @@ export class WhatsAppProviderStatusService {
       });
 
       if (!message) {
-        this.serviceLogger.warn("whatsapp.provider_status.unknown_message", {
-          providerMessageId: event.providerMessageId,
-        });
-        return "unknown-message";
+        throw new ProviderStatusConcurrencyConflict();
       }
+
+      if (message.providerMessageId !== pointer.providerMessageId || pointer.providerMessageId !== event.providerMessageId ||
+        (message.conversation.shopId && message.conversation.shopId !== pointerShopId) ||
+        message.conversation.checkoutRecovery && message.conversation.checkoutRecovery.shopId !== pointerShopId) {
+        throw new ProviderStatusConcurrencyConflict();
+      }
+      const actualShopId = message.conversation.shopId ?? message.conversation.checkoutRecovery?.shopId;
+      if (actualShopId !== pointerShopId) throw new ProviderStatusConcurrencyConflict();
 
       if (message.direction !== "OUTBOUND") {
         this.serviceLogger.warn("whatsapp.provider_status.non_outbound_message", {
@@ -231,37 +255,37 @@ export class WhatsAppProviderStatusService {
         });
       }
 
-      this.serviceLogger.info("whatsapp.provider_status.applied", {
+      appliedInfo = {
         messageId: message.id,
         status: event.status,
         outcome:
           !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
             ? "ignored"
             : "applied",
-      });
+      };
       return !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
         ? "ignored"
         : "applied";
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 
+    if (appliedInfo) this.serviceLogger.info("whatsapp.provider_status.applied", appliedInfo);
+
     // Never perform credit accounting inside provider-status convergence. Retry
     // even if the FAILED row was already persisted in an earlier job attempt.
     if (event.status === "FAILED" && outcome !== "unknown-message") {
-      const corrected = await this.compensation.reconcile(event.providerMessageId);
-      const reachability = await this.failureReachability.afterCorrection(
+      const corrected = await this.runAfterCommit(event, "compensation", () => this.compensation.reconcile(event.providerMessageId), true);
+      const reachability = await this.runAfterCommit(event, "failure_reachability", () => this.failureReachability.afterCorrection(
         { providerMessageId: event.providerMessageId }, corrected,
-      );
-      const notice = await this.notification.notify(
+      ));
+      const notice = await this.runAfterCommit(event, "merchant_notification", () => this.notification.notify(
         { providerMessageId: event.providerMessageId }, corrected, reachability,
-      );
+      ));
       this.serviceLogger.info("whatsapp.reachability.failure_converged", {
         providerMessageId: event.providerMessageId, correction: corrected, outcome: reachability, notice,
       });
     } else if ((event.status === "DELIVERED" || event.status === "READ") &&
       outcome !== "unknown-message") {
-      const reachability = await this.positiveReachability.fromProviderDelivery(
-        event.providerMessageId,
-      );
+      const reachability = await this.runAfterCommit(event, "positive_reachability", () => this.positiveReachability.fromProviderDelivery(event.providerMessageId));
       this.serviceLogger.info("whatsapp.reachability.positive_converged", {
         providerMessageId: event.providerMessageId, outcome: reachability,
       });
@@ -269,18 +293,63 @@ export class WhatsAppProviderStatusService {
     return outcome;
   }
 
-  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
+  private async runAfterCommit<T>(event: NormalizedWhatsAppStatus, stage: string, operation: () => Promise<T>, sourceOwned = false): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      this.serviceLogger.error("whatsapp.provider_status.downstream_failed", {
+        operation: "processProviderStatus", stage, providerMessageId: event.providerMessageId,
+        statusTransactionCommitted: true,
+        ...(sourceOwned ? { sourceDiagnosticEvent: "recovery.delivery_compensation.failed" } : { error, ...databaseErrorContext(error) }),
+      });
+      throw error;
+    }
+  }
+
+  private async withRetry<T>(event: NormalizedWhatsAppStatus, operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
       try {
         return await operation();
       } catch (error) {
-        if (!isRetryableConflict(error) || attempt === this.maxRetries - 1) {
-          throw error;
+        const fields = { operation: "processProviderStatus", stage: "status_transaction", providerMessageId: event.providerMessageId, status: event.status, attempt, maxAttempts: this.maxRetries, retryExhausted: isRetryableConflict(error) && attempt === this.maxRetries };
+        if (isRetryableConflict(error) && attempt < this.maxRetries) {
+          this.serviceLogger.warn("whatsapp.provider_status.retry", { ...fields, reasonCode: providerConflictCode(error), error, ...databaseErrorContext(error) });
+          continue;
         }
+        this.serviceLogger.error("whatsapp.provider_status.failed", { ...fields, error, ...databaseErrorContext(error) });
+        throw error;
       }
     }
     throw new Error("Provider status retry limit exceeded");
   }
+}
+
+function providerConflictCode(error: unknown): string {
+  return error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "internal-concurrency-conflict";
+}
+
+function databaseErrorContext(error: unknown): Record<string, unknown> {
+  if (!error || typeof error !== "object") return {};
+  const record = error as { code?: unknown; clientVersion?: unknown; meta?: unknown };
+  const isPrismaError = error instanceof Prisma.PrismaClientKnownRequestError;
+  const meta = record.meta && typeof record.meta === "object" && !Array.isArray(record.meta)
+    ? record.meta as Record<string, unknown>
+    : undefined;
+  const hasSqlState = typeof meta?.code === "string" && /^[A-Za-z0-9]{5}$/.test(meta.code);
+  if (!isPrismaError && !hasSqlState) return {};
+  const databaseError: Record<string, unknown> = {};
+  if (isPrismaError && typeof record.code === "string" && record.code.length <= 32) databaseError.code = record.code;
+  if (isPrismaError && typeof record.clientVersion === "string" && record.clientVersion.length <= 64) databaseError.clientVersion = record.clientVersion;
+  if (meta) {
+    const safeMeta: Record<string, unknown> = {};
+    for (const key of ["modelName", "target", "constraint", "field_name"] as const) {
+      const value = meta[key];
+      if (typeof value === "string" && /^[A-Za-z0-9_.$:-]{1,128}$/.test(value)) safeMeta[key] = value;
+      else if (Array.isArray(value) && value.length <= 16 && value.every((part) => typeof part === "string" && /^[A-Za-z0-9_.$:-]{1,128}$/.test(part))) safeMeta[key] = value;
+    }
+    if (hasSqlState) safeMeta.code = meta.code;
+    if (Object.keys(safeMeta).length) databaseError.meta = safeMeta;
+  }
+  return Object.keys(databaseError).length ? { databaseError } : {};
 }
 
 export const whatsappProviderStatusService =

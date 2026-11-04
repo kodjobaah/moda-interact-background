@@ -20,13 +20,23 @@ import {
 } from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
 import { RecoveryCapacityAdmissionService } from "./recovery-billing/recovery-capacity-admission.service.js";
 import { RecoveryReservationLifecycleService } from "./recovery-billing/recovery-reservation-lifecycle.service.js";
+import { InitialOutreachCreditService } from "./recovery-billing/initial-outreach-credit.service.js";
 import type {
+  ConfirmedInitialOutreachCreditInput,
+  ConfirmedInitialOutreachSettlement,
+  ExistingInitialOutreachCredit,
+  ExistingInitialOutreachCreditInput,
   RecoveryBillingAdmission,
   RecoveryBillingAdmissionResult,
   RecoveryProviderFailureDisposition,
 } from "./recovery-billing/recovery-billing.types.js";
 
 export type {
+  ConfirmedInitialOutreachCreditInput,
+  ConfirmedInitialOutreachSettlement,
+  ExistingInitialOutreachCredit,
+  ExistingInitialOutreachCreditInput,
+  InitialOutreachCreditIdentity,
   RecoveryBillingAdmission,
   RecoveryBillingAdmissionResult,
   RecoveryProviderFailureDisposition,
@@ -65,6 +75,7 @@ export class RecoveryBillingService {
   private readonly capacityExhaustionNotification: RecoveryCapacityExhaustionNotificationService;
   private readonly capacityAdmission: RecoveryCapacityAdmissionService;
   private readonly reservationLifecycle: RecoveryReservationLifecycleService;
+  private readonly initialOutreachCredit: InitialOutreachCreditService;
 
   constructor(
     database: RecoveryBillingDatabase = prisma,
@@ -75,6 +86,7 @@ export class RecoveryBillingService {
     promotionalReservationService: PromotionalReservationService = promotionalRecoveryReservationService,
     private readonly postContractPolicyResolver: PostContractRecoveryPolicyResolver = postContractRecoveryPolicyResolver,
   ) {
+    this.initialOutreachCredit = new InitialOutreachCreditService(database);
     this.capacityExhaustionNotification =
       new RecoveryCapacityExhaustionNotificationService(database);
     this.capacityAdmission = new RecoveryCapacityAdmissionService(
@@ -89,6 +101,18 @@ export class RecoveryBillingService {
       paidIncludedReservationService,
       promotionalReservationService,
     );
+  }
+
+  settleConfirmedInitialOutreach(
+    input: ConfirmedInitialOutreachCreditInput,
+  ): Promise<ConfirmedInitialOutreachSettlement> {
+    return this.initialOutreachCredit.settleConfirmedInitialOutreach(input);
+  }
+
+  revalidateExistingInitialOutreach(
+    input: ExistingInitialOutreachCreditInput,
+  ): Promise<ExistingInitialOutreachCredit> {
+    return this.initialOutreachCredit.revalidateExistingInitialOutreach(input);
   }
 
   async admit(input: {

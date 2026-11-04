@@ -72,7 +72,7 @@ export type PaidIncludedReservationOutcome =
   | { kind: "allowance-exhausted"; remaining: number; policy: EffectiveBillingPolicy };
 
 export class PaidIncludedRecoveryReservationError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public readonly reason?: "PERIOD_NOT_CURRENT_OPEN") {
     super(message);
     this.name = "PaidIncludedRecoveryReservationError";
   }
@@ -130,6 +130,16 @@ export class PaidIncludedRecoveryReservationService {
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     );
+  }
+
+  async commitInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
+      Pick<PaidIncludedRecoveryReservationInput, "quantity"> & { occurredAt?: Date },
+  ): Promise<PaidIncludedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new PaidIncludedRecoveryReservationError(message));
+    return this.commitInTransaction(transaction, input, quantity);
   }
 
   async release(
@@ -300,7 +310,10 @@ export class PaidIncludedRecoveryReservationService {
       subscription.currentPeriodStart?.getTime() !== period.periodStart.getTime() ||
       subscription.currentPeriodEnd?.getTime() !== period.periodEnd.getTime()
     ) {
-      throw new PaidIncludedRecoveryReservationError("Paid included reservation period is no longer current and open");
+      throw new PaidIncludedRecoveryReservationError(
+        "Paid included reservation period is no longer current and open",
+        "PERIOD_NOT_CURRENT_OPEN",
+      );
     }
 
     const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
@@ -345,7 +358,7 @@ export class PaidIncludedRecoveryReservationService {
           ? ShopifyReportState.PENDING
           : ShopifyReportState.NOT_APPLICABLE,
         shopifyEventHandle: provider === "SHOPIFY"
-          ? await this.readPaidUsageEventHandle(transaction, input.shopId)
+          ? plan.plan.shopifyUsageEventHandle
           : null,
         shopifyIdempotencyKey: provider === "SHOPIFY"
           ? createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey)
@@ -504,17 +517,6 @@ export class PaidIncludedRecoveryReservationService {
     if (!reservation) throw new PaidIncludedRecoveryReservationError("Reservation does not exist");
     assertRecoveryReservationShop(reservation, input.shopId, (message) => new PaidIncludedRecoveryReservationError(message));
     return reservation;
-  }
-
-  private async readPaidUsageEventHandle(transaction: ReservationTransaction, shopId: string): Promise<string> {
-    const subscription = await transaction.subscription.findUnique({
-      where: { shopId },
-      select: { plan: { select: { kind: true, shopifyUsageEventHandle: true } } },
-    });
-    if (subscription?.plan?.kind !== BillingPlanKind.PAID_METERED || !subscription.plan.shopifyUsageEventHandle) {
-      throw new PaidIncludedRecoveryReservationError("Paid normal usage meter is missing");
-    }
-    return subscription.plan.shopifyUsageEventHandle;
   }
 
   private async withRetry<T>(operation: () => Promise<T>): Promise<T> {

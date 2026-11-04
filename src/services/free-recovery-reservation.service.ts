@@ -104,6 +104,15 @@ export class FreeRecoveryReservationService {
     );
   }
 
+  async commitInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: FreeRecoveryReservationInput,
+  ): Promise<ReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new FreeRecoveryReservationError(message));
+    return this.commitInTransaction(transaction, input, quantity);
+  }
+
   async release(input: FreeRecoveryReservationInput): Promise<ReservationOutcome> {
     const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new FreeRecoveryReservationError(message));
     return this.withRetry(() =>

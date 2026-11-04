@@ -86,6 +86,31 @@ export class PromotionalRecoveryReservationService {
     );
   }
 
+  async commitInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
+  ): Promise<PromotionalReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity,
+      (message) => new PromotionalRecoveryReservationError(message));
+    return this.commitInTransaction(transaction, input, quantity);
+  }
+
+  async isReservedSourceEligibleInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: { shopId: string; reservationId: string; sourceKey: string; now: Date },
+  ): Promise<boolean> {
+    const reservation = await transaction.usageReservation.findUnique({
+      where: { id: input.reservationId },
+    });
+    if (!reservation || reservation.shopId !== input.shopId ||
+      reservation.sourceKey !== input.sourceKey || reservation.status !== UsageReservationStatus.RESERVED ||
+      !reservation.promotionalCreditGrantId) return false;
+
+    const grant = await this.findUsableGrant(transaction, { shopId: input.shopId, now: input.now });
+    return grant?.id === reservation.promotionalCreditGrantId &&
+      grant.reservedQuantity >= Number(reservation.quantity);
+  }
+
   async release(input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string }): Promise<PromotionalReservationOutcome> {
     const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PromotionalRecoveryReservationError(message));
     return this.withRetry(() =>
@@ -166,7 +191,7 @@ export class PromotionalRecoveryReservationService {
 
   private async commitInTransaction(
     transaction: ReservationTransaction,
-    input: PromotionalRecoveryReservationInput,
+    input: Omit<PromotionalRecoveryReservationInput, "planId"> & { planId?: string },
     quantity: number,
   ): Promise<PromotionalReservationOutcome> {
     const reservation = await this.requirePromotionalReservation(transaction, input);
@@ -282,7 +307,7 @@ export class PromotionalRecoveryReservationService {
 
   private async findUsableGrant(
     transaction: ReservationTransaction,
-    input: PromotionalRecoveryReservationInput,
+    input: { shopId: string; now?: Date },
   ) {
     const now = input.now ?? this.now();
     const policy = await this.createPolicyResolver(transaction).resolve(input.shopId, now);

@@ -103,6 +103,18 @@ function createHarness(resolvedPolicy: EffectiveBillingPolicy = policy, provider
 }
 
 describe("FreeRecoveryReservationService", () => {
+  it("keeps same-transaction commits direct and preserves the owner's original error", async () => {
+    const { service, database } = createHarness();
+    const original = new Error("owner transaction failed");
+    const transaction = { usageReservation: { findUnique: vi.fn().mockRejectedValue(original) } };
+
+    await expect(service.commitInExistingTransaction(transaction as never, {
+      shopId: "shop-1",
+      sourceKey: "recovery:existing-transaction",
+    })).rejects.toBe(original);
+    expect(database.$transaction).not.toHaveBeenCalled();
+  });
+
   it("replays the same source key without reserving twice", async () => {
     const { service, transaction } = createHarness();
 

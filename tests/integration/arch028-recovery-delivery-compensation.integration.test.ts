@@ -2,6 +2,7 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 import { describe, expect, it } from "vitest";
 import { RecoveryDeliveryCompensationService } from
   "../../src/services/recovery-delivery-compensation/reconcile.service.js";
@@ -36,6 +37,7 @@ async function fixture(input: TestCase = {}) {
   const active = input.active !== false;
   const sender = input.sender ?? "AUTOMATION";
   const linked = input.linkMessage !== false;
+  const humanCommandIds: string[] = [];
   const now = new Date();
   // Closed source windows must still have a positive duration. Making start=end
   // would fail the database boundary checks before compensation is exercised.
@@ -80,20 +82,29 @@ async function fixture(input: TestCase = {}) {
     } });
   } else {
     // ARCH-040 requires an INSERT to be an accepted intent with no outbound
-    // identity. Link the produced message in a separate guarded UPDATE.
-    const command = await db.merchantConversationSendCommand.create({ data: {
-      shopId, conversationId: conversation.id,
-      kind: input.humanKind ?? "RECOVERY_FOLLOW_UP_TEMPLATE",
-      recipientSnapshot: "15551234567", idempotencyKey: `human-${id}`,
-      payloadSha256: "0".repeat(64), expectedControlRevision: 1,
-      ...(input.humanKind === "HUMAN_TEXT"
-        ? { textBody: "Ordinary merchant reply" }
-        : { templateName: "recovery_follow_up", templateLanguageCode: "en",
-          recoveryOutreachAttemptId: attemptId }),
-    } });
-    await db.merchantConversationSendCommand.update({
-      where: { id: command.id }, data: { outboundMessageId: messageId },
+    // identity. This fixture represents existing lineage, not pending work, so
+    // cancel and link it atomically before any parallel suite can claim it.
+    const command = await db.$transaction(async (tx) => {
+      const created = await tx.merchantConversationSendCommand.create({ data: {
+        shopId, conversationId: conversation.id,
+        kind: input.humanKind ?? "RECOVERY_FOLLOW_UP_TEMPLATE",
+        recipientSnapshot: "15551234567", idempotencyKey: `human-${id}`,
+        payloadSha256: "0".repeat(64), expectedControlRevision: 1,
+        ...(input.humanKind === "HUMAN_TEXT"
+          ? { textBody: "Ordinary merchant reply" }
+          : { templateName: "recovery_follow_up", templateLanguageCode: "en",
+            recoveryOutreachAttemptId: attemptId }),
+      } });
+      await tx.merchantConversationSendCommand.update({
+        where: { id: created.id },
+        data: {
+          state: "CANCELLED", failureCode: "fixture_lineage_only",
+          nextAttemptAt: null, completedAt: new Date(), outboundMessageId: messageId,
+        },
+      });
+      return created;
     });
+    humanCommandIds.push(command.id);
   }
   const logicalKey = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${attemptId}`);
   let sourceKey = logicalKey;
@@ -213,7 +224,21 @@ async function fixture(input: TestCase = {}) {
     reservationId: reservation.id, counterId, billingPeriodEntitlementCounterId,
     promotionalCreditGrantId, purchasedCreditPurchaseId, sourceKey,
     compensate: new RecoveryDeliveryCompensationService(db),
-    close: () => db.$disconnect(),
+    async close() {
+      try {
+        if (humanCommandIds.length) {
+          await db.merchantConversationSendCommand.updateMany({
+            where: {
+              id: { in: humanCommandIds }, shopId, state: "ACCEPTED",
+              providerDispatchKey: null, leaseToken: null, leaseExpiresAt: null,
+            },
+            data: { state: "CANCELLED", nextAttemptAt: null, completedAt: new Date() },
+          });
+        }
+      } finally {
+        await db.$disconnect();
+      }
+    },
   };
 }
 
@@ -321,9 +346,17 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
   it("fails closed when a matched credit has no durable source, without deleting its hard-limit entry", async () => {
     const f = await fixture();
     try {
+      const records: LogRecord[] = [];
+      const logger = createLogger({ serviceName: "compensation-test", environment: "test", sink: (record) => records.push(record) });
+      const compensation = new RecoveryDeliveryCompensationService(f.db, () => new Date(), logger);
       await f.db.usageReservation.update({ where: { id: f.reservationId },
         data: { sourceKey: `invalid-${f.sourceKey}` } });
-      await expect(f.compensate.reconcile(f.providerMessageId)).rejects.toThrow(/missing or ambiguous reservation/);
+      await expect(compensation.reconcile(f.providerMessageId)).rejects.toThrow(/missing or ambiguous reservation/);
+      const emitted = JSON.stringify(records);
+      expect(emitted).toContain("recovery.delivery_compensation.failed");
+      expect(emitted).toContain("missing or ambiguous reservation");
+      expect(emitted).toContain('"stage":"source_lookup"');
+      expect(emitted).toContain(`"providerMessageId":"${f.providerMessageId}"`);
       expect(await f.db.usageEvent.count({ where: { sourceId: f.messageId,
         metric: "OUTBOUND_AUTOMATED_MESSAGE" } })).toBe(1);
     } finally { await f.close(); }

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
 vi.mock("../../../src/services/recovery-delivery-compensation/reconcile.service.js", () => ({
@@ -52,6 +53,7 @@ function harness(
     : { id: "command-1", state: commandState };
   const message = {
     id: "message-1",
+    providerMessageId: "wamid-1",
     direction: "OUTBOUND",
     status,
     sentAt: new Date("2026-09-08T14:59:00.000Z"),
@@ -68,8 +70,11 @@ function harness(
   };
   const usageEvents: Array<Record<string, unknown>> = [];
   const transaction = {
+    $queryRaw: vi.fn(async () => [{ id: "shop-1" }]),
     conversationMessage: {
-      findUnique: vi.fn().mockResolvedValue(message),
+      findUnique: vi.fn().mockImplementation(async ({ where }: { where: { id?: string; providerMessageId?: string } }) =>
+        (!where.id || where.id === message.id) && (!where.providerMessageId || where.providerMessageId === message.providerMessageId)
+          ? message : null),
       updateMany: vi
         .fn()
         .mockImplementation(
@@ -151,13 +156,12 @@ function harness(
   const failureReachability = { afterCorrection: vi.fn().mockResolvedValue("not-applicable") };
   const positiveReachability = { fromProviderDelivery: vi.fn().mockResolvedValue("unchanged") };
   const notification = { notify: vi.fn().mockResolvedValue("skipped") };
-  const serviceLogger = {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    child: vi.fn(),
-  };
+  const records: LogRecord[] = [];
+  const serviceLogger = createLogger({
+    serviceName: "provider-status-test",
+    environment: "test",
+    sink: (record) => records.push(record),
+  });
 
   return {
     message,
@@ -167,6 +171,7 @@ function harness(
     transaction,
     database,
     serviceLogger,
+    records,
     compensation,
     failureReachability,
     positiveReachability,
@@ -184,6 +189,92 @@ function harness(
 }
 
 describe("WhatsAppProviderStatusService", () => {
+  it("does not emit applied when the status transaction fails at commit", async () => {
+    const test = harness();
+    const original = Object.assign(new Error("status commit failed"), {
+      meta: { code: "40001", query: "unsafe-status-query-sentinel" },
+    });
+    test.database.$transaction.mockImplementationOnce(async (operation) => {
+      await operation(test.transaction);
+      throw original;
+    });
+
+    await expect(test.service.process(baseEvent)).rejects.toBe(original);
+    const emitted = JSON.stringify(test.records);
+    expect(emitted).toContain("whatsapp.provider_status.failed");
+    expect(emitted).toContain("status commit failed");
+    expect(emitted).not.toContain("whatsapp.provider_status.applied");
+    expect(emitted).toContain('"databaseError":{"meta":{"code":"40001"}}');
+    expect(emitted).not.toContain("unsafe-status-query-sentinel");
+    expect(emitted).not.toContain('"providerCode"');
+  });
+
+  it("marks continuation failures as occurring after committed status persistence", async () => {
+    const test = harness();
+    const original = new Error("compensation-source-failure-sentinel");
+    test.compensation.reconcile.mockRejectedValueOnce(original);
+
+    await expect(test.service.process({
+      ...baseEvent,
+      status: "FAILED",
+      schemaVersion: 3,
+      failure: { providerCode: "131026" },
+    })).rejects.toBe(original);
+    const emitted = JSON.stringify(test.records);
+    expect(emitted).toContain("whatsapp.provider_status.applied");
+    expect(emitted).toContain("whatsapp.provider_status.downstream_failed");
+    expect(emitted).toContain('"statusTransactionCommitted":true');
+    expect(emitted).toContain('"sourceDiagnosticEvent":"recovery.delivery_compensation.failed"');
+    expect(emitted).toContain('"providerMessageId":"wamid-1"');
+    expect(emitted).not.toContain("compensation-source-failure-sentinel");
+    const downstream = JSON.parse(JSON.stringify(test.records.find((record) =>
+      record.event === "whatsapp.provider_status.downstream_failed"))) as Record<string, unknown>;
+    expect(downstream).toMatchObject({
+      level: "error",
+      "service.name": "provider-status-test",
+      "deployment.environment.name": "test",
+      data: {
+        stage: "compensation",
+        providerMessageId: "wamid-1",
+        statusTransactionCommitted: true,
+        sourceDiagnosticEvent: "recovery.delivery_compensation.failed",
+      },
+    });
+    expect(downstream).not.toHaveProperty("data.error");
+  });
+
+  it.each([
+    ["failure_reachability", "reachability failure sentinel"],
+    ["merchant_notification", "notification failure sentinel"],
+  ])("correlates %s failures to committed provider status", async (stage, message) => {
+    const test = harness();
+    const original = new Error(message);
+    if (stage === "failure_reachability") test.failureReachability.afterCorrection.mockRejectedValueOnce(original);
+    else test.notification.notify.mockRejectedValueOnce(original);
+
+    await expect(test.service.process({
+      ...baseEvent,
+      status: "FAILED",
+      schemaVersion: 3,
+      failure: { providerCode: "131026" },
+    })).rejects.toBe(original);
+
+    const events = test.records.map((record) => JSON.parse(JSON.stringify(record)) as Record<string, unknown>);
+    expect(events.some((record) => record.event === "whatsapp.provider_status.applied")).toBe(true);
+    const downstream = events.find((record) => record.event === "whatsapp.provider_status.downstream_failed");
+    expect(downstream).toMatchObject({
+      level: "error",
+      data: {
+        stage,
+        providerMessageId: "wamid-1",
+        statusTransactionCommitted: true,
+        error: { name: "Error", message },
+      },
+    });
+    expect(JSON.stringify(downstream)).not.toContain('"databaseError"');
+    expect(test.message.status).toBe("FAILED");
+  });
+
   it("records one delivered usage event for duplicate delivery notifications", async () => {
     const test = harness();
 
