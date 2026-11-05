@@ -1,0 +1,25 @@
+{
+  "version": "1",
+  "provider": "WOOCOMMERCE",
+  "observedAt": "2026-11-05T00:00:00.000Z",
+  "product": {
+    "status": "AVAILABLE",
+    "productId": "fixture-product-1",
+    "variantId": null,
+    "requiresShipping": true,
+    "virtual": false,
+    "weight": null,
+    "dimensions": null,
+    "shippingClassId": null,
+    "shippingClassSlug": null
+  },
+  "policy": {
+    "status": "UNSUPPORTED",
+    "trust": "UNTRUSTED_REFERENCE",
+    "title": null,
+    "bodyStatus": "NOT_AVAILABLE",
+    "bodyHtml": null,
+    "url": null,
+    "updatedAt": null
+  }
+}

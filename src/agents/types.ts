@@ -44,4 +44,6 @@ export interface RecoveryAgentContext {
   conversation: AgentConversationContext;
 }
 
-export type CommerceAgentResult = Omit<CommerceFinalResponse, "details">;
+export type CommerceAgentResult = Omit<CommerceFinalResponse, "details"> & {
+  hostComposedReplyCandidates?: readonly string[];
+};

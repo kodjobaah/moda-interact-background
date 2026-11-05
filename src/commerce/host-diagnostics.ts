@@ -85,6 +85,25 @@ export type CommerceHostDiagnostic = Readonly<{
   runnerDiagnostic?: RunnerDiagnostic;
 }>;
 
+export type SafeCommerceDiagnosticText = Readonly<{ value: string; redacted: boolean; truncated: boolean }>;
+
+export function safeCommerceDiagnosticText(value: string, maximum = 1024): SafeCommerceDiagnosticText {
+  if (["{", "}", "[", "]"].some((character) => value.includes(character)) ||
+      /\b(?:SELECT\s+.+\s+FROM|INSERT\s+INTO|UPDATE\s+.+\s+SET|DELETE\s+FROM)\b/i.test(value)) {
+    return { value: "[REDACTED]", redacted: true, truncated: false };
+  }
+  const scrubbed = value
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret|password|passwd|secret|credential)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "[REDACTED]")
+    .replace(/(?<![A-Za-z0-9])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9])/g, "[REDACTED]")
+    .replace(/(?:https?:\/\/|www\.)[^\s<>"']+/gi, "[REDACTED_URL]");
+  const truncated = scrubbed.length > maximum;
+  return { value: truncated ? `${scrubbed.slice(0, maximum)}[TRUNCATED]` : scrubbed,
+    redacted: scrubbed !== value, truncated };
+}
+
 const transportCodes = new Set([
   "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT",
   "ENETUNREACH", "EHOSTUNREACH", "EPIPE", "UND_ERR_CONNECT_TIMEOUT",
@@ -146,12 +165,30 @@ export function logCommerceHostFailure(
   retryable: boolean,
   diagnostic: CommerceHostDiagnostic,
   identifiers: { shopId: string; recoveryId: string; conversationId: string; inboundVersion: number },
+  originalFailure?: unknown,
 ): void {
   const { runnerDiagnostic, ...safe } = diagnostic;
   try {
     const log = ["DENIED", "STALE_TURN", "CANCELLED"].includes(code) ? logger.warn.bind(logger) : logger.error.bind(logger);
+    const sourceFailure = originalFailure && typeof originalFailure === "object" && "sourceFailure" in originalFailure
+      ? (originalFailure as { sourceFailure?: unknown }).sourceFailure : undefined;
+    const localErrors: Array<Record<string, unknown>> = [];
+    const seen = new Set<unknown>();
+    let cause = originalFailure instanceof Error ? originalFailure : undefined;
+    for (let depth = 0; cause && depth < 5 && !seen.has(cause); depth += 1) {
+      seen.add(cause);
+      const code = (cause as Error & { code?: unknown }).code;
+      const message = safeCommerceDiagnosticText(cause.message, 1024);
+      localErrors.push({ name: cause.name.slice(0, 96), ...(typeof code === "string" ? { code: code.slice(0, 96) } : {}),
+        message: message.value, redactionApplied: message.redacted, truncated: message.truncated });
+      cause = cause.cause instanceof Error ? cause.cause : undefined;
+    }
     log("commerce.host.failed", {
       ...identifiers, errorCode: code, retryable, ...safe,
+      ...(sourceFailure ? { failureSource: "mcp_response" } :
+        originalFailure instanceof Error ? { failureSource: "local_exception" } : {}),
+      ...(sourceFailure ? { sourceFailure } : {}),
+      ...(localErrors.length ? { originalErrors: localErrors } : {}),
       ...(runnerDiagnostic ? {
         runnerStage: runnerDiagnostic.stage,
         runnerReasonCode: runnerDiagnostic.reasonCode,

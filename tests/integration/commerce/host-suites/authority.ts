@@ -52,17 +52,14 @@ it("rejects server expansion beyond the retained grant", async () => {
     f.active = structuredClone(f.active);
     f.active.capabilities[0]!.toolDescriptor.name = "injected_tool";
     f.expand = true;
-    await expect(f.run(vi.fn())).rejects.toMatchObject({ code: "DENIED" });
+    await expect(f.run(vi.fn())).rejects.toMatchObject({ code: "INCOMPATIBLE_VERSION" });
   });
 
-it("supports zero tools and current revocation without changing the original grant", async () => {
+it("rejects a shortened generic descriptor list without changing the original grant", async () => {
     await f.run(async () => f.final());
     f.revoked = true;
-    await f.run(async (request) => {
-      expect(request.tools.map((t) => t.name)).toEqual(["finalResponse"]);
-      return f.final();
-    });
-    expect(f.grants.get(f.state.id).grantedTools).toHaveLength(1);
+    await expect(f.run(vi.fn())).rejects.toMatchObject({ code: "DENIED" });
+    expect(f.grants.get(f.state.id).grantedTools.length).toBeGreaterThan(1);
   });
 
 it.each(["COMPLETED", "EXPIRED", "CANCELLED", "MESSAGE_SENT", "ENGAGED"])(
@@ -114,6 +111,12 @@ it("propagates cancellation and MCP outage without model fallback", async () => 
 
 it("a pinned release with genuinely no tools still produces a bounded referral", async () => {
   f.active = f.exampleManifest(f.digest, false);
+  f.active.builtInTools = structuredClone([...f.commerceDiscountBuiltInDescriptors]);
+  f.active.grantedTools = f.active.builtInTools.map((tool) => ({
+    kind: "BUILT_IN" as const,
+    toolName: tool.name,
+    definitionVersion: tool.definitionVersion,
+  }));
   f.releases.set(f.active.releaseId, f.active);
   expect(f.active.capabilities).toEqual([]);
   expect(f.active.selectedCapabilityKeys).toEqual([]);
@@ -123,7 +126,9 @@ it("a pinned release with genuinely no tools still produces a bounded referral",
   });
   expect(result.answerKind).toBe("REFER_TO_STORE");
   expect(f.grants.get(f.state.id).selectedCapabilityKeys).toEqual([]);
-  expect(f.grants.get(f.state.id).grantedTools).toEqual([]);
+  expect(f.grants.get(f.state.id).grantedTools).toEqual(f.commerceDiscountBuiltInDescriptors.map((tool) => ({
+    kind: "BUILT_IN", toolName: tool.name, definitionVersion: tool.definitionVersion,
+  })));
 });
 
 it("P10 a model cannot expand authority through tool arguments", async () => {

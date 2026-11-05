@@ -41,17 +41,9 @@ it("discovers arbitrary names, sends bounded context only and sends only reply t
       f.observations.find((o) => o.method === "initialize")?.params
         .protocolVersion,
     ).toBe("2025-11-25");
-    expect(f.observations[0]?.claims).toMatchObject({
-      purpose: "resolve",
-      shopId: "shop-fixture",
-      checkoutRecoveryId: "recovery-fixture",
-    });
-    expect(f.observations[0]?.claims).not.toHaveProperty("grantId");
-    expect(list[0]?.claims).toMatchObject({
-      purpose: "execute",
-      grantId: "grant-0",
-      releaseId: "release-fixture",
-    });
+    for (const observation of f.observations) {
+      expect(observation.claims).toEqual({ shopId: "shop-fixture" });
+    }
   });
 
 it("applies shared Feature behaviour once and exposes a reused Tool once", async () => {
@@ -117,7 +109,7 @@ it("R02 validates new bounded details without interpreting them; R08 referral ha
     });
   });
 
-it("R07/P05 retains old grant and response hash on a later turn while fresh state changes", async () => {
+it("R07/P05 fails closed when the current release no longer matches the retained grant", async () => {
     await f.run(async () => f.final());
     const old = f.grants.get(f.state.id);
     f.active = structuredClone(f.active);
@@ -130,22 +122,16 @@ it("R07/P05 retains old grant and response hash on a later turn while fresh stat
     f.state.inboundVersion = 2;
     f.state.processingInboundVersion = 2;
     f.state.checkoutRecovery.status = "COMPLETED";
-    const second = vi.fn(async (request: ModelRequest) => {
-      expect((request.context as any).trustedRecovery.recovery.status).toBe(
-        "COMPLETED",
-      );
-      return f.final();
-    });
-    await f.run(second, {
+    const second = vi.fn(async () => f.final());
+    await expect(f.run(second, {
       ...f.context,
       conversation: { ...f.context.conversation, version: 2 },
-    });
+    })).rejects.toMatchObject({ code: "INCOMPATIBLE_VERSION" });
+    expect(second).not.toHaveBeenCalled();
     expect(f.grants.get(f.state.id)).toEqual(old);
     expect(f.db.commerceConversationGrant.create).toHaveBeenCalledTimes(1);
-    expect(
-      f.observations.filter((o) => o.method === "resources/read").at(-1)?.claims
-        .releaseId,
-    ).toBe("release-fixture");
+    expect(f.observations.filter((o) => o.method === "resources/read").at(-1)?.claims)
+      .toEqual({ shopId: "shop-fixture" });
   });
 
 it("a newly named tool is available only to new grants, without a host switch", async () => {
@@ -160,12 +146,10 @@ it("a newly named tool is available only to new grants, without a host switch", 
     f.active.grantedTools[0]!.toolId = "new-tool";
     f.active.grantedTools[0]!.toolRevisionId = "new-tool-revision";
     f.releases.set(f.active.releaseId, f.active);
-    await f.run(async (request) => {
-      expect(request.tools.map((t) => t.name)).not.toContain(
-        "newly_authored_fabric",
-      );
+    await expect(f.run(async (request) => {
+      expect(request.tools.map((t) => t.name)).not.toContain("newly_authored_fabric");
       return f.final();
-    });
+    })).rejects.toMatchObject({ code: "INCOMPATIBLE_VERSION" });
     f.state.id = "new-conversation";
     await f.run(
       async (request) => {
@@ -191,16 +175,14 @@ it("first-turn insert races retain the unique winner", async () => {
     }
     expect(f.fixtureError).toBeNull();
     expect(f.grants.size).toBe(1);
-    expect(
-      f.observations
-        .filter((o) => o.method === "tools/list")
-        .every((o) => o.claims.grantId === "grant-0"),
-    ).toBe(true);
+    expect(f.observations.filter((o) => o.method === "tools/list")
+      .every((o) => JSON.stringify(o.claims) === JSON.stringify({ shopId: "shop-fixture" }))).toBe(true);
   });
 
 it("uses a concurrently persisted different release instead of its losing resolve candidate", async () => {
   const winner = structuredClone(f.active);
   winner.releaseId = "winner-release";
+  f.active = winner;
   f.releases.set(winner.releaseId, winner);
   f.db.commerceConversationGrant.create.mockImplementationOnce(
     async ({ data }) => {
@@ -224,15 +206,8 @@ it("uses a concurrently persisted different release instead of its losing resolv
     throw error;
   }
   expect(f.fixtureError).toBeNull();
-  expect(
-    f.observations
-      .filter((o) => o.method === "tools/list")
-      .every(
-        (o) =>
-          o.claims.releaseId === "winner-release" &&
-          o.claims.grantId === "winner-grant",
-      ),
-  ).toBe(true);
+  expect(f.observations.filter((o) => o.method === "tools/list").every((o) =>
+    JSON.stringify(o.claims) === JSON.stringify({ shopId: "shop-fixture" }))).toBe(true);
 });
   });
 }

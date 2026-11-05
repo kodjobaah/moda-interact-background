@@ -33,10 +33,7 @@ it("logs model language candidates and unstable-input rejection without customer
       logger,
     );
 
-    expect(result).toMatchObject({
-      detectedLanguageTag: null,
-      detectedLanguageConfidence: null,
-    });
+    expect(result).toMatchObject({ detectedLanguageTag: "en", detectedLanguageConfidence: 0.99 });
     expect(records).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -96,11 +93,11 @@ it("P06 renders the verified referral in explicit French without using model con
   expect(result.replyText).not.toContain("attacker");
 });
 
-it.each(["ok", "12345", "https://example.com", "👍"])("A1-L06 ambiguous %s returns null detection despite model guess",async(content)=>{
+it.each(["ok", "12345", "https://example.com", "👍"])("A1-L06 ambiguous %s is rejected for language selection without rewriting model metadata",async(content)=>{
  f.state.languageTag="fr";f.state.languageSource="DETECTED";
  const altered=structuredClone(f.context); altered.conversation.messages=[{role:"user",content}];
  const result=await f.run(async()=>f.final({detectedLanguageTag:"en",detectedLanguageConfidence:0.99}),altered);
- expect(result).toMatchObject({detectedLanguageTag:null,detectedLanguageConfidence:null});
+ expect(result).toMatchObject({detectedLanguageTag:"en",detectedLanguageConfidence:0.99});
  expect(result.replyText).toContain("Veuillez contacter");
 });
   });

@@ -37,12 +37,14 @@ export async function composeAiOutbound(
     conversationId: string;
     messageId: string;
     generatedResponse: string;
+    hostComposedReplyCandidates?: readonly string[];
   }>,
 ): Promise<AiOutboundComposition> {
   const result = await wrapper.renderConversationResponse({
     conversationId: input.conversationId,
     messageIdentity: input.messageId,
     responseBody: input.generatedResponse,
+    ...(input.hostComposedReplyCandidates ? { hostComposedReplyCandidates: input.hostComposedReplyCandidates } : {}),
     source: "AI",
     // BG005 reads the committed conversation language itself. Passing the
     // model's low-confidence guess here could contradict that durable choice.
