@@ -5,8 +5,8 @@ import { hostFixture as f } from "../host.fixture.js";
 export function registerMcpDiagnosticsHostTests() {
   describe("Commerce host MCP and runner diagnostics", () => {
 it.each([
-  ["401", "UNAVAILABLE"],
-  ["403", "UNAVAILABLE"],
+  ["401", "DENIED"],
+  ["403", "DENIED"],
   ["429", "UNAVAILABLE"],
   ["503", "UNAVAILABLE"],
   ["MALFORMED", "UNAVAILABLE"],
@@ -50,15 +50,16 @@ it.each([
     calls: [{ name: "never_seeded_catalogue_facts", arguments: { handle: "linen" } }],
     outputTokens: 10,
   } : f.final());
+  const expectedCode = statusCode === 401 || statusCode === 403 ? "DENIED" : "UNAVAILABLE";
   await expect(f.run(model, f.context, undefined, logger)).rejects.toMatchObject({
-    code: "UNAVAILABLE", retryable: true,
+    code: expectedCode, retryable: expectedCode === "UNAVAILABLE",
     diagnostic: { reasonCode: reason, statusCode, operation: "call_tool" },
   });
   const failureEvent = records.find((record) => record.event === "commerce.host.failed");
   expect(failureEvent).toMatchObject({ data: {
     shopId: "shop-fixture", recoveryId: "recovery-fixture",
     conversationId: "conversation-fixture", inboundVersion: 1,
-    errorCode: "UNAVAILABLE", retryable: true, statusCode,
+    errorCode: expectedCode, retryable: expectedCode === "UNAVAILABLE", statusCode,
     reasonCode: reason, operation: "call_tool", runnerStage: "tool.execute",
   }});
   expect(records.some((record) => record.event === "commerce.turn.failed")).toBe(true);

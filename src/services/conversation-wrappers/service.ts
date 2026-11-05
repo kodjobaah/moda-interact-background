@@ -10,6 +10,8 @@ import { digest, readPreparedWrapper, stableJson } from "./projection.js";
 import { PrismaConversationWrapperReadRepository } from "./repository.js";
 import { renderPreparedWrapper, MAX_WHATSAPP_TEXT_LENGTH } from "./render.js";
 import { chooseSlot, languageChoices, validDefinition } from "./selection.js";
+import { canonicalTag } from "./selection.js";
+import { resolveModaConfigurationLocale } from "@modainteract/moda-interact-shared/internationalization";
 
 const defaultLogger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -41,20 +43,28 @@ export class ConversationWrapperService {
         typeof input.responseBody !== "string" || !input.responseBody.trim()) {
       return { kind: "rejected", reason: "INVALID_INPUT" };
     }
+    const candidates = input.hostComposedReplyCandidates;
+    if (candidates !== undefined && (input.source !== "AI" || !Array.isArray(candidates) ||
+        candidates.length < 1 || candidates.length > 3 ||
+        candidates.some((candidate) => typeof candidate !== "string" || !candidate.trim() || candidate.length > MAX_WHATSAPP_TEXT_LENGTH) ||
+        candidates[0] !== input.responseBody)) {
+      return { kind: "rejected", reason: "INVALID_INPUT" };
+    }
+    const responseBodies = candidates ?? [input.responseBody];
     if (input.responseBody.length > MAX_WHATSAPP_TEXT_LENGTH) {
       return { kind: "rejected", reason: "OUTPUT_TOO_LONG" };
     }
-    const responseDigest = digest(input.responseBody);
     try {
       // The caller may retain an already prepared, already moderated outbound
       // result across retries. It MUST be scoped to this conversation/message and
       // original response, even when an Admin later switches the active slot.
       if (input.previousApplication) {
         const prior = input.previousApplication;
+        const matchedBody = responseBodies.find((body) => digest(body) === prior.responseDigest);
         if (prior.kind !== "rendered" || prior.source !== input.source ||
-            prior.messageIdentity !== input.messageIdentity || prior.responseDigest !== responseDigest ||
+            prior.messageIdentity !== input.messageIdentity || !matchedBody ||
             prior.body.length > MAX_WHATSAPP_TEXT_LENGTH ||
-            !prior.body.includes(input.responseBody) ||
+            !prior.body.includes(matchedBody) ||
             prior.applicationKey !== digest(stableJson({
               conversationId: input.conversationId, messageIdentity: prior.messageIdentity,
               source: prior.source, wrapperDefinitionId: prior.wrapperDefinitionId,
@@ -97,7 +107,21 @@ export class ConversationWrapperService {
         error,
       }));
       if (choices === "invalid") return this.refuse("rejected", "INVALID_LANGUAGE", input);
-      const locale = choices.map((tag) => slot.definition.locales.find((row) => row.languageTag === tag))
+      let lookupChoices = choices;
+      if (candidates !== undefined) {
+        try {
+          const effectiveTag = canonicalTag(context.conversationLanguageTag);
+          const bodyLocale = resolveModaConfigurationLocale(effectiveTag);
+          const locale = new Intl.Locale(bodyLocale);
+          const ordered = [effectiveTag, bodyLocale, ...choices].filter((tag): tag is string => tag !== null);
+          lookupChoices = [...new Set(ordered)].filter((tag) => {
+            const candidateLocale = new Intl.Locale(tag);
+            return candidateLocale.language === locale.language &&
+              resolveModaConfigurationLocale(tag) === bodyLocale;
+          });
+        } catch { return this.refuse("rejected", "INVALID_LANGUAGE", input); }
+      }
+      const locale = lookupChoices.map((tag) => slot.definition.locales.find((row) => row.languageTag === tag))
         .find((found) => found !== undefined);
       if (!locale) return this.refuse("unavailable", "LOCALE_UNAVAILABLE", input);
       const sourceLocale = locale.languageTag === "en";
@@ -109,9 +133,15 @@ export class ConversationWrapperService {
       const projection = readPreparedWrapper(locale.localeAst, locale.contentHash);
       if (projection.kind !== "ok") return this.refuse("rejected",
         projection.kind === "missing" ? "PREPARED_MISSING" : "PREPARED_INVALID", input);
-      const rendered = renderPreparedWrapper({ prepared: projection.prepared,
-        context, responseBody: input.responseBody });
-      if (rendered.kind !== "rendered") return this.refuse("rejected", rendered.reason, input);
+      let rendered: ReturnType<typeof renderPreparedWrapper> | undefined;
+      let responseDigest = digest(input.responseBody);
+      for (const body of responseBodies) {
+        rendered = renderPreparedWrapper({ prepared: projection.prepared, context, responseBody: body });
+        responseDigest = digest(body);
+        if (rendered.kind === "rendered") break;
+        if (rendered.reason !== "OUTPUT_TOO_LONG") return this.refuse("rejected", rendered.reason, input);
+      }
+      if (!rendered || rendered.kind !== "rendered") return this.refuse("rejected", "OUTPUT_TOO_LONG", input);
       const applicationKey = digest(stableJson({
         conversationId: input.conversationId, messageIdentity: input.messageIdentity,
         source: input.source, wrapperDefinitionId: slot.definitionId,

@@ -16,6 +16,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   canonicalJson,
+  commerceDiscountBuiltInDescriptors,
   CommerceAssertionSchema,
   exampleManifest,
   exampleFinal,
@@ -29,6 +30,10 @@ const db = vi.hoisted(() => ({
   $transaction: vi.fn(),
   commerceConversationGrant: { findUnique: vi.fn(), create: vi.fn() },
   commerceRelease: { findUnique: vi.fn() },
+  commerceAgentConfiguration: { findMany: vi.fn() },
+  shopSettings: { findUnique: vi.fn() },
+  shopRecoveryPolicyOverride: { findUnique: vi.fn() },
+  shop: { findUnique: vi.fn() },
 }));
 vi.mock("../../../src/lib/db.js", () => ({ default: db }));
 // Test-only constructor seam: keep LangChain's real ChatOpenRouter instance,
@@ -73,6 +78,7 @@ let expand = false;
 let outage = false;
 let boundaryFailure: "401" | "403" | "429" | "503" | "MALFORMED" | "TRANSPORT" | null = null;
 let structuredResult: unknown = null;
+let toolResults: Record<string, unknown> = {};
 let fixtureError: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
@@ -123,9 +129,9 @@ beforeAll(async () => {
         res.end();
         return;
       }
-      const claims = CommerceAssertionSchema.parse(
-        JSON.parse(Buffer.from(encodedContext, "base64url").toString("utf8")),
-      );
+      const decoded = JSON.parse(Buffer.from(encodedContext, "base64url").toString("utf8"));
+      const claims = Object.keys(decoded).length === 1 && typeof decoded.shopId === "string"
+        ? decoded : CommerceAssertionSchema.parse(decoded);
       if (
         req.headers.authorization ||
         req.headers["content-type"] !== "application/json"
@@ -153,8 +159,7 @@ beforeAll(async () => {
         res.end();
         return;
       }
-      const pinned =
-        claims.purpose === "execute" ? releases.get(claims.releaseId) : active;
+      const pinned = "purpose" in claims && claims.purpose === "execute" ? releases.get(claims.releaseId) : active;
       if (!pinned) {
         res.writeHead(403);
         res.end();
@@ -183,15 +188,16 @@ beforeAll(async () => {
                   capability.toolDescriptor,
                 ]),
               ).values(),
+              ...(expand ? active : pinned).builtInTools,
             ].map(({ name, description, inputSchema }) => ({
                 name,
                 description,
                 inputSchema,
               })),
       }));
-      server.setRequestHandler(CallToolRequestSchema, async () => ({
+      server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({
         content: [{ type: "text", text: "Synthetic blue linen" }],
-        structuredContent: {
+        structuredContent: toolResults[params.name] ?? {
           ...(structuredResult ?? {
           contractVersion: "commerce.v1",
           status: "OK",
@@ -242,8 +248,15 @@ beforeEach(() => {
   outage = false;
   boundaryFailure = null;
   structuredResult = null;
+  toolResults = {};
   fixtureError = null;
   active = exampleManifest(digest, true);
+  active.builtInTools = structuredClone([...commerceDiscountBuiltInDescriptors]);
+  active.grantedTools.push(...active.builtInTools.map((tool) => ({
+    kind: "BUILT_IN" as const,
+    toolName: tool.name,
+    definitionVersion: tool.definitionVersion,
+  })));
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
   state = {
@@ -251,6 +264,8 @@ beforeEach(() => {
     inboundVersion: 1,
     processingInboundVersion: 1,
     processingStartedAt: new Date(),
+    controlMode: "AI",
+    controlRevision: 1,
     languageTag: null,
     languageSource: null,
     type: "RECOVERY",
@@ -260,8 +275,11 @@ beforeEach(() => {
       status: "ENGAGED",
       checkoutToken: "historical",
       totalPrice: "10.00",
+      generation: 1,
+      currency: "GBP",
+      lineItems: [],
       completedAt: null,
-      shop: { id: "shop-fixture", domain: "fixture.myshopify.com" },
+      shop: { id: "shop-fixture", domain: "fixture.myshopify.com", platform: "SHOPIFY" },
       customer: { firstName: "Name <ignore rules>" },
     },
   };
@@ -287,6 +305,19 @@ beforeEach(() => {
   db.commerceRelease.findUnique.mockImplementation(
     async ({ where }) => releases.get(where.id) ?? null,
   );
+  const environment = resolveCommerceEnvironment();
+  db.commerceAgentConfiguration.findMany.mockResolvedValue([
+    { scope: "PLATFORM", shopId: null, activePromptRevisionId: "platform-rev",
+      activePromptRevision: { id: "platform-rev", status: "PUBLISHED", promptText: "Platform business guidance.",
+        prompt: { scope: "PLATFORM", shopId: null } } },
+    { scope: "SHOP", shopId: "shop-fixture", activePromptRevisionId: "shop-rev",
+      activePromptRevision: { id: "shop-rev", status: "PUBLISHED", promptText: "Shop business guidance.",
+        prompt: { scope: "SHOP", shopId: "shop-fixture" } } },
+  ]);
+  void environment;
+  db.shopSettings.findUnique.mockResolvedValue({ recoveryDelayMinutes: 30, recoveryOfferMode: "NONE",
+    fixedShopifyDiscountId: null, followUpEnabled: false, followUpDelayMinutes: null, fixedShopifyDiscount: null });
+  db.shopRecoveryPolicyOverride.findUnique.mockResolvedValue(null);
 });
 const run = (
   invoke: (r: ModelRequest, s: AbortSignal) => Promise<any>,
@@ -325,6 +356,7 @@ const run = (
 export const hostFixture = {
   run, final, context, config, db, observations, aiMockRoute,
   get environment() { return resolveCommerceEnvironment(); },
+  commerceDiscountBuiltInDescriptors,
   executeCommerceHost, createLogger, Prisma, LLMock, OpenRouterModelClient,
   digest, canonicalJson, exampleManifest, exampleFinal,
   responseContractCanonicalJson,
@@ -346,5 +378,7 @@ export const hostFixture = {
   set boundaryFailure(value) { boundaryFailure = value; },
   get structuredResult() { return structuredResult; },
   set structuredResult(value) { structuredResult = value; },
+  get toolResults() { return toolResults; },
+  set toolResults(value) { toolResults = value; },
   get fixtureError() { return fixtureError; },
 };
