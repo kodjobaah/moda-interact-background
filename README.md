@@ -628,28 +628,31 @@ Moda Interact is built around a few core architectural principles:
 7. **Avoid premature infrastructure complexity**  
    PostgreSQL and Redis provide sufficient scalability for the current system while preserving clear future boundaries for higher-volume workloads.
 
-## Published discount identity migration (ARCH-059)
+## MCP-authorized capability discovery (ARCH-059)
 
-The in-progress Background migration consumes Shared 5.1.0 published capability
-and revision identities for both conversation and initial outreach. Historical
-built-in grants remain stored unchanged and are refused by the new path.
-`INITIAL_RECOVERY_OUTREACH` stays trusted host context. Production selector
-factories first use the existing `checkout_recovery` entitlement gate; the
-four-name allowlist, 16-call/3-search/5-detail limits and graph deadline remain.
-The client pins the manifest, checks persisted release members, validates
-capability-key discovery and routes model-facing tool names to published keys.
-Pre/post manifest checks discard results after activation or permission changes.
+Background consumes published Shared 5.1.0 manifests. MCP selects the current
+published revision and reauthorizes membership, tenant and permissions for each
+request. Compatible activation between requests is supported; Background sends
+trusted shop/purpose and permitted arguments, without selecting a remote revision.
+Historical grants remain unchanged. Conversation execution retains the original
+Feature scope while using MCP's current members/revisions for that scope.
 
-This implementation is not ready for deployment: Shared/MCP must first provide
-and enforce a trusted expected published-call identity before provider I/O.
-Host pre/post checks cannot close an activation race between a manifest read
-and the MCP request snapshot. The architect-confirmed prerequisite is recorded
-in the task report; do not treat these checks as server-side pin enforcement.
+Initial outreach resolves the trusted Product Search Feature ID, intersects it
+with MCP's current authorized published members and exposes only that set to the
+agent. Unrelated Features remain excluded. There is no tool-name membership list,
+required first tool, injected final exact-tool read or tool-name invocation quota.
+Additional supported published members use their advertised input schema and the
+Shared bounded Commerce result envelope; they need no Background schema-switch
+entry to execute or return data to the model. Known discount/product interpreters
+only establish validated facts for deterministic offer finalization; generic
+results cannot independently establish savings, eligibility or delivery authority.
 
-Retain the ARCH-059 controlled cutover: stage the complete canonical release,
-keep the old pointer, pause/drain affected consumers, deploy strict MCP, obtain
-explicit operator activation confirmation, verify unique names and plan parity,
-then deploy/resume compatible Background. On failure stay paused and roll back
-old MCP/Background artifacts together with the old compatible pointer. This
-source change performs no deployment, activation, grant rewrite, credit change
-or delivery-state migration.
+Production selector construction retains checkout_recovery admission. Aggregate
+limits remain 16 remote calls, 8 model steps with at most 512 output tokens each,
+a 45-second graph deadline, 32 KiB per projected result and 128 KiB tool-message
+history. Trusted cancellation, conversation lease/control checks, current merchant
+policy, offer revalidation, moderation, credit and delivery behavior are preserved.
+
+The operator-owned staged-release cutover and paired rollback procedure remains
+binding. These implementation changes perform no deployment, release activation,
+queue operation, grant rewrite or credit/delivery-state migration.

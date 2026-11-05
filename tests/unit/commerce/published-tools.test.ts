@@ -30,12 +30,11 @@ describe('published identity admission', () => {
     expect(() => assertPublishedManifest(historical)).toThrow();
     expect(historical).toEqual(before);
   });
-  it('rejects duplicate canonical membership, wrong revisions, grant mismatch and schema drift', () => {
+  it('rejects duplicate canonical membership, grant mismatch and schema drift', () => {
     const duplicate = publishedManifest(); duplicate.capabilities.push({ ...structuredClone(duplicate.capabilities[0]!), capabilityId: 'duplicate', position: 2, key: 'alias' });
-    duplicate.selectedCapabilityKeys.push('alias'); duplicate.grantedTools = deduplicateTools(duplicate.capabilities, []);
-    const old = publishedManifest(); old.capabilities[0]!.toolDescriptor.definitionVersion = '2.0.0'; old.grantedTools = deduplicateTools(old.capabilities, []);
+    duplicate.selectedCapabilityKeys.push('alias'); duplicate.capabilities[2]!.toolDescriptor.toolId = 'conflicting-tool';
     const forged = publishedManifest(); forged.grantedTools = [];
-    for (const manifest of [duplicate, old, forged]) expect(() => assertPublishedManifest(manifest)).toThrow();
+    for (const manifest of [duplicate, forged]) expect(() => assertPublishedManifest(manifest)).toThrow();
     const current = publishedManifest(); const list = publishedToolEntries(current).map(entry => entry.descriptor);
     expect(() => assertPublishedToolList(current, [list[0]!, list[0]!])).toThrow();
     expect(() => assertPublishedToolList(current, [{ ...list[0]!, inputSchema: { type: 'object' } }, list[1]!])).toThrow();

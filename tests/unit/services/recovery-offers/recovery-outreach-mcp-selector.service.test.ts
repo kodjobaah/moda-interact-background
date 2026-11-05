@@ -35,6 +35,11 @@ function makeFixture(input: {
 } = {}) {
   const listed = input.tools ?? [optionsDescriptor, detailsDescriptor, { name: "commerce_delete_customer", description: "not allowed", inputSchema: { type: "object", properties: {}, additionalProperties: false } }];
   const manifest = publishedManifest([...new Map(listed.map(tool => [tool.name, tool])).values()] as never);
+  const unrelated = manifest.capabilities.find(cap => cap.key === "commerce_delete_customer");
+  if (unrelated) {
+    unrelated.featureId = "feature-unrelated";
+    manifest.featureBehaviours.push({ featureId: unrelated.featureId, behaviourPrompt: "Unrelated" });
+  }
   const client = {
     manifest: vi.fn(async () => manifest),
     connect: vi.fn(async () => undefined),
@@ -53,6 +58,7 @@ function makeFixture(input: {
       configuration: () => ({ endpoint: new URL("https://mcp.example/api/mcp") } satisfies McpConfiguration),
       clientFactory: () => client,
       validateRelease: async () => undefined,
+      resolveFeatureScope: async () => ["feature-product-search"],
     },
   );
   return { service, client, manifest };
@@ -85,11 +91,11 @@ describe("RecoveryOutreachMcpSelectorService", () => {
     expect(CommerceToolOutputs.commerce_get_discount_options.safeParse(result.data).success).toBe(true);
     await expect(service.call("commerce_get_discount_options", { limit: 10, unexpected: true }))
       .rejects.toMatchObject({ code: "INVALID_INPUT" });
-    await expect(service.call("commerce_delete_customer", {})).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(service.call("commerce_delete_customer", {})).rejects.toMatchObject({ code: "DENIED" });
     expect(client.call).toHaveBeenCalledOnce();
   });
 
-  it("rejects duplicate listed names and a malformed successful feature payload", async () => {
+  it("rejects duplicate listed names and returns bounded generic results without a fixed output schema gate", async () => {
     const duplicate = makeFixture({ tools: [optionsDescriptor, optionsDescriptor, detailsDescriptor] });
     await duplicate.service.connect();
     await expect(duplicate.service.tools()).rejects.toMatchObject({ code: "DENIED" });
@@ -103,25 +109,23 @@ describe("RecoveryOutreachMcpSelectorService", () => {
     await malformed.service.connect();
     await malformed.service.tools();
     await expect(malformed.service.call("commerce_get_discount_options", { limit: 5 }))
-      .rejects.toMatchObject({ code: "UNAVAILABLE" });
+      .resolves.toMatchObject({ status: "OK" });
   });
 });
-it('pins one attempt and rejects changed release/revision before client calls', async () => {
-  for (const change of ['release', 'revision']) {
-    const f = makeFixture(); await f.service.connect(); await f.service.tools();
-    if (change === 'release') f.manifest.releaseId = 'other-release';
-    else f.manifest.capabilities[0]!.toolDescriptor.toolRevisionId = 'other-revision';
-    await expect(f.service.call('commerce_get_discount_options', { limit: 5 })).rejects.toThrow();
-    expect(f.client.call).not.toHaveBeenCalled();
-  }
-});
-it('missing published discount membership is unavailable and unrelated tools never expand the allowlist', async () => {
-  const missing = makeFixture({ tools: [optionsDescriptor] }); await missing.service.connect();
-  await expect(missing.service.tools()).rejects.toMatchObject({ code: 'UNAVAILABLE' });
-  expect(missing.client.call).not.toHaveBeenCalled();
+it('accepts compatible release/revision activation and discovers new supported members dynamically', async () => {
   const f = makeFixture(); await f.service.connect(); await f.service.tools();
-  await expect(f.service.call('commerce_delete_customer', {})).rejects.toThrow();
-  expect(f.client.call).not.toHaveBeenCalled();
+  f.manifest.releaseId = 'new-release';
+  f.manifest.capabilities[0]!.toolDescriptor.toolRevisionId = 'new-revision';
+  const { deduplicateTools } = await import('@modainteract/moda-interact-shared/commerce');
+  f.manifest.grantedTools = deduplicateTools(f.manifest.capabilities, []);
+  await expect(f.service.call('commerce_get_discount_options', { limit: 5 })).resolves.toMatchObject({ status: 'OK' });
+});
+it('does not require fixed discount members and excludes unrelated Feature tools', async () => {
+  const f = makeFixture({ tools: [optionsDescriptor] }); await f.service.connect();
+  expect((await f.service.tools()).map(tool => tool.name)).toEqual([optionsDescriptor.name]);
+  const standard = makeFixture(); await standard.service.connect(); await standard.service.tools();
+  await expect(standard.service.call('commerce_delete_customer', {})).rejects.toMatchObject({ code: 'DENIED' });
+  expect(standard.client.call).not.toHaveBeenCalled();
 });
 it('checkout recovery host admission runs before selector/client construction', async () => {
   const { createAdmittedRecoveryOutreachMcpSelector } = await import('../../../../src/services/recovery-offers/recovery-outreach-mcp-selector.service.js');

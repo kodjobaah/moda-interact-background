@@ -106,7 +106,7 @@ it("R02 validates new bounded details without interpreting them; R08 referral ha
     });
   });
 
-it("R07/P05 fails closed when the current release no longer matches the retained grant", async () => {
+it("uses a compatible current release while preserving the historical grant", async () => {
     await f.run(async () => f.final());
     const old = f.grants.get(f.state.id);
     f.active = structuredClone(f.active);
@@ -123,15 +123,15 @@ it("R07/P05 fails closed when the current release no longer matches the retained
     await expect(f.run(second, {
       ...f.context,
       conversation: { ...f.context.conversation, version: 2 },
-    })).rejects.toMatchObject({ code: "INCOMPATIBLE_VERSION" });
-    expect(second).not.toHaveBeenCalled();
+    })).resolves.toHaveProperty("answerKind");
+    expect(second).toHaveBeenCalled();
     expect(f.grants.get(f.state.id)).toEqual(old);
     expect(f.db.commerceConversationGrant.create).toHaveBeenCalledTimes(1);
     expect(f.observations.filter((o) => o.method === "resources/read").at(-1)?.claims)
       .toEqual({ shopId: "shop-fixture" });
   });
 
-it("a newly named tool is available only to new grants, without a host switch", async () => {
+it("a newly named member is available within the retained authorized Feature scope", async () => {
     await f.run(async () => f.final());
     f.active = structuredClone(f.active);
     f.active.releaseId = "new-release";
@@ -143,10 +143,12 @@ it("a newly named tool is available only to new grants, without a host switch", 
     f.active.grantedTools[0]!.toolId = "new-tool";
     f.active.grantedTools[0]!.toolRevisionId = "new-tool-revision";
     f.releases.set(f.active.releaseId, f.active);
-    await expect(f.run(async (request) => {
-      expect(request.tools.map((t) => t.name)).not.toContain("newly_authored_fabric");
+    const historical = structuredClone(f.grants.get(f.state.id));
+    await f.run(async (request) => {
+      expect(request.tools.map((t) => t.name)).toContain("newly_authored_fabric");
       return f.final();
-    })).rejects.toMatchObject({ code: "INCOMPATIBLE_VERSION" });
+    });
+    expect(f.grants.get(f.state.id)).toEqual(historical);
     f.state.id = "new-conversation";
     await f.run(
       async (request) => {

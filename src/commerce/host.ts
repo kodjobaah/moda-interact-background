@@ -1,3 +1,4 @@
+import { selectPublishedFeatures } from "./published-tools.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -36,7 +37,7 @@ import {
   readGrant,
   persistGrant,
   validateRelease,
-  manifestMatchesGrant,
+  readGrantFeatureScope,
 } from "./grants.js";
 import { RECOVERY_INSTRUCTIONS } from "./recovery-instructions.js";
 import { loadRecommendationContext, refreshRecommendationContext, refreshRecommendationPolicy } from "./recommendations/context.js";
@@ -253,18 +254,21 @@ async function execute(
     }
   }
   const client = new CommerceMcpClient(config, turn, signal, grant);
-  const evidence = new TurnEvidenceRegistry({
-    turn,
-    grantId: grant.id,
-    releaseId: grant.releaseId,
-  });
   const extractEvidence = deps.extractEvidence ?? extractTrustedEvidence;
   try {
     await client.connect();
-    const manifest = await client.manifest();
-    if (!manifestMatchesGrant(manifest, grant))
-      throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
-        hostDiagnostic("host.grant", "HOST_MANIFEST_GRANT_MISMATCH"));
+    const scope = await readGrantFeatureScope(grant);
+    const manifest = selectPublishedFeatures(await client.manifest(), scope);
+    // Stored grant history remains untouched. This turn uses MCP's current
+    // authorized members only within its existing Feature scope.
+    const activeGrant = { ...grant, releaseId: manifest.releaseId, selectedCapabilityKeys: manifest.selectedCapabilityKeys,
+      grantedTools: manifest.grantedTools };
+    grant = activeGrant;
+    const evidence = new TurnEvidenceRegistry({
+      turn,
+      grantId: grant.id,
+      releaseId: grant.releaseId,
+    });
     try { await validateRelease(manifest); }
     catch (error) {
       if (error instanceof CommerceHostError && error.diagnostic) throw error;
@@ -347,20 +351,22 @@ async function execute(
     });
     const available = async (requestSignal = signal) => {
       await assertCurrent();
+      const currentManifest = selectPublishedFeatures(await observeMcp(() => client.manifest()), scope);
       const listed = await observeMcp(() => client.tools(requestSignal));
-      const listedKeys = new Set(listed.map(tool => tool.name));
-      const names = new Set(descriptors.filter(descriptor => manifest.capabilities.some(capability =>
-        capability.toolDescriptor.toolId === descriptor.toolId &&
-        capability.toolDescriptor.toolRevisionId === descriptor.toolRevisionId && listedKeys.has(capability.key)))
-        .map(descriptor => descriptor.name));
-      if (names.size !== descriptors.length) throw retain(new CommerceHostError("DENIED", false,
-        hostDiagnostic("host.authorization", "HOST_TOOL_LIST_UNAUTHORIZED")));
+      const keys = new Set(listed.map(tool => tool.name));
+      const names = new Set(currentManifest.capabilities.filter(cap => keys.has(cap.key)).map(cap => cap.toolDescriptor.name));
       if (recommendationContext.policy.mode === "NONE" ||
           recommendationContext.policy.mode === "FIXED" && recommendationContext.policy.authorisedDiscountIds.length === 0) {
         names.delete("commerce_get_discount_options");
         names.delete("commerce_get_discount_details");
       }
       return names;
+    };
+    const callScoped = async (name: string, args: Record<string, unknown>, toolSignal = signal) => {
+      const currentManifest = selectPublishedFeatures(await client.manifest(), scope);
+      const capability = currentManifest.capabilities.find(cap => cap.toolDescriptor.name === name);
+      if (!capability) throw new CommerceHostError("DENIED");
+      return client.call(capability.key, args, toolSignal);
     };
     await available();
     const language = {
@@ -471,7 +477,7 @@ async function execute(
           isAuthorized: async (authorizedGrant, toolSignal) => preserveRunnerFailure(async () => {
             toolSignal.throwIfAborted();
             if (!(await available(toolSignal)).has(descriptor.name)) return false;
-            return grant.grantedTools.some((candidate) =>
+            return activeGrant.grantedTools.some((candidate) =>
               canonicalJson(candidate) === canonicalJson(authorizedGrant) &&
               !isBuiltInTool(candidate) && candidate.toolId === descriptor.toolId &&
               candidate.toolRevisionId === descriptor.toolRevisionId && candidate.toolName === descriptor.name &&
@@ -501,7 +507,7 @@ async function execute(
                     hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
               }
             }
-            const result = await observeMcp(() => client.call(descriptor.name, args, toolSignal));
+            const result = await observeMcp(() => callScoped(descriptor.name, args, toolSignal));
             if (isDiscount) await refreshRecommendationPolicy({
               context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent,
             });
@@ -573,7 +579,7 @@ async function execute(
         isCancelled: () => deps.signal?.aborted === true,
         replay: async ({ name, arguments: args }) => {
           usedCalls += 1;
-          return client.call(name, args, signal);
+          return callScoped(name, args, signal);
         },
         extractEvidence,
       });
@@ -767,7 +773,7 @@ async function execute(
           if (usedCalls >= 10) return null;
           usedCalls += 1;
           const args = { productId, variantId };
-          const fresh = await observeMcp(() => client.call("commerce_get_product", args, signal));
+          const fresh = await observeMcp(() => callScoped("commerce_get_product", args, signal));
           await assertCurrent();
           if (fresh.status !== "OK") throw new CommerceHostError(fresh.code, fresh.retryable,
             hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
@@ -816,7 +822,7 @@ async function execute(
             throw retain(new CommerceHostError("DENIED", false, hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
           if (usedCalls >= 10) continue;
           usedCalls += 1;
-          const refreshed = await observeMcp(() => client.call("commerce_get_discount_details", { offerId }, signal));
+          const refreshed = await observeMcp(() => callScoped("commerce_get_discount_details", { offerId }, signal));
           await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
           if (refreshed.status !== "OK") throw new CommerceHostError(refreshed.code, refreshed.retryable,
             hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
@@ -920,7 +926,7 @@ async function execute(
           if (shippingPlanned && observed && usedCalls < 10 && (await available()).has("commerce_get_shipping_information")) {
             await assertCurrent();
             usedCalls += 1;
-            const refreshed = await observeMcp(() => client.call("commerce_get_shipping_information", args, signal));
+            const refreshed = await observeMcp(() => callScoped("commerce_get_shipping_information", args, signal));
             await assertCurrent();
             if (refreshed.status !== "OK") throw new CommerceHostError(refreshed.code, refreshed.retryable,
               hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));

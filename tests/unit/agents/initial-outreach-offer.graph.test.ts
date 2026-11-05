@@ -223,21 +223,22 @@ describe("InitialOutreachOffer LangGraph", () => {
     });
   });
 
-  it("blocks final decisions before the mandatory initial discount-options call", async () => {
+  it("allows a safe no-offer final choice without forcing a named tool", async () => {
     const { graph, selector } = fixture([
       { name: "submitInitialOutreachOffer", arguments: { kind: "NO_VERIFIED_OFFER" } },
     ]);
 
     const state = await graph.invoke();
-    expect(state.finalDecision).toMatchObject({ kind: "FAILURE", reasonCode: "FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS" });
+    expect(state.finalDecision).toMatchObject({ kind: "NO_VERIFIED_OFFER" });
     expect(selector.call).not.toHaveBeenCalled();
   });
 
-  it("performs a final exact product read after the model selects an alternative from search", async () => {
+  it("uses an exact product read selected by the agent before accepting an alternative", async () => {
     const { graph, selector } = fixture([
       { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
       { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
       { name: "commerce_search_products", arguments: { query: "matching accessory" } },
+      { name: "commerce_get_product", arguments: { productId: "product-2", variantId: "variant-2" } },
       { name: "submitInitialOutreachOffer", arguments: {
         kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: "offer-1", productId: "product-2", variantId: "variant-2",
       } },
@@ -274,6 +275,7 @@ describe("InitialOutreachOffer LangGraph", () => {
       { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
       { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
       { name: "commerce_search_products", arguments: { query: "matching accessory" } },
+      { name: "commerce_get_product", arguments: { productId: "product-2", variantId: "variant-2" } },
       { name: "submitInitialOutreachOffer", arguments: {
         kind: "ALTERNATIVE_PRODUCT_PROMOTION", offerId: "offer-1", productId: "product-2", variantId: "variant-2",
       } },
@@ -285,19 +287,20 @@ describe("InitialOutreachOffer LangGraph", () => {
     });
   });
 
-  it("blocks Stage 2 product search after a preceding details call supports checkout", async () => {
+  it("does not impose a named-tool stage gate after observing a supported checkout offer", async () => {
     const { graph, selector } = fixture([
       { name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } },
       [
         { name: "commerce_get_discount_details", arguments: { offerId: "offer-1" } },
         { name: "commerce_search_products", arguments: { query: "another product" } },
       ],
+      { name: "submitInitialOutreachOffer", arguments: { kind: "CHECKOUT_DISCOUNT", offerIds: ["offer-1"] } },
     ]);
     const state = await graph.invoke();
     expect(selector.call.mock.calls.map(([name]) => name)).toEqual([
-      "commerce_get_discount_options", "commerce_get_discount_details",
+      "commerce_get_discount_options", "commerce_get_discount_details", "commerce_search_products",
     ]);
-    expect(state.failure).toMatchObject({ reasonCode: "PRODUCT_SEARCH_AFTER_SUPPORTED_CHECKOUT" });
+    expect(state.failure).toBeNull();
     expect(state.finalDecision).toMatchObject({ kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [{ offerId: "offer-1" }] } });
   });
 });

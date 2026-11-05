@@ -1,3 +1,4 @@
+import { registerDynamicOutreachTests } from "./host-suites/dynamic-outreach.js";
 // Composition only: all executable host scenarios live in focused suite modules.
 import { registerAiMockHostTests } from "./host-suites/ai-mock.js";
 import { registerLiveBudgetHostTests } from "./host-suites/budgets.js";
@@ -28,3 +29,5 @@ registerRecommendationRevalidationTests();
 registerRecommendationFailureTests();
 registerFallbackResponseTests();
 registerShippingResponseTests();
+
+registerDynamicOutreachTests();

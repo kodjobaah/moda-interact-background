@@ -19,6 +19,7 @@ import {
   canonicalJson,
   commerceDiscountBuiltInDescriptors,
   CommerceAssertionSchema,
+  CommerceOutreachToolContextSchema,
   exampleManifest,
   exampleFinal,
   responseContractCanonicalJson,
@@ -35,6 +36,7 @@ const db = vi.hoisted(() => ({
   shopSettings: { findUnique: vi.fn() },
   shopRecoveryPolicyOverride: { findUnique: vi.fn() },
   shop: { findUnique: vi.fn() },
+  feature: { findUnique: vi.fn() },
 }));
 vi.mock("../../../src/lib/db.js", () => ({ default: db }));
 // Test-only constructor seam: keep LangChain's real ChatOpenRouter instance,
@@ -133,7 +135,9 @@ beforeAll(async () => {
       }
       const decoded = JSON.parse(Buffer.from(encodedContext, "base64url").toString("utf8"));
       const claims = Object.keys(decoded).length === 1 && typeof decoded.shopId === "string"
-        ? decoded : CommerceAssertionSchema.parse(decoded);
+        ? decoded : Object.keys(decoded).length === 2 && decoded.shopId === "shop-fixture" &&
+          CommerceOutreachToolContextSchema.safeParse(decoded.toolContext).success
+          ? decoded : CommerceAssertionSchema.parse(decoded);
       if (
         req.headers.authorization ||
         req.headers["content-type"] !== "application/json"
@@ -254,6 +258,7 @@ beforeEach(() => {
   active = exampleManifest(digest, true);
   appendPublishedDiscounts(active);
   releases = new Map([[active.releaseId, active]]);
+  db.feature.findUnique.mockImplementation(async () => ({ id: active.featureBehaviours[0]?.featureId, active: true }));
   grants = new Map();
   state = {
     id: "conversation-fixture",

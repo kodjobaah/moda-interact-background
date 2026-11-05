@@ -22,12 +22,7 @@ export function assertPublishedManifest(manifest: CommerceManifest): void {
       const previous = identities.get(descriptor.name);
       if (previous && previous !== identity) throw new Error('Conflicting published name');
       identities.set(descriptor.name, identity);
-      if (descriptor.name === 'commerce_get_discount_options' || descriptor.name === 'commerce_get_discount_details') {
-        if (capability.key !== descriptor.name || descriptor.definitionVersion !== '3.0.0' ||
-            manifest.capabilities.filter(cap => cap.toolDescriptor.name === descriptor.name).length !== 1) {
-          throw new Error('Canonical discount identity mismatch');
-        }
-      }
+
     }
   } catch { throw new CommerceHostError('INCOMPATIBLE_VERSION'); }
 }
@@ -49,4 +44,17 @@ export function assertPublishedToolList(manifest: CommerceManifest,
         canonicalJson(tool.inputSchema) === canonicalJson(descriptor.inputSchema)))) {
     throw new CommerceHostError('DENIED');
   }
+}
+
+
+/** A trusted host selects Feature IDs; MCP remains authoritative for current
+ * membership/entitlement. This is a projection, never a stored-grant rewrite. */
+export function selectPublishedFeatures(manifest: CommerceManifest, featureIds: readonly string[]): CommerceManifest {
+  assertPublishedManifest(manifest);
+  const allowed = new Set(featureIds);
+  const capabilities = manifest.capabilities.filter(cap => allowed.has(cap.featureId));
+  const represented = new Set(capabilities.map(cap => cap.featureId));
+  return CommerceManifestSchema.parse({ ...manifest, capabilities,
+    selectedCapabilityKeys: capabilities.map(cap => cap.key), grantedTools: deduplicateTools(capabilities, []),
+    featureBehaviours: manifest.featureBehaviours.filter(feature => represented.has(feature.featureId)) });
 }

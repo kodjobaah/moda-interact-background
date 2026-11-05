@@ -1,6 +1,7 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import {
   CommerceToolOutputs,
+  CommerceToolResultSchema,
   InitialOutreachCheckoutOfferSetSchema,
 } from "@modainteract/moda-interact-shared/commerce";
 import {
@@ -33,8 +34,6 @@ import type {
 
 export const MAX_MODEL_STEPS = 8;
 export const MAX_MCP_CALLS = 16;
-export const MAX_PRODUCT_SEARCHES = 3;
-export const MAX_PRODUCT_DETAIL_READS = 5;
 export const MAX_OUTREACH_DEADLINE_MS = 45_000;
 export const MAX_TOOL_RESULT_BYTES = 32 * 1024;
 export const MAX_TOOL_MESSAGES_BYTES = 128 * 1024;
@@ -50,11 +49,9 @@ type FailureState = Readonly<{
 }>;
 const INVALID_RESULT_REASONS = new Set([
   "MODEL_STEP_INVALID", "MODEL_CALL_INVALID", "MODEL_FINAL_CALL_MIXED", "MODEL_FINAL_CHOICE_INVALID",
-  "FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS", "MODEL_REQUESTED_UNLISTED_TOOL", "PRODUCT_SEARCH_BEFORE_CHECKOUT_STAGE",
-  "OUTREACH_TOOL_NOT_ALLOWED", "DISCOUNT_DETAILS_NOT_TIED_TO_AUTHORISED_OPTIONS",
+  "MODEL_REQUESTED_UNLISTED_TOOL",
   "DISCOUNT_DETAILS_SOURCE_IDENTITY_MISMATCH", "DISCOUNT_MODE_MISMATCH",
-  "PRODUCT_READ_NOT_TIED_TO_OBSERVED_IDENTITY", "PRODUCT_EXACT_IDENTITY_MISMATCH",
-  "PRODUCT_CHOICE_NOT_FROM_OBSERVED_SEARCH", "PRODUCT_SEARCH_AFTER_SUPPORTED_CHECKOUT",
+  "PRODUCT_EXACT_IDENTITY_MISMATCH",
 ]);
 type ProductObservation = Readonly<{
   product: InitialOutreachCommerceProduct;
@@ -79,9 +76,6 @@ const OutreachGraphState = Annotation.Root({
   phase: Annotation<"CHECKOUT" | "ALTERNATIVE">({ reducer: (_current, update) => update, default: () => "CHECKOUT" }),
   modelSteps: Annotation<number>({ reducer: (_current, update) => update, default: () => 0 }),
   mcpCalls: Annotation<number>({ reducer: (_current, update) => update, default: () => 0 }),
-  discountOptionsCalls: Annotation<number>({ reducer: (_current, update) => update, default: () => 0 }),
-  productSearches: Annotation<number>({ reducer: (_current, update) => update, default: () => 0 }),
-  productDetailReads: Annotation<number>({ reducer: (_current, update) => update, default: () => 0 }),
   runtimeMessages: Annotation<readonly ToolResultMessage[]>({ reducer: (_current, update) => update, default: () => [] }),
   availableTools: Annotation<readonly OutreachMcpToolDescriptor[]>({ reducer: (_current, update) => update, default: () => [] }),
   optionsById: Annotation<OfferOptionMap>({ reducer: (_current, update) => update, default: () => new Map() }),
@@ -95,9 +89,7 @@ const OutreachGraphState = Annotation.Root({
   pendingChoice: Annotation<InitialOutreachModelChoice | null>({ reducer: (_current, update) => update, default: () => null }),
   finalDecision: Annotation<InitialOutreachAgentResult | null>({ reducer: (_current, update) => update, default: () => null }),
   failure: Annotation<FailureState | null>({ reducer: (_current, update) => update, default: () => null }),
-  firstMcpCallSeen: Annotation<boolean>({ reducer: (_current, update) => update, default: () => false }),
   seenToolCalls: Annotation<ReadonlySet<string>>({ reducer: (_current, update) => update, default: () => new Set() }),
-  nextDiscountCursor: Annotation<string | null>({ reducer: (_current, update) => update, default: () => null }),
 });
 
 type OutreachGraphStateValue = typeof OutreachGraphState.State;
@@ -153,6 +145,7 @@ function safeProjection(context: InitialOutreachAgentContext): Record<string, un
 }
 
 function modelTools(descriptors: readonly OutreachMcpToolDescriptor[]): ModelRequest["tools"] {
+  if (descriptors.some(tool => tool.name === FINAL_TOOL)) throw new CommerceHostError("INCOMPATIBLE_VERSION");
   return [
     ...descriptors.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
     {
@@ -198,7 +191,7 @@ function validatedModelStep(value: unknown): { step: ModelStep; calls: ToolCall[
 function projectToolResult(name: string, result: OutreachMcpResult): OutreachMcpResult {
   if (result.status === "ERROR") return result;
   const data = record(result.data) ? result.data : {};
-  let projected: Record<string, unknown>;
+  let projected: unknown;
   switch (name) {
     case "commerce_get_discount_options": {
       const output = CommerceToolOutputs.commerce_get_discount_options.parse(data);
@@ -257,7 +250,9 @@ function projectToolResult(name: string, result: OutreachMcpResult): OutreachMcp
       break;
     }
     default:
-      throw new Error("OUTREACH_TOOL_NOT_ALLOWED");
+      // Generic authorized results may inform the agent, but do not populate
+      // deterministic offer/product evidence without a known fact interpreter.
+      projected = result.data;
   }
   const projectedResult = {
     contractVersion: result.contractVersion,
@@ -423,54 +418,42 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
     .addNode("resolveTools", async () => {
       try {
         await dependencies.selector.connect();
+          const availableTools = await dependencies.selector.tools();
+          return { availableTools };
+        } catch (error) {
+          return { failure: failureFrom(error) };
+        }
+      })
+      .addNode("invokeModel", async (state) => {
+        if (state.failure || state.pendingChoice) return {};
+        if (dependencies.signal.aborted) return { failure: failureFrom(dependencies.signal.reason ?? new Error("OUTREACH_CANCELLED")) };
+        if (nowMs() - dependencies.startedAt >= MAX_OUTREACH_DEADLINE_MS) {
+          return { failure: { code: "DEADLINE", reasonCode: "OUTREACH_DEADLINE" } };
+        }
+        if (state.modelSteps >= MAX_MODEL_STEPS) {
+          return { failure: { code: "BUDGET_EXHAUSTED", reasonCode: "MODEL_STEP_BUDGET_EXHAUSTED" }, catalogueIncomplete: true };
+        }
+        try {
         const availableTools = await dependencies.selector.tools();
-        return { availableTools };
-      } catch (error) {
-        return { failure: failureFrom(error) };
-      }
-    })
-    .addNode("invokeModel", async (state) => {
-      if (state.failure || state.pendingChoice) return {};
-      if (dependencies.signal.aborted) return { failure: failureFrom(dependencies.signal.reason ?? new Error("OUTREACH_CANCELLED")) };
-      if (nowMs() - dependencies.startedAt >= MAX_OUTREACH_DEADLINE_MS) {
-        return { failure: { code: "DEADLINE", reasonCode: "OUTREACH_DEADLINE" } };
-      }
-      if (state.modelSteps >= MAX_MODEL_STEPS) {
-        return { failure: { code: "BUDGET_EXHAUSTED", reasonCode: "MODEL_STEP_BUDGET_EXHAUSTED" }, catalogueIncomplete: true };
-      }
-      const request: ModelRequest = {
-        instructions,
-        context: safeProjection(dependencies.context),
-        history: [],
-        messages: state.runtimeMessages,
-        tools: modelTools(state.availableTools),
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-      };
-      try {
+        const request: ModelRequest = {
+          instructions,
+          context: safeProjection(dependencies.context),
+          history: [],
+          messages: state.runtimeMessages,
+          tools: modelTools(availableTools),
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+        };
         const raw = await (await modelInvoker()).invoke(request, dependencies.signal);
         const validated = validatedModelStep(raw);
-        if (validated.choice && state.discountOptionsCalls === 0) throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
-        if (validated.calls.some((call) => !state.availableTools.some((tool) => tool.name === call.name))) {
+        if (validated.calls.some((call) => !availableTools.some((tool) => tool.name === call.name))) {
           throw new Error("MODEL_REQUESTED_UNLISTED_TOOL");
         }
-        if (validated.calls.some((call) => call.name === "commerce_search_products") &&
-            state.supportedCheckoutOffers.length > 0) {
-          return { failure: { code: "INVALID_RESULT", reasonCode: "PRODUCT_SEARCH_BEFORE_CHECKOUT_STAGE" }, modelSteps: state.modelSteps + 1, lastModelStep: validated.step };
-        }
-        let pendingCalls = validated.calls;
-        if (validated.choice?.kind === "ALTERNATIVE_PRODUCT_PROMOTION") {
-          const identity = identityKey(validated.choice.productId, validated.choice.variantId);
-          const product = state.observedProductsByIdentity.get(identity);
-          if (!product) throw new Error("PRODUCT_CHOICE_NOT_FROM_OBSERVED_SEARCH");
-          if (!product.exact) {
-            pendingCalls = [{ name: "commerce_get_product", arguments: {
-              productId: validated.choice.productId,
-              variantId: validated.choice.variantId,
-            } }];
-          }
-        }
+        const pendingCalls = validated.calls;
+        // A final choice never injects a host-selected named tool call. Exact
+        // source facts must already exist for deterministic finalization.
         dependencies.onEvent?.("model_step", { modelStep: state.modelSteps + 1, toolCallCount: validated.calls.length });
         return {
+          availableTools,
           modelSteps: state.modelSteps + 1,
           lastModelStep: validated.step,
           pendingCalls,
@@ -487,13 +470,8 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
       const observedProductsByIdentity = new Map(state.observedProductsByIdentity);
       const runtimeMessages = [...state.runtimeMessages];
       let mcpCalls = state.mcpCalls;
-      let discountOptionsCalls = state.discountOptionsCalls;
-      let productSearches = state.productSearches;
-      let productDetailReads = state.productDetailReads;
       let catalogueIncomplete = state.catalogueIncomplete;
-      let firstMcpCallSeen = state.firstMcpCallSeen;
       const seenToolCalls = new Set(state.seenToolCalls);
-      let nextDiscountCursor = state.nextDiscountCursor;
       let failure: FailureState | null = null;
       let phase = state.phase;
       try {
@@ -504,52 +482,12 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
             catalogueIncomplete = true;
             break;
           }
-          if (!firstMcpCallSeen && call.name !== "commerce_get_discount_options") {
-            throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
-          }
-          if (call.name === "commerce_search_products" && productSearches >= MAX_PRODUCT_SEARCHES) {
-            failure = { code: "BUDGET_EXHAUSTED", reasonCode: "PRODUCT_SEARCH_BUDGET_EXHAUSTED" };
-            catalogueIncomplete = true;
-            break;
-          }
-          if (call.name === "commerce_get_product" && productDetailReads >= MAX_PRODUCT_DETAIL_READS) {
-            failure = { code: "BUDGET_EXHAUSTED", reasonCode: "PRODUCT_DETAIL_READ_BUDGET_EXHAUSTED" };
-            catalogueIncomplete = true;
-            break;
-          }
           const callSignature = JSON.stringify([call.name, call.arguments]);
           if (seenToolCalls.has(callSignature)) throw new Error("OUTREACH_DUPLICATE_TOOL_CALL");
           seenToolCalls.add(callSignature);
-          if (call.name === "commerce_get_discount_options") {
-            const requestedCursor = call.arguments.cursor ?? null;
-            if (requestedCursor !== nextDiscountCursor) throw new Error("DISCOUNT_PAGE_CURSOR_MISMATCH");
-          }
-          if (call.name === "commerce_get_discount_details") {
-            const offerId = call.arguments.offerId;
-            if (typeof offerId !== "string" || !optionsById.has(offerId) ||
-                state.context.mode === "FIXED" && !state.context.authorisedDiscountIds.includes(offerId)) {
-              throw new Error("DISCOUNT_DETAILS_NOT_TIED_TO_AUTHORISED_OPTIONS");
-            }
-          }
-          if (call.name === "commerce_get_product") {
-            const productId = call.arguments.productId;
-            const variantId = call.arguments.variantId;
-            if (typeof productId !== "string" || !(variantId === null || typeof variantId === "string") ||
-                !observedProductsByIdentity.has(identityKey(productId, variantId))) {
-              throw new Error("PRODUCT_READ_NOT_TIED_TO_OBSERVED_IDENTITY");
-            }
-          }
-          if (call.name === "commerce_search_products" &&
-              [...observedOffersById.values()].some((candidate) => candidate.eligibility.verdict === "SUPPORTED")) {
-            throw new Error("PRODUCT_SEARCH_AFTER_SUPPORTED_CHECKOUT");
-          }
           dependencies.onEvent?.("tool_called", { toolName: call.name, callNumber: mcpCalls + 1 });
-          const result = await dependencies.selector.call(call.name, call.arguments, dependencies.signal);
+          const result = CommerceToolResultSchema.parse(await dependencies.selector.call(call.name, call.arguments, dependencies.signal));
           mcpCalls += 1;
-          firstMcpCallSeen = true;
-          if (call.name === "commerce_get_discount_options") discountOptionsCalls += 1;
-          if (call.name === "commerce_search_products") productSearches += 1;
-          if (call.name === "commerce_get_product") productDetailReads += 1;
           if (result.status === "ERROR") {
             throw new CommerceHostError(result.code, result.retryable);
           }
@@ -563,7 +501,6 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
                 if (state.context.mode === "FIXED" && !state.context.authorisedDiscountIds.includes(offer.offerId)) continue;
                 optionsById.set(offer.offerId, offer);
               }
-              nextDiscountCursor = output.cursor ?? null;
               catalogueIncomplete ||= output.truncated || output.cursor != null;
               outputData = output;
               break;
@@ -573,10 +510,14 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
               if ("outcome" in output) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("CATALOGUE_LOOKUP_UNAVAILABLE"));
               const requested = call.arguments.offerId as string;
               if (output.details) {
-                if (output.details.offer.offerId !== requested || !optionsById.has(requested) || !output.details.providerDiscountId) {
+                if (output.details.offer.offerId !== requested || !output.details.providerDiscountId) {
                   throw new Error("DISCOUNT_DETAILS_SOURCE_IDENTITY_MISMATCH");
                 }
-                const option = optionsById.get(requested)!;
+                const option = optionsById.get(requested);
+                if (!option || state.context.mode === "FIXED" && !state.context.authorisedDiscountIds.includes(requested)) {
+                  outputData = output;
+                  break;
+                }
                 const observed: ObservedCheckoutOffer = {
                   offer: option as InitialOutreachCommerceOffer,
                   details: output.details as InitialOutreachCommerceDiscountDetails,
@@ -616,7 +557,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
               break;
             }
             default:
-              throw new Error("OUTREACH_TOOL_NOT_ALLOWED");
+              outputData = result.data;
           }
           const modelResult = projectToolResult(call.name, { ...result, data: outputData } as OutreachMcpResult);
           runtimeMessages.push({ tool: call.name, result: modelResult });
@@ -634,12 +575,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
       return {
         phase,
         mcpCalls,
-        discountOptionsCalls,
-        productSearches,
-        productDetailReads,
-        firstMcpCallSeen,
         seenToolCalls,
-        nextDiscountCursor,
         optionsById,
         observedOffersById,
         observedProductsByIdentity,

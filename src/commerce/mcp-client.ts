@@ -4,14 +4,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
-  canonicalJson,
-  manifestMatchesGrant,
-  isBuiltInTool,
-  type CommerceManifest,
   CommerceAssertionSchema,
   CommerceOutreachToolContextSchema,
   CommerceManifestSchema,
   CommerceToolResultSchema,
+  compileSubset,
 } from "@modainteract/moda-interact-shared/commerce";
 import type {
   CommerceConversationGrant,
@@ -230,7 +227,6 @@ export function encodeCommerceContext(
 
 export class CommerceMcpClient {
   private client = new Client({ name: "moda-background", version: "1.0.0" });
-  private pinnedManifest: CommerceManifest | undefined;
   private listed = false;
   private operation: CommerceHostOperation = "initialize";
   private httpFailure: CommerceHostDiagnostic | undefined;
@@ -399,13 +395,6 @@ export class CommerceMcpClient {
     if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
       hostDiagnostic("mcp.manifest", "MCP_MANIFEST_SCHEMA_INVALID", { operation: "read_manifest" }));
     assertPublishedManifest(parsed.data);
-    if (this.grant && (this.grant.grantedTools.some(isBuiltInTool) || !manifestMatchesGrant(parsed.data, this.grant))) {
-      throw new CommerceHostError("INCOMPATIBLE_VERSION");
-    }
-    if (this.pinnedManifest && canonicalJson(this.pinnedManifest) !== canonicalJson(parsed.data)) {
-      throw new CommerceHostError("INCOMPATIBLE_VERSION");
-    }
-    this.pinnedManifest ??= structuredClone(parsed.data);
     return parsed.data;
   }
   async tools(signal = this.signal) {
@@ -432,14 +421,17 @@ export class CommerceMcpClient {
     signal = this.signal,
   ) {
     return observeCommerceTool(async () => {
-      if (!this.pinnedManifest || !this.listed) throw new CommerceHostError("DENIED");
-      // Re-read the current projection before each request. A changed release,
-      // permission selection or revision ends this pinned attempt.
+      if (!this.listed) throw new CommerceHostError("DENIED");
+      // MCP owns revision selection. Re-read current authorized membership and
+      // validate its input contract without requiring revision equality.
       const manifest = await this.manifest();
       const entries = publishedToolEntries(manifest);
-      const entry = entries.find(item => item.capability.toolDescriptor.name === name) ??
-        entries.find(item => item.descriptor.name === name);
+      const entry = entries.find(item => item.descriptor.name === name) ??
+        entries.find(item => item.capability.toolDescriptor.name === name);
       if (!entry) throw new CommerceHostError("DENIED");
+      try { compileSubset(entry.capability.toolDescriptor.inputSchema, "input").parse(args); }
+      catch { throw new CommerceHostError("INVALID_INPUT"); }
+      signal.throwIfAborted();
       const capabilityName = entry.capability.key;
       const result = await this.sdkOperation("call_tool", "mcp.tool_call", "MCP_TOOL_CALL_FAILED", () =>
         this.client.callTool({ name: capabilityName, arguments: args }, undefined, this.options(signal)));
@@ -450,8 +442,6 @@ export class CommerceMcpClient {
       if ((value.status === "ERROR") !== Boolean(result.isError))
         throw new CommerceHostError("INVALID_INPUT", false,
           hostDiagnostic("mcp.tool_result", "MCP_TOOL_ERROR_FLAG_MISMATCH", { operation: "call_tool" }));
-      // Discard results if activation or revocation raced the read-only call.
-      await this.manifest();
       signal.throwIfAborted();
       return value;
     });

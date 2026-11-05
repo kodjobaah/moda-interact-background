@@ -25,19 +25,29 @@ describe('pinned published MCP calls', () => {
     await c.tools(); await c.call('read_product', {});
     expect(sdk.callTool.mock.calls[0]![0]).toEqual({ name: 'feature_product_read', arguments: {} });
   });
-  it.each(['release', 'revision', 'permission'] as const)('refuses a changed %s before sending a tool call', async change => {
+  it.each(['release', 'revision'] as const)('accepts compatible %s activation selected by MCP', async change => {
     const c = client(); await c.tools();
     if (change === 'release') manifest.releaseId = 'different-release';
-    if (change === 'revision') { manifest.capabilities[0]!.toolDescriptor.toolRevisionId = 'different-revision'; manifest.grantedTools = deduplicateTools(manifest.capabilities, []); }
-    if (change === 'permission') { manifest.capabilities = []; manifest.selectedCapabilityKeys = []; manifest.grantedTools = []; manifest.featureBehaviours = []; }
-    await expect(c.call('commerce_get_discount_options', {})).rejects.toMatchObject({ code: 'INCOMPATIBLE_VERSION' });
+    else { manifest.capabilities[0]!.toolDescriptor.toolRevisionId = 'different-revision'; manifest.grantedTools = deduplicateTools(manifest.capabilities, []); }
+    await expect(c.call('commerce_get_discount_options', {})).resolves.toMatchObject({ status: 'OK' });
+    expect(sdk.callTool).toHaveBeenCalledOnce();
+  });
+  it('denies current revoked membership and incompatible inputs before sending a tool call', async () => {
+    const c = client(); await c.tools();
+    await expect(c.call('commerce_get_discount_options', { shopId: 'forged' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    manifest.capabilities = []; manifest.selectedCapabilityKeys = []; manifest.grantedTools = []; manifest.featureBehaviours = [];
+    await expect(c.call('commerce_get_discount_options', {})).rejects.toMatchObject({ code: 'DENIED' });
     expect(sdk.callTool).not.toHaveBeenCalled();
   });
-  it('discards a result when release activation races the read-only tool call', async () => {
+  it('does not discard an authorized result solely because activation occurred during the request', async () => {
     const c = client(); await c.tools();
     sdk.callTool.mockImplementation(async () => { manifest.releaseId = 'activated-during-call'; return { isError: false, structuredContent: { contractVersion: 'commerce.v1', status: 'OK', data: {}, renderedText: '' } }; });
-    await expect(c.call('commerce_get_discount_options', {})).rejects.toMatchObject({ code: 'INCOMPATIBLE_VERSION' });
-    expect(sdk.callTool).toHaveBeenCalledOnce();
+    await expect(c.call('commerce_get_discount_options', {})).resolves.toMatchObject({ status: 'OK' });
+  });
+  it('rejects an incompatible result envelope instead of returning unvalidated data', async () => {
+    const c = client(); await c.tools();
+    sdk.callTool.mockResolvedValue({ isError: false, structuredContent: { contractVersion: 'unknown', status: 'OK', data: {} } });
+    await expect(c.call('commerce_get_discount_options', {})).rejects.toMatchObject({ code: 'UNAVAILABLE' });
   });
   it('keeps trusted purpose outside model arguments and denies forged purpose', () => {
     expect(JSON.parse(Buffer.from(encodeCommerceContext(identity), 'base64url').toString())).toEqual(identity);

@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import {
   CommerceConversationGrantSchema,
-  manifestMatchesGrant,
   canonicalJson,
   verifyResponseContract,
   isBuiltInTool,
@@ -123,4 +122,20 @@ export async function persistGrant(
     return winner;
   }
 }
-export { manifestMatchesGrant };
+/** Historical grant revisions are audit data. Only their authorized Feature
+ * scope is retained across requests; current MCP projection supplies revisions. */
+export async function readGrantFeatureScope(grant: { releaseId: string; selectedCapabilityKeys: string[] }) {
+  const release = await prisma.commerceRelease.findUnique({ where: { id: grant.releaseId },
+    select: { capabilities: { select: { featureId: true, capability: { select: { key: true } } } } } });
+  if (!release) throw new CommerceHostError("UNAVAILABLE", true);
+  const selected = new Set(grant.selectedCapabilityKeys);
+  const members = release.capabilities.filter(member => selected.has(member.capability.key));
+  if (new Set(members.map(member => member.capability.key)).size !== selected.size) throw new CommerceHostError("DENIED");
+  return [...new Set(members.map(member => member.featureId))];
+}
+
+export async function readOutreachFeatureScope() {
+  const feature = await prisma.feature.findUnique({ where: { key: "product_search" }, select: { id: true, active: true } });
+  if (!feature?.active) throw new CommerceHostError("DENIED");
+  return [feature.id];
+}
