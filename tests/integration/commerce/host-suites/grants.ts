@@ -50,7 +50,7 @@ it("applies shared Feature behaviour once and exposes a reused Tool once", async
     const sibling = structuredClone(f.active.capabilities[0]!);
     sibling.capabilityId = "capability-sibling";
     sibling.key = "feature_product_read_sibling";
-    sibling.position = 1;
+    sibling.position = Math.max(...f.active.capabilities.map(cap => cap.position)) + 1;
     f.active.capabilities.push(sibling);
     f.active.selectedCapabilityKeys.push(sibling.key);
     f.active.grantedTools[0]!.capabilityKeys.push(sibling.key);
@@ -69,10 +69,7 @@ it("applies shared Feature behaviour once and exposes a reused Tool once", async
       f.active.capabilities[0]!.toolDescriptor.name,
       "finalResponse",
     ]);
-    expect(f.grants.get(f.state.id).selectedCapabilityKeys).toEqual([
-      f.active.capabilities[0]!.key,
-      sibling.key,
-    ]);
+    expect(f.grants.get(f.state.id).selectedCapabilityKeys).toEqual(f.active.capabilities.map(cap => cap.key));
     expect(f.grants.get(f.state.id).grantedTools[0].capabilityKeys).toEqual([
       f.active.capabilities[0]!.key,
       sibling.key,

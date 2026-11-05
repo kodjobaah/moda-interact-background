@@ -6,7 +6,7 @@ import { CommerceToolOutputs } from "@modainteract/moda-interact-shared/commerce
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import { RecoveryOutreachMcpSelectorService } from "../recovery-offers/recovery-outreach-mcp-selector.service.js";
+import { RecoveryOutreachMcpSelectorService, createAdmittedRecoveryOutreachMcpSelector } from "../recovery-offers/recovery-outreach-mcp-selector.service.js";
 import { CommerceHostError } from "../../commerce/mcp-client.js";
 import {
   readR2Configuration,
@@ -110,7 +110,7 @@ type ProductReader = Pick<RecoveryOutreachMcpSelectorService, "connect" | "tools
 
 export type OutreachProductImageResolverDependencies = Readonly<{
   database?: MediaDatabase;
-  selectorFactory?: (input: { shopId: string; signal: AbortSignal }) => ProductReader;
+  selectorFactory?: (input: { shopId: string; signal: AbortSignal }) => ProductReader | Promise<ProductReader>;
   readPublicMedia?: typeof readShopBrandPublicMediaConfiguration;
   readR2?: typeof readR2Configuration;
   fetcher?: SafeFetcher;
@@ -214,8 +214,7 @@ export class RecoveryProductImageResolver {
 
   constructor(dependencies: OutreachProductImageResolverDependencies = {}) {
     this.database = dependencies.database ?? prisma;
-    this.selectorFactory = dependencies.selectorFactory ??
-      ((input) => new RecoveryOutreachMcpSelectorService(input));
+    this.selectorFactory = dependencies.selectorFactory ?? createAdmittedRecoveryOutreachMcpSelector;
     this.readPublicMedia = dependencies.readPublicMedia ?? readShopBrandPublicMediaConfiguration;
     this.readR2 = dependencies.readR2 ?? readR2Configuration;
     this.fetcher = dependencies.fetcher ?? createSafeImageFetcher({ maxBytes: MAX_SOURCE_BYTES });
@@ -459,7 +458,7 @@ export class RecoveryProductImageResolver {
   }
 
   private async readCurrentProduct(input: OutreachProductImageRequest, signal: AbortSignal) {
-    const selector = this.selectorFactory({ shopId: input.shopId, signal });
+    const selector = await this.selectorFactory({ shopId: input.shopId, signal });
     let primaryError: unknown;
     let productResult: NonNullable<Infer<typeof CommerceToolOutputs.commerce_get_product>["product"]> | undefined;
     try {

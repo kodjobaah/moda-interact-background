@@ -11,7 +11,7 @@ import {
   type InitialOutreachAgentContext,
   type InitialOutreachAgentResult,
 } from "./initial-outreach-offer.types.js";
-import { RecoveryOutreachMcpSelectorService } from "../services/recovery-offers/recovery-outreach-mcp-selector.service.js";
+import { RecoveryOutreachMcpSelectorService, createAdmittedRecoveryOutreachMcpSelector } from "../services/recovery-offers/recovery-outreach-mcp-selector.service.js";
 
 const defaultLogger = createLogger({
   serviceName: "moda-background",
@@ -22,7 +22,7 @@ export type RunInitialOutreachOfferAgentDependencies = Readonly<{
   signal: AbortSignal;
   modelInvoker?: CommerceModelInvoker;
   createModelInvoker?: () => Promise<CommerceModelInvoker>;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => RecoveryOutreachMcpSelectorService;
+  createSelector?: (input: { shopId: string; signal: AbortSignal }) => RecoveryOutreachMcpSelectorService | Promise<RecoveryOutreachMcpSelectorService>;
   logger?: Pick<StructuredLogger, "info" | "warn" | "error">;
   now?: () => Date;
 }>;
@@ -167,7 +167,7 @@ export async function runInitialOutreachOfferAgent(
   let modelSteps = 0;
   let toolCalls = 0;
   try {
-    selector = (dependencies.createSelector ?? ((input) => new RecoveryOutreachMcpSelectorService(input)))({
+    selector = await (dependencies.createSelector ?? createAdmittedRecoveryOutreachMcpSelector)({
       shopId: context.shopId,
       signal,
     });

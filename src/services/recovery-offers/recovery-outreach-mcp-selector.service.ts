@@ -1,3 +1,7 @@
+import { canonicalJson, type CommerceManifest } from "@modainteract/moda-interact-shared/commerce";
+import { assertPublishedManifest, assertPublishedToolList } from "../../commerce/published-tools.js";
+import { validateRelease } from "../../commerce/grants.js";
+import { entitlementService, EntitlementError } from "../entitlement.service.js";
 import {
   CommerceToolInputs,
   CommerceToolOutputs,
@@ -32,11 +36,12 @@ const MAX_MCP_CALLS = 16;
 const MAX_PRODUCT_SEARCHES = 3;
 const MAX_PRODUCT_DETAIL_READS = 5;
 
-type Client = Pick<CommerceMcpClient, "connect" | "tools" | "call" | "close">;
+type Client = Pick<CommerceMcpClient, "connect" | "manifest" | "tools" | "call" | "close">;
 
 export type RecoveryOutreachMcpSelectorDependencies = Readonly<{
   clientFactory?: (config: McpConfiguration, identity: CommerceOutreachMcpIdentity, signal: AbortSignal) => Client;
   configuration?: () => McpConfiguration;
+  validateRelease?: typeof validateRelease;
 }>;
 
 function invalidInput(reason: string): CommerceHostError {
@@ -103,6 +108,7 @@ function sharedOutputSchema(name: OutreachMcpToolName) {
 
 export class RecoveryOutreachMcpSelectorService {
   private readonly client: Client;
+  private pinnedManifest: CommerceManifest | null = null;
   private listedTools: Map<string, OutreachMcpToolDescriptor> | null = null;
   private connected = false;
   private closed = false;
@@ -113,7 +119,7 @@ export class RecoveryOutreachMcpSelectorService {
 
   constructor(
     private readonly input: Readonly<{ shopId: string; signal: AbortSignal }>,
-    dependencies: RecoveryOutreachMcpSelectorDependencies = {},
+    private readonly dependencies: RecoveryOutreachMcpSelectorDependencies = {},
   ) {
     if (!input.shopId || !input.signal) throw invalidInput("OUTREACH_SELECTOR_INPUT_INVALID");
     const identity: CommerceOutreachMcpIdentity = {
@@ -136,7 +142,11 @@ export class RecoveryOutreachMcpSelectorService {
   async tools(): Promise<readonly OutreachMcpToolDescriptor[]> {
     if (!this.connected || this.closed) throw invalidInput("OUTREACH_CLIENT_NOT_CONNECTED");
     if (this.listedTools) return [...this.listedTools.values()];
+    const manifest = await this.client.manifest();
+    assertPublishedManifest(manifest);
+    await (this.dependencies.validateRelease ?? validateRelease)(manifest);
     const listed = await this.client.tools(this.input.signal);
+    assertPublishedToolList(manifest, listed);
     const seen = new Set<string>();
     const allowed = new Map<string, OutreachMcpToolDescriptor>();
     for (const raw of listed) {
@@ -161,6 +171,7 @@ export class RecoveryOutreachMcpSelectorService {
     if (!allowed.has("commerce_get_discount_options") || !allowed.has("commerce_get_discount_details")) {
       throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_DISCOUNT_TOOLS_MISSING"));
     }
+    this.pinnedManifest = structuredClone(manifest);
     this.listedTools = allowed;
     return [...allowed.values()];
   }
@@ -188,6 +199,13 @@ export class RecoveryOutreachMcpSelectorService {
       throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_PRODUCT_READ_BUDGET_EXHAUSTED"));
     }
     signal.throwIfAborted();
+    const current = await this.client.manifest();
+    assertPublishedManifest(current);
+    if (!this.pinnedManifest || canonicalJson(current) !== canonicalJson(this.pinnedManifest)) {
+      throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_PUBLISHED_IDENTITY_CHANGED"));
+    }
+    await (this.dependencies.validateRelease ?? validateRelease)(current);
+    signal.throwIfAborted();
     this.calls += 1;
     if (toolName === "commerce_search_products") this.productSearches += 1;
     if (toolName === "commerce_get_product") this.productDetailReads += 1;
@@ -206,4 +224,22 @@ export class RecoveryOutreachMcpSelectorService {
     this.closed = true;
     if (this.connectionAttempted) await this.client.close();
   }
+}
+
+/** Host-owned checkout_recovery admission precedes selector/client creation.
+ * No credit reservation or delivery state is changed here. */
+export async function createAdmittedRecoveryOutreachMcpSelector(
+  input: Readonly<{ shopId: string; signal: AbortSignal }>,
+  dependencies: RecoveryOutreachMcpSelectorDependencies & {
+    assertFeature?: typeof entitlementService.assertFeature;
+  } = {},
+): Promise<RecoveryOutreachMcpSelectorService> {
+  input.signal.throwIfAborted();
+  try { await (dependencies.assertFeature ?? entitlementService.assertFeature.bind(entitlementService))(input.shopId, "checkout_recovery"); }
+  catch (error) {
+    if (error instanceof EntitlementError) throw new CommerceHostError("DENIED", false);
+    throw error;
+  }
+  input.signal.throwIfAborted();
+  return new RecoveryOutreachMcpSelectorService(input, dependencies);
 }

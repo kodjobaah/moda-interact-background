@@ -111,12 +111,6 @@ it("propagates cancellation and MCP outage without model fallback", async () => 
 
 it("a pinned release with genuinely no tools still produces a bounded referral", async () => {
   f.active = f.exampleManifest(f.digest, false);
-  f.active.builtInTools = structuredClone([...f.commerceDiscountBuiltInDescriptors]);
-  f.active.grantedTools = f.active.builtInTools.map((tool) => ({
-    kind: "BUILT_IN" as const,
-    toolName: tool.name,
-    definitionVersion: tool.definitionVersion,
-  }));
   f.releases.set(f.active.releaseId, f.active);
   expect(f.active.capabilities).toEqual([]);
   expect(f.active.selectedCapabilityKeys).toEqual([]);
@@ -126,9 +120,7 @@ it("a pinned release with genuinely no tools still produces a bounded referral",
   });
   expect(result.answerKind).toBe("REFER_TO_STORE");
   expect(f.grants.get(f.state.id).selectedCapabilityKeys).toEqual([]);
-  expect(f.grants.get(f.state.id).grantedTools).toEqual(f.commerceDiscountBuiltInDescriptors.map((tool) => ({
-    kind: "BUILT_IN", toolName: tool.name, definitionVersion: tool.definitionVersion,
-  })));
+  expect(f.grants.get(f.state.id).grantedTools).toEqual([]);
 });
 
 it("P10 a model cannot expand authority through tool arguments", async () => {

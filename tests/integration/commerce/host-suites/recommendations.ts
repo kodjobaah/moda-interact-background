@@ -9,9 +9,9 @@ export function registerRecommendationHostTests() {
         expect(request.tools.map((tool) => tool.name)).not.toContain("commerce_get_discount_details");
         return f.final();
       });
-      const names = f.active.builtInTools.map((tool) => tool.name);
+      const names = f.active.capabilities.filter(cap => cap.key.startsWith("commerce_get_discount_")).map(cap => cap.key);
       expect(names).toEqual(["commerce_get_discount_options", "commerce_get_discount_details"]);
-      expect(f.grants.get(f.state.id).grantedTools.filter((tool: any) => tool.kind === "BUILT_IN")).toHaveLength(2);
+      expect(f.grants.get(f.state.id).grantedTools.filter((tool: any) => tool.toolName.startsWith("commerce_get_discount_"))).toHaveLength(2);
       expect(f.observations.filter((call) => call.method === "tools/call")).toHaveLength(0);
     });
 
@@ -71,7 +71,7 @@ export function registerRecommendationHostTests() {
         result.replyText,
         "Store: https://fixture.myshopify.com",
       ]);
-      expect(f.observations.filter((call) => call.method === "tools/call" && call.params.name === "commerce_get_product")).toHaveLength(2);
+      expect(f.observations.filter((call) => call.method === "tools/call" && call.params.name === f.active.capabilities[0]!.key)).toHaveLength(2);
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);
     });
 
@@ -100,7 +100,6 @@ export function registerRecommendationHostTests() {
       f.active.capabilities = [search, get] as any;
       f.active.selectedCapabilityKeys = [search.key, get.key];
       f.active.grantedTools = [
-        ...f.active.grantedTools.filter((tool: any) => tool.kind === "BUILT_IN"),
         ...[search, get].map((capability) => ({
           toolId: capability.toolDescriptor.toolId,
           toolRevisionId: capability.toolDescriptor.toolRevisionId,
@@ -169,7 +168,7 @@ export function registerRecommendationHostTests() {
       expect(response.replyText).not.toContain("Browse shirt");
       expect(response.replyText).not.toContain("UNTRUSTED MODEL PROSE");
       expect(f.observations.filter((call) => call.method === "tools/call").map((call) => call.params.name)).toEqual([
-        "commerce_search_products", "commerce_search_products", "commerce_get_product",
+        "feature_search", "feature_search", "feature_get",
       ]);
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);
     });

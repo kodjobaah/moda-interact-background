@@ -15,7 +15,7 @@ import { createOpenRouterCredentialResolver } from "../../commerce/openrouter-cr
 import { resolveCommerceEnvironment } from "../../commerce/model-environment.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { InitialOutreachAgentContextService } from "./initial-outreach-agent-context.service.js";
-import { RecoveryOutreachMcpSelectorService } from "./recovery-outreach-mcp-selector.service.js";
+import { RecoveryOutreachMcpSelectorService, createAdmittedRecoveryOutreachMcpSelector } from "./recovery-outreach-mcp-selector.service.js";
 import { CurrentOutreachOfferRevalidationService, type CurrentOutreachOfferAdmissionToken } from "./current-outreach-offer-revalidation.service.js";
 import { CheckoutPriceReconciliationService } from "../recovery-pricing/checkout-price-reconciliation.service.js";
 import type {
@@ -51,7 +51,7 @@ export type InitialOutreachOfferSelectionDependencies = Readonly<{
   environment?: CommerceEnvironment;
   contextBuilder?: ContextBuilder;
   modelInvoker?: CommerceModelInvoker;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => RecoveryOutreachMcpSelectorService;
+  createSelector?: (input: { shopId: string; signal: AbortSignal }) => RecoveryOutreachMcpSelectorService | Promise<RecoveryOutreachMcpSelectorService>;
   agent?: typeof runInitialOutreachOfferAgent;
   logger?: Pick<StructuredLogger, "info" | "warn" | "error">;
   revalidator?: Pick<CurrentOutreachOfferRevalidationService,
@@ -83,7 +83,7 @@ function createExactProductReader(
 ): ExactProductReader {
   return {
     async read(input) {
-      const selector = createSelector({ shopId: input.shopId, signal: input.signal });
+      const selector = await createSelector({ shopId: input.shopId, signal: input.signal });
       try {
         await selector.connect();
         await selector.tools();
@@ -127,8 +127,7 @@ export class InitialOutreachOfferSelectionService {
   constructor(dependencies: InitialOutreachOfferSelectionDependencies = {}) {
     this.db = dependencies.db ?? prisma;
     this.environment = dependencies.environment ?? resolveCommerceEnvironment();
-    this.createSelector = dependencies.createSelector ?? ((input) =>
-      new RecoveryOutreachMcpSelectorService(input));
+    this.createSelector = dependencies.createSelector ?? createAdmittedRecoveryOutreachMcpSelector;
     this.contextBuilder = dependencies.contextBuilder ?? null;
     this.logger = dependencies.logger ?? logger;
     this.revalidator = dependencies.revalidator ?? null;

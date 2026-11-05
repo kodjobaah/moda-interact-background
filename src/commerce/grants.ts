@@ -1,3 +1,4 @@
+import { assertPublishedManifest } from "./published-tools.js";
 import { satisfies } from "semver";
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
@@ -6,6 +7,7 @@ import {
   manifestMatchesGrant,
   canonicalJson,
   verifyResponseContract,
+  isBuiltInTool,
 } from "@modainteract/moda-interact-shared/commerce";
 import type {
   CommerceManifest,
@@ -34,6 +36,7 @@ export async function readGrant(turn: CommerceTurnIdentity) {
   });
   if (!row) return null;
   const grant = wireGrant(row);
+  if (grant.grantedTools.some(isBuiltInTool)) throw new CommerceHostError("INCOMPATIBLE_VERSION");
   if (
     grant.shopId !== turn.shopId ||
     grant.initialInboundVersion > turn.inboundVersion ||
@@ -44,6 +47,7 @@ export async function readGrant(turn: CommerceTurnIdentity) {
   return grant;
 }
 export async function validateRelease(manifest: CommerceManifest) {
+  assertPublishedManifest(manifest);
   if (!satisfies(runnerVersion, manifest.runnerCompatibility))
     throw new CommerceHostError("INCOMPATIBLE_VERSION");
   if (
@@ -61,6 +65,9 @@ export async function validateRelease(manifest: CommerceManifest) {
       responseContractHash: true,
       runnerCompatibility: true,
       contractVersion: true,
+      capabilities: { select: { capabilityId: true, featureId: true, toolId: true, toolRevisionId: true,
+        capability: { select: { key: true } },
+        toolRevision: { select: { status: true, definitionVersion: true, definition: true } } } },
     },
   });
   if (
@@ -72,6 +79,19 @@ export async function validateRelease(manifest: CommerceManifest) {
       canonicalJson(manifest.responseContract)
   )
     throw new CommerceHostError("INCOMPATIBLE_VERSION");
+  for (const member of manifest.capabilities) {
+    const stored = release.capabilities.find(candidate => candidate.capabilityId === member.capabilityId);
+    const definition = stored?.toolRevision.definition;
+    if (!stored || stored.featureId !== member.featureId || stored.capability.key !== member.key ||
+        stored.toolId !== member.toolDescriptor.toolId || stored.toolRevisionId !== member.toolDescriptor.toolRevisionId ||
+        stored.toolRevision.status !== "PUBLISHED" || stored.toolRevision.definitionVersion !== member.toolDescriptor.definitionVersion ||
+        !definition || typeof definition !== "object" || Array.isArray(definition) ||
+        canonicalJson({ toolId: stored.toolId, toolRevisionId: stored.toolRevisionId,
+          name: definition.name, description: definition.description, inputSchema: definition.inputSchema,
+          definitionVersion: definition.definitionVersion }) !== canonicalJson(member.toolDescriptor)) {
+      throw new CommerceHostError("INCOMPATIBLE_VERSION");
+    }
+  }
 }
 export async function persistGrant(
   turn: CommerceTurnIdentity,

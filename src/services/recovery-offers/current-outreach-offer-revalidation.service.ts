@@ -16,7 +16,7 @@ import { selectCompatibleCheckoutOffers } from "../../agents/initial-outreach-of
 import { productTargetMatches } from "../../agents/initial-outreach-offer-product-target.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { InitialOutreachAgentContextService } from "./initial-outreach-agent-context.service.js";
-import { RecoveryOutreachMcpSelectorService } from "./recovery-outreach-mcp-selector.service.js";
+import { RecoveryOutreachMcpSelectorService, createAdmittedRecoveryOutreachMcpSelector } from "./recovery-outreach-mcp-selector.service.js";
 import type { DiscountSourceFence, DiscountSourceFenceResult } from "./current-discount-source-fence.js";
 import { readCurrentDiscountSourceFence } from "./current-discount-source-fence.js";
 import type { CheckoutPriceReconciliation } from "../recovery-pricing/checkout-price-reconciliation.types.js";
@@ -53,7 +53,7 @@ export type CurrentOutreachOfferDecision =
 
 export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   contextBuilder: ContextBuilder;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => Selector;
+  createSelector?: (input: { shopId: string; signal: AbortSignal }) => Selector | Promise<Selector>;
   readFence?: (input: {
     shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; signal: AbortSignal;
   }) => Promise<DiscountSourceFenceResult>;
@@ -188,7 +188,7 @@ export class CurrentOutreachOfferRevalidationService {
   private readonly log: Pick<StructuredLogger, "warn" | "error">;
 
   constructor(private readonly dependencies: CurrentOutreachOfferRevalidationDependencies) {
-    this.createSelector = dependencies.createSelector ?? ((input) => new RecoveryOutreachMcpSelectorService(input));
+    this.createSelector = dependencies.createSelector ?? createAdmittedRecoveryOutreachMcpSelector;
     this.readFence = dependencies.readFence ?? readCurrentDiscountSourceFence;
     this.readBudgetMs = dependencies.readBudgetMs ?? MCP_READ_BUDGET_MS;
     this.clock = dependencies.clock ?? (() => new Date());
@@ -238,7 +238,7 @@ export class CurrentOutreachOfferRevalidationService {
     }
     const deadline = AbortSignal.timeout(this.readBudgetMs);
     const signal = AbortSignal.any([input.signal, deadline]);
-    const selector = this.createSelector({ shopId: input.shopId, signal });
+    const selector = await this.createSelector({ shopId: input.shopId, signal });
     let primaryError: unknown;
     let closeError: unknown;
     let discoveryIncomplete = false;

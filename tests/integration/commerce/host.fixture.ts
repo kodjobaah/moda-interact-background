@@ -1,3 +1,4 @@
+import { appendPublishedDiscounts } from "../../fixtures/commerce/published-discounts.js";
 import {
   afterAll,
   beforeAll,
@@ -183,25 +184,18 @@ beforeAll(async () => {
         tools: revoked
           ? []
           : [
-              ...new Map(
-                (expand ? active : pinned).capabilities.map((capability) => [
-                  capability.toolDescriptor.name,
-                  capability.toolDescriptor,
-                ]),
-              ).values(),
-              ...(expand ? active : pinned).builtInTools,
-            ].map(({ name, description, inputSchema }) => ({
-                name,
-                description,
-                inputSchema,
+              ...(expand ? active : pinned).capabilities.map(capability => ({
+                name: capability.key, description: capability.toolDescriptor.description, inputSchema: capability.toolDescriptor.inputSchema,
               })),
+            ],
       }));
       server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({
         content: [{ type: "text", text: "Synthetic blue linen" }],
         structuredContent: (() => {
-          const configured = toolResults[params.name];
-          const callIndex = toolResultCallCounts[params.name] ?? 0;
-          toolResultCallCounts[params.name] = callIndex + 1;
+          const toolName = pinned.capabilities.find(cap => cap.key === params.name)?.toolDescriptor.name ?? params.name;
+          const configured = toolResults[toolName];
+          const callIndex = toolResultCallCounts[toolName] ?? 0;
+          toolResultCallCounts[toolName] = callIndex + 1;
           return (Array.isArray(configured) ? configured[Math.min(callIndex, configured.length - 1)] : configured) ?? {
           ...(structuredResult ?? {
           contractVersion: "commerce.v1",
@@ -258,12 +252,7 @@ beforeEach(() => {
   toolResultCallCounts = {};
   fixtureError = null;
   active = exampleManifest(digest, true);
-  active.builtInTools = structuredClone([...commerceDiscountBuiltInDescriptors]);
-  active.grantedTools.push(...active.builtInTools.map((tool) => ({
-    kind: "BUILT_IN" as const,
-    toolName: tool.name,
-    definitionVersion: tool.definitionVersion,
-  })));
+  appendPublishedDiscounts(active);
   releases = new Map([[active.releaseId, active]]);
   grants = new Map();
   state = {
@@ -310,7 +299,14 @@ beforeEach(() => {
     return row;
   });
   db.commerceRelease.findUnique.mockImplementation(
-    async ({ where }) => releases.get(where.id) ?? null,
+    async ({ where }) => {
+      const manifest = releases.get(where.id);
+      return manifest ? { ...manifest, capabilities: manifest.capabilities.map(cap => ({
+        capabilityId: cap.capabilityId, featureId: cap.featureId, toolId: cap.toolDescriptor.toolId,
+        toolRevisionId: cap.toolDescriptor.toolRevisionId, capability: { key: cap.key },
+        toolRevision: { status: "PUBLISHED", definitionVersion: cap.toolDescriptor.definitionVersion, definition: cap.toolDescriptor },
+      })) } : null;
+    },
   );
   const environment = resolveCommerceEnvironment();
   db.commerceAgentConfiguration.findMany.mockResolvedValue([

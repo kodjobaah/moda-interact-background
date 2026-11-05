@@ -8,8 +8,6 @@ import {
   CommerceToolOutputs,
   productBelongsToDomain,
   isBuiltInTool,
-  isTrustedCommerceBuiltInDescriptor,
-  isTrustedCommerceBuiltInGrant,
   type CommerceToolResult,
   verifyResponseContract,
 } from "@modainteract/moda-interact-shared/commerce";
@@ -282,7 +280,7 @@ async function execute(
         ]),
       ).values(),
     ];
-    const descriptors = [...publishedDescriptors, ...manifest.builtInTools];
+    const descriptors = publishedDescriptors;
     let runnerHostFailure: CommerceHostError | undefined;
     let runnerOriginalError: unknown;
     const retain = (failure: CommerceHostError) => {
@@ -350,40 +348,13 @@ async function execute(
     const available = async (requestSignal = signal) => {
       await assertCurrent();
       const listed = await observeMcp(() => client.tools(requestSignal));
-      for (const entry of listed) {
-        const descriptor = descriptors.find((d) => d.name === entry.name);
-        if (!descriptor) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
-        const builtin = "kind" in descriptor ? descriptor : undefined;
-        const expectedGrant = builtin
-          ? grant.grantedTools.find((candidate) => isBuiltInTool(candidate) &&
-            candidate.toolName === builtin.name && candidate.definitionVersion === builtin.definitionVersion &&
-            isTrustedCommerceBuiltInGrant(candidate))
-          : grant.grantedTools.find((candidate) => !isBuiltInTool(candidate) && "toolId" in descriptor &&
-            candidate.toolId === descriptor.toolId &&
-            candidate.toolRevisionId === descriptor.toolRevisionId &&
-            candidate.toolName === descriptor.name &&
-            candidate.definitionVersion === descriptor.definitionVersion);
-        if (!expectedGrant) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_GRANT_MISMATCH")));
-        if (builtin && !isTrustedCommerceBuiltInDescriptor(builtin))
-          throw retain(new CommerceHostError("INCOMPATIBLE_VERSION", false,
-            hostDiagnostic("host.authorization", "HOST_TOOL_DESCRIPTOR_CHANGED")));
-        if (canonicalJson(entry) !== canonicalJson({
-          name: descriptor.name,
-          description: descriptor.description,
-          inputSchema: descriptor.inputSchema,
-        })) throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_DESCRIPTOR_CHANGED")));
-      }
-      if (new Set(listed.map((t) => t.name)).size !== listed.length)
-        throw retain(new CommerceHostError("INVALID_INPUT", false,
-          hostDiagnostic("mcp.tool_list", "HOST_TOOL_LIST_DUPLICATE")));
-      if (listed.length !== descriptors.length || descriptors.some((descriptor) =>
-        !listed.some((entry) => entry.name === descriptor.name)))
-        throw retain(new CommerceHostError("DENIED", false,
-          hostDiagnostic("host.authorization", "HOST_TOOL_LIST_UNAUTHORIZED")));
-      const names = new Set(listed.map((t) => t.name));
+      const listedKeys = new Set(listed.map(tool => tool.name));
+      const names = new Set(descriptors.filter(descriptor => manifest.capabilities.some(capability =>
+        capability.toolDescriptor.toolId === descriptor.toolId &&
+        capability.toolDescriptor.toolRevisionId === descriptor.toolRevisionId && listedKeys.has(capability.key)))
+        .map(descriptor => descriptor.name));
+      if (names.size !== descriptors.length) throw retain(new CommerceHostError("DENIED", false,
+        hostDiagnostic("host.authorization", "HOST_TOOL_LIST_UNAUTHORIZED")));
       if (recommendationContext.policy.mode === "NONE" ||
           recommendationContext.policy.mode === "FIXED" && recommendationContext.policy.authorisedDiscountIds.length === 0) {
         names.delete("commerce_get_discount_options");
@@ -502,13 +473,10 @@ async function execute(
             if (!(await available(toolSignal)).has(descriptor.name)) return false;
             return grant.grantedTools.some((candidate) =>
               canonicalJson(candidate) === canonicalJson(authorizedGrant) &&
-              (isBuiltInTool(candidate)
-                ? isTrustedCommerceBuiltInGrant(candidate) && manifest.builtInTools.some((builtin) =>
-                  builtin.name === descriptor.name && builtin.definitionVersion === candidate.definitionVersion)
-                : "toolId" in descriptor && candidate.toolId === descriptor.toolId &&
-                  candidate.toolRevisionId === descriptor.toolRevisionId &&
-                  candidate.toolName === descriptor.name &&
-                  candidate.definitionVersion === descriptor.definitionVersion));
+              !isBuiltInTool(candidate) && candidate.toolId === descriptor.toolId &&
+              candidate.toolRevisionId === descriptor.toolRevisionId && candidate.toolName === descriptor.name &&
+              candidate.definitionVersion === descriptor.definitionVersion);
+
           }),
           execute: async (args, toolSignal): Promise<CommerceToolResult> => preserveRunnerFailure(async () => {
             toolSignal.throwIfAborted();
@@ -516,8 +484,7 @@ async function execute(
             if (!(await available(toolSignal)).has(descriptor.name))
               throw retain(new CommerceHostError("DENIED", false,
                 hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
-            const builtin = "kind" in descriptor;
-            const isDiscount = builtin && (descriptor.name === "commerce_get_discount_options" ||
+            const isDiscount = (descriptor.name === "commerce_get_discount_options" ||
               descriptor.name === "commerce_get_discount_details");
             if (isDiscount) {
               await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent });

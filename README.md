@@ -627,3 +627,29 @@ Moda Interact is built around a few core architectural principles:
 
 7. **Avoid premature infrastructure complexity**  
    PostgreSQL and Redis provide sufficient scalability for the current system while preserving clear future boundaries for higher-volume workloads.
+
+## Published discount identity migration (ARCH-059)
+
+The in-progress Background migration consumes Shared 5.1.0 published capability
+and revision identities for both conversation and initial outreach. Historical
+built-in grants remain stored unchanged and are refused by the new path.
+`INITIAL_RECOVERY_OUTREACH` stays trusted host context. Production selector
+factories first use the existing `checkout_recovery` entitlement gate; the
+four-name allowlist, 16-call/3-search/5-detail limits and graph deadline remain.
+The client pins the manifest, checks persisted release members, validates
+capability-key discovery and routes model-facing tool names to published keys.
+Pre/post manifest checks discard results after activation or permission changes.
+
+This implementation is not ready for deployment: Shared/MCP must first provide
+and enforce a trusted expected published-call identity before provider I/O.
+Host pre/post checks cannot close an activation race between a manifest read
+and the MCP request snapshot. The architect-confirmed prerequisite is recorded
+in the task report; do not treat these checks as server-side pin enforcement.
+
+Retain the ARCH-059 controlled cutover: stage the complete canonical release,
+keep the old pointer, pause/drain affected consumers, deploy strict MCP, obtain
+explicit operator activation confirmation, verify unique names and plan parity,
+then deploy/resume compatible Background. On failure stay paused and roll back
+old MCP/Background artifacts together with the old compatible pointer. This
+source change performs no deployment, activation, grant rewrite, credit change
+or delivery-state migration.
