@@ -65,12 +65,9 @@ describeWithDatabase("recommendation context PostgreSQL boundary", () => {
       await expect(refreshRecommendationPolicy({ context, db, signal: new AbortController().signal, assertCurrent }))
         .rejects.toBeInstanceOf(CommerceHostError);
     } finally {
-      await db.commerceAgentConfiguration.deleteMany({ where: { shopId } });
-      await db.commerceAgentPromptRevision.deleteMany({ where: { id: { in: [platformRevisionId, shopRevisionId] } } });
-      await db.commerceAgentPrompt.deleteMany({ where: { id: { in: [platformPromptId, shopPromptId] } } });
-      await db.checkoutRecovery.deleteMany({ where: { id: recoveryId } });
-      await db.shopSettings.deleteMany({ where: { shopId } });
-      await db.shop.deleteMany({ where: { id: shopId } });
+      // Published prompt revisions are immutable under ARCH-021. The disposable
+      // integration harness destroys this database after the test, so retain
+      // the isolated UUID fixture rows instead of violating that invariant.
       await db.$disconnect();
     }
   }, 30_000);
