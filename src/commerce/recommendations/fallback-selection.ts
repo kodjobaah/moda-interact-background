@@ -1,3 +1,4 @@
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import type { RecommendationSelection } from "./disposition.js";
 import type { TurnRecommendationObservations } from "./observations.js";
 
@@ -5,7 +6,7 @@ export function selectFallbackRecommendation(input: {
   selection: RecommendationSelection["productRecommendations"];
   observations: TurnRecommendationObservations;
   currentProductIds?: ReadonlySet<string>;
-  basketProductIds?: ReadonlySet<string>;
+  basketProductIdentities?: ReadonlySet<string>;
 }): NonNullable<RecommendationSelection["productRecommendations"]>[number] | null {
   const proposals = input.selection ?? [];
   const observed = [
@@ -23,6 +24,7 @@ export function selectFallbackRecommendation(input: {
     return Boolean(product?.available === true && product.url && (matchingGet || record.toolName === "commerce_search_products"));
   }));
   const rank = (proposal: NonNullable<RecommendationSelection["productRecommendations"]>[number]) =>
-    input.currentProductIds?.has(proposal.productId) ? 0 : input.basketProductIds?.has(proposal.productId) ? 1 : 2;
+    input.currentProductIds?.has(proposal.productId) ? 0 :
+      input.basketProductIdentities?.has(canonicalJson({ productId: proposal.productId, variantId: proposal.variantId })) ? 1 : 2;
   return candidates.sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }

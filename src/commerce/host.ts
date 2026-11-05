@@ -51,6 +51,7 @@ import { planRecommendationRefreshes } from "./recommendations/revalidation.js";
 import { decimalToMinorUnits, isValidDecimal, minorUnitsToDecimal, sumPurchaseSubtotal } from "./recommendations/money.js";
 import { evaluatePurchaseDiscount, type DiscountEvaluationPurchase, type ObservedDiscount } from "./recommendations/eligibility.js";
 import { selectCompatibleOffers } from "./recommendations/combinations.js";
+import { selectFallbackRecommendation } from "./recommendations/fallback-selection.js";
 import { selectShippingPresentation } from "./recommendations/shipping.js";
 import { resolveModaConfigurationLocale } from "@modainteract/moda-interact-shared/internationalization";
 import { resolveCommerceEnvironment } from "./model-environment.js";
@@ -718,6 +719,25 @@ async function execute(
           seenProposalKeys.add(key);
           return true;
         });
+        const softDisposition = selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
+          selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED";
+        const currentContextProductIds = new Set(initialProductObservations
+          .filter((observation) => observation.toolName === "commerce_get_product" || observation.arguments.browse !== true)
+          .flatMap((observation) => {
+            const output = observation.output as { product?: Product | null; products?: Product[] };
+            return [output.product?.productId, ...(output.products ?? []).map((product) => product.productId)]
+              .filter((productId): productId is string => Boolean(productId));
+          }));
+        const basketProductIdentities = new Set((currentBasket?.lines ?? [])
+          .filter((line) => line.productId !== null)
+          .map((line) => canonicalJson({ productId: line.productId, variantId: line.variantId })));
+        const fallbackProposal = softDisposition ? selectFallbackRecommendation({
+          selection: budgetedCandidates,
+          observations: recommendationObservations,
+          currentProductIds: currentContextProductIds,
+          basketProductIdentities,
+        }) : null;
+        const proposalsToRefresh = softDisposition ? (fallbackProposal ? [fallbackProposal] : []) : budgetedCandidates;
         const availableOptions = new Map<string, HostDiscountOptions["offers"][number]>();
         for (const observation of recommendationObservations.all("commerce_get_discount_options")) {
           const output = observation.output as ReturnType<typeof CommerceToolOutputs.commerce_get_discount_options.parse>;
@@ -747,7 +767,7 @@ async function execute(
           }) } : {}),
           availableCalls: Math.max(0, 10 - usedCalls),
         });
-        let refreshPlan = planRefreshes(budgetedCandidates, null);
+        let refreshPlan = planRefreshes(proposalsToRefresh, null);
         if (refreshPlan.proposals.some((item) => item.proposal.scope !== "PRODUCT_ONLY")) {
           const refreshedBasket = await refreshRecommendationContext({ context: recommendationContext,
             recoveryId: recovery.id, db: prisma, signal, assertCurrent });

@@ -79,6 +79,7 @@ let outage = false;
 let boundaryFailure: "401" | "403" | "429" | "503" | "MALFORMED" | "TRANSPORT" | null = null;
 let structuredResult: unknown = null;
 let toolResults: Record<string, unknown> = {};
+let toolResultCallCounts: Record<string, number> = {};
 let fixtureError: unknown = null;
 const observations: Array<{ method: string; params: any; claims: any }> = [];
 const config = () => ({
@@ -197,7 +198,11 @@ beforeAll(async () => {
       }));
       server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({
         content: [{ type: "text", text: "Synthetic blue linen" }],
-        structuredContent: toolResults[params.name] ?? {
+        structuredContent: (() => {
+          const configured = toolResults[params.name];
+          const callIndex = toolResultCallCounts[params.name] ?? 0;
+          toolResultCallCounts[params.name] = callIndex + 1;
+          return (Array.isArray(configured) ? configured[Math.min(callIndex, configured.length - 1)] : configured) ?? {
           ...(structuredResult ?? {
           contractVersion: "commerce.v1",
           status: "OK",
@@ -207,7 +212,8 @@ beforeAll(async () => {
           },
           renderedText: "Synthetic blue linen",
           }),
-        },
+          };
+        })(),
       }));
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -249,6 +255,7 @@ beforeEach(() => {
   boundaryFailure = null;
   structuredResult = null;
   toolResults = {};
+  toolResultCallCounts = {};
   fixtureError = null;
   active = exampleManifest(digest, true);
   active.builtInTools = structuredClone([...commerceDiscountBuiltInDescriptors]);
