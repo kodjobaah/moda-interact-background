@@ -16,6 +16,7 @@ import type {
 import {
   hostDiagnostic,
   mcpTransportDiagnostic,
+  safeCommerceDiagnosticText,
   type CommerceHostDiagnostic,
   type CommerceHostOperation,
   type CommerceHostStage,
@@ -46,25 +47,10 @@ export type McpSourceFailure = Readonly<{
   truncated: boolean;
 }>;
 
-type SafeDiagnosticText = Readonly<{ value: string; redacted: boolean; truncated: boolean }>;
-
-function safeDiagnosticText(value: string, maximum = 1024): SafeDiagnosticText {
-  const scrubbed = value
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED]")
-    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
-    .replace(/\b(?:access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret|password|passwd|secret|credential)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "[REDACTED]")
-    .replace(/(?<![A-Za-z0-9])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9])/g, "[REDACTED]")
-    .replace(/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi, "[REDACTED_URL]");
-  const truncated = scrubbed.length > maximum;
-  return { value: truncated ? `${scrubbed.slice(0, maximum)}[TRUNCATED]` : scrubbed,
-    redacted: scrubbed !== value, truncated };
-}
-
 function safeErrorDetails(value: unknown, depth = 0): { value: unknown; redacted: boolean; truncated: boolean } {
   if (depth > 4) return { value: "[TRUNCATED]", redacted: false, truncated: true };
   if (typeof value === "string") {
-    const safe = safeDiagnosticText(value, 256);
+    const safe = safeCommerceDiagnosticText(value, 256);
     return { value: safe.value, redacted: safe.redacted, truncated: safe.truncated };
   }
   if (value === null || typeof value === "boolean" || typeof value === "number")
@@ -145,14 +131,14 @@ async function readMcpSourceFailure(
       ? errorValue as Record<string, unknown> : null;
     const graphqlErrors = Array.isArray(envelope.errors) ? envelope.errors : undefined;
     if (typeof errorValue === "string") {
-      const message = safeDiagnosticText(errorValue);
+      const message = safeCommerceDiagnosticText(errorValue);
       providerError = { message: message.value };
       redacted ||= message.redacted;
       truncated ||= message.truncated;
     } else if (structured) {
       const codeValue = structured.code;
       const code = typeof codeValue === "string" || typeof codeValue === "number" ? String(codeValue).slice(0, 96) : undefined;
-      const message = typeof structured.message === "string" ? safeDiagnosticText(structured.message) : null;
+      const message = typeof structured.message === "string" ? safeCommerceDiagnosticText(structured.message) : null;
       const details = structured.details === undefined ? null : safeErrorDetails(structured.details);
       providerError = { ...(code ? { code } : {}), ...(message ? { message: message.value } : {}), ...(details ? { details: details.value } : {}) };
       redacted ||= message?.redacted === true || details?.redacted === true;
@@ -172,7 +158,7 @@ async function readMcpSourceFailure(
       if (!providerErrorBody && Object.keys(envelope).length > 0) { providerErrorBody = "[REDACTED]"; redacted = true; }
     }
   } else {
-    const safe = safeDiagnosticText(text, 1024);
+    const safe = safeCommerceDiagnosticText(text, 1024);
     providerErrorBody = safe.value;
     redacted ||= safe.redacted;
     truncated ||= safe.truncated;
@@ -234,7 +220,7 @@ export function encodeCommerceContext(
   );
   if (!context.success) throw new CommerceHostError("INVALID_INPUT", false,
     hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"));
-  return Buffer.from(JSON.stringify(context.data), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ shopId: context.data.shopId }), "utf8").toString("base64url");
 }
 
 export class CommerceMcpClient {

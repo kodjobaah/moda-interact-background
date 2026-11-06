@@ -1,0 +1,28 @@
+{
+  "version": "1",
+  "provider": "SHOPIFY",
+  "products": [
+    {
+      "productId": "fixture-product-1",
+      "variantId": "fixture-variant-1",
+      "title": "Synthetic blue linen shirt",
+      "url": "https://fixture.example/products/blue-linen-shirt",
+      "available": true,
+      "unitPrice": "24.00",
+      "currency": "GBP",
+      "categoryIds": [],
+      "collectionIds": ["fixture-collection-1"]
+    }
+  ],
+  "proposals": [
+    {
+      "scope": "PRODUCT_ONLY",
+      "basketLineId": null,
+      "productId": "fixture-product-1",
+      "variantId": "fixture-variant-1",
+      "quantity": 1,
+      "promotionKind": "NONE",
+      "offerIds": []
+    }
+  ]
+}

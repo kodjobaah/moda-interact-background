@@ -261,7 +261,17 @@ export class CurrentOutreachOfferRevalidationService {
           continue;
         }
         const parsed = CommerceToolOutputs.commerce_get_discount_details.safeParse(result.data);
-        const details = parsed.success ? parsed.data.details : null;
+        if (parsed.success && "outcome" in parsed.data) {
+          this.log.warn("recovery_offer.current_source.mcp_member_unavailable", {
+            shopId: input.shopId, attemptId: input.outreachAttemptId,
+            tool: "commerce_get_discount_details",
+            reasonCode: "CATALOGUE_LOOKUP_UNAVAILABLE",
+            sourceOutcome: "UNAVAILABLE",
+            sourceReasonCode: parsed.data.reasonCode,
+          });
+          return { kind: "FAILURE", reasonCode: "OFFER_DISCOVERY_INCOMPLETE", retryable: true };
+        }
+        const details = parsed.success && !("outcome" in parsed.data) ? parsed.data.details : null;
         if (!details || details.offer.offerId !== offerId || !details.providerDiscountId) {
           discoveryIncomplete = true;
           continue;

@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "case": "redirect-without-a-grounded-product",
+  "answerKind": "ANSWER",
+  "responseDisposition": "OUT_OF_SCOPE_REDIRECT",
+  "productRecommendationVersion": "1",
+  "productRecommendations": [],
+  "expectedLines": [
+    "I can help with this store's products, but I can't answer that question.",
+    "Store: https://fixture.example"
+  ],
+  "expectedDiscountCalls": 0
+}

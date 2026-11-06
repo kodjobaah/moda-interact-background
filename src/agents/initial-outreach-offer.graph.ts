@@ -202,6 +202,7 @@ function projectToolResult(name: string, result: OutreachMcpResult): OutreachMcp
   switch (name) {
     case "commerce_get_discount_options": {
       const output = CommerceToolOutputs.commerce_get_discount_options.parse(data);
+      if ("outcome" in output) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("CATALOGUE_LOOKUP_UNAVAILABLE"));
       projected = {
         mode: output.mode,
         offers: output.offers.map(({ offerId, title, method, startsAt, endsAt, support, reasonCodes }) =>
@@ -213,6 +214,7 @@ function projectToolResult(name: string, result: OutreachMcpResult): OutreachMcp
     }
     case "commerce_get_discount_details": {
       const output = CommerceToolOutputs.commerce_get_discount_details.parse(data);
+      if ("outcome" in output) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("CATALOGUE_LOOKUP_UNAVAILABLE"));
       projected = {
         details: output.details ? {
           offer: {
@@ -555,6 +557,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
           switch (call.name) {
             case "commerce_get_discount_options": {
               const output = CommerceToolOutputs.commerce_get_discount_options.parse(result.data);
+              if ("outcome" in output) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("CATALOGUE_LOOKUP_UNAVAILABLE"));
               if (output.mode !== state.context.mode) throw new Error("DISCOUNT_MODE_MISMATCH");
               for (const offer of output.offers) {
                 if (state.context.mode === "FIXED" && !state.context.authorisedDiscountIds.includes(offer.offerId)) continue;
@@ -567,6 +570,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
             }
             case "commerce_get_discount_details": {
               const output = CommerceToolOutputs.commerce_get_discount_details.parse(result.data);
+              if ("outcome" in output) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("CATALOGUE_LOOKUP_UNAVAILABLE"));
               const requested = call.arguments.offerId as string;
               if (output.details) {
                 if (output.details.offer.offerId !== requested || !optionsById.has(requested) || !output.details.providerDiscountId) {

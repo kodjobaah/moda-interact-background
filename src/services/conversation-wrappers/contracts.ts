@@ -99,6 +99,7 @@ export type RenderConversationResponseInput = Readonly<{
   source: WrapperSource;
   messageIdentity: string;
   responseBody: string;
+  hostComposedReplyCandidates?: readonly string[];
   languageTag?: string | null;
   /** Previously prepared outcome owned by the outbound caller for the same message. */
   previousApplication?: WrappedResult;

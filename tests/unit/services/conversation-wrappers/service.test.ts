@@ -100,6 +100,26 @@ describe("ARCH-047 BG005 selection and facade", () => {
     expect(await service.renderConversationResponse(input)).toEqual({ kind: "no-wrapper", body: response, reason: "NOT_CONFIGURED" });
     expect(await harness([]).service.renderConversationResponse(input)).toEqual({ kind: "unavailable", reason: "NOT_CONFIGURED" });
   });
+  it("advances only after a composed length refusal and replays the selected candidate digest", async () => {
+    const { service, read } = harness([slot("AI")]);
+    const candidates = ["x".repeat(4090), "Compact complete reply."] as const;
+    const first = await service.renderConversationResponse({ ...input, responseBody: candidates[0],
+      hostComposedReplyCandidates: candidates });
+    expect(first).toMatchObject({ kind: "rendered", responseDigest: digest(candidates[1]) });
+    if (first.kind !== "rendered") return;
+    expect(first.body).toContain(candidates[1]);
+    read.loadContext.mockRejectedValue(new Error("replay must stay before reads"));
+    expect(await service.renderConversationResponse({ ...input, responseBody: candidates[0],
+      hostComposedReplyCandidates: candidates, previousApplication: first })).toMatchObject({ replayed: true });
+  });
+  it("rejects invalid or HUMAN candidate arrays before context reads", async () => {
+    const { service, read } = harness([slot("AI")]);
+    expect(await service.renderConversationResponse({ ...input, hostComposedReplyCandidates: ["Other"] }))
+      .toEqual({ kind: "rejected", reason: "INVALID_INPUT" });
+    expect(await service.renderConversationResponse({ ...input, source: "HUMAN", hostComposedReplyCandidates: [response] }))
+      .toEqual({ kind: "rejected", reason: "INVALID_INPUT" });
+    expect(read.loadContext).not.toHaveBeenCalled();
+  });
   it("logs exceptions through shared-logger interface and rethrows, never swallows", async () => {
     const { service, read, logger } = harness([slot("AI")]);
     read.loadSlots.mockRejectedValue(new Error("do not leak customer URLs"));

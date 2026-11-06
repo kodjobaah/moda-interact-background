@@ -135,6 +135,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     replyText: string;
     detectedLanguageTag: string | null;
     detectedLanguageConfidence: number | null;
+    hostComposedReplyCandidates?: readonly string[];
   };
   now?: () => Date;
   runtimeConfig?: RuntimeConfigReader;
@@ -589,6 +590,9 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         messageId: reserved.messageId,
         generatedResponse: agentResult.replyText,
+        ...(agentResult.hostComposedReplyCandidates
+          ? { hostComposedReplyCandidates: agentResult.hostComposedReplyCandidates }
+          : {}),
       });
       if (composed.kind === "refused") {
         this.logger.warn("whatsapp.turn.ai_wrapper_refused", {

@@ -11,6 +11,11 @@ import {
 import { CommerceEnvironmentSchema } from "@modainteract/moda-interact-shared/commerce/model";
 import type { CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
 import type { CheckoutPriceReconciliation } from "../services/recovery-pricing/checkout-price-reconciliation.types.js";
+import type {
+  DiscountCombinationDecision,
+  DiscountEligibilityDecision,
+  ObservedDiscount,
+} from "../commerce/recommendations/eligibility.js";
 
 const CheckoutLineSchema = z.strictObject({
   lineKey: z.string().min(1).max(128),
@@ -78,24 +83,11 @@ export type InitialOutreachCommerceOffer = z.infer<typeof CommerceOfferSchema>;
 export type InitialOutreachCommerceDiscountDetails = z.infer<typeof CommerceDiscountDetailsSchema>;
 export type InitialOutreachCommerceProduct = z.infer<typeof CommerceProductSchema>;
 
-export type CheckoutEligibilityDecision = Readonly<{
-  offerId: string;
-  verdict: "SUPPORTED" | "NOT_APPLICABLE" | "UNVERIFIABLE";
-  eligibleLineKeys: readonly string[];
-  reasonCodes: readonly string[];
-}>;
+export type CheckoutEligibilityDecision = DiscountEligibilityDecision;
 
-export type CheckoutOfferGroupDecision = Readonly<{
-  verdict: "SUPPORTED" | "UNVERIFIABLE" | "INCOMPATIBLE";
-  offerIds: readonly string[];
-  reasonCodes: readonly string[];
-}>;
+export type CheckoutOfferGroupDecision = DiscountCombinationDecision;
 
-export type ObservedCheckoutOffer = Readonly<{
-  offer: InitialOutreachCommerceOffer;
-  details: InitialOutreachCommerceDiscountDetails;
-  eligibility: CheckoutEligibilityDecision;
-}>;
+export type ObservedCheckoutOffer = ObservedDiscount;
 
 export type SourceBoundOutreachProduct = Readonly<{
   sourceTool: "commerce_get_product";
