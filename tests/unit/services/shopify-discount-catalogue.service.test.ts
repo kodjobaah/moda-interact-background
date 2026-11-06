@@ -29,13 +29,14 @@ function harness(onboardingCompleted: boolean, legacyOnboardingCompleted: boolea
     .mockResolvedValueOnce({ id: "shop-1" })
     .mockResolvedValueOnce({
       domain: "merchant.example",
+      platform: "SHOPIFY",
       status: "ACTIVE",
       onboardingCompleted,
       settings: { onboardingCompleted: legacyOnboardingCompleted },
       subscription: { status: "ACTIVE" },
     })
     .mockImplementation(async ({ select }: { select?: Record<string, unknown> }) => select?.domain
-      ? { domain: "merchant.example", status: "ACTIVE", onboardingCompleted,
+      ? { domain: "merchant.example", platform: "SHOPIFY", status: "ACTIVE", onboardingCompleted,
         subscription: { status: "ACTIVE" } }
       : { id: "shop-1", domain: "merchant.example" });
   const transaction = {
@@ -53,7 +54,12 @@ function harness(onboardingCompleted: boolean, legacyOnboardingCompleted: boolea
       upsert: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
-    session: { findFirst: vi.fn().mockResolvedValue({ scope: "read_discounts" }) },
+    session: {
+      findMany: vi.fn().mockResolvedValue([{ id: "actual-session-id" }]),
+      findUnique: vi.fn().mockResolvedValue({
+        id: "actual-session-id", shop: "merchant.example", isOnline: false, scope: "read_discounts",
+      }),
+    },
   };
   hoisted.prisma.$transaction.mockImplementation(async (callback: (value: typeof transaction) => unknown) => callback(transaction));
   return { transaction, service: new ShopifyDiscountCatalogueService() };
@@ -83,6 +89,12 @@ describe("ShopifyDiscountCatalogueService onboarding eligibility", () => {
     expect(eligibilityQuery.select).toEqual(expect.objectContaining({ onboardingCompleted: true }));
     expect(eligibilityQuery.select).not.toHaveProperty("settings");
     expect(test.transaction.shopifyDiscountCatalogue.update).not.toHaveBeenCalled();
+    expect(test.transaction.session.findMany).toHaveBeenCalledWith({
+      where: { shop: "merchant.example", isOnline: false }, select: { id: true }, take: 2,
+    });
+    expect(test.transaction.session.findUnique).toHaveBeenCalledWith({
+      where: { id: "actual-session-id" }, select: { id: true, shop: true, isOnline: true, scope: true },
+    });
   });
 
   it("allows eligibility when the shared Shop milestone is true even if the legacy mirror is false", async () => {
@@ -96,6 +108,24 @@ describe("ShopifyDiscountCatalogueService onboarding eligibility", () => {
     expect(test.transaction.shopifyDiscountCatalogue.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_REQUIRED" }),
     }));
+  });
+
+  it("uses the actual offline Session ID for scope-only eligibility without refreshing an expired token", async () => {
+    const test = harness(true, true);
+    test.transaction.session.findUnique.mockResolvedValue({
+      id: "actual-session-id",
+      shop: "merchant.example",
+      isOnline: false,
+      scope: "read_discounts",
+      expires: new Date(Date.now() - 60_000),
+    } as never);
+
+    await expect(test.service.requestSync("shop-1", new Date("2026-10-02T12:00:00.000Z"))).resolves.toBe("requested");
+
+    expect(test.transaction.session.findUnique).toHaveBeenCalledWith({
+      where: { id: "actual-session-id" }, select: { id: true, shop: true, isOnline: true, scope: true },
+    });
+    expect(hoisted.listDiscounts).not.toHaveBeenCalled();
   });
 
   it("keeps a failed provider read retryable and persists enriched facts on the next successful sync", async () => {

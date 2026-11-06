@@ -347,8 +347,8 @@ type DiscountConditionFacts = {
 };
 
 export class ShopifyDiscountProvider {
-  async listDiscounts(shopDomain: string): Promise<ShopifyDiscountRecord[]> {
-    const accessToken = await getShopifyAccessToken(shopDomain);
+  async listDiscounts(shopId: string, shopDomain: string): Promise<ShopifyDiscountRecord[]> {
+    const accessToken = await getShopifyAccessToken(shopId);
     const records: ShopifyDiscountRecord[] = [];
     let after: string | null = null;
     let hasNextPage = true;

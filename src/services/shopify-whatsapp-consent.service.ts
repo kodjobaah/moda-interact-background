@@ -121,6 +121,7 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
     let observation: ShopifyWhatsAppConsentObservation;
     try {
       observation = await this.reader.readCurrent({
+        shopId: scoped.shop.id,
         shopDomain: scoped.shop.domain,
         customerGid: scoped.identity.gid,
       });

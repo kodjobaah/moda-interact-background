@@ -22,11 +22,11 @@ function provider(response: Response | ((_: string | URL | Request, init?: Reque
 describe("ShopifyWhatsAppConsentProvider", () => {
   it("only performs the Admin 2026-07 GraphQL customer read with the existing offline token", async () => {
     const { client, http, token } = provider(graphqlResponse());
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual({
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual({
       kind: "OBSERVED", customerGid: GID, phoneNumber: "+447400123456",
       state: "SUBSCRIBED", updatedAt: "2026-10-20T09:00:00.000Z",
     });
-    expect(token).toHaveBeenCalledWith(SHOP);
+    expect(token).toHaveBeenCalledWith("shop-1", { signal: expect.any(AbortSignal) });
     expect(http).toHaveBeenCalledTimes(1);
     const [endpoint, options] = vi.mocked(http).mock.calls[0]!;
     expect(endpoint).toBe(`https://${SHOP}/admin/api/2026-07/graphql.json`);
@@ -41,7 +41,7 @@ describe("ShopifyWhatsAppConsentProvider", () => {
   it.each(["UNSUBSCRIBED", "PENDING", "NEVER_SUBSCRIBED", "REDACTED"] as const)(
     "returns non-granted Shopify state %s verbatim", async (state) => {
       const { client } = provider(graphqlResponse({ state, updatedAt: null }));
-      expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toMatchObject({
+      expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toMatchObject({
         kind: "OBSERVED", state, updatedAt: null,
       });
     },
@@ -59,20 +59,20 @@ describe("ShopifyWhatsAppConsentProvider", () => {
     [{ errors: "malformed", data: { customer: null } }, { kind: "UNAVAILABLE", reason: "GRAPHQL" }],
   ] as const)("fails closed for missing/protected/malformed GraphQL fields", async (body, expected) => {
     const { client } = provider(new Response(JSON.stringify(body), { status: 200 }));
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual(expected);
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual(expected);
   });
 
   it.each([401, 403, 429, 503])("classifies HTTP %s without ever granting", async (status) => {
     const { client } = provider(new Response("denied", { status }));
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual({
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual({
       kind: "UNAVAILABLE", reason: status === 401 || status === 403 ? "ACCESS_DENIED" : "HTTP",
     });
   });
 
   it("rejects an arbitrary host and non-GID identity without sending the offline token", async () => {
     const { client, token, http } = provider(graphqlResponse());
-    expect(await client.readCurrent({ shopDomain: "127.0.0.1", customerGid: GID })).toMatchObject({ kind: "UNAVAILABLE" });
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: "12345" })).toMatchObject({ kind: "UNAVAILABLE" });
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: "127.0.0.1", customerGid: GID })).toMatchObject({ kind: "UNAVAILABLE" });
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: "12345" })).toMatchObject({ kind: "UNAVAILABLE" });
     expect(token).not.toHaveBeenCalled();
     expect(http).not.toHaveBeenCalled();
   });
@@ -82,7 +82,7 @@ describe("ShopifyWhatsAppConsentProvider", () => {
       accessToken: vi.fn().mockRejectedValue(new Error("secret redacted")),
       fetchImpl: vi.fn(),
     });
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual({ kind: "UNAVAILABLE", reason: "ACCESS_DENIED" });
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual({ kind: "UNAVAILABLE", reason: "ACCESS_DENIED" });
   });
 
   it("times out a hanging request, aborts the transport and never returns a grant", async () => {
@@ -91,7 +91,7 @@ describe("ShopifyWhatsAppConsentProvider", () => {
     const client = new ShopifyWhatsAppConsentProvider({
       fetchImpl: http, accessToken: vi.fn().mockResolvedValue("test-token"), timeoutMs: 12,
     });
-    expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual({ kind: "UNAVAILABLE", reason: "TIMEOUT" });
+    expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual({ kind: "UNAVAILABLE", reason: "TIMEOUT" });
     expect(http).toHaveBeenCalledTimes(1);
   });
 
@@ -99,7 +99,7 @@ describe("ShopifyWhatsAppConsentProvider", () => {
     for (const response of [new Response("not-json"),
       new Response("x".repeat(300_000))]) {
       const { client } = provider(response);
-      expect(await client.readCurrent({ shopDomain: SHOP, customerGid: GID })).toEqual({
+      expect(await client.readCurrent({ shopId: "shop-1", shopDomain: SHOP, customerGid: GID })).toEqual({
         kind: "UNAVAILABLE", reason: "INVALID_RESPONSE",
       });
     }

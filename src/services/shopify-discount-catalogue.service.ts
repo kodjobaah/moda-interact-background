@@ -66,7 +66,7 @@ export class ShopifyDiscountCatalogueService {
 
     let observed: ShopifyDiscountRecord[];
     try {
-      observed = await shopifyDiscountProvider.listDiscounts(claimed.domain);
+      observed = await shopifyDiscountProvider.listDiscounts(shopId, claimed.domain);
       logger.info("shopify.discount_sync.provider_received", {
         shopId,
         generation: claimed.generation,
@@ -127,10 +127,23 @@ export class ShopifyDiscountCatalogueService {
   }
 
   private async getEligibility(transaction: Prisma.TransactionClient, shopId: string): Promise<boolean> {
-    const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { domain: true, status: true, onboardingCompleted: true, subscription: { select: { status: true } } } });
-    if (!shop) return false;
-    const session = await transaction.session.findFirst({ where: { shop: shop.domain, isOnline: false }, select: { scope: true }, orderBy: { expires: "desc" } });
-    return shop.status === "ACTIVE"
+    const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { domain: true, platform: true, status: true, onboardingCompleted: true, subscription: { select: { status: true } } } });
+    if (!shop || shop.platform !== "SHOPIFY") return false;
+    const sessionIds = await transaction.session.findMany({
+      where: { shop: shop.domain, isOnline: false },
+      select: { id: true },
+      take: 2,
+    });
+    if (sessionIds.length !== 1) return false;
+    const sessionId = sessionIds[0]!.id;
+    const session = await transaction.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true, shop: true, isOnline: true, scope: true },
+    });
+    return session?.id === sessionId
+      && session.shop === shop.domain
+      && session.isOnline === false
+      && shop.status === "ACTIVE"
       && shop.onboardingCompleted === true
       && ACTIVE.includes(shop.subscription?.status as typeof ACTIVE[number])
       && session?.scope?.split(",").some((scope) => scope.trim() === "read_discounts") === true;

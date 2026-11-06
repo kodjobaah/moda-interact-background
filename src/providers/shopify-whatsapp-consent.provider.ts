@@ -31,6 +31,7 @@ export type ShopifyWhatsAppConsentObservation =
 
 export interface ShopifyWhatsAppConsentReader {
   readCurrent(input: {
+    shopId: string;
     shopDomain: string;
     customerGid: string;
   }): Promise<ShopifyWhatsAppConsentObservation>;
@@ -40,14 +41,14 @@ type FetchPort = (input: string | URL | Request, init?: RequestInit) => Promise<
 
 type ProviderDependencies = {
   fetchImpl?: FetchPort;
-  accessToken?: (shopDomain: string) => Promise<string>;
+  accessToken?: (shopId: string, options?: { signal?: AbortSignal }) => Promise<string>;
   timeoutMs?: number;
 };
 
 /** Read-only Shopify boundary. All identity/recipient/persistence policy stays in the service. */
 export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentReader {
   private readonly fetchImpl: FetchPort;
-  private readonly accessToken: (shopDomain: string) => Promise<string>;
+  private readonly accessToken: (shopId: string, options?: { signal?: AbortSignal }) => Promise<string>;
   private readonly timeoutMs: number;
 
   constructor(dependencies: ProviderDependencies = {}) {
@@ -60,6 +61,7 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
   }
 
   async readCurrent(input: {
+    shopId: string;
     shopDomain: string;
     customerGid: string;
   }): Promise<ShopifyWhatsAppConsentObservation> {
@@ -91,7 +93,7 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
       // Bound offline-token retrieval as well as HTTP/body transfer.
       let token: string;
       try {
-        token = await Promise.race([this.accessToken(input.shopDomain), deadline]);
+        token = await Promise.race([this.accessToken(input.shopId, { signal: controller.signal }), deadline]);
       } catch (error) {
         if (controller.signal.aborted) throw error;
         return { kind: "UNAVAILABLE", reason: "ACCESS_DENIED" };
