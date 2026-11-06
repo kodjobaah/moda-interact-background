@@ -29,6 +29,8 @@ export function createShopifySessionService(input: {
   return Object.freeze({
     getAccessToken: (shopId: string, options?: { signal?: AbortSignal }) =>
       provider.getAccessToken(shopId, options),
+    getSession: (shopId: string, options?: { signal?: AbortSignal }) =>
+      provider.getSession(shopId, options),
   });
 }
 
@@ -66,4 +68,12 @@ export function getShopifyAccessToken(
   options?: { signal?: AbortSignal },
 ): Promise<string> {
   return shopifySessionService.getAccessToken(shopId, options);
+}
+
+/** Return Shared's server-only credential snapshot for the authorized selected Shop. */
+export function getShopifySession(
+  shopId: string,
+  options?: { signal?: AbortSignal },
+) {
+  return shopifySessionService.getSession(shopId, options);
 }

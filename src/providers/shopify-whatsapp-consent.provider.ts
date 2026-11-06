@@ -1,10 +1,12 @@
 import { toShopifyCustomerGid } from "@modainteract/moda-interact-shared/identity";
-import { getShopifyAccessToken } from "../services/shopify-session.service.js";
+import { getShopifySession } from "../services/shopify-session.service.js";
 
 const API_VERSION = "2026-07";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const SHOP_DOMAIN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/;
+const MAX_REQUEST_BYTES = 16 * 1024;
+const CONSENT_PATH = `/admin/api/${API_VERSION}/graphql.json`;
+type ConsentSession = Pick<Awaited<ReturnType<typeof getShopifySession>>, "shop" | "accessToken">;
 
 const CUSTOMER_WHATSAPP_CONSENT_QUERY = `
   query CustomerWhatsAppConsent($id: ID!) {
@@ -32,7 +34,6 @@ export type ShopifyWhatsAppConsentObservation =
 export interface ShopifyWhatsAppConsentReader {
   readCurrent(input: {
     shopId: string;
-    shopDomain: string;
     customerGid: string;
   }): Promise<ShopifyWhatsAppConsentObservation>;
 }
@@ -41,19 +42,19 @@ type FetchPort = (input: string | URL | Request, init?: RequestInit) => Promise<
 
 type ProviderDependencies = {
   fetchImpl?: FetchPort;
-  accessToken?: (shopId: string, options?: { signal?: AbortSignal }) => Promise<string>;
+  session?: (shopId: string, options?: { signal?: AbortSignal }) => Promise<ConsentSession>;
   timeoutMs?: number;
 };
 
 /** Read-only Shopify boundary. All identity/recipient/persistence policy stays in the service. */
 export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentReader {
   private readonly fetchImpl: FetchPort;
-  private readonly accessToken: (shopId: string, options?: { signal?: AbortSignal }) => Promise<string>;
+  private readonly session: (shopId: string, options?: { signal?: AbortSignal }) => Promise<ConsentSession>;
   private readonly timeoutMs: number;
 
   constructor(dependencies: ProviderDependencies = {}) {
     this.fetchImpl = dependencies.fetchImpl ?? fetch;
-    this.accessToken = dependencies.accessToken ?? getShopifyAccessToken;
+    this.session = dependencies.session ?? getShopifySession;
     this.timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 30_000) {
       throw new Error("Invalid Shopify consent read timeout");
@@ -62,15 +63,8 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
 
   async readCurrent(input: {
     shopId: string;
-    shopDomain: string;
     customerGid: string;
   }): Promise<ShopifyWhatsAppConsentObservation> {
-    // The domain is taken from the tenant's Shop row, never from a caller-supplied URL.
-    // Reject arbitrary hosts before using a merchant-scoped offline access token.
-    if (!SHOP_DOMAIN.test(input.shopDomain)) {
-      return { kind: "UNAVAILABLE", reason: "INVALID_RESPONSE" };
-    }
-
     let customerGid: string;
     try {
       customerGid = toShopifyCustomerGid(input.customerGid);
@@ -91,25 +85,32 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
     });
     try {
       // Bound offline-token retrieval as well as HTTP/body transfer.
-      let token: string;
+      let session: ConsentSession;
       try {
-        token = await Promise.race([this.accessToken(input.shopId, { signal: controller.signal }), deadline]);
+        session = await Promise.race([this.session(input.shopId, { signal: controller.signal }), deadline]);
       } catch (error) {
         if (controller.signal.aborted) throw error;
         return { kind: "UNAVAILABLE", reason: "ACCESS_DENIED" };
       }
-      if (!token) return { kind: "UNAVAILABLE", reason: "ACCESS_DENIED" };
+      if (!session?.accessToken) return { kind: "UNAVAILABLE", reason: "ACCESS_DENIED" };
+      const endpoint = buildConsentEndpoint(session.shop);
+      if (!endpoint) return { kind: "UNAVAILABLE", reason: "INVALID_RESPONSE" };
+      const requestBody = JSON.stringify({
+        query: CUSTOMER_WHATSAPP_CONSENT_QUERY,
+        variables: { id: customerGid },
+      });
+      if (Buffer.byteLength(requestBody, "utf8") > MAX_REQUEST_BYTES) {
+        return { kind: "UNAVAILABLE", reason: "INVALID_RESPONSE" };
+      }
       const response = await Promise.race([
-        this.fetchImpl(`https://${input.shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+        this.fetchImpl(endpoint, {
           method: "POST",
+          redirect: "error",
           headers: {
             "Content-Type": "application/json",
-            "X-Shopify-Access-Token": token,
+            "X-Shopify-Access-Token": session.accessToken,
           },
-          body: JSON.stringify({
-            query: CUSTOMER_WHATSAPP_CONSENT_QUERY,
-            variables: { id: customerGid },
-          }),
+          body: requestBody,
           signal: controller.signal,
         }),
         deadline,
@@ -143,6 +144,21 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
     } finally {
       if (timeout) clearTimeout(timeout);
     }
+  }
+}
+
+function buildConsentEndpoint(shop: string): URL | undefined {
+  if (!shop || shop.length > 255 || /[\u0000-\u0020\u007f]/.test(shop)) return undefined;
+  try {
+    const endpoint = new URL(`https://${shop}${CONSENT_PATH}`);
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.port ||
+        endpoint.pathname !== CONSENT_PATH || endpoint.search || endpoint.hash ||
+        endpoint.hostname !== shop || endpoint.origin !== `https://${shop}`) {
+      return undefined;
+    }
+    return endpoint;
+  } catch {
+    return undefined;
   }
 }
 

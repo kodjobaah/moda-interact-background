@@ -164,6 +164,15 @@ const checkout = { shopId: "shop-a", customerId: "customer-a", shopifyCustomerId
 beforeEach(() => vi.clearAllMocks());
 
 describe("ShopifyWhatsAppConsentService", () => {
+  it("passes the authorized Shop ID without treating a custom storefront label as the provider endpoint", async () => {
+    const ctx = fakeDatabase();
+    ctx.shops[0]!.domain = "brand.example";
+    const { instance, readCurrent } = service(ctx.db);
+
+    await expect(instance.evaluateRecipient(checkout)).resolves.toMatchObject({ status: "ALLOWED" });
+    expect(readCurrent).toHaveBeenCalledWith({ shopId: "shop-a", customerGid: GID });
+  });
+
   it("verifies one new checkout and projects its exact phone; later sends consult only the stored revisions", async () => {
     const ctx = fakeDatabase();
     const { instance, readCurrent } = service(ctx.db);
@@ -179,7 +188,7 @@ describe("ShopifyWhatsAppConsentService", () => {
     expect(await instance.evaluateStoredRecipient({ shopId: "shop-a", customerId: "customer-a", recipient: checkout.recipient }))
       .toMatchObject({ status: "ALLOWED", consentRevision: 1n });
     expect(readCurrent).toHaveBeenCalledTimes(1);
-    expect(readCurrent).toHaveBeenCalledWith({ shopDomain: "a-shop.myshopify.com", customerGid: GID });
+    expect(readCurrent).toHaveBeenCalledWith({ shopId: "shop-a", customerGid: GID });
   });
 
   it("keeps identical Shopify events idempotent and drops out-of-order grants after revocation", async () => {
