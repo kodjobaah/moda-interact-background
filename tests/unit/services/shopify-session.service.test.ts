@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => {
     await state.providerInput?.readOAuth();
     return "test-access-token";
   });
-  return { database, state, getAccessToken };
+  const getSession = vi.fn(async () => {
+    return { id: "offline-1", shopId: "selected-shop-1", shop: "merchant.myshopify.com", accessToken: "test-access-token", scope: null, expires: null, refreshTokenExpires: null };
+  });
+  return { database, state, getAccessToken, getSession };
 });
 
 vi.mock("../../../src/lib/db.js", () => ({ default: mocks.database }));
@@ -21,7 +24,7 @@ vi.mock("@modainteract/moda-interact-shared/shopify/node", () => ({
   },
   createShopifyOfflineTokenProvider: vi.fn((input: { readOAuth: () => Promise<unknown>; fetch: typeof fetch }) => {
     mocks.state.providerInput = input;
-    return { getAccessToken: mocks.getAccessToken };
+    return { getAccessToken: mocks.getAccessToken, getSession: mocks.getSession };
   }),
 }));
 
@@ -29,6 +32,7 @@ import { createShopifyOfflineTokenProvider } from "@modainteract/moda-interact-s
 import {
   createShopifySessionService,
   getShopifyAccessTokenForDomain,
+  getShopifySession,
   resolveShopifyShopId,
 } from "../../../src/services/shopify-session.service.js";
 
@@ -53,6 +57,14 @@ describe("Background Shopify offline session service", () => {
     expect(configRead).toHaveBeenCalledTimes(2);
     expect(configRead).toHaveBeenNthCalledWith(1, "shopify.oauth");
     expect(configRead).toHaveBeenNthCalledWith(2, "shopify.oauth");
+  });
+
+  it("exposes the coordinated server-side snapshot by selected Shop ID", async () => {
+    const snapshot = await getShopifySession("selected-shop-1");
+    expect(snapshot).toMatchObject({
+      id: "offline-1", shopId: "selected-shop-1", shop: "merchant.myshopify.com", accessToken: "test-access-token",
+    });
+    expect(mocks.getSession).toHaveBeenCalledWith("selected-shop-1", undefined);
   });
 
   it("resolves a domain-only internal caller to exactly one active Shopify Shop ID", async () => {
