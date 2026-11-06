@@ -199,12 +199,6 @@ export interface FindCustomerByPhoneInput {
   phone: string;
 }
 
-export type EntitlementFeature =
-  | "checkout_recovery"
-  | "order_support"
-  | "product_search"
-  | "ai_conversations";
-
 export type UsageMetric =
   | "monthly_conversations"
   | "monthly_recoveries"
