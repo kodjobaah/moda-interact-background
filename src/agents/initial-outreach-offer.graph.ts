@@ -257,7 +257,10 @@ function projectToolResult(name: string, result: OutreachMcpResult): OutreachMcp
       break;
     }
     default:
-      throw new Error("OUTREACH_TOOL_NOT_ALLOWED");
+      // Selector validated the complete bounded published output. Generic reads
+      // inform language only, never the typed offer/product evidence stores.
+      projected = structuredClone(data);
+      break;
   }
   const projectedResult = {
     contractVersion: result.contractVersion,
@@ -414,16 +417,18 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
     return resolvedInvoker;
   };
   const nowMs = () => (dependencies.now?.() ?? new Date()).getTime();
-  const instructions = composeInitialOutreachInstructions({
-    platformInstructions: dependencies.context.platformInstructions,
-    merchantInstructions: dependencies.context.merchantInstructions,
-  });
+  let instructions: readonly string[] = [];
 
   const workflow = new StateGraph(OutreachGraphState)
     .addNode("resolveTools", async () => {
       try {
         await dependencies.selector.connect();
         const availableTools = await dependencies.selector.tools();
+        instructions = composeInitialOutreachInstructions({
+          platformInstructions: dependencies.context.platformInstructions,
+          merchantInstructions: dependencies.context.merchantInstructions,
+          publishedBehaviourPrompt: dependencies.selector.profile().behaviourPrompt,
+        });
         return { availableTools };
       } catch (error) {
         return { failure: failureFrom(error) };
@@ -449,7 +454,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
       try {
         const raw = await (await modelInvoker()).invoke(request, dependencies.signal);
         const validated = validatedModelStep(raw);
-        if (validated.choice && state.discountOptionsCalls === 0) throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
+        if (validated.choice && state.discountOptionsCalls === 0 && state.availableTools.some((tool) => tool.name === "commerce_get_discount_options")) throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
         if (validated.calls.some((call) => !state.availableTools.some((tool) => tool.name === call.name))) {
           throw new Error("MODEL_REQUESTED_UNLISTED_TOOL");
         }
@@ -504,7 +509,7 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
             catalogueIncomplete = true;
             break;
           }
-          if (!firstMcpCallSeen && call.name !== "commerce_get_discount_options") {
+          if (discountOptionsCalls === 0 && ["commerce_get_discount_details", "commerce_search_products", "commerce_get_product"].includes(call.name) && state.availableTools.some((tool) => tool.name === "commerce_get_discount_options")) {
             throw new Error("FIRST_TOOL_CALL_MUST_LIST_DISCOUNTS");
           }
           if (call.name === "commerce_search_products" && productSearches >= MAX_PRODUCT_SEARCHES) {
@@ -616,7 +621,9 @@ export function createInitialOutreachOfferGraph(dependencies: InitialOutreachOff
               break;
             }
             default:
-              throw new Error("OUTREACH_TOOL_NOT_ALLOWED");
+              // Generic read observations cannot contribute offer/product evidence.
+              outputData = result.data;
+              break;
           }
           const modelResult = projectToolResult(call.name, { ...result, data: outputData } as OutreachMcpResult);
           runtimeMessages.push({ tool: call.name, result: modelResult });
