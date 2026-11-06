@@ -84,7 +84,7 @@ describe("ShopifyDiscountProvider", () => {
       }),
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       combination: { discountTags: string[] | null; allowedSameLineProductTags: string[] | null; discountClasses: string[] | null };
@@ -115,7 +115,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: basicDiscount(fields),
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       combination: Record<string, unknown>;
@@ -139,7 +139,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: basicDiscount({ minimumRequirement: value }),
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       minimumSubtotal: string | null;
@@ -159,7 +159,7 @@ describe("ShopifyDiscountProvider", () => {
       discount: basicDiscount({ context: { __typename: "DiscountCustomerSegments" } }),
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
 
     expect(facts.completeness).toBe("PARTIAL");
@@ -177,7 +177,7 @@ describe("ShopifyDiscountProvider", () => {
       }),
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       combination: { discountTags: string[] | null; allowedSameLineProductTags: string[] | null; discountClasses: string[] | null };
@@ -209,7 +209,7 @@ describe("ShopifyDiscountProvider", () => {
 
     let caught: unknown;
     try {
-      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     } catch (error) {
       caught = error;
     }
@@ -263,7 +263,7 @@ describe("ShopifyDiscountProvider", () => {
     }]));
     vi.stubGlobal("fetch", fetchMock);
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
 
     expect(discount).toMatchObject({ providerType: "DiscountCodeBasic", fixedSelectable: true, singleRedeemCode: "SAVE20" });
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
@@ -327,7 +327,7 @@ describe("ShopifyDiscountProvider", () => {
       },
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
       completeness: "PARTIAL", discountKind: "PERCENTAGE", discountValue: "15", discountCurrency: null,
@@ -357,7 +357,7 @@ describe("ShopifyDiscountProvider", () => {
       },
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
       completeness: "PARTIAL", discountKind: "PERCENTAGE",
@@ -385,7 +385,7 @@ describe("ShopifyDiscountProvider", () => {
       },
     }], { hasNextPage: false, endCursor: null }, null)));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as {
       completeness: string;
       combination: { shopifyPlus: boolean | null; combinesWith: object | null };
@@ -436,7 +436,7 @@ describe("ShopifyDiscountProvider", () => {
       }]));
       vi.stubGlobal("fetch", fetchMock);
 
-      const [result] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      const [result] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
       const snapshot = result?.providerSnapshot;
       const facts = snapshot?.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
       const request = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
@@ -478,7 +478,7 @@ describe("ShopifyDiscountProvider", () => {
       },
     }])));
 
-    const [result] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [result] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = result?.providerSnapshot.conditionFacts as { completeness: string; unrepresentedConditions: string[] };
 
     expect(result?.providerSnapshot.recurringCycleLimit).toBeNull();
@@ -501,7 +501,7 @@ describe("ShopifyDiscountProvider", () => {
       },
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const facts = discount?.providerSnapshot.conditionFacts as { completeness: string; targeting: { includedProductIds: string[] }; unrepresentedConditions: string[] };
 
     expect(facts.completeness).toBe("PARTIAL");
@@ -520,7 +520,7 @@ describe("ShopifyDiscountProvider", () => {
         ...(providerType === "DiscountCodeBxgy" ? { codesCount: { count: 2, precision: "EXACT" }, codes: { nodes: [], pageInfo: { hasNextPage: true } } } : {}) },
     }])));
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
 
     expect(discount?.providerSnapshot.conditionFacts).toMatchObject({
       completeness: "PARTIAL", discountKind: kind, customerScope: "UNKNOWN",
@@ -539,7 +539,7 @@ describe("ShopifyDiscountProvider", () => {
       }], { hasNextPage: false, endCursor: null }, false));
     vi.stubGlobal("fetch", fetchMock);
 
-    const [discount] = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const [discount] = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const requests = fetchMock.mock.calls.map((call) => JSON.parse(call[1]?.body as string) as { variables: { includeShopPlan: boolean } });
     const facts = discount?.providerSnapshot.conditionFacts as { combination: { shopifyPlus: boolean | null } };
 
@@ -558,7 +558,7 @@ describe("ShopifyDiscountProvider", () => {
 
     let caught: unknown;
     try {
-      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     } catch (error) {
       caught = error;
     }
@@ -587,7 +587,7 @@ describe("ShopifyDiscountProvider", () => {
 
     let caught: unknown;
     try {
-      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     } catch (error) {
       caught = error;
     }
@@ -611,7 +611,7 @@ describe("ShopifyDiscountProvider", () => {
 
     let caught: unknown;
     try {
-      await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+      await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     } catch (error) {
       caught = error;
     }
@@ -633,7 +633,7 @@ describe("ShopifyDiscountProvider", () => {
       .mockResolvedValueOnce(response([], { hasNextPage: true, endCursor: "same" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new ShopifyDiscountProvider().listDiscounts("example.myshopify.com"))
+    await expect(new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com"))
       .rejects.toThrow("pagination returned no advancing cursor");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -649,7 +649,7 @@ describe("ShopifyDiscountProvider", () => {
     }]));
     vi.stubGlobal("fetch", fetchMock);
 
-    const discounts = await new ShopifyDiscountProvider().listDiscounts("example.myshopify.com");
+    const discounts = await new ShopifyDiscountProvider().listDiscounts("shop-1", "example.myshopify.com");
     const requestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
     const automaticAppFragment = requestBody.query.match(/\.\.\. on DiscountAutomaticApp \{([^}]*)\}/)?.[1] ?? "";
     const codeAppFragment = requestBody.query.match(/\.\.\. on DiscountCodeApp \{([^}]*)\}/)?.[1] ?? "";

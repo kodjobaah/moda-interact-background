@@ -1,147 +1,69 @@
-import prisma  from "../lib/db.js";
+import type { PrismaClient } from "@prisma/client";
+import {
+  createShopifyOfflineTokenProvider,
+  ShopifyOfflineTokenError,
+  type ShopifyOfflineDatabase,
+} from "@modainteract/moda-interact-shared/shopify/node";
+import prisma from "../lib/db.js";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 
-type ShopifyRefreshResponse = {
-  access_token: string;
-  expires_in: number;
-  refresh_token: string;
-  refresh_token_expires_in: number;
-  scope?: string;
-};
+type OAuthConfigurationReader = Pick<typeof platformConsumerConfiguration, "read">;
 
-export async function getShopifyAccessToken(
-  shop: string,
-): Promise<string> {
-  const session =
-    await prisma.session.findFirst({
-      where: {
-        shop,
-        isOnline: false,
-      },
+/** Compose the published Shared reader with this service's own Prisma/config/fetch ports. */
+export function createShopifySessionService(input: {
+  database?: PrismaClient;
+  configuration?: OAuthConfigurationReader;
+  fetchImpl?: typeof fetch;
+} = {}) {
+  const database = input.database ?? prisma;
+  const configuration = input.configuration ?? platformConsumerConfiguration;
+  const provider = createShopifyOfflineTokenProvider({
+    prisma: database as unknown as ShopifyOfflineDatabase,
+    readOAuth: async () => {
+      const { value } = await configuration.read("shopify.oauth");
+      return { apiKey: value.apiKey, apiSecret: value.apiSecret };
+    },
+    fetch: input.fetchImpl ?? globalThis.fetch,
+  });
 
-      orderBy: {
-        expires: "desc",
-      },
-    });
-
-  if (!session) {
-    throw new Error(
-      `No offline Shopify session found for ${shop}`,
-    );
-  }
-
-  if (!session.accessToken) {
-    throw new Error(
-      `Shopify session has no access token for ${shop}`,
-    );
-  }
-
-  // Non-expiring offline token
-  if (!session.expires) {
-    return session.accessToken;
-  }
-
-  const now = new Date();
-
-  // Still valid
-  if (session.expires > now) {
-    return session.accessToken;
-  }
-
-  // Expired and cannot be refreshed
-  if (!session.refreshToken) {
-    throw new Error(
-      `Shopify access token expired and no refresh token exists for ${shop}`,
-    );
-  }
-
-  return refreshShopifyAccessToken({
-    sessionId: session.id,
-    shop,
-    refreshToken: session.refreshToken,
+  return Object.freeze({
+    getAccessToken: (shopId: string, options?: { signal?: AbortSignal }) =>
+      provider.getAccessToken(shopId, options),
   });
 }
 
-async function refreshShopifyAccessToken({
-  sessionId,
-  shop,
-  refreshToken,
-}: {
-  sessionId: string;
-  shop: string;
-  refreshToken: string;
-}): Promise<string> {
-  const oauth = (await platformConsumerConfiguration.read("shopify.oauth")).value;
-  const clientId = oauth.apiKey;
-  const clientSecret = oauth.apiSecret;
+const shopifySessionService = createShopifySessionService();
 
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      "Shopify API credentials are missing",
-    );
+/** Resolve domain-only internal callers back to one active, stored Shopify Shop. */
+export async function resolveShopifyShopId(shopDomain: string): Promise<string> {
+  let shops: Array<{ id: string }>;
+  try {
+    shops = await prisma.shop.findMany({
+      where: { domain: shopDomain, platform: "SHOPIFY", status: "ACTIVE" },
+      select: { id: true },
+      take: 2,
+    });
+  } catch {
+    throw new ShopifyOfflineTokenError("PERSISTENCE_UNAVAILABLE");
   }
+  if (shops.length === 0) throw new ShopifyOfflineTokenError("SESSION_MISSING");
+  if (shops.length !== 1) throw new ShopifyOfflineTokenError("SESSION_IDENTITY_CONFLICT");
+  return shops[0]!.id;
+}
 
-  const response = await fetch(
-    `https://${shop}/admin/oauth/access_token`,
-    {
-      method: "POST",
+/** Domain-only callers must still use an exact active Shop mapping before reading credentials. */
+export async function getShopifyAccessTokenForDomain(
+  shopDomain: string,
+  options?: { signal?: AbortSignal },
+): Promise<string> {
+  const shopId = await resolveShopifyShopId(shopDomain);
+  return shopifySessionService.getAccessToken(shopId, options);
+}
 
-      headers: {
-        "Content-Type":
-          "application/x-www-form-urlencoded",
-      },
-
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      }),
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-
-    throw new Error(
-      `Failed to refresh Shopify access token: ${response.status} ${body}`,
-    );
-  }
-
-  const refreshed =
-    (await response.json()) as ShopifyRefreshResponse;
-
-  const accessTokenExpires =
-    new Date(
-      Date.now() +
-        refreshed.expires_in * 1000,
-    );
-
-  const refreshTokenExpires =
-    new Date(
-      Date.now() +
-        refreshed.refresh_token_expires_in *
-          1000,
-    );
-
-  await prisma.session.update({
-    where: {
-      id: sessionId,
-    },
-
-    data: {
-      accessToken:
-        refreshed.access_token,
-
-      expires:
-        accessTokenExpires,
-
-      refreshToken:
-        refreshed.refresh_token,
-
-      refreshTokenExpires,
-    },
-  });
-
-  return refreshed.access_token;
+/** `shopId` is selected by the already-authorized caller; Shared revalidates Shop/session identity. */
+export function getShopifyAccessToken(
+  shopId: string,
+  options?: { signal?: AbortSignal },
+): Promise<string> {
+  return shopifySessionService.getAccessToken(shopId, options);
 }

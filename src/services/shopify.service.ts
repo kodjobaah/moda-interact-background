@@ -1,5 +1,5 @@
 import type { SearchProductsInput, ShopifyProduct } from "../integration/shopify/types.js";
-import { getShopifyAccessToken } from "./shopify-session.service.js";
+import { getShopifyAccessTokenForDomain } from "./shopify-session.service.js";
 
 type ShopifyProductNode = {
   id: string;
@@ -24,7 +24,7 @@ export async function searchProducts({
   maxPrice,
 }: SearchProductsInput): Promise<ShopifyProduct[]> {
   const accessToken =
-    await getShopifyAccessToken(shop);
+    await getShopifyAccessTokenForDomain(shop);
 
   const searchQuery = buildProductSearchQuery({
     query,

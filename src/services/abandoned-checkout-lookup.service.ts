@@ -93,7 +93,10 @@ export class AbandonedCheckoutLookupService {
     return shop.domain;
   }
 
-  async lookup(input: AbandonedCheckoutLookupInput): Promise<AbandonedCheckoutLookupOutcome> {
+  async lookup(
+    input: AbandonedCheckoutLookupInput,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AbandonedCheckoutLookupOutcome> {
     // Exact URL matching is the recovery identity. Without it the lookup cannot
     // be completed deterministically.
     if (!input.abandonedCheckoutUrl) {
@@ -106,12 +109,13 @@ export class AbandonedCheckoutLookupService {
       return { kind: "not-found" };
     }
 
-    const accessToken = await getShopifyAccessToken(input.shopDomain);
+    const accessToken = await getShopifyAccessToken(input.shopId, options);
 
     const count = await this.fetchBoundedCount(
       input.shopDomain,
       accessToken,
       timeRange,
+      options.signal,
     );
 
     if (count === null) {
@@ -137,6 +141,7 @@ export class AbandonedCheckoutLookupService {
       input.shopDomain,
       accessToken,
       timeRange,
+      options.signal,
     );
 
     if (candidates === null) {
@@ -194,6 +199,7 @@ export class AbandonedCheckoutLookupService {
     shopDomain: string,
     accessToken: string,
     timeRange: { fromIso: string; toIso: string },
+    signal?: AbortSignal,
   ): Promise<number | null> {
     const query = this.buildFilterQuery(timeRange);
 
@@ -211,7 +217,7 @@ export class AbandonedCheckoutLookupService {
       },
     };
 
-    const result = await this.postGraphql(shopDomain, accessToken, body);
+    const result = await this.postGraphql(shopDomain, accessToken, body, signal);
     if (!result) {
       return null;
     }
@@ -223,6 +229,7 @@ export class AbandonedCheckoutLookupService {
     shopDomain: string,
     accessToken: string,
     timeRange: { fromIso: string; toIso: string },
+    signal?: AbortSignal,
   ): Promise<NormalizedAbandonedCheckout[] | null> {
     const query = this.buildFilterQuery(timeRange);
 
@@ -288,7 +295,7 @@ export class AbandonedCheckoutLookupService {
       },
     };
 
-    const result = await this.postGraphql(shopDomain, accessToken, body);
+    const result = await this.postGraphql(shopDomain, accessToken, body, signal);
     if (!result) {
       return null;
     }
@@ -338,6 +345,7 @@ export class AbandonedCheckoutLookupService {
     shopDomain: string,
     accessToken: string,
     body: { query: string; variables: Record<string, unknown> },
+    signal?: AbortSignal,
   ): Promise<AbandonedCheckoutGraphqlResponse | null> {
     let response: Response;
     try {
@@ -350,6 +358,7 @@ export class AbandonedCheckoutLookupService {
             "X-Shopify-Access-Token": accessToken,
           },
           body: JSON.stringify(body),
+          ...(signal ? { signal } : {}),
         },
       );
     } catch (error) {
