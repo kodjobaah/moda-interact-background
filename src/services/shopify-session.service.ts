@@ -1,13 +1,21 @@
 import type { PrismaClient } from "@prisma/client";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   createShopifyOfflineTokenProvider,
   ShopifyOfflineTokenError,
+  type ShopifyOfflineRefreshEvent,
   type ShopifyOfflineDatabase,
 } from "@modainteract/moda-interact-shared/shopify/node";
 import prisma from "../lib/db.js";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 
 type OAuthConfigurationReader = Pick<typeof platformConsumerConfiguration, "read">;
+
+const logger = createLogger({
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 /** Compose the published Shared reader with this service's own Prisma/config/fetch ports. */
 export function createShopifySessionService(input: {
@@ -24,6 +32,26 @@ export function createShopifySessionService(input: {
       return { apiKey: value.apiKey, apiSecret: value.apiSecret };
     },
     fetch: input.fetchImpl ?? globalThis.fetch,
+    onEvent: (event: ShopifyOfflineRefreshEvent) => {
+      const fields = {
+        operationId: event.operationId,
+        shopId: event.shopId,
+        source: event.source,
+        durationMs: event.durationMs,
+        outcome: event.outcome,
+        reasonCode: event.reasonCode,
+      };
+
+      try {
+        if (event.event === "shopify.offline_refresh.failed") {
+          logger.warn(event.event, fields);
+        } else {
+          logger.info(event.event, fields);
+        }
+      } catch {
+        // Logging must never change the provider refresh outcome.
+      }
+    },
   });
 
   return Object.freeze({
