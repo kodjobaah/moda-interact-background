@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
-import { createShopBrandR2Writer, SHOP_BRAND_CACHE_CONTROL,
+import { putGuardedImmutableR2Object, createShopBrandR2Writer, SHOP_BRAND_CACHE_CONTROL,
   sanitizeR2ProviderMessage, type BrandR2Transport } from "../../../../src/services/shop-brand-media/r2-writer.js";
 import { loadShopBrandR2Credentials } from "../../../../src/services/shop-brand-media/r2-config.js";
 import type { VerifiedBrandImage } from "../../../../src/services/shop-brand-media/contracts.js";
@@ -148,4 +148,16 @@ describe("ARCH-049 dedicated immutable R2 writer", () => {
     expect(sanitizeR2ProviderMessage(new Error("x".repeat(500)), credentials)).toHaveLength(300);
     expect(sanitizeR2ProviderMessage({ name: "AccessDenied" }, credentials)).toBeUndefined();
   });
+});
+
+describe('platform-owned expected dimensions',()=>{
+ it('defaults to brand canvas and permits bounded explicit sample dimensions',async()=>{
+ const fixture=await image();fixture.width=505;fixture.height=757;
+ const head=vi.fn(async()=>({ContentType:fixture.contentType,ContentLength:fixture.sizeBytes,CacheControl:SHOP_BRAND_CACHE_CONTROL,Metadata:{sha256:fixture.contentSha256}}));
+ const input={transportOrFactory:{head,put:vi.fn()},bucket,objectKey:'platform-fixed',image:fixture,acceptsKey:(key:string)=>key==='platform-fixed'};
+ await expect(putGuardedImmutableR2Object(input)).rejects.toMatchObject({code:'OUTPUT_VERIFICATION_FAILED'});
+ await expect(putGuardedImmutableR2Object({...input,expectedDimensions:{width:505,height:757}})).resolves.toBeUndefined();
+ for(const dimensions of [{width:0,height:757},{width:1.5,height:757},{width:40000001,height:1}])await expect(putGuardedImmutableR2Object({...input,expectedDimensions:dimensions})).rejects.toMatchObject({code:'OUTPUT_VERIFICATION_FAILED'});
+ expect(head).toHaveBeenCalledOnce();
+ });
 });

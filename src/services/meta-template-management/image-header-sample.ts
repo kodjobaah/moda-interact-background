@@ -1,14 +1,11 @@
-import { createSafeImageFetcher } from "../shop-brand-media/safe-fetch.js";
 import { ShopBrandMediaError } from "../shop-brand-media/contracts.js";
 import { MetaManagementError } from "./contracts.js";
 
-export const META_TEMPLATE_SAMPLE_URL = "https://www.modainteract.com/assets/whatsup-sample.jpeg";
-const SAMPLE_FILE_NAME = "moda-whatsapp-template-sample.jpeg";
-const MAX_BYTES = 5_000_000;
-const SAMPLE_FETCHER = createSafeImageFetcher({ maxBytes: MAX_BYTES, maxRedirects: 0 });
+import { createProductionMetaTemplateSampleSource, type MetaTemplateSampleSource } from "./sample-source.js";
+import { META_TEMPLATE_SAMPLE_ASSET, validateMetaTemplateSample } from "./sample-asset.js";
+const SAMPLE_FILE_NAME = META_TEMPLATE_SAMPLE_ASSET.filename;
 
 export type TrustedMetaImageSampleHandle = Readonly<{ value: string }>;
-export type SampleFetcher = Pick<ReturnType<typeof createSafeImageFetcher>, "fetch">;
 const trustedHandles = new WeakSet<object>();
 
 export function isTrustedMetaImageSampleHandle(value: unknown): value is TrustedMetaImageSampleHandle {
@@ -58,24 +55,25 @@ function requestId(response: Response): string | null {
   return value ? value.slice(0, 128) : null;
 }
 
-async function failure(response: Response, operation: "sample_session" | "sample_upload", token: string): Promise<MetaManagementError> {
+async function failure(response: Response, operation: "sample_session" | "sample_upload", token: string, signal: AbortSignal): Promise<MetaManagementError> {
   let raw = "";
+  const reader = response.body?.getReader();
   try {
-    const reader = response.body?.getReader();
     if (reader) {
       const chunks: Uint8Array[] = [];
       let size = 0;
       while (size < 4096) {
-        const next = await reader.read();
+        const next = await withSignal(reader.read(), signal);
         if (next.done) break;
         const chunk = next.value.subarray(0, 4096 - size);
         chunks.push(chunk);
         size += chunk.length;
       }
-      await reader.cancel().catch(() => {});
+      void reader.cancel().catch(() => {});
       raw = new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
     }
   } catch { /* body absent/read failure is explicit below */ }
+  finally { if (reader) void reader.cancel().catch(() => {}); }
   let parsed: { error?: MetaErrorDetails } | null = null;
   try { parsed = JSON.parse(raw) as { error?: MetaErrorDetails }; } catch { /* non-JSON retained only as bounded provider body */ }
   const source = parsed?.error;
@@ -121,40 +119,32 @@ function sourceFailure(error: unknown, operation: "sample_fetch" | "sample_sessi
   });
 }
 
-function isJpeg(bytes: Buffer): boolean {
-  return bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff &&
-    bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9;
-}
-
 export class MetaImageHeaderSampleUploader {
   constructor(
     private readonly request: typeof fetch = fetch,
-    private readonly fetcher: SampleFetcher = SAMPLE_FETCHER,
+    private readonly source: MetaTemplateSampleSource = createProductionMetaTemplateSampleSource(),
   ) {}
 
-  async upload(input: { appId: string; accessToken: string; graphBase: string }): Promise<TrustedMetaImageSampleHandle> {
+  async upload(input: { appId: string; accessToken: string; graphBase: string; signal?: AbortSignal }): Promise<TrustedMetaImageSampleHandle> {
     if (!/^\d{1,32}$/.test(input.appId) || !input.accessToken || input.accessToken.length > 4096) {
       throw new MetaManagementError("META_APP_CONFIGURATION_INVALID", "blocked");
     }
     let image;
-    try { image = await this.fetcher.fetch(META_TEMPLATE_SAMPLE_URL); }
+    try { image = await this.source.read(input.signal); }
     catch (error) { throw sourceFailure(error, "sample_fetch", input.accessToken); }
-    if (image.declaredContentType !== "image/jpeg" || image.bytes.length === 0 || image.bytes.length > MAX_BYTES || !isJpeg(image.bytes)) {
-      throw new MetaManagementError("META_SAMPLE_INVALID", "blocked", undefined, {
-        origin: "internal", operation: "sample_fetch", reasonCode: "META_SAMPLE_INVALID",
-      });
-    }
+    validateMetaTemplateSample(image.bytes, image.declaredContentType);
 
     const base = input.graphBase.replace(/\/+$/, "");
     const sessionUrl = new URL(`${base}/${input.appId}/uploads`);
     sessionUrl.search = new URLSearchParams({ file_length: String(image.bytes.length), file_type: "image/jpeg", file_name: SAMPLE_FILE_NAME }).toString();
+    const sessionSignal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
     let session: Response;
     try {
-      session = await this.request(sessionUrl, { method: "POST", headers: { Authorization: `OAuth ${input.accessToken}` }, signal: AbortSignal.timeout(10_000) });
+      session = await withSignal(this.request(sessionUrl, { method: "POST", headers: { Authorization: `OAuth ${input.accessToken}` }, signal: sessionSignal }), sessionSignal);
     } catch (error) { throw sourceFailure(error, "sample_session", input.accessToken); }
-    if (!session.ok) throw await failure(session, "sample_session", input.accessToken);
+    if (!session.ok) throw await failure(session, "sample_session", input.accessToken, sessionSignal);
     let sessionJson: unknown;
-    try { sessionJson = await session.json(); }
+    try { sessionJson = await boundedJson(session, sessionSignal); }
     catch (error) { throw sourceFailure(error, "sample_session", input.accessToken); }
     const sessionId = sessionJson && typeof sessionJson === "object" && "id" in sessionJson
       ? (sessionJson as { id?: unknown }).id : undefined;
@@ -165,16 +155,17 @@ export class MetaImageHeaderSampleUploader {
       });
     }
 
+    const uploadSignal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
     let uploaded: Response;
     try {
-      uploaded = await this.request(new URL(`${base}/${sessionId}`), {
+      uploaded = await withSignal(this.request(new URL(`${base}/${sessionId}`), {
         method: "POST", headers: { Authorization: `OAuth ${input.accessToken}`, file_offset: "0", "Content-Type": "application/octet-stream" },
-        body: new Uint8Array(image.bytes), signal: AbortSignal.timeout(30_000),
-      });
+        body: new Uint8Array(image.bytes), signal: uploadSignal,
+      }), uploadSignal);
     } catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken); }
-    if (!uploaded.ok) throw await failure(uploaded, "sample_upload", input.accessToken);
+    if (!uploaded.ok) throw await failure(uploaded, "sample_upload", input.accessToken, uploadSignal);
     let uploadedJson: unknown;
-    try { uploadedJson = await uploaded.json(); }
+    try { uploadedJson = await boundedJson(uploaded, uploadSignal); }
     catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken); }
     const handle = uploadedJson && typeof uploadedJson === "object" && "h" in uploadedJson
       ? (uploadedJson as { h?: unknown }).h : undefined;
@@ -190,4 +181,20 @@ export class MetaImageHeaderSampleUploader {
     trustedHandles.add(trusted);
     return trusted;
   }
+}
+
+function withSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error("sample-deadline"));
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new Error("sample-deadline")); signal.addEventListener("abort", abort, {once:true});
+    promise.then(value => {signal.removeEventListener("abort", abort);resolve(value);}, error => {signal.removeEventListener("abort", abort);reject(error);});
+  });
+}
+async function boundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const reader = response.body?.getReader(); if (!reader) throw new Error("sample-json-empty");
+  const chunks: Uint8Array[] = []; let size = 0;
+  try { for (;;) { const next = await withSignal(reader.read(), signal); if (next.done) break;
+    size += next.value.length; if (size > 8192) throw new Error("sample-json-too-large"); chunks.push(next.value);
+  } return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } finally { void reader.cancel().catch(() => {}); }
 }

@@ -291,13 +291,14 @@ describe("BG003 server-side Meta Graph API adapter", () => {
       await expect(client.uploadImageHeaderSample("987654")).rejects.toMatchObject({ code: "WABA_MISMATCH" });
       expect(request).not.toHaveBeenCalled();
       process.env.META_APP_ID = "777888999";
-      const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      const { readPackagedMetaTemplateSample } = await import("../../../../src/services/meta-template-management/sample-asset.js");
+      const bytes = await readPackagedMetaTemplateSample();
       const uploaderRequest = vi.fn()
         .mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })))
         .mockResolvedValueOnce(new Response(JSON.stringify({ h: "4::Meta-issued-handle" })));
       const { MetaImageHeaderSampleUploader } = await import("../../../../src/services/meta-template-management/image-header-sample.js");
       const uploadClient = new MetaGraphTemplateAdapter(request as typeof fetch, new MetaImageHeaderSampleUploader(
-        uploaderRequest as typeof fetch, { fetch: vi.fn(async () => ({ bytes, declaredContentType: "image/jpeg" })) },
+        uploaderRequest as typeof fetch, { read: vi.fn(async () => ({ bytes, declaredContentType: "image/jpeg" })) },
       ));
       const handle = await uploadClient.uploadImageHeaderSample("123456");
       expect(uploaderRequest.mock.calls[0]?.[0]).toMatchObject({

@@ -6,7 +6,9 @@ COPY package*.json ./
 
 RUN npm ci
 
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.provision.json ./
+COPY scripts ./scripts
+COPY assets ./assets
 COPY prisma.config.ts ./
 COPY database ./database
 COPY observability ./observability

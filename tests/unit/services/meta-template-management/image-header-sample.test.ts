@@ -1,14 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { MetaImageHeaderSampleUploader, META_TEMPLATE_SAMPLE_URL } from "../../../../src/services/meta-template-management/image-header-sample.js";
+import { MetaImageHeaderSampleUploader } from "../../../../src/services/meta-template-management/image-header-sample.js";
 import { ShopBrandMediaError } from "../../../../src/services/shop-brand-media/contracts.js";
 
-const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0xff, 0xd9]);
+const jpeg = readFileSync(new URL("../../../../assets/meta-template-samples/v1/14af14ebb7b71df4b0a32d31ba7d8df82a7d18f47e56143a4bc0b5ea46587717.jpeg",import.meta.url));
 const fetched = { bytes: jpeg, declaredContentType: "image/jpeg" };
 const input = { appId: "123456789", accessToken: "test-token", graphBase: "https://graph.facebook.com/v25.0" };
 
 function fetcher(result: typeof fetched = fetched) {
-  return { fetch: vi.fn(async (url: string) => {
-    expect(url).toBe(META_TEMPLATE_SAMPLE_URL);
+  return { read: vi.fn(async () => {
     return result;
   }) };
 }
@@ -21,7 +21,7 @@ describe("trusted Meta template image sample upload", () => {
     const sample = fetcher();
     const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, sample);
     await expect(uploader.upload(input)).resolves.toEqual({ value: "4::Meta-issued-sample-handle" });
-    expect(sample.fetch).toHaveBeenCalledTimes(1);
+    expect(sample.read).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledTimes(2);
     const [sessionUrl, sessionInit] = request.mock.calls[0] as unknown as [URL, RequestInit];
     expect(sessionUrl.pathname).toBe("/v25.0/123456789/uploads");
@@ -100,7 +100,7 @@ describe("trusted Meta template image sample upload", () => {
   ] as const)("preserves retryability for a controlled sample-fetch failure", async (fetchError, disposition, code) => {
     const request = vi.fn();
     const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch,
-      { fetch: vi.fn(async () => { throw fetchError; }) });
+      { read: vi.fn(async () => { throw fetchError; }) });
     await expect(uploader.upload(input)).rejects.toMatchObject({ code, disposition });
     expect(request).not.toHaveBeenCalled();
   });
