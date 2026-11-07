@@ -1,3 +1,4 @@
+import { PRODUCT_DISCOVERY_INSTRUCTION } from "../../../../src/commerce/product-discovery-instructions.js";
 import { describe, expect, it } from "vitest";
 import type { ModelRequest } from "@modainteract/moda-interact-shared/commerce/runner";
 import { hostFixture as f } from "../host.fixture.js";
@@ -13,6 +14,7 @@ export function registerInstructionCompositionTests() {
       const shop = instructions.indexOf("Shop business guidance.");
       const feature = instructions.indexOf("Synthetic Feature behavior.");
       expect(recovery).toBeGreaterThanOrEqual(0);
+      expect(captured?.instructions).toContain(PRODUCT_DISCOVERY_INSTRUCTION);
       expect(platform).toBeGreaterThan(recovery);
       expect(shop).toBeGreaterThan(platform);
       expect(feature).toBeGreaterThan(shop);

@@ -1,3 +1,4 @@
+import { PRODUCT_DISCOVERY_INSTRUCTION } from "./product-discovery-instructions.js";
 import { filterMerchantKnowledgeAvailability } from "./merchant-knowledge-availability.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
@@ -410,7 +411,7 @@ async function execute(
       grant,
       manifest,
       signal,
-      hostInstructions: [...RECOVERY_INSTRUCTIONS, recommendationContext.platformText,
+      hostInstructions: [...RECOVERY_INSTRUCTIONS, PRODUCT_DISCOVERY_INSTRUCTION, recommendationContext.platformText,
         ...(recommendationContext.shopText ? [recommendationContext.shopText] : [])],
       context: {
         recovery: {
