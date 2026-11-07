@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","compilerOptions":{"rootDir":".","outDir":"dist-cli"},"include":["scripts/provision-meta-template-sample.ts"],"exclude":["node_modules","dist","dist-cli"]}

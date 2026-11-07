@@ -15,6 +15,7 @@ export const SHOP_BRAND_CACHE_CONTROL = "public, max-age=31536000, immutable";
 export interface BrandR2Transport {
   head(input: HeadObjectCommandInput, signal?: AbortSignal): Promise<HeadObjectCommandOutput>;
   put(input: PutObjectCommandInput, signal?: AbortSignal): Promise<void>;
+  close?(): void;
   safeErrorMessage?(error: unknown): string | undefined;
 }
 
@@ -41,6 +42,7 @@ export function createBrandR2S3Transport(credentials: ShopBrandR2Credentials): B
     credentials: { accessKeyId: credentials.accessKeyId, secretAccessKey: credentials.secretAccessKey },
     maxAttempts: 2 });
   return {
+    close() { client.destroy(); },
     head(input, signal) {
       return client.send(new HeadObjectCommand(input), signal ? { abortSignal: signal } : {});
     },
@@ -82,13 +84,15 @@ export async function putGuardedImmutableR2Object(input: Readonly<{
   image: VerifiedBrandImage;
   acceptsKey: (objectKey: string) => boolean;
   signal?: AbortSignal;
+  expectedDimensions?: Readonly<{width: number; height: number}>;
 }>): Promise<void> {
   const { bucket, objectKey, image } = input;
+  const dimensions = input.expectedDimensions ?? { width: 1125, height: 600 };
   if (!validBucket(bucket) || !input.acceptsKey(objectKey) ||
       !["image/jpeg", "image/png"].includes(image.contentType) ||
       !/^[a-f0-9]{64}$/.test(image.contentSha256) ||
       createHash("sha256").update(image.bytes).digest("hex") !== image.contentSha256 ||
-      image.sizeBytes !== image.bytes.length || image.width !== 1125 || image.height !== 600) {
+      image.sizeBytes !== image.bytes.length || !Number.isSafeInteger(dimensions.width) || !Number.isSafeInteger(dimensions.height) || dimensions.width <= 0 || dimensions.height <= 0 || dimensions.width * dimensions.height > 40_000_000 || image.width !== dimensions.width || image.height !== dimensions.height) {
     throw new ShopBrandMediaError("OUTPUT_VERIFICATION_FAILED");
   }
   const transport = typeof input.transportOrFactory === "function"
