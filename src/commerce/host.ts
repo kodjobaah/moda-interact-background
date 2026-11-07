@@ -1,3 +1,4 @@
+import { filterMerchantKnowledgeAvailability } from "./merchant-knowledge-availability.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -389,7 +390,7 @@ async function execute(
         names.delete("commerce_get_discount_options");
         names.delete("commerce_get_discount_details");
       }
-      return names;
+      return filterMerchantKnowledgeAvailability(prisma, turn.shopId, names);
     };
     await available();
     const language = {
