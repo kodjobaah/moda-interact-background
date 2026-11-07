@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { observeCommerceTool } from "./observe-tool.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,11 +8,14 @@ import {
   CommerceOutreachToolContextSchema,
   CommerceManifestSchema,
   CommerceToolResultSchema,
+  CommercePurposeProfileSchema,
+  IdSchema,
 } from "@modainteract/moda-interact-shared/commerce";
 import type {
   CommerceConversationGrant,
   CommerceOutreachToolContext,
   CommerceTurnIdentity,
+  CommercePurposeProfile,
 } from "@modainteract/moda-interact-shared/commerce";
 import {
   hostDiagnostic,
@@ -173,6 +177,8 @@ export type McpConfiguration = {
 export type CommerceOutreachMcpIdentity = Readonly<{
   shopId: string;
   toolContext: CommerceOutreachToolContext;
+  executionPurpose?: "INITIAL_RECOVERY_OUTREACH";
+  releaseId?: string;
 }>;
 export function mcpConfiguration(): McpConfiguration {
   let endpoint: URL;
@@ -201,11 +207,16 @@ export function encodeCommerceContext(
 ): string {
   if ("toolContext" in turn) {
     if (grant || !/^[A-Za-z0-9_-]{1,128}$/.test(turn.shopId) ||
-        !CommerceOutreachToolContextSchema.safeParse(turn.toolContext).success) {
+        !CommerceOutreachToolContextSchema.safeParse(turn.toolContext).success ||
+        turn.executionPurpose !== undefined && turn.executionPurpose !== "INITIAL_RECOVERY_OUTREACH" ||
+        turn.releaseId !== undefined && !IdSchema.safeParse(turn.releaseId).success) {
       throw new CommerceHostError("INVALID_INPUT", false,
         hostDiagnostic("mcp.authorization", "CONTEXT_ASSERTION_INVALID"));
     }
-    return Buffer.from(JSON.stringify({ shopId: turn.shopId, toolContext: turn.toolContext }), "utf8")
+    return Buffer.from(JSON.stringify({ shopId: turn.shopId, toolContext: turn.toolContext,
+      executionPurpose: "INITIAL_RECOVERY_OUTREACH",
+      ...(turn.releaseId ? { releaseId: turn.releaseId } : {}),
+    }), "utf8")
       .toString("base64url");
   }
   const context = CommerceAssertionSchema.safeParse(
@@ -224,6 +235,17 @@ export function encodeCommerceContext(
 }
 
 export class CommerceMcpClient {
+  private outreachProfile: CommercePurposeProfile | null = null;
+  /** Pin one validated immutable release for every subsequent private-context call. */
+  pinOutreachProfile(raw: unknown): CommercePurposeProfile {
+    if (!("toolContext" in this.turn)) throw new CommerceHostError("INVALID_INPUT", false);
+    const profile = CommercePurposeProfileSchema.parse(raw);
+    if (this.outreachProfile && !isDeepStrictEqual(this.outreachProfile, profile))
+      throw new CommerceHostError("INCOMPATIBLE_VERSION", false);
+    this.outreachProfile = profile;
+    this.turn = { ...this.turn, executionPurpose: profile.purpose, releaseId: profile.releaseId };
+    return profile;
+  }
   private client = new Client({ name: "moda-background", version: "1.0.0" });
   private operation: CommerceHostOperation = "initialize";
   private httpFailure: CommerceHostDiagnostic | undefined;
@@ -413,6 +435,8 @@ export class CommerceMcpClient {
     args: Record<string, unknown>,
     signal = this.signal,
   ) {
+    if ("toolContext" in this.turn && (!this.outreachProfile || !this.outreachProfile.capabilities.some(member => member.name === name)))
+      throw new CommerceHostError("INVALID_INPUT", false, undefined, new Error("OUTREACH_PURPOSE_NOT_PINNED_OR_LISTED"));
     return observeCommerceTool(async () => {
       const result = await this.sdkOperation("call_tool", "mcp.tool_call", "MCP_TOOL_CALL_FAILED", () =>
         this.client.callTool({ name, arguments: args }, undefined, this.options(signal)));

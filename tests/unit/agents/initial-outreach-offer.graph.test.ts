@@ -104,10 +104,14 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
   offerOverride?: Record<string, unknown>;
   evaluatedAt?: Date;
   invokeError?: Error;
+  availableTools?: OutreachMcpToolDescriptor[];
+  genericData?: Record<string, unknown>;
+  behaviourPrompt?: string;
 } = {}) {
   const selector = {
     connect: vi.fn(async () => undefined),
-    tools: vi.fn(async () => tools),
+    tools: vi.fn(async () => options.availableTools ?? tools),
+    profile: vi.fn(() => ({ behaviourPrompt: options.behaviourPrompt ?? "Trusted profile behavior." })),
     call: vi.fn(async (name: string) => {
       if (name === "commerce_get_discount_options") return success({
         mode: "AI_BEST_APPLICABLE", offers: [{ ...offer, ...options.offerOverride }], cursor: null, truncated: false,
@@ -117,6 +121,7 @@ function fixture(choices: Array<ModelCall | ModelCall[]>, options: {
         : details) });
       if (name === "commerce_search_products") return success({ products: [alternativeProduct], cursor: null, truncated: false });
       if (name === "commerce_get_product") return success({ product: alternativeProduct });
+      if (options.genericData) return success(options.genericData);
       throw new Error("unexpected tool");
     }),
     close: vi.fn(async () => undefined),
@@ -299,5 +304,53 @@ describe("InitialOutreachOffer LangGraph", () => {
     ]);
     expect(state.failure).toMatchObject({ reasonCode: "PRODUCT_SEARCH_AFTER_SUPPORTED_CHECKOUT" });
     expect(state.finalDecision).toMatchObject({ kind: "CHECKOUT_DISCOUNT", offerSet: { offers: [{ offerId: "offer-1" }] } });
+  });
+});
+
+describe("published generic outreach reads", () => {
+  const fifth = { name: "commerce_read_reference", description: "Read bounded reference", inputSchema: { type: "object", properties: {}, additionalProperties: false } };
+  it("uses a fifth read and published behavior without granting offer/product authority", async () => {
+    const { graph, requests } = fixture([
+      { name: fifth.name, arguments: {} },
+      { name: "submitInitialOutreachOffer", arguments: { kind: "NO_VERIFIED_OFFER" } },
+    ], { availableTools: [fifth], genericData: { text: "Reference context", offerId: "forged", savings: "100", url: "https://forged.example" }, behaviourPrompt: "Ask about delivery preferences." });
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({ kind: "NO_VERIFIED_OFFER" });
+    expect(state.optionsById.size).toBe(0);
+    expect(state.observedOffersById.size).toBe(0);
+    expect(state.observedProductsByIdentity.size).toBe(0);
+    expect(requests[1]?.messages).toMatchObject([{ tool: fifth.name, result: { data: { text: "Reference context" } } }]);
+    expect(requests[0]?.tools.map(tool => tool.name)).toEqual([fifth.name, "submitInitialOutreachOffer"]);
+    const instructions = requests[0]!.instructions.join("\n");
+    expect(instructions.indexOf("Consent, authorization")).toBeLessThan(instructions.indexOf("Ask about delivery preferences."));
+    expect(instructions).not.toContain("Your goal is to propose up to THREE");
+  });
+
+  it("cannot manufacture a checkout offer from generic fields", async () => {
+    const { graph } = fixture([
+      { name: fifth.name, arguments: {} },
+      { name: "submitInitialOutreachOffer", arguments: { kind: "CHECKOUT_DISCOUNT", offerIds: ["offer-1"] } },
+    ], { availableTools: [fifth], genericData: { offers: [offer], details } });
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({ kind: "NO_VERIFIED_OFFER" });
+    expect(state.observedOffersById.size).toBe(0);
+  });
+
+  it("does not invent removed discount tools for a safe no-offer choice", async () => {
+    const { graph, selector } = fixture([
+      { name: "submitInitialOutreachOffer", arguments: { kind: "NO_VERIFIED_OFFER" } },
+    ], { availableTools: [fifth] });
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({ kind: "NO_VERIFIED_OFFER" });
+    expect(selector.call).not.toHaveBeenCalled();
+  });
+
+  it("keeps the fixed result budget for generic data", async () => {
+    const { graph } = fixture([{ name: fifth.name, arguments: {} }], {
+      availableTools: [fifth], genericData: { text: "x".repeat(33 * 1024) },
+    });
+    const state = await graph.invoke();
+    expect(state.finalDecision).toMatchObject({ kind: "FAILURE" });
+    expect(state.observedProductsByIdentity.size).toBe(0);
   });
 });
