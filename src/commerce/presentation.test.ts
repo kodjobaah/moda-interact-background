@@ -8,7 +8,7 @@ const product = { ...pair, title:"Shirt", url:null, available:null, unitPrice:nu
 const setup = (details: Record<string, unknown>) => ({envelope:envelope(details),authorizedPairs:[pair],readProduct:vi.fn(async () => ({product})),consumeBudget:vi.fn(),assertCurrent:vi.fn(),brandName:null,locale:"en" as const,storeUrl:"https://shop.example"});
 describe("host product facts verification", () => {
  it("renders plain sizes without a purchase URL or recommendation and truthfully limits unknown details", async () => {
-  const input=setup({productDetailSelections:[pair]}); const p=await prepareProductFactsPresentation(input);
+  const input=setup({productDetailSelections:[pair],responseDisposition:"PRODUCT_DETAILS"}); const p=await prepareProductFactsPresentation(input);
   expect(input.readProduct).toHaveBeenCalledExactlyOnceWith(pair); expect(input.consumeBudget).toHaveBeenCalledTimes(1); expect(input.assertCurrent).toHaveBeenCalledTimes(2);
   const result=composeCommerceWhatsAppPreview({envelope:input.envelope,presentation:p!});
   expect(result.kind).toBe("ready"); if(result.kind!=="ready") return;

@@ -3,7 +3,7 @@ import { hostFixture as f } from "../host.fixture.js";
 
 export function registerLifecycleHostTests() {
   describe("Commerce host lifecycle and diagnostics", () => {
-    it("rejects an unresolved standalone owner before model or provider I/O", async () => {
+    it("rejects missing real recovery before model or provider I/O", async () => {
       f.state.checkoutRecovery = null;
       const model = vi.fn();
       await expect(f.run(model)).rejects.toMatchObject({ code: "DENIED", diagnostic: { reasonCode: "HOST_RECOVERY_MISSING" } });

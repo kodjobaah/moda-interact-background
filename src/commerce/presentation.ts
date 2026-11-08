@@ -1,10 +1,8 @@
-import { CommerceAnswerPresentationSelectionSchema } from "@modainteract/moda-interact-shared/commerce";
+import { verifyCommerceAnswerPresentationSelection } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type { ModaSupportedLanguageTag } from "@modainteract/moda-interact-shared/internationalization";
 import { CommerceVerifiedPresentationSchema, verifyCommerceOptionFacts, verifyCommerceProductFacts, type CommerceVerifiedPresentation } from "@modainteract/moda-interact-shared/commerce/presentation";
 export type PresentationProductPair = Readonly<{ productId: string; variantId: string | null }>;
-// Both retained and additive selectors use the published exact-pair contract.
-const selections = CommerceAnswerPresentationSelectionSchema.shape.productOptionSelections.unwrap();
 const key = (p: PresentationProductPair) => JSON.stringify([p.productId, p.variantId]);
 export class PresentationVerificationError extends Error {
  readonly stage = "presentation.verify";
@@ -18,14 +16,12 @@ export async function prepareProductFactsPresentation(input: {
  brandName: string | null; locale: ModaSupportedLanguageTag; storeUrl: string;
 }): Promise<CommerceVerifiedPresentation | null> {
  if (input.envelope.answerKind === "REFER_TO_STORE") return null;
- const read = (name: string) => {
-  if (!Object.hasOwn(input.envelope.details, name)) return [];
-  const parsed = selections.safeParse(input.envelope.details[name]);
-  if (!parsed.success || new Set(parsed.data.map(key)).size !== parsed.data.length) throw new PresentationVerificationError("INVALID_SELECTION");
-  return parsed.data;
- };
- const options = read("productOptionSelections"), products = read("productDetailSelections");
- if (options.length && products.length) throw new PresentationVerificationError("INVALID_SELECTION");
+ const selection = verifyCommerceAnswerPresentationSelection(Object.fromEntries(
+  ["productOptionSelections", "productDetailSelections", "responseDisposition", "shippingInformationSelection"]
+   .filter(name => Object.hasOwn(input.envelope.details, name)).map(name => [name, input.envelope.details[name]]),
+ ));
+ if (selection.kind !== "verified") throw new PresentationVerificationError("INVALID_SELECTION");
+ const options = selection.selection.productOptionSelections ?? [], products = selection.selection.productDetailSelections ?? [];
  const selected = products.length ? products : options;
  if (!selected.length) return null;
  const authorized = new Set(input.authorizedPairs.map(key));

@@ -10,17 +10,14 @@ type Logger = { warn: (event: string, fields: { shopId: string; conversationId: 
 const TTL = 24 * 60 * 60 * 1000;
 const MAX_BYTES = 32768;
 const ownerSelect = { shopId: true, inboundVersion: true, checkoutRecoveryId: true,
-  shop: { select: { platform: true } },
   checkoutRecovery: { select: { shopId: true, shop: { select: { platform: true } } } },
 } satisfies Prisma.ConversationSelect;
 type Owner = Prisma.ConversationGetPayload<{ select: typeof ownerSelect }>;
 function owner(row: Owner | null, shopId: string) {
-  if (!row || (row.checkoutRecoveryId && !row.checkoutRecovery)) return null;
+  if (!row?.checkoutRecoveryId || !row.checkoutRecovery) return null;
   const recovery = row.checkoutRecovery;
-  if (recovery && row.shopId && row.shopId !== recovery.shopId) return null;
-  const id = recovery?.shopId ?? row.shopId;
-  const platform = recovery?.shop.platform ?? row.shop?.platform;
-  return id === shopId && platform ? { platform, version: row.inboundVersion } : null;
+  if (row.shopId && row.shopId !== recovery.shopId) return null;
+  return recovery.shopId === shopId ? { platform: recovery.shop.platform, version: row.inboundVersion } : null;
 }
 function validated(value: unknown, identity: Identity, platform: string) {
   const result = CommerceConversationProductContextSchema.safeParse(value);

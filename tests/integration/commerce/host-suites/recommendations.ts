@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { hostFixture as f } from "../host.fixture.js";
 
 export function registerRecommendationHostTests() {
@@ -75,7 +76,7 @@ export function registerRecommendationHostTests() {
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);
     });
 
-    it("verifies generic product details without purchase URL or recommendation authority", async () => {
+    it("retains checkout identity for a later generic product question and composes verified facts", async () => {
       const descriptor = f.active.capabilities[0]!.toolDescriptor;
       descriptor.name = "commerce_get_product";
       descriptor.description = "Read a current product and variant.";
@@ -93,12 +94,17 @@ export function registerRecommendationHostTests() {
       f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
       f.toolResults = { commerce_get_product: { contractVersion: "commerce.v1", status: "OK", renderedText: "Blue linen shirt", data: { product: {
         productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", title: "Blue linen shirt",
-        url: null, available: false, description: "Soft linen fabric.",
+        url: null, available: false, description: { status: "AVAILABLE", text: "Soft linen fabric." },
         unitPrice: "24.00", currency: "GBP", productType: "Shirt", vendor: "Fixture",
         categories: [], categoryIds: [], collectionIds: [], saleEvidence: null, observedAt: "2026-11-05T12:00:00Z",
       } } } };
+      await f.run(async () => f.final());
+      const laterContext = structuredClone(f.context);
+      laterContext.conversation.history = [{ role: "assistant", content: "We can help with your checkout." }];
+      laterContext.conversation.messages = [{ role: "user", content: "Tell me about the fabric of another shirt, not my checkout." }];
       let step = 0;
       const result = await f.run(async (request) => {
+        expect((request.context as any).trustedRecovery.recovery).toMatchObject({ id: laterContext.recovery.id, checkoutToken: laterContext.recovery.checkoutToken });
         step += 1;
         if (step === 1) {
           expect(request.tools.map((tool) => tool.name)).toContain("commerce_get_product");
@@ -106,9 +112,13 @@ export function registerRecommendationHostTests() {
         }
         return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "MODEL PROSE MUST BE DISCARDED",
           details: { productDetailSelections: [{ productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" }] } });
-      });
+      }, laterContext);
+      expect(f.observations.every(call => call.claims.shopId === laterContext.shopId)).toBe(true);
       expect(result.commercePresentation?.verified).toMatchObject({ disposition: "PRODUCT_DETAILS", products: [], includeNoVerifiedOffer: false });
       expect(result.commercePresentation?.verified.productFacts).toHaveLength(1);
+      const composed = composeCommerceWhatsAppPreview({ envelope: result.commercePresentation!.envelope, presentation: result.commercePresentation!.verified });
+      expect(composed).toMatchObject({ kind: "ready" });
+      if (composed.kind === "ready") expect(composed.body).toContain("Soft linen fabric.");
       expect(result.productContextUpdate?.references).toEqual(expect.arrayContaining([expect.objectContaining({ productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" })]));
       expect(f.observations.filter((call) => call.method === "tools/call" && call.params.name === "commerce_get_product")).toHaveLength(2);
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);

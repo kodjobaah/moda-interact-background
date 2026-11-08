@@ -149,7 +149,6 @@ async function execute(
   const current = await prisma.conversation.findUnique({
     where: { id: context.conversation.conversationId },
     include: {
-      shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
       checkoutRecovery: {
         include: {
           shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
