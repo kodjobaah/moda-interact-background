@@ -1,3 +1,5 @@
+import { exampleFinal } from "@modainteract/moda-interact-shared/commerce";
+import type { CommercePresentationInput } from "../../../../src/services/conversation-wrappers/contracts.js";
 import { describe, expect, it, vi } from "vitest";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { ConversationWrapperService } from "../../../../src/services/conversation-wrappers/service.js";
@@ -128,5 +130,57 @@ describe("ARCH-047 BG005 selection and facade", () => {
       errorType: "Error", conversationId: "conversation",
     }));
     expect(JSON.stringify((logger.error as ReturnType<typeof vi.fn>).mock.calls)).not.toContain("do not leak customer URLs");
+  });
+});
+
+const presentation = (text: string): CommercePresentationInput => ({
+  envelope: { ...exampleFinal, replyText: text },
+  verified: { schemaVersion: 1, brandName: null, locale: "fr", disposition: "STANDARD",
+    storeUrl: "https://shop.example", products: [], optionFacts: [], productFacts: [],
+    requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false },
+});
+describe("ARCH-066 single Shared composition boundary", () => {
+  it("normalizes explicit unwrapped AI text while leaving HUMAN behavior unchanged", async () => {
+    const { service } = harness([]);
+    const value = await service.renderConversationResponse({ ...input, responseBody: "**Hello**",
+      commercePresentation: presentation("**Hello**") });
+    expect(value).toMatchObject({ kind: "no-wrapper", body: "Hello" });
+    expect(await service.renderConversationResponse({ ...input, source: "HUMAN" }))
+      .toEqual({ kind: "unavailable", reason: "NOT_CONFIGURED" });
+  });
+  it("wraps exactly once and replays saved composition without revision reads", async () => {
+    const { service, read } = harness([slot("AI")]);
+    const typed = { ...input, commercePresentation: presentation(response) };
+    const first = await service.renderConversationResponse(typed);
+    expect(first).toMatchObject({ kind: "rendered", body: `Header\n${response}\nFooter` });
+    if (first.kind !== "rendered") throw new Error("expected rendered");
+    read.loadContext.mockRejectedValue(new Error("no reread"));
+    read.loadSlots.mockRejectedValue(new Error("no revision reread"));
+    expect(await service.renderConversationResponse({ ...typed, previousApplication: first }))
+      .toEqual({ ...first, replayed: true });
+    expect(await service.renderConversationResponse({ ...typed,
+      commercePresentation: presentation("changed"), previousApplication: first }))
+      .toEqual({ kind: "rejected", reason: "REPLAY_MISMATCH" });
+  });
+  it("refuses configured invalid projection, missing locale and untrusted brand", async () => {
+    const typed = { ...input, commercePresentation: presentation(response) };
+    expect(await harness([slot("AI", { preparedMissing: true })]).service.renderConversationResponse(typed))
+      .toEqual({ kind: "rejected", reason: "PREPARED_MISSING" });
+    const missing = slot("AI");
+    expect(await harness([{ ...missing, definition: { ...missing.definition, locales: [] } }]).service.renderConversationResponse(typed))
+      .toEqual({ kind: "rejected", reason: "LOCALE_UNAVAILABLE" });
+    expect(await harness([]).service.renderConversationResponse({ ...typed,
+      commercePresentation: { ...typed.commercePresentation, verified: { ...typed.commercePresentation.verified, brandName: "fabricated" } } }))
+      .toEqual({ kind: "rejected", reason: "INVALID_INPUT" });
+  });
+  it("checks final total wrapper size at 4096 and refuses 4097", async () => {
+    const { service } = harness([slot("AI")]);
+    const overhead = "Header\n\nFooter".length;
+    for (const length of [4096, 4097]) {
+      const text = "x".repeat(length - overhead);
+      const result = await service.renderConversationResponse({ ...input, responseBody: text, commercePresentation: presentation(text) });
+      if (length === 4096) { expect(result.kind).toBe("rendered"); if (result.kind === "rendered") expect(result.body.length).toBe(4096); }
+      else expect(result).toEqual({ kind: "rejected", reason: "OUTPUT_TOO_LONG" });
+    }
   });
 });

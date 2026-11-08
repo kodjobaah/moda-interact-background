@@ -1,3 +1,6 @@
+import { createProductContextRepository } from "./product-context-repository.js";
+import { prepareProductFactsPresentation, PresentationVerificationError } from "./presentation.js";
+import { CommerceVerifiedPresentationSchema, type CommerceVerifiedPresentation } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { PRODUCT_DISCOVERY_INSTRUCTION, shopVoiceInstruction } from "./product-discovery-instructions.js";
 import { filterMerchantKnowledgeAvailability } from "./merchant-knowledge-availability.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
@@ -5,6 +8,8 @@ import { renderStoreReferral } from "./referral.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   canonicalJson,
+  mergeConversationProductContext,
+  type CommerceProductObservation,
   CommerceTurnIdentitySchema,
   finalResponseSchema,
   CommerceToolOutputs,
@@ -106,6 +111,8 @@ export async function executeCommerceHost(
     return await execute(context, deps);
   } catch (error) {
     const failure = error instanceof CommerceHostError ? error
+      : error instanceof PresentationVerificationError
+        ? new CommerceHostError(error.code, false, hostDiagnostic("presentation.verify", "HOST_PRESENTATION_REJECTED"), error)
       : error instanceof LiveBudgetPolicyError
         ? new CommerceHostError("UNAVAILABLE", false,
           hostDiagnostic("host.lifecycle", "HOST_LIVE_POLICY_REJECTED"), error)
@@ -142,6 +149,7 @@ async function execute(
   const current = await prisma.conversation.findUnique({
     where: { id: context.conversation.conversationId },
     include: {
+      shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
       checkoutRecovery: {
         include: {
           shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
@@ -153,6 +161,8 @@ async function execute(
   const recovery = current?.checkoutRecovery;
   if (!current) throw new CommerceHostError("DENIED", false,
     hostDiagnostic("host.authorization", "HOST_CONVERSATION_MISSING"));
+  if (current.shopId && recovery && current.shopId !== recovery.shopId) throw new CommerceHostError("DENIED", false,
+    hostDiagnostic("host.authorization", "HOST_SHOP_ID_MISMATCH"));
   if (!recovery) throw new CommerceHostError("DENIED", false,
     hostDiagnostic("host.authorization", "HOST_RECOVERY_MISSING"));
   if (recovery.id !== context.recovery.id) throw new CommerceHostError("DENIED", false,
@@ -231,6 +241,7 @@ async function execute(
     merchantPricingPlanId: budget.merchantPricingPlanId,
     policyEditVersions: budget.policyEditVersions, resolvedAt: budget.resolvedAt,
   }); } catch { /* best-effort telemetry */ }
+  const productContext = await createProductContextRepository().read({ shopId: turn.shopId, conversationId: turn.conversationId, now: Date.now() });
   const config = deps.config ?? mcpConfiguration();
   let grant: Awaited<ReturnType<typeof readGrant>>;
   try { grant = await readGrant(turn); }
@@ -408,6 +419,8 @@ async function execute(
     };
     const result = await runCommerceTurn({
       turn,
+      productContext,
+      platform: recommendationContext.provider,
       grant,
       manifest,
       signal,
@@ -667,6 +680,44 @@ async function execute(
       }
     }
     let hostComposedReplyCandidates: readonly string[] | undefined;
+    let commerceVerifiedPresentation: CommerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
+      schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null,
+      locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
+      disposition: "STANDARD", products: [], optionFacts: [], productFacts: [], requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false,
+    });
+    const productObservations = (): CommerceProductObservation[] => [
+      ...recommendationObservations.all("commerce_search_products"), ...recommendationObservations.all("commerce_get_product"),
+    ].map(observation => {
+      const products = observation.toolName === "commerce_search_products"
+        ? CommerceToolOutputs.commerce_search_products.parse(observation.output).products
+        : (() => { const product = CommerceToolOutputs.commerce_get_product.parse(observation.output).product; return product ? [product] : []; })();
+      return { toolName: observation.toolName, products, observedAt: observation.observedAt };
+    });
+    const authorizedPairs = [ ...(productContext?.references ?? []), ...productObservations().flatMap(item => item.products) ];
+    let factsPresentation: CommerceVerifiedPresentation | null = null;
+    if (envelope.answerKind === "ANSWER") {
+      factsPresentation = await prepareProductFactsPresentation({ envelope, authorizedPairs,
+        brandName: recovery.shop.brand?.brandName ?? null,
+        locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
+        assertCurrent: async () => { await assertCurrent(); },
+        consumeBudget: () => {
+          if (signal.aborted) throw new PresentationVerificationError("DEADLINE");
+          if (usedCalls >= 10) throw new PresentationVerificationError("BUDGET_EXHAUSTED");
+          usedCalls += 1;
+        },
+        readProduct: async pair => {
+          if (!(await available()).has("commerce_get_product")) throw new CommerceHostError("DENIED", false);
+          const fresh = await observeMcp(() => client.call("commerce_get_product", pair, signal));
+          if (fresh.status !== "OK") throw new CommerceHostError(fresh.code, fresh.retryable);
+          const parsed = CommerceToolOutputs.commerce_get_product.safeParse(fresh.data);
+          if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
+            hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error);
+          recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(descriptors.find(d => d.name === "commerce_get_product")), arguments: pair, output: parsed.data });
+          return parsed.data;
+        },
+      });
+      if (factsPresentation) commerceVerifiedPresentation = factsPresentation;
+    }
     if (envelope.answerKind === "ANSWER") {
       const details = envelope.details && typeof envelope.details === "object" && !Array.isArray(envelope.details)
         ? envelope.details as Record<string, unknown> : {};
@@ -681,7 +732,7 @@ async function execute(
       const controlled = ownsPresentation || observationsLatch ||
         selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
         selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED";
-      if (controlled) {
+      if (controlled && !factsPresentation) {
         await assertCurrent();
         await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
         const inspection = evaluateRecommendationDiscountInspection(recommendationObservations, recommendationContext.policy);
@@ -980,6 +1031,12 @@ async function execute(
           recommendationObservations.all("commerce_get_discount_options").length > 0 && retained.length > 0 &&
           retained.some((item) => item.proposal.promotionKind === "DISCOUNT") &&
           retained.every((item) => !item.renderFacts.offerTerms?.length);
+        commerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
+          schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null, locale,
+          disposition, storeUrl: recommendationContext.storeUrl, products: renderedProducts,
+          optionFacts: [], productFacts: [], includeNoVerifiedOffer,
+          requiresShipping: shippingPresentation?.requiresShipping ?? null, policyUrl: shippingPresentation?.policyUrl ?? null,
+        });
         const fullBody = renderRecommendationReply({ locale, disposition, storeUrl: recommendationContext.storeUrl,
           products: renderedProducts,
           includeNoVerifiedOffer,
@@ -1002,15 +1059,16 @@ async function execute(
       answerKind: envelope.answerKind,
       referralReason: envelope.referralReason,
       evidenceIds: envelope.evidenceIds,
-      replyText: hostComposedReplyCandidates?.[0] ?? (envelope.answerKind === "REFER_TO_STORE"
-          ? renderStoreReferral(
-              recovery.shop.domain,
-              language,
-              context.conversation.messages,
-              envelope,
-            )
-          : envelope.replyText),
+      replyText: hostComposedReplyCandidates?.[0] ?? (envelope.answerKind === "REFER_TO_STORE" ? renderStoreReferral(
+        recovery.shop.domain, language, context.conversation.messages, envelope,
+      ) : envelope.replyText),
       ...(hostComposedReplyCandidates ? { hostComposedReplyCandidates } : {}),
+      commercePresentation: { envelope, verified: commerceVerifiedPresentation },
+      ...(envelope.answerKind === "ANSWER" && productObservations().length ? {
+        productContextUpdate: mergeConversationProductContext(result.productContextUpdate ?? productContext, productObservations(), {
+          shopId: turn.shopId, conversationId: turn.conversationId, platform: recommendationContext.provider, now: Date.now(),
+        }),
+      } : {}),
       detectedLanguageTag: envelope.detectedLanguageTag,
       detectedLanguageConfidence: envelope.detectedLanguageConfidence,
     };

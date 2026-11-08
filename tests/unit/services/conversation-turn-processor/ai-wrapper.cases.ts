@@ -12,6 +12,49 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
     applicationKey: "application-key", responseDigest: "response-hash", replayed: false,
   });
 
+  it.each(["WRITTEN", "UNCHANGED", "SKIPPED", "STALE", "CONFLICT"] as const)("persists only successful presentation with fenced %s disposition", async (disposition) => {
+    const write = vi.fn().mockResolvedValue(disposition);
+    const test = harness({ productContextRepository: { write } });
+    const commercePresentation = { envelope: {}, verified: {} };
+    const productContextUpdate = { schemaVersion: 1 };
+    test.runAgent.mockResolvedValue({ replyText: "reply", detectedLanguageTag: null,
+      detectedLanguageConfidence: null, commercePresentation, productContextUpdate });
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    expect(write).toHaveBeenCalledExactlyOnceWith({ shopId: "shop-1", conversationId: "conversation-1",
+      expectedInboundVersion: 3, context: productContextUpdate, now: expect.any(Date) });
+    expect(test.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(expect.objectContaining({ commercePresentation }));
+    if (disposition === "STALE" || disposition === "CONFLICT") {
+      expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+      expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+    } else {
+      expect(write.mock.invocationCallOrder[0]).toBeLessThan(test.admission.sendPreparedText.mock.invocationCallOrder[0]);
+      expect(test.admission.sendPreparedText).toHaveBeenCalledOnce();
+    }
+  });
+  it("rechecks inbound fence after cache transaction and prevents stale delivery", async () => {
+    const test = harness({ productContextRepository: { write: vi.fn().mockResolvedValue("WRITTEN") } });
+    test.runAgent.mockResolvedValue({ replyText: "reply", detectedLanguageTag: null,
+      detectedLanguageConfidence: null, commercePresentation: { envelope: {}, verified: {} }, productContextUpdate: {} });
+    test.conversation.hasChanged.mockResolvedValueOnce(false).mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+    expect(test.productContextRepository.write).toHaveBeenCalledOnce();
+    expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+    expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
+  });
+  it("does not persist refused presentation or replayed application", async () => {
+    for (const replay of [false, true]) {
+      const write = vi.fn();
+      const test = harness({ productContextRepository: { write } });
+      test.runAgent.mockResolvedValue({ replyText: "reply", detectedLanguageTag: null,
+        detectedLanguageConfidence: null, commercePresentation: { envelope: {}, verified: {} }, productContextUpdate: {} });
+      test.aiWrapper.renderConversationResponse.mockResolvedValue(replay ? { ...rendered("composed"), replayed: true } : { kind: "rejected", reason: "INVALID_INPUT" });
+      await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
+      expect(write).not.toHaveBeenCalled();
+      if (!replay) expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
+    }
+  });
+
   it("sends exactly one fully composed AI reply, retaining original response and message identity", async () => {
     const test = harness();
     test.aiWrapper.renderConversationResponse.mockResolvedValue(rendered("Shop: reply. Visit the checkout."));
