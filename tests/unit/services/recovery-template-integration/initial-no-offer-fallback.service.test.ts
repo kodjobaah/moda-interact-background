@@ -58,7 +58,13 @@ function fixture(log = { warn: vi.fn(), error: vi.fn() }) {
     database as never, preparer as never, async () => "waba-1", () => now,
     log as never, lifetimeReader,
   );
-  return { service, database, preparer, log, lifetimeReader, recovery, attempt };
+  const proof = { expectedGeneration: recovery.generation,
+    expectedBasketFingerprint: fingerprintRecoveryPricingBasket({ shopId: recovery.shopId, checkoutRecoveryId: recovery.id,
+      generation: recovery.generation, currency: recovery.currency, lineItems: recovery.lineItems }),
+    outreachEvaluation: readyEvaluation(recovery.shopId, attempt.id, recovery.lineItems),
+  };
+  const verifiedService = { prepare: (input: Parameters<InitialNoOfferFallbackService["prepare"]>[0]) => service.prepare({ ...proof, ...input }) };
+  return { service: verifiedService, rawService: service, database, preparer, log, lifetimeReader, recovery, attempt };
 }
 
 beforeEach(() => {

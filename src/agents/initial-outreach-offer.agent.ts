@@ -18,7 +18,7 @@ export async function runInitialOutreachOfferAgent(rawContext: unknown, deps: Ru
  const selector = (deps.createSelector ?? (input => new RecoveryOutreachMcpSelectorService(input)))({ shopId: context.shopId, signal });
  try {
   const result = await createInitialOutreachOfferGraph({ context, selector, signal, startedAt: (deps.now?.() ?? new Date()).getTime(),
-   ...(deps.now ? { now: deps.now } : {}), modelInvoker: deps.createModelInvoker ?? deps.modelInvoker ?? { invoke: async () => { throw Error("MODEL_INVOKER_UNAVAILABLE"); } },
+   ...(deps.now ? { now: deps.now } : {}), modelInvoker: deps.modelInvoker ?? deps.createModelInvoker ?? { invoke: async () => { throw Error("MODEL_INVOKER_UNAVAILABLE"); } },
   }).invoke();
   try { logger.info("outreach.offer_agent.completed", { shopId: context.shopId, recoveryId: context.checkoutRecoveryId,
    outreachAttemptId: context.outreachAttemptId, selectedOutcome: result.finalDecision.kind, toolCalls: result.mcpCalls, modelSteps: result.modelSteps }); } catch { /* shared logger failure cannot change decisions */ }

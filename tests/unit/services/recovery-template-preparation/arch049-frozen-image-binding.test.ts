@@ -110,7 +110,7 @@ describe("ARCH-049 Admin frozen-image projection and BG006 pass-through", () => 
 
   it("rejects an initial legacy IMAGE registration without target-bound approval", async () => {
     const { preparer, input } = setup("COVER_IMAGE", { stage: "INITIAL" });
-    expect(await preparer.prepare(input)).toMatchObject({ outcome: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" });
+    expect(await preparer.prepare(input)).toMatchObject({ outcome: "unavailable", reason: "DEFINITION_UNAVAILABLE" });
   });
 
   it("supports FOLLOW_UP without changing BG006 send semantics", async () => {

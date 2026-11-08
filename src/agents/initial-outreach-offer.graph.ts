@@ -1,3 +1,4 @@
+import { INITIAL_OUTREACH_HOST_INVARIANTS } from "./initial-outreach-offer.instructions.js";
 import { evaluateInitialOutreach, type InitialOutreachEvaluationInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type { CommerceModelInvoker } from "@modainteract/moda-interact-shared/commerce/runner";
 import type { InitialOutreachAgentContext, InitialOutreachAgentResult } from "./initial-outreach-offer.types.js";
@@ -21,7 +22,9 @@ export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphD
  return { async invoke() {
   const context = deps.context;
   let connected = false;
+  let listed = new Set<string>();
   let model: CommerceModelInvoker | undefined;
+  let publishedBehaviourPrompt = "";
   let modelSteps = 0, mcpCalls = 0;
   const raw = {
    schemaVersion: 1, runId: context.outreachAttemptId, shopId: context.shopId, platform: context.platform, environment: context.environment,
@@ -37,7 +40,10 @@ export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphD
   const evaluation = await evaluateInitialOutreach(raw, {
    signal: deps.signal, now: deps.now ?? (() => new Date()),
    callTool: async call => {
-    if (!connected) { await deps.selector.connect(); await deps.selector.tools(); connected = true; }
+    if (!connected) { await deps.selector.connect(); listed = new Set((await deps.selector.tools()).map(tool => tool.name));
+      publishedBehaviourPrompt = deps.selector.profile?.()?.behaviourPrompt ?? "";
+      connected = true; }
+    if (!listed.has(call.name)) throw Object.assign(new Error("OUTREACH_TOOL_NOT_LISTED"), { code: "DENIED", retryable: false });
     mcpCalls++; deps.onEvent?.("tool_called", { toolName: call.name, callNumber: mcpCalls });
     const result = await deps.selector.call(call.name, call.arguments, call.signal);
     if (result.status === "ERROR") throw Object.assign(new Error("OUTREACH_PROVIDER_REFUSAL"), { code: result.code, retryable: result.retryable });
@@ -46,7 +52,10 @@ export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphD
    modelInvoker: { invoke: async (request, signal) => {
     model ??= typeof deps.modelInvoker === "function" ? await deps.modelInvoker() : deps.modelInvoker;
     modelSteps++; deps.onEvent?.("model_step", { modelStep: modelSteps });
-    return model.invoke(request, signal);
+    const trustedRequest = { ...request, instructions: [...request.instructions, INITIAL_OUTREACH_HOST_INVARIANTS,
+      ...(publishedBehaviourPrompt ? [publishedBehaviourPrompt] : [])] };
+    if (Buffer.byteLength(JSON.stringify(trustedRequest), "utf8") > MAX_TOOL_MESSAGES_BYTES) throw Object.assign(new Error("OUTREACH_MESSAGE_BUDGET_EXHAUSTED"), { code: "BUDGET_EXHAUSTED" });
+    return model.invoke(trustedRequest, signal);
    } },
    log: () => {},
   });

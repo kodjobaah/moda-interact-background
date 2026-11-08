@@ -1,3 +1,4 @@
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
@@ -404,6 +405,13 @@ export class AutomatedRecoveryTemplateService {
         }
         if (result.kind === "ALTERNATIVE_PRODUCT_PROMOTION") return unavailable("OUTSIDE_CHECKOUT");
         if (result.evaluation?.kind !== "ready") return unavailable("INITIAL_EVALUATION_MISSING");
+        const evaluatedDecision = result.evaluation.offerDecision;
+        if (result.evaluation.shopId !== input.shopId || result.evaluation.runId !== input.outreachAttemptId ||
+            evaluatedDecision.kind !== result.kind ||
+            result.kind === "CHECKOUT_DISCOUNT" && canonicalJson(evaluatedDecision) !== canonicalJson({ kind: result.kind,
+              offerSet: result.offerSet, members: result.members, group: result.group, discoveryIncomplete: result.discoveryIncomplete })) {
+          return unavailable("INITIAL_EVALUATION_MISMATCH");
+        }
         outreachEvaluation = result.evaluation;
         evaluatedFallback = result.evaluation;
         evaluatedGeneration = context.basket.generation; evaluatedBasketFingerprint = context.basket.fingerprint;
