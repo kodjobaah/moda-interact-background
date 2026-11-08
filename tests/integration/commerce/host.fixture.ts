@@ -28,6 +28,8 @@ import { Prisma } from "@prisma/client";
 const db = vi.hoisted(() => ({
   conversation: { findUnique: vi.fn() },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
+  commerceConversationProductContext: { findFirst: vi.fn() },
   commerceConversationGrant: { findUnique: vi.fn(), create: vi.fn() },
   commerceRelease: { findUnique: vi.fn() },
   commerceAgentConfiguration: { findMany: vi.fn() },
@@ -196,25 +198,18 @@ beforeAll(async () => {
                 inputSchema,
               })),
       }));
-      server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({
-        content: [{ type: "text", text: "Synthetic blue linen" }],
-        structuredContent: (() => {
-          const configured = toolResults[params.name];
-          const callIndex = toolResultCallCounts[params.name] ?? 0;
-          toolResultCallCounts[params.name] = callIndex + 1;
-          return (Array.isArray(configured) ? configured[Math.min(callIndex, configured.length - 1)] : configured) ?? {
-          ...(structuredResult ?? {
-          contractVersion: "commerce.v1",
-          status: "OK",
-          data: {
-            source: "SHOPIFY_STOREFRONT",
-            values: { description: "blue linen" },
-          },
+      server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+        const configured = toolResults[params.name];
+        const callIndex = toolResultCallCounts[params.name] ?? 0;
+        toolResultCallCounts[params.name] = callIndex + 1;
+        const result = (Array.isArray(configured) ? configured[Math.min(callIndex, configured.length - 1)] : configured) ?? structuredResult ?? {
+          contractVersion: "commerce.v1", status: "OK",
+          data: { source: "SHOPIFY_STOREFRONT", values: { description: "blue linen" } },
           renderedText: "Synthetic blue linen",
-          }),
-          };
-        })(),
-      }));
+        };
+        return { content: [{ type: "text", text: "Synthetic blue linen" }], structuredContent: result,
+          isError: result.status === "ERROR" };
+      });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
@@ -276,6 +271,7 @@ beforeEach(() => {
     languageTag: null,
     languageSource: null,
     type: "RECOVERY",
+    checkoutRecoveryId: "recovery-fixture",
     checkoutRecovery: {
       id: "recovery-fixture",
       shopId: "shop-fixture",
@@ -291,6 +287,8 @@ beforeEach(() => {
     },
   };
   db.conversation.findUnique.mockImplementation(async () => state);
+  db.commerceConversationProductContext.findFirst.mockResolvedValue(null);
+  db.$queryRaw.mockResolvedValue([{ bytes: 1024 }]);
   db.commerceConversationGrant.findUnique.mockImplementation(
     async ({ where }) => grants.get(where.conversationId) ?? null,
   );

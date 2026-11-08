@@ -24,3 +24,25 @@ describe("host product facts verification", () => {
  it("preserves legacy options and canonical missing-fact limitation",async()=>{const input=setup({productOptionSelections:[pair]});expect(await prepareProductFactsPresentation(input)).toMatchObject({disposition:"PRODUCT_OPTIONS",optionFacts:[{productId:"p1"}]});});
  it("uses the actual Shared composer 4096/4097 envelope boundary",async()=>{const p=await prepareProductFactsPresentation(setup({productDetailSelections:[pair]}));const presentation={...p!,disposition:"STANDARD" as const};expect(composeCommerceWhatsAppPreview({envelope:envelope({},"x".repeat(4096)),presentation})).toMatchObject({kind:"ready",body:"x".repeat(4096)});expect(composeCommerceWhatsAppPreview({envelope:envelope({},"x".repeat(4097)),presentation})).toMatchObject({kind:"refused"});});
 });
+
+it("matches Studio's identical synthetic Tree fixture byte-for-byte", async () => {
+ // Identical literal inputs to Commerce tests/arch066-preview-presentation.test.ts:8-15;
+ // deliberately no cross-service import or production customer/recovery fabrication.
+ const now = Date.parse("2026-11-08T12:00:00Z");
+ const pair = { productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/2" };
+ const { CommerceProductSchema, exampleFinal } = await import("@modainteract/moda-interact-shared/commerce");
+ const { verifyCommerceProductFacts } = await import("@modainteract/moda-interact-shared/commerce/presentation");
+ const product = CommerceProductSchema.parse({ ...pair, title: "Tree", url: "https://shop.example/tree", available: true, unitPrice: "12.50", currency: "GBP", productType: null, vendor: null, observedAt: new Date(now).toISOString(), description: { status: "AVAILABLE", text: "Oak & fern" }, attributes: { status: "AVAILABLE", items: [{ name: "Height", values: ["30 cm"] }] }, options: { status: "NOT_PROVIDED", items: [] }, selectedOptions: [] });
+ const envelope = { ...exampleFinal, answerKind: "ANSWER" as const, referralReason: null, details: { productDetailSelections: [pair], responseDisposition: "PRODUCT_DETAILS" } };
+ const verified = await prepareProductFactsPresentation({ envelope, authorizedPairs: [pair], readProduct: async () => ({ product }), consumeBudget: () => {}, assertCurrent: () => {}, brandName: "Trees", locale: "en", storeUrl: "https://shop.example" });
+ const facts = verifyCommerceProductFacts([pair], [product]);
+ expect(facts.kind).toBe("verified"); if (facts.kind !== "verified") throw Error("fixture invalid");
+ const studioCanonicalInput = { envelope, presentation: { schemaVersion: 1 as const, brandName: "Trees", locale: "en" as const, disposition: "PRODUCT_DETAILS" as const, storeUrl: "https://shop.example", products: [], optionFacts: [], productFacts: facts.productFacts, requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false } };
+ expect(verified).toEqual(studioCanonicalInput.presentation);
+ const actual = composeCommerceWhatsAppPreview({ envelope, presentation: verified! });
+ const studioExpected = composeCommerceWhatsAppPreview(studioCanonicalInput);
+ expect(actual).toEqual(studioExpected);
+ if (actual.kind !== "ready" || studioExpected.kind !== "ready") throw Error("fixture refused");
+ expect(Buffer.from(actual.body)).toEqual(Buffer.from(studioExpected.body));
+ expect(actual.body).toBe("Tree\nOak & fern\nHeight: 30 cm");
+});
