@@ -1,3 +1,4 @@
+import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { RecoveryTemplatePreparer } from "../../../../src/services/recovery-template-preparation/recovery-template-preparer.service.js";
@@ -18,6 +19,7 @@ const input = (override: Partial<RecoveryTemplatePreparationInput> = {}): Recove
   conversationLanguageTag: "en-US", merchantLanguageTag: "en",
   customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Merchant" }, checkout,
   checkoutItems: { shopId: "shop-1", lineItems: [{ title: "Saved item", quantity: 1 }] },
+  outreachEvaluation: readyEvaluation(override.shopId ?? "shop-1", "attempt-1", override.checkoutItems?.lineItems),
   ...override,
 });
 
@@ -692,4 +694,37 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       ],
     } }));
   });
+});
+
+describe("ARCH066 published frozen-brand compatibility", () => {
+ it.each([
+  ["shopBrand.logoAltText", "Saved logo alt"], ["shopBrand.logoWidth", "100"],
+  ["shopBrand.logoHeight", "200"], ["shopBrand.squareLogoAltText", "Saved square alt"],
+ ])("preserves valid mandatory %s in the shared INITIAL renderer", async (key, expected) => {
+  const row = fixture({ components: [{ type: "BODY", text: "Brand {{1}} from {{2}}" }], bindings: {
+   promotionTarget: "CHECKOUT", header: [], body: [{ position: 1, variable: key }, { position: 2, variable: "shop.name" }], buttons: [],
+  } });
+  const brand: ShopBrandRow = { brandName: "Saved brand", logoUrl: null, logoAltText: "Saved logo alt", logoWidth: 100,
+   logoHeight: 200, squareLogoUrl: null, squareLogoAltText: "Saved square alt", coverImageUrl: null };
+  const result = await setup([row], { brand }).service.prepare(input());
+  // This required positive compatibility assertion currently exposes immutable5.8.0's missing resolver cases.
+  expect(result).toMatchObject({ outcome: "prepared", template: { components: [{ type: "body", parameters: [{ type: "text", text: expected }] }] } });
+ });
+});
+
+it("matches Shared's frozen initial parameters, full body and provenance for identical recorded inputs", async () => {
+ const { renderInitialOutreachPreview } = await import("@modainteract/moda-interact-shared/commerce/outreach");
+ const row = fixture(); const request = input();
+ const canonical = { schemaVersion: 1 as const, evaluation: request.outreachEvaluation!,
+  preparedProjection: JSON.parse(JSON.stringify({ variant: row, canonicalLanguageTag: "en", selectionSource: "merchant-fallback" })),
+  variables: { shopName: "Merchant", customerFirstName: "Alex", checkoutUrl: sourceUrl, shopCategory: null }, headerMedia: null };
+ const expected = renderInitialOutreachPreview(canonical);
+ const actual = await setup([row]).service.prepare(request);
+ expect(expected.kind).toBe("ready"); expect(actual.outcome).toBe("prepared");
+ if(expected.kind !== "ready" || actual.outcome !== "prepared") throw Error("supported fixture refused");
+ expect(actual.template.components).toEqual(expected.parameters); expect(actual.renderedText).toBe(expected.renderedText);
+ expect(Buffer.from(actual.renderedText!)).toEqual(Buffer.from(expected.renderedText));
+ expect({ variantId: actual.variantId, registrationId: actual.registrationId, definitionId: actual.definitionId,
+  providerTemplateId: actual.providerTemplateId, providerTemplateName: actual.providerTemplateName, providerLanguageCode: actual.providerLanguageCode,
+  submittedContentHash: actual.submittedContentHash, bindingFingerprint: actual.bindingFingerprint }).toEqual(expected.templateProvenance);
 });

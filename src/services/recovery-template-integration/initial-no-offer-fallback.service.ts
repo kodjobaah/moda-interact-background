@@ -1,3 +1,5 @@
+import { fingerprintRecoveryPricingBasket } from "../recovery-pricing/price-comparison.js";
+import type { InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
@@ -30,7 +32,10 @@ export type InitialFallbackTrigger =
 export type InitialFallbackResult =
   | Readonly<{
       kind: "PREPARED";
-      trigger: InitialFallbackTrigger;
+      expectedGeneration?: number;
+    expectedBasketFingerprint?: string;
+    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
+    trigger: InitialFallbackTrigger;
       prepared: PreparedRecoveryTemplate;
       send: ReturnType<typeof templateSendFields>;
     }>
@@ -50,6 +55,9 @@ export interface InitialNoOfferFallbackPort {
     shopId: string;
     recoveryId: string;
     outreachAttemptId: string;
+    expectedGeneration?: number;
+    expectedBasketFingerprint?: string;
+    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
     trigger: InitialFallbackTrigger;
   }>): Promise<InitialFallbackResult>;
 }
@@ -107,6 +115,9 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
     shopId: string;
     recoveryId: string;
     outreachAttemptId: string;
+    expectedGeneration?: number;
+    expectedBasketFingerprint?: string;
+    outreachEvaluation?: InitialOutreachRenderInput["evaluation"];
     trigger: InitialFallbackTrigger;
   }>): Promise<InitialFallbackResult> {
     try {
@@ -114,7 +125,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
         this.database.checkoutRecovery.findUnique({
           where: { id: input.recoveryId },
           select: {
-            id: true, shopId: true, generation: true, status: true,
+            id: true, shopId: true, generation: true, status: true, currency: true,
             checkoutUrl: true, lineItems: true, lastExternalActivityAt: true,
             expiredAt: true, customer: { select: { firstName: true } },
             shop: { select: {
@@ -167,10 +178,15 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
         checkoutRecoveryLifetimeDays: lifetimeDays,
       })) return { kind: "BLOCKED", reason: "INELIGIBLE_RECOVERY" };
 
+      if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== recovery.shopId ||
+          input.outreachEvaluation.runId !== attempt.id || input.expectedGeneration !== recovery.generation ||
+          input.expectedBasketFingerprint !== fingerprintRecoveryPricingBasket({ shopId: recovery.shopId, checkoutRecoveryId: recovery.id,
+            generation: recovery.generation, currency: recovery.currency, lineItems: recovery.lineItems })) return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       const senderWabaId = await this.senderWaba();
       if (!senderWabaId) return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
       const prepared = await this.preparer.prepare({
         shopId: recovery.shopId,
+        outreachEvaluation: input.outreachEvaluation,
         senderWabaId,
         stage: "INITIAL",
         promotionTarget: "CHECKOUT",

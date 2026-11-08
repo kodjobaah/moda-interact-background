@@ -1,3 +1,4 @@
+import type { InitialOutreachEvaluationResult } from "@modainteract/moda-interact-shared/commerce/outreach";
 /** ARCH-047 BG001: a local, read-only preparation boundary (not a send permit). */
 export type RecoveryStage = "INITIAL" | "FOLLOW_UP";
 export type VerifiedOfferPresentation = "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER";
@@ -63,6 +64,7 @@ export type SourceBoundPromotionalProduct = Readonly<{
 
 export type RecoveryTemplatePreparationInput = Readonly<{
   shopId: string;
+  outreachEvaluation?: Extract<InitialOutreachEvaluationResult, { kind: "ready" }>;
   /** Must equal the currently configured sender WABA resolved again by this module. */
   senderWabaId: string;
   stage: RecoveryStage;
@@ -83,7 +85,7 @@ export type RecoveryTemplatePreparationInput = Readonly<{
 }>;
 
 export type TemplateUnavailableReason =
-  | "INVALID_REQUEST" | "INVALID_LANGUAGE" | "SHOP_UNAVAILABLE" | "SENDER_UNAVAILABLE"
+  | "MESSAGE_TOO_LARGE" | "INVALID_REQUEST" | "INVALID_LANGUAGE" | "SHOP_UNAVAILABLE" | "SENDER_UNAVAILABLE"
   | "SENDER_MISMATCH" | "NO_LANGUAGE" | "NO_APPROVED_ASSIGNMENT"
   | "LEGACY_ASSIGNMENT" | "AMBIGUOUS_ASSIGNMENT" | "REGISTRATION_UNAVAILABLE"
   | "PROVIDER_UNAVAILABLE" | "PROVIDER_DRIFT" | "IDENTITY_MISMATCH"
@@ -109,6 +111,7 @@ export type PreparedMetaComponent =
 
 export type PreparedRecoveryTemplate = Readonly<{
   outcome: "prepared";
+  renderedText?: string;
   shopId: string;
   senderWabaId: string;
   purpose: RecoveryTemplatePurpose;
