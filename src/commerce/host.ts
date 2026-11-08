@@ -1,4 +1,4 @@
-import { PRODUCT_DISCOVERY_INSTRUCTION } from "./product-discovery-instructions.js";
+import { PRODUCT_DISCOVERY_INSTRUCTION, shopVoiceInstruction } from "./product-discovery-instructions.js";
 import { filterMerchantKnowledgeAvailability } from "./merchant-knowledge-availability.js";
 import { conversationLanguageService } from "../services/conversation-language.service.js";
 import { renderStoreReferral } from "./referral.js";
@@ -144,7 +144,7 @@ async function execute(
     include: {
       checkoutRecovery: {
         include: {
-          shop: { select: { id: true, domain: true, platform: true } },
+          shop: { select: { id: true, domain: true, platform: true, brand: { select: { brandName: true } } } },
           customer: { select: { firstName: true } },
         },
       },
@@ -412,7 +412,7 @@ async function execute(
       manifest,
       signal,
       hostInstructions: [...RECOVERY_INSTRUCTIONS, PRODUCT_DISCOVERY_INSTRUCTION, recommendationContext.platformText,
-        ...(recommendationContext.shopText ? [recommendationContext.shopText] : [])],
+        ...(recommendationContext.shopText ? [recommendationContext.shopText] : []), shopVoiceInstruction(recovery.shop.brand?.brandName)],
       context: {
         recovery: {
           id: recovery.id,
