@@ -28,3 +28,6 @@ registerRecommendationRevalidationTests();
 registerRecommendationFailureTests();
 registerFallbackResponseTests();
 registerShippingResponseTests();
+
+import { registerProductContextAcceptanceTests } from "./host-suites/product-context-acceptance.js";
+registerProductContextAcceptanceTests();

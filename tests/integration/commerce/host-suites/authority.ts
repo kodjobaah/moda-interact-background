@@ -145,7 +145,7 @@ it("P10 a model cannot expand authority through tool arguments", async () => {
           outputTokens: 10,
         }
       : f.final();
-  await expect(f.run(model)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  await expect(f.run(model)).resolves.toMatchObject({ answerKind: "REFER_TO_STORE", referralReason: "INSUFFICIENT_TOOLS" });
   expect(f.observations.filter((o) => o.method === "tools/call")).toEqual([]);
 });
   });

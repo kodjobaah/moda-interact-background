@@ -1,3 +1,6 @@
+import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
+import type { CommercePresentationInput } from "./conversation-wrappers/contracts.js";
+import { createCommerceProductContextRepository } from "../commerce/product-context-repository.js";
 import type {
   ConversationService,
   ConversationTurnState,
@@ -131,11 +134,14 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
   runAgent: (context: TContext) => Promise<TResult>;
   /** BG005 prepared wrapper; required even when no active slot is configured. */
   aiWrapper: AiConversationWrapper;
+  productContextRepository?: Pick<ReturnType<typeof createCommerceProductContextRepository>, "write">;
   getResult: (result: TResult) => {
     replyText: string;
     detectedLanguageTag: string | null;
     detectedLanguageConfidence: number | null;
     hostComposedReplyCandidates?: readonly string[];
+    commercePresentation?: CommercePresentationInput;
+    productContextUpdate?: CommerceConversationProductContext;
   };
   now?: () => Date;
   runtimeConfig?: RuntimeConfigReader;
@@ -590,6 +596,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         messageId: reserved.messageId,
         generatedResponse: agentResult.replyText,
+        ...(agentResult.commercePresentation ? { commercePresentation: agentResult.commercePresentation } : {}),
         ...(agentResult.hostComposedReplyCandidates
           ? { hostComposedReplyCandidates: agentResult.hostComposedReplyCandidates }
           : {}),
@@ -608,6 +615,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
           conversationId, observedVersion, messageId: reserved.messageId,
           wrapperDefinitionId: composed.wrapper.wrapperDefinitionId,
           localeId: composed.wrapper.localeId,
+          contentHash: composed.wrapper.contentHash,
           slotEditVersion: composed.wrapper.slotEditVersion,
           applicationKey: composed.wrapper.applicationKey,
           replayed: composed.wrapper.replayed,
@@ -627,6 +635,26 @@ export class ConversationTurnProcessor<TContext, TResult> {
         const latest = await this.dependencies.conversation.getTurnState(conversationId);
         await this.enqueue(conversationId, latest.inboundVersion);
         return;
+      }
+
+      if (agentResult.productContextUpdate && agentResult.commercePresentation && !composed.wrapper?.replayed) {
+        const repository = this.dependencies.productContextRepository ?? createCommerceProductContextRepository();
+        const writeResult = await repository.write({ shopId: loaded.shopId, conversationId,
+          expectedInboundVersion: observedVersion, context: agentResult.productContextUpdate, now: this.now() });
+        if (writeResult === "STALE" || writeResult === "CONFLICT") {
+          await failPrepared(reserved.messageId);
+          await this.finishSuppressedTurn(conversationId, observedVersion, controlRevision);
+          return;
+        }
+        // A takeover/new inbound can arrive while the short cache transaction awaits.
+        if (!(await checkControl("after-await", loaded.shopId)) ||
+            await this.dependencies.conversation.hasChanged(conversationId, observedVersion)) {
+          await failPrepared(reserved.messageId);
+          await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+          const latest = await this.dependencies.conversation.getTurnState(conversationId);
+          await this.enqueue(conversationId, latest.inboundVersion);
+          return;
+        }
       }
 
       await sendPreparedText({

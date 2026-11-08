@@ -1,3 +1,4 @@
+import { exampleFinal } from "@modainteract/moda-interact-shared/commerce";
 import { describe, expect, it, vi } from "vitest";
 import { composeAiOutbound } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
 import type { AiConversationWrapper } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
@@ -33,7 +34,7 @@ describe("ARCH-047-BG008 prepared AI outbound composition", () => {
     expect(await composeAiOutbound(wrapper, input)).toEqual({ kind: "ready",
       text: `Welcome! ${input.generatedResponse} Goodbye!`,
       wrapper: { applicationKey: "application-1", wrapperDefinitionId: "definition-1",
-        localeId: "locale-fr", slotEditVersion: 2, replayed: false },
+        localeId: "locale-fr", contentHash: "digest", slotEditVersion: 2, replayed: false },
     });
   });
 
@@ -42,6 +43,17 @@ describe("ARCH-047-BG008 prepared AI outbound composition", () => {
       reason: "LOCALE_UNAVAILABLE" }) };
     expect(await composeAiOutbound(wrapper, input))
       .toEqual({ kind: "refused", reason: "LOCALE_UNAVAILABLE" });
+  });
+
+  it("accepts Shared-normalized unwrapped text only with typed host presentation", async () => {
+    const commercePresentation = { envelope: exampleFinal,
+      verified: { schemaVersion: 1 as const, brandName: null, locale: "en" as const,
+        disposition: "STANDARD" as const, storeUrl: "https://shop.example", products: [], optionFacts: [],
+        requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false } };
+    const render = vi.fn(async () => ({ kind: "no-wrapper" as const, reason: "NOT_CONFIGURED" as const, body: "normalized" }));
+    expect(await composeAiOutbound({ renderConversationResponse: render }, { ...input, commercePresentation }))
+      .toEqual({ kind: "ready", text: "normalized", wrapper: null });
+    expect(render).toHaveBeenCalledWith(expect.objectContaining({ commercePresentation }));
   });
 
   it("rejects fabricated no-wrapper text rather than permitting another composition path", async () => {

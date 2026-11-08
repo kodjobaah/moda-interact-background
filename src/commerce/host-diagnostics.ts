@@ -6,7 +6,7 @@ export type CommerceHostStage =
   | "configuration" | "mcp.connection" | "mcp.manifest" | "mcp.tool_list"
   | "mcp.authorization" | "mcp.tool_call" | "mcp.tool_result"
   | "host.authorization" | "host.turn_state" | "host.grant"
-  | "host.release" | "host.runner_result" | "host.lifecycle";
+  | "host.release" | "host.runner_result" | "host.lifecycle" | "presentation.verify";
 
 type Explanation = Readonly<{ message: string; action: string }>;
 const explanations = {
@@ -69,6 +69,7 @@ const explanations = {
   HOST_CANCELLED: { message: "The Commerce host operation was cancelled by its caller.", action: "Inspect the caller cancellation and shutdown lifecycle." },
   HOST_LIVE_POLICY_REJECTED: { message: "The LIVE Commerce budget is unavailable, invalid or incompatible with the processing lease.", action: "Check the resolved policy, subscription mapping and worker processing lease." },
   HOST_DEADLINE_EXCEEDED: { message: "The Commerce host reached its execution deadline.", action: "Inspect the elapsed operation and MCP service latency." },
+  HOST_PRESENTATION_REJECTED: { message: "Fresh product presentation verification rejected the selected facts.", action: "Inspect the selected reference, provider availability and remaining turn budget." },
   HOST_UNEXPECTED_FAILURE: { message: "An unexpected Commerce host operation failed.", action: "Inspect adjacent application and database logs for this conversation." },
 } as const satisfies Record<string, Explanation>;
 

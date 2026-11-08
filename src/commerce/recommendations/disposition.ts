@@ -28,10 +28,13 @@ export function readRecommendationSelection(details: Record<string, unknown>): R
   const hasVersion = recommendationData?.productRecommendationVersion !== undefined;
   const hasProducts = recommendationData?.productRecommendations !== undefined;
   const recommendationsValid = recommendationData !== null && hasVersion === hasProducts;
-  const disposition = presentation.success
+  const parsedDisposition = presentation.success
     ? presentation.data.responseDisposition
     : CommerceAnswerPresentationSelectionSchema.safeParse({ responseDisposition: details.responseDisposition }).success
       ? details.responseDisposition as RecommendationSelection["responseDisposition"] : undefined;
+  // Fact dispositions are owned by fresh presentation verification, never the recommendation latch.
+  const disposition = parsedDisposition === "STANDARD" || parsedDisposition === "OUT_OF_SCOPE_REDIRECT" || parsedDisposition === "SHIPPING_INFORMATION_UNVERIFIED"
+    ? parsedDisposition : undefined;
   const shippingSelection = presentation.success
     ? presentation.data.shippingInformationSelection
     : CommerceAnswerPresentationSelectionSchema.safeParse({

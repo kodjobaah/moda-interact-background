@@ -8,6 +8,7 @@ export type RecommendationToolName =
 
 export type RecommendationObservation = Readonly<{
   sequence: number;
+  observedAt: string;
   toolName: RecommendationToolName;
   descriptorIdentity: string;
   arguments: Readonly<Record<string, unknown>>;
@@ -41,7 +42,7 @@ export class TurnRecommendationObservations {
     const argumentKey = canonicalJson(args);
     const prior = [...this.entries].reverse().find((entry) =>
       entry.toolName === input.toolName && entry.descriptorIdentity === input.descriptorIdentity && entry.argumentKey === argumentKey);
-    const record = Object.freeze({ sequence: ++this.sequence, toolName: input.toolName,
+    const record = Object.freeze({ sequence: ++this.sequence, observedAt: new Date().toISOString(), toolName: input.toolName,
       descriptorIdentity: input.descriptorIdentity, arguments: args, argumentKey,
       output: immutable(output) });
     if (prior) this.entries.splice(this.entries.indexOf(prior), 1);

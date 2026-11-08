@@ -52,7 +52,8 @@
     "test:arch040-moderation": "vitest run tests/unit/services/conversation-moderation",
     "test:arch040-moderation:postgres": "node scripts/test-integration.mjs tests/integration/conversation-moderation.integration.test.ts",
     "meta:sample:provision": "node dist-cli/scripts/provision-meta-template-sample.js",
-    "test:meta-sample:artifact": "node scripts/smoke-meta-template-sample.mjs"
+    "test:meta-sample:artifact": "node scripts/smoke-meta-template-sample.mjs",
+    "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs"
   },
   "keywords": [],
   "author": "",
@@ -61,7 +62,7 @@
     "@ai-sdk/openai": "^4.0.46",
     "@aws-sdk/client-s3": "^3.1143.0",
     "@langchain/langgraph": "1.4.15",
-    "@modainteract/moda-interact-shared": "5.5.0",
+    "@modainteract/moda-interact-shared": "5.8.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",

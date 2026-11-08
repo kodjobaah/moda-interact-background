@@ -1,3 +1,4 @@
+import { composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
   createLogger, type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
@@ -43,7 +44,9 @@ export class ConversationWrapperService {
         typeof input.responseBody !== "string" || !input.responseBody.trim()) {
       return { kind: "rejected", reason: "INVALID_INPUT" };
     }
-    const candidates = input.hostComposedReplyCandidates;
+    if (input.commercePresentation && input.source !== "AI") return { kind: "rejected", reason: "INVALID_INPUT" };
+    const candidates = input.commercePresentation ? undefined : input.hostComposedReplyCandidates;
+    const presentationDigest = input.commercePresentation ? digest(stableJson(input.commercePresentation)) : null;
     if (candidates !== undefined && (input.source !== "AI" || !Array.isArray(candidates) ||
         candidates.length < 1 || candidates.length > 3 ||
         candidates.some((candidate) => typeof candidate !== "string" || !candidate.trim() || candidate.length > MAX_WHATSAPP_TEXT_LENGTH) ||
@@ -51,7 +54,7 @@ export class ConversationWrapperService {
       return { kind: "rejected", reason: "INVALID_INPUT" };
     }
     const responseBodies = candidates ?? [input.responseBody];
-    if (input.responseBody.length > MAX_WHATSAPP_TEXT_LENGTH) {
+    if (!input.commercePresentation && input.responseBody.length > MAX_WHATSAPP_TEXT_LENGTH) {
       return { kind: "rejected", reason: "OUTPUT_TOO_LONG" };
     }
     try {
@@ -60,11 +63,13 @@ export class ConversationWrapperService {
       // original response, even when an Admin later switches the active slot.
       if (input.previousApplication) {
         const prior = input.previousApplication;
-        const matchedBody = responseBodies.find((body) => digest(body) === prior.responseDigest);
+        const matchedBody = presentationDigest !== null
+          ? (presentationDigest === prior.responseDigest ? input.responseBody : undefined)
+          : responseBodies.find((body) => digest(body) === prior.responseDigest);
         if (prior.kind !== "rendered" || prior.source !== input.source ||
             prior.messageIdentity !== input.messageIdentity || !matchedBody ||
             prior.body.length > MAX_WHATSAPP_TEXT_LENGTH ||
-            !prior.body.includes(matchedBody) ||
+            (!presentationDigest && !prior.body.includes(matchedBody)) ||
             prior.applicationKey !== digest(stableJson({
               conversationId: input.conversationId, messageIdentity: prior.messageIdentity,
               source: prior.source, wrapperDefinitionId: prior.wrapperDefinitionId,
@@ -84,6 +89,31 @@ export class ConversationWrapperService {
       if (context === "TENANT_MISMATCH") return this.refuse("rejected", "TENANT_MISMATCH", input);
       if (!context) return this.refuse("unavailable", "CONVERSATION_UNAVAILABLE", input);
       const slots = await this.repository.loadSlots();
+      if (input.commercePresentation) {
+        const composed = composeCommerceWhatsAppPreview({
+          envelope: input.commercePresentation.envelope,
+          presentation: input.commercePresentation.verified,
+          ...(context.conversationLanguageTag ? { locale: context.conversationLanguageTag } : {}),
+          brandName: context.variables["shopBrand.brandName"] ?? context.variables["shop.name"] ?? null,
+          wrapper: { slots, context, digest, platformFallbackLanguageTag: this.dependencies.platformFallbackLanguageTag ?? null },
+        });
+        if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
+        if (!composed.wrapper) return { kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED" };
+        const selected = chooseSlot(slots, "AI");
+        if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
+        const responseDigest = presentationDigest!;
+        const applicationKey = digest(stableJson({
+          conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
+          wrapperDefinitionId: composed.wrapper.definitionId, localeId: composed.wrapper.localeId,
+          contentHash: composed.wrapper.contentHash, editVersion: composed.wrapper.slotEditVersion,
+          responseDigest, bodyDigest: digest(composed.body),
+        }));
+        return { kind: "rendered", body: composed.body, wrapperDefinitionId: composed.wrapper.definitionId,
+          localeId: composed.wrapper.localeId, contentHash: composed.wrapper.contentHash,
+          slotEditVersion: composed.wrapper.slotEditVersion, audience: selected.audience as WrappedResult["audience"],
+          languageTag: selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)?.languageTag ?? "en",
+          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, replayed: false };
+      }
       const slot = chooseSlot(slots, input.source);
       if (slot === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
       if (!slot) {

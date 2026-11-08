@@ -1,5 +1,6 @@
 import type {
   RenderConversationResponseInput,
+  CommercePresentationInput,
   WrapperRefusal,
   WrapperRenderResult,
 } from "./contracts.js";
@@ -19,6 +20,7 @@ export type AiOutboundComposition =
         applicationKey: string;
         wrapperDefinitionId: string;
         localeId: string;
+        contentHash: string;
         slotEditVersion: number;
         replayed: boolean;
       }>;
@@ -38,6 +40,7 @@ export async function composeAiOutbound(
     messageId: string;
     generatedResponse: string;
     hostComposedReplyCandidates?: readonly string[];
+    commercePresentation?: CommercePresentationInput;
   }>,
 ): Promise<AiOutboundComposition> {
   const result = await wrapper.renderConversationResponse({
@@ -45,6 +48,7 @@ export async function composeAiOutbound(
     messageIdentity: input.messageId,
     responseBody: input.generatedResponse,
     ...(input.hostComposedReplyCandidates ? { hostComposedReplyCandidates: input.hostComposedReplyCandidates } : {}),
+    ...(input.commercePresentation ? { commercePresentation: input.commercePresentation } : {}),
     source: "AI",
     // BG005 reads the committed conversation language itself. Passing the
     // model's low-confidence guess here could contradict that durable choice.
@@ -60,6 +64,7 @@ export async function composeAiOutbound(
         applicationKey: result.applicationKey,
         wrapperDefinitionId: result.wrapperDefinitionId,
         localeId: result.localeId,
+        contentHash: result.contentHash,
         slotEditVersion: result.slotEditVersion,
         replayed: result.replayed,
       },
@@ -67,7 +72,7 @@ export async function composeAiOutbound(
   }
   if (result.kind === "no-wrapper") {
     // No-wrapper must not silently rewrite the original AI response either.
-    if (result.body !== input.generatedResponse) {
+    if (!input.commercePresentation && result.body !== input.generatedResponse) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
     return { kind: "ready", text: result.body, wrapper: null };

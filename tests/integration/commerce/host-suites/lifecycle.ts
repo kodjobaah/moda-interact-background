@@ -3,6 +3,21 @@ import { hostFixture as f } from "../host.fixture.js";
 
 export function registerLifecycleHostTests() {
   describe("Commerce host lifecycle and diagnostics", () => {
+    it("rejects missing real recovery before model or provider I/O", async () => {
+      f.state.checkoutRecovery = null;
+      const model = vi.fn();
+      await expect(f.run(model)).rejects.toMatchObject({ code: "DENIED", diagnostic: { reasonCode: "HOST_RECOVERY_MISSING" } });
+      expect(model).not.toHaveBeenCalled();
+      expect(f.observations).toEqual([]);
+    });
+    it("rejects a canonical conversation owner conflicting with recovery before I/O", async () => {
+      f.state.shopId = "other-owner";
+      const model = vi.fn();
+      await expect(f.run(model)).rejects.toMatchObject({ code: "DENIED", diagnostic: { reasonCode: "HOST_SHOP_ID_MISMATCH" } });
+      expect(model).not.toHaveBeenCalled();
+      expect(f.observations).toEqual([]);
+    });
+
 it("passes a safe child logger to Shared while preserving the messaging service identity", async () => {
     const records: Array<Record<string, unknown>> = [];
     const logger = f.createLogger({
