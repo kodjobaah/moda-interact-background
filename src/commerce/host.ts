@@ -1046,6 +1046,13 @@ async function execute(
         const disposition = selection?.responseDisposition ?? "STANDARD";
         presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
+        if (disposition === "STANDARD" && !selection?.shippingInformationSelection && renderedProducts.length === 0 && initialProductObservations.some(observation => {
+          const output = observation.output as { products?: Product[]; product?: Product | null };
+          return Boolean(output.product) || Boolean(output.products?.length);
+        })) {
+          compositionDiagnostic({ stage: 'RESULT', outcome: 'REFUSED', reason: 'MISSING_VERIFIED_PRODUCT_SELECTION' });
+          throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
+        }
         const includeNoVerifiedOffer = inspection === "SATISFIED" &&
           recommendationObservations.all("commerce_get_discount_options").length > 0 && retained.length > 0 &&
           retained.some((item) => item.proposal.promotionKind === "DISCOUNT") &&
