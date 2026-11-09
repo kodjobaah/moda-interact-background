@@ -208,3 +208,13 @@ describe('ARCH067 rendered presentation receipts', () => {
   }
  });
 });
+
+it('records composition outcome without reply content and tolerates a failed diagnostic sink', async () => {
+  const {service,logger}=harness([]);
+  const request={...input,responseBody:'**Hello**',commercePresentation:presentation('**Hello**')};
+  expect(await service.renderConversationResponse(request)).toMatchObject({kind:'no-wrapper',body:'Hello'});
+  expect(logger.info).toHaveBeenCalledWith('commerce.response.composition',expect.objectContaining({stage:'RESULT',outcome:'ready',conversationId:'conversation',productCount:0}));
+  expect(JSON.stringify((logger.info as ReturnType<typeof vi.fn>).mock.calls)).not.toContain('Hello');
+  (logger.info as ReturnType<typeof vi.fn>).mockImplementation(()=>{throw new Error('sink unavailable');});
+  expect(await service.renderConversationResponse(request)).toMatchObject({kind:'no-wrapper',body:'Hello'});
+});

@@ -727,10 +727,14 @@ async function execute(
       });
       if (factsPresentation) commerceVerifiedPresentation = factsPresentation;
     }
+    const compositionDiagnostic = (fields: Record<string, unknown>) => {
+      try { logger.info('commerce.response.composition', { ...fields, purpose: 'live', shopId: turn.shopId, conversationId: turn.conversationId, inboundVersion: current.inboundVersion, recoveryId: recovery.id }); } catch { /* Diagnostics must never affect delivery. */ }
+    };
     if (envelope.answerKind === "ANSWER") {
       const details = envelope.details && typeof envelope.details === "object" && !Array.isArray(envelope.details)
         ? envelope.details as Record<string, unknown> : {};
       const selection = readRecommendationSelection(details);
+      compositionDiagnostic({ stage: 'RECOMMENDATION_SELECTION', answerKind: envelope.answerKind, selectionValid: selection !== null, disposition: selection?.responseDisposition ?? 'STANDARD', proposals: selection?.productRecommendations?.map(p => ({ productId: p.productId, variantId: p.variantId, promotionKind: p.promotionKind, scope: p.scope })) ?? [], reason: selection?.productRecommendations?.length ? null : 'MODEL_SELECTED_NO_RECOMMENDATIONS', factsPresentation: factsPresentation !== null });
       const ownsPresentation = ["productRecommendationVersion", "productRecommendations", "responseDisposition",
         "shippingInformationSelection"].some((key) => Object.hasOwn(details, key));
       const observationsLatch = recommendationObservations.all("commerce_get_product").length > 0 ||
@@ -745,6 +749,7 @@ async function execute(
         await assertCurrent();
         await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
         const inspection = evaluateRecommendationDiscountInspection(recommendationObservations, recommendationContext.policy);
+        compositionDiagnostic({ stage: 'DISCOUNT_INSPECTION', inspection });
         const proposed = inspection === "NOT_REQUIRED" || inspection === "SATISFIED"
           ? selection?.productRecommendations ?? [] : [];
         type ProductProposal = NonNullable<typeof proposed>[number];
@@ -766,21 +771,23 @@ async function execute(
         });
         let currentBasket = recommendationContext.basket;
         const seenProposalKeys = new Set<string>();
+        const rejectProposal = (proposal: ProductProposal, reason: string) => { compositionDiagnostic({ stage: 'SELECTION_REJECTED', productId: proposal.productId, variantId: proposal.variantId, reason }); return false; };
         const budgetedCandidates = proposed.filter((proposal) => {
-          if (!hasInitialProduct(proposal) || recommendationContext.provider === "SHOPIFY" && proposal.variantId === null) return false;
-          if ((proposal.scope === "PRODUCT_ONLY" || proposal.scope === "ADD_TO_BASKET") && proposal.basketLineId !== null) return false;
+          if (!hasInitialProduct(proposal) || recommendationContext.provider === "SHOPIFY" && proposal.variantId === null) return rejectProposal(proposal, 'UNOBSERVED_OR_INCOMPLETE_IDENTITY');
+          if ((proposal.scope === "PRODUCT_ONLY" || proposal.scope === "ADD_TO_BASKET") && proposal.basketLineId !== null) return rejectProposal(proposal, 'UNEXPECTED_BASKET_LINE');
           if (proposal.scope === "REPLACE_BASKET_LINE" && (!currentBasket || !proposal.basketLineId ||
-              !currentBasket.lines.some((line) => line.lineKey === proposal.basketLineId))) return false;
+              !currentBasket.lines.some((line) => line.lineKey === proposal.basketLineId))) return rejectProposal(proposal, 'BASKET_LINE_NOT_FOUND');
           if (proposal.scope !== "PRODUCT_ONLY" && (!currentBasket || currentBasket.lines.some((line) =>
-              !line.productId || !line.quantity || recommendationContext.provider === "SHOPIFY" && !line.variantId))) return false;
+              !line.productId || !line.quantity || recommendationContext.provider === "SHOPIFY" && !line.variantId))) return rejectProposal(proposal, 'BASKET_CONTEXT_INCOMPLETE');
           if (proposal.promotionKind !== "DISCOUNT" && proposal.offerIds.length > 0 ||
-              proposal.promotionKind === "DISCOUNT" && (proposal.offerIds.length < 1 || proposal.offerIds.length > 3)) return false;
+              proposal.promotionKind === "DISCOUNT" && (proposal.offerIds.length < 1 || proposal.offerIds.length > 3)) return rejectProposal(proposal, 'INVALID_PROMOTION_SELECTION');
           const key = canonicalJson({ productId: proposal.productId, variantId: proposal.variantId,
             scope: proposal.scope, basketLineId: proposal.basketLineId });
-          if (seenProposalKeys.has(key)) return false;
+          if (seenProposalKeys.has(key)) return rejectProposal(proposal, 'DUPLICATE_SELECTION');
           seenProposalKeys.add(key);
           return true;
         });
+        compositionDiagnostic({ stage: 'RECOMMENDATION_FILTER', proposedCount: proposed.length, validCount: budgetedCandidates.length, rejectedCount: proposed.length - budgetedCandidates.length });
         const softDisposition = selection?.responseDisposition === "OUT_OF_SCOPE_REDIRECT" ||
           selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED";
         const currentContextProductIds = new Set(initialProductObservations
@@ -844,6 +851,7 @@ async function execute(
         }
         const budgeted = refreshPlan.proposals.map((item) => ({ ...item.proposal, offerIds: item.offerIds,
           promotionKind: item.proposal.promotionKind === "DISCOUNT" && item.offerIds.length === 0 ? "NONE" as const : item.proposal.promotionKind }));
+        compositionDiagnostic({ stage: 'REFRESH_PLAN', selectedCount: proposalsToRefresh.length, plannedCount: budgeted.length, reason: budgeted.length < proposalsToRefresh.length ? 'REFRESH_BUDGET_OR_BASKET_CHANGED' : null });
         const shippingPlanned = refreshPlan.shippingCallKey !== null;
         const refreshedProducts = new Map<string, Product | null>();
         const productKey = (productId: string | null, variantId: string | null) => canonicalJson({ productId, variantId });
@@ -884,7 +892,8 @@ async function execute(
         };
         for (const proposal of budgeted) {
           const product = await refreshProduct(proposal.productId, proposal.variantId, true);
-          if (!product) continue;
+          if (!product) { compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'REJECTED', reason: 'PRODUCT_REFRESH_NOT_VERIFIED' }); continue; }
+          compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'ACCEPTED' });
           retained.push({ proposal, product, renderFacts: {
             title: product.title, url: product.url!, quantity: proposal.quantity, scope: proposal.scope,
             currentPrice: product.unitPrice, currency: product.currency,
@@ -1064,6 +1073,7 @@ async function execute(
         hostComposedReplyCandidates = buildReplyCandidates({ fullBody, firstProductBody: firstBody, minimalBody });
       }
     }
+    compositionDiagnostic({ stage: 'VERIFIED_PROJECTION', disposition: commerceVerifiedPresentation.disposition, productCount: commerceVerifiedPresentation.products.length, optionCount: commerceVerifiedPresentation.optionFacts.length, detailCount: (commerceVerifiedPresentation.productFacts?.length ?? 0) });
     // Custom details are intentionally not returned to the delivery adapter.
     return {
       answerKind: envelope.answerKind,

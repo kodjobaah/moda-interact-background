@@ -98,6 +98,15 @@ export class ConversationWrapperService {
           brandName: context.variables["shopBrand.brandName"] ?? context.variables["shop.name"] ?? null,
           wrapper: { slots, context, digest, platformFallbackLanguageTag: this.dependencies.platformFallbackLanguageTag ?? null },
         });
+        try { this.logger.info('commerce.response.composition', {
+          stage: 'RESULT', purpose: 'live', conversationId: input.conversationId,
+          messageIdentity: input.messageIdentity, outcome: composed.kind,
+          disposition: input.commercePresentation.verified.disposition,
+          productCount: input.commercePresentation.verified.products.length,
+          optionCount: input.commercePresentation.verified.optionFacts.length,
+          detailCount: (input.commercePresentation.verified.productFacts?.length ?? 0),
+          reason: composed.kind === 'refused' ? composed.reason : null,
+        }); } catch { /* Diagnostics must never affect delivery. */ }
         if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
         const receipts = presentationCandidates(input.commercePresentation);
         if (!composed.wrapper) return { kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED",
