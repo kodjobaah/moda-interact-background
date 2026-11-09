@@ -693,6 +693,7 @@ async function execute(
       return { toolName: observation.toolName, products, observedAt: observation.observedAt };
     });
     const authorizedPairs = [ ...(productContext?.references ?? []), ...productObservations().flatMap(item => item.products) ];
+    let presentedRecommendationPairs: { productId: string; variantId: string | null }[] = [];
     let factsPresentation: CommerceVerifiedPresentation | null = null;
     if (envelope.answerKind === "ANSWER") {
       factsPresentation = await prepareProductFactsPresentation({ envelope, authorizedPairs,
@@ -712,6 +713,15 @@ async function execute(
           if (!parsed.success) throw new CommerceHostError("INCOMPATIBLE_VERSION", false,
             hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error);
           recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(descriptors.find(d => d.name === "commerce_get_product")), arguments: pair, output: parsed.data });
+          if (parsed.data.product) {
+            const product = parsed.data.product;
+            try { logger.info("commerce.product.lookup.verified", { shopId: turn.shopId, conversationId: turn.conversationId, recoveryId: recovery.id,
+              productId: product.productId, variantId: product.variantId, stockStatus: product.stock?.status ?? "UNAVAILABLE",
+              stockScope: product.stock?.status === "KNOWN" ? product.stock.scope : null,
+              // Provider-only unavailable reasons remain in MCP diagnostics; the wire intentionally carries status only.
+              reason: product.stock?.status === "KNOWN" ? "KNOWN" : product.stock?.status === "NOT_TRACKED" ? "NOT_TRACKED" : product.stock ? null : "MISSING_PROVIDER_FIELD",
+              contextReferenceCount: productContext?.references.length ?? 0, presentationCount: productContext?.presentation?.references.length ?? 0 }); } catch { /* best effort */ }
+          }
           return parsed.data;
         },
       });
@@ -1025,6 +1035,7 @@ async function execute(
         await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
         const locale = resolveModaConfigurationLocale(languageEvaluation.languageTag);
         const disposition = selection?.responseDisposition ?? "STANDARD";
+        presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
         const includeNoVerifiedOffer = inspection === "SATISFIED" &&
           recommendationObservations.all("commerce_get_discount_options").length > 0 && retained.length > 0 &&
@@ -1062,7 +1073,7 @@ async function execute(
         recovery.shop.domain, language, context.conversation.messages, envelope,
       ) : envelope.replyText),
       ...(hostComposedReplyCandidates ? { hostComposedReplyCandidates } : {}),
-      commercePresentation: { envelope, verified: commerceVerifiedPresentation },
+      commercePresentation: { envelope, verified: commerceVerifiedPresentation, productPairs: presentedRecommendationPairs },
       ...(envelope.answerKind === "ANSWER" && productObservations().length ? {
         productContextUpdate: mergeConversationProductContext(result.productContextUpdate ?? productContext, productObservations(), {
           shopId: turn.shopId, conversationId: turn.conversationId, platform: recommendationContext.provider, now: Date.now(),

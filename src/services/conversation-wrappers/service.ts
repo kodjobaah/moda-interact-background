@@ -1,3 +1,4 @@
+import { presentationCandidates } from "../../commerce/presentation-receipt.js";
 import { composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
   createLogger, type StructuredLogger,
@@ -98,9 +99,17 @@ export class ConversationWrapperService {
           wrapper: { slots, context, digest, platformFallbackLanguageTag: this.dependencies.platformFallbackLanguageTag ?? null },
         });
         if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
-        if (!composed.wrapper) return { kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED" };
+        const receipts = presentationCandidates(input.commercePresentation);
+        if (!composed.wrapper) return { kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED",
+          ...(receipts.length ? { presentedPairs: receipts.find(receipt => receipt.body === composed.body)?.pairs ?? [] } : {}) };
         const selected = chooseSlot(slots, "AI");
         if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
+        const localeRow = selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)!;
+        const prepared = readPreparedWrapper(localeRow.localeAst, localeRow.contentHash);
+        if (prepared.kind !== "ok") return this.refuse("rejected", "PREPARED_INVALID", input);
+        // Replay the same bounded candidate rendering to retain the chosen candidate's native pairs.
+        const chosen = composed.candidates.find(candidate => renderPreparedWrapper({ prepared: prepared.prepared, context, responseBody: candidate }).kind === "rendered");
+        const presentedPairs = receipts.length ? receipts.find(receipt => receipt.body === chosen)?.pairs ?? [] : undefined;
         const responseDigest = presentationDigest!;
         const applicationKey = digest(stableJson({
           conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
@@ -112,7 +121,7 @@ export class ConversationWrapperService {
           localeId: composed.wrapper.localeId, contentHash: composed.wrapper.contentHash,
           slotEditVersion: composed.wrapper.slotEditVersion, audience: selected.audience as WrappedResult["audience"],
           languageTag: selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)?.languageTag ?? "en",
-          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, replayed: false };
+          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, replayed: false, ...(presentedPairs ? { presentedPairs } : {}) };
       }
       const slot = chooseSlot(slots, input.source);
       if (slot === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);

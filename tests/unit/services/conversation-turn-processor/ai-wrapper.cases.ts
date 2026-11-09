@@ -21,15 +21,28 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
       detectedLanguageConfidence: null, commercePresentation, productContextUpdate });
     await test.processor.process({ conversationId: "conversation-1", observedVersion: 3 });
     expect(write).toHaveBeenCalledExactlyOnceWith({ shopId: "shop-1", conversationId: "conversation-1",
-      expectedInboundVersion: 3, context: productContextUpdate, now: expect.any(Date) });
+      expectedInboundVersion: 3, context: productContextUpdate, now: expect.any(Date), reply: { messageId: "message-1", body: "reply" } });
     expect(test.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(expect.objectContaining({ commercePresentation }));
-    if (disposition === "STALE" || disposition === "CONFLICT") {
+    if (disposition === "STALE" || disposition === "CONFLICT" || disposition === "SKIPPED") {
       expect(test.admission.sendPreparedText).not.toHaveBeenCalled();
       expect(test.admission.failPrepared).toHaveBeenCalledWith("message-1");
     } else {
       expect(write.mock.invocationCallOrder[0]).toBeLessThan(test.admission.sendPreparedText.mock.invocationCallOrder[0]);
       expect(test.admission.sendPreparedText).toHaveBeenCalledOnce();
     }
+  });
+  it('persists exact rendered pairs with the composed body, independently of model and reference order', async () => {
+    const write = vi.fn().mockResolvedValue('WRITTEN');
+    const test = harness({ productContextRepository: { write } });
+    const now = first.toISOString();
+    const pairs = [{ productId:'30',variantId:null },{productId:'10',variantId:null}];
+    const productContextUpdate = {schemaVersion:1,shopId:'shop-1',conversationId:'conversation-1',platform:'WOOCOMMERCE',updatedAt:now,
+      references:[...pairs].reverse().map(pair=>({...pair,title:'Tree',observedAt:now}))};
+    test.runAgent.mockResolvedValue({replyText:'model stock 7',commercePresentation:{envelope:{},verified:{}},productContextUpdate});
+    test.aiWrapper.renderConversationResponse.mockResolvedValue({...rendered('Tree\nStock: 2'),presentedPairs:pairs});
+    await test.processor.process({conversationId:'conversation-1',observedVersion:3});
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({context:expect.objectContaining({presentation:expect.objectContaining({references:pairs})}),reply:{messageId:'message-1',body:'Tree\nStock: 2'}}));
+    expect(test.admission.sendPreparedText).toHaveBeenCalledWith(expect.objectContaining({text:'Tree\nStock: 2'}));
   });
   it("rechecks inbound fence after cache transaction and prevents stale delivery", async () => {
     const test = harness({ productContextRepository: { write: vi.fn().mockResolvedValue("WRITTEN") } });

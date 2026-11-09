@@ -1,3 +1,4 @@
+import { presentedProductContext } from "../commerce/product-context-write.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import type { CommercePresentationInput } from "./conversation-wrappers/contracts.js";
 import { createCommerceProductContextRepository } from "../commerce/product-context-repository.js";
@@ -640,8 +641,9 @@ export class ConversationTurnProcessor<TContext, TResult> {
       if (agentResult.productContextUpdate && agentResult.commercePresentation && !composed.wrapper?.replayed) {
         const repository = this.dependencies.productContextRepository ?? createCommerceProductContextRepository();
         const writeResult = await repository.write({ shopId: loaded.shopId, conversationId,
-          expectedInboundVersion: observedVersion, context: agentResult.productContextUpdate, now: this.now() });
-        if (writeResult === "STALE" || writeResult === "CONFLICT") {
+          expectedInboundVersion: observedVersion, context: composed.presentedPairs ? presentedProductContext(agentResult.productContextUpdate, composed.presentedPairs, this.now()) : agentResult.productContextUpdate, now: this.now(),
+          reply: { messageId: reserved.messageId, body: composed.text } });
+        if (writeResult === "STALE" || writeResult === "CONFLICT" || writeResult === "SKIPPED") {
           await failPrepared(reserved.messageId);
           await this.finishSuppressedTurn(conversationId, observedVersion, controlRevision);
           return;

@@ -1,3 +1,4 @@
+import { productContextForPersistence } from "./product-context-write.js";
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { canonicalJson, CommerceConversationProductContextSchema, type CommerceConversationProductContext } from '@modainteract/moda-interact-shared/commerce';
 import { createLogger } from '@modainteract/moda-interact-shared/logging';
@@ -52,7 +53,7 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
         return context;
       } catch { warn(identity, 'DATABASE_UNAVAILABLE'); return null; }
     },
-    async write(input: Identity & { expectedInboundVersion: number; context: CommerceConversationProductContext }): Promise<ProductContextWriteResult> {
+    async write(input: Identity & { expectedInboundVersion: number; context: CommerceConversationProductContext; reply?: { messageId: string; body: string } }): Promise<ProductContextWriteResult> {
       if (!Number.isSafeInteger(input.expectedInboundVersion) || input.expectedInboundVersion < 0 || !Number.isFinite(Number(input.now))) { warn(input, 'INPUT_INVALID'); return 'SKIPPED'; }
       try {
         return await db.$transaction(async tx => {
@@ -60,7 +61,7 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
           if (!locked.length) return 'STALE';
           const canonicalOwner = owner(await tx.conversation.findUnique({ where: { id: input.conversationId }, select: ownerSelect }), input.shopId);
           if (!canonicalOwner || canonicalOwner.version !== input.expectedInboundVersion) return 'STALE';
-          const context = validated(input.context, input, canonicalOwner.platform);
+          const context = validated(productContextForPersistence(input.context), input, canonicalOwner.platform);
           if (!context) { warn(input, 'PAYLOAD_INVALID'); return 'SKIPPED'; }
           const json = canonicalJson(context);
           const size = await tx.$queryRaw<{ bytes: number }[]>`SELECT pg_column_size(${json}::jsonb) AS bytes`;
@@ -68,7 +69,14 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
           const existing = await tx.commerceConversationProductContext.findUnique({ where: { conversationId: input.conversationId } });
           if (existing) {
             if (existing.shopId !== input.shopId || existing.sourceInboundVersion > input.expectedInboundVersion) return 'STALE';
-            if (existing.sourceInboundVersion === input.expectedInboundVersion) return existing.schemaVersion === context.schemaVersion && canonicalJson(existing.references) === json ? 'UNCHANGED' : 'CONFLICT';
+            if (existing.sourceInboundVersion === input.expectedInboundVersion) {
+              if (existing.schemaVersion !== context.schemaVersion || canonicalJson(existing.references) !== json) return 'CONFLICT';
+              if (input.reply) {
+                const message = await tx.conversationMessage.findFirst({ where: { id: input.reply.messageId, conversationId: input.conversationId, direction: 'OUTBOUND', senderType: 'AGENT', content: input.reply.body }, select: { id: true } });
+                if (!message) return 'CONFLICT';
+              }
+              return 'UNCHANGED';
+            }
           }
           const data = { shopId: input.shopId, schemaVersion: context.schemaVersion, sourceInboundVersion: input.expectedInboundVersion,
             references: context as Prisma.InputJsonValue, expiresAt: new Date(Number(input.now) + TTL) };
@@ -77,6 +85,13 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
           } else {
             const changed = await tx.commerceConversationProductContext.updateMany({ where: { conversationId: input.conversationId, shopId: input.shopId, revision: existing.revision }, data: { ...data, revision: { increment: 1 } } });
             if (changed.count !== 1) return 'CONFLICT';
+          }
+          if (input.reply) {
+            if (!input.reply.body.trim() || input.reply.body.length > 4096) throw new Error('REPLY_INVALID');
+            const prepared = await tx.conversationMessage.updateMany({ where: { id: input.reply.messageId, conversationId: input.conversationId,
+              direction: 'OUTBOUND', senderType: 'AGENT', status: 'PENDING', providerDispatchKey: null, providerDispatchAdmittedAt: null,
+              content: { in: ['[Pending automated WhatsApp message]', input.reply.body] } }, data: { content: input.reply.body } });
+            if (prepared.count !== 1) throw new Error('REPLY_NOT_CURRENT');
           }
           return 'WRITTEN';
         });

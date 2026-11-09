@@ -25,6 +25,8 @@ function configure() {
   f.active.responseContract.detailsSchema = { type: "object", properties: {
     productOptionSelections: { type: "array", maxItems: 3, items: { type: "object", properties: { productId: { type: "string", maxLength: 128 }, variantId: { type: ["string", "null"], maxLength: 128 } }, required: ["productId", "variantId"], additionalProperties: false } },
   }, required: [], additionalProperties: false };
+  const properties = f.active.responseContract.detailsSchema.properties as Record<string, unknown>;
+  properties.productDetailSelections = properties.productOptionSelections;
   f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
 }
 function turn(version: number, message: string, prior?: CommerceConversationProductContext) {
@@ -65,5 +67,27 @@ export function registerProductContextAcceptanceTests() {
    if (code === "DENIED") { expect(result.answerKind).toBe("REFER_TO_STORE"); expect(result.productContextUpdate).toBeUndefined(); expect(reads.map(o => o.params.name)).toEqual(["commerce_get_product"]); }
    else { expect(result.answerKind).toBe("ANSWER"); expect(reads.map(o => o.params.name)).toEqual(["commerce_get_product", "commerce_search_products", "commerce_get_product"]); expect(result.commercePresentation!.verified.optionFacts[0]!.productId).toBe(replacement.productId); }
   });
+  it.each(['first one', 'the green finish'])('uses remembered presentation/options for %s but refreshes exact stock in the current turn', async message => {
+   configure();
+   const now = new Date().toISOString();
+   const products = [product(30), product(10), product(20)].map((p, index) => ({ ...p, selectedOptions: [{ name: 'Finish', value: index === 0 ? 'Green' : 'Natural' }], stock: { status: 'KNOWN' as const, quantity: 7, scope: 'VARIANT' as const } }));
+   const prior: CommerceConversationProductContext = { schemaVersion: 1, shopId: f.context.shopId, conversationId: f.context.conversation.conversationId, platform: 'SHOPIFY', updatedAt: now,
+    references: [...products].reverse().map(p => ({ productId: p.productId, variantId: p.variantId, title: p.title, observedAt: now, selectedOptions: p.selectedOptions })),
+    presentation: { references: products.map(p => ({ productId: p.productId, variantId: p.variantId })), presentedAt: now } };
+   f.toolResults = { commerce_get_product: ok({ product: { ...products[0], stock: { status: 'KNOWN', quantity: 2, scope: 'VARIANT' } } }) };
+   const result = await f.run(async request => {
+    const references = (request.context as any).productReferences;
+    expect(references.presentation.references).toEqual(prior.presentation!.references);
+    expect(references.references.find((ref: any) => ref.productId === pair(30).productId).selectedOptions).toEqual([{ name: 'Finish', value: 'Green' }]);
+    expect(JSON.stringify(request.context)).not.toContain('"stock"');
+    return answer({ productDetailSelections: [pair(30)] }, 'There are 7 in stock');
+   }, turn(2, message, prior));
+   const composed = composeCommerceWhatsAppPreview({ envelope: result.commercePresentation!.envelope, presentation: result.commercePresentation!.verified });
+   expect(result.commercePresentation!.verified.productFacts![0]!.stock).toEqual({ status: 'KNOWN', quantity: 2, scope: 'VARIANT' });
+   expect(composed.kind).toBe('ready');
+   if (composed.kind === 'ready') { expect(composed.body).toContain('2'); expect(composed.body).not.toContain('7 in stock'); }
+   expect(f.observations.filter(o => o.method === 'tools/call').map(o => [o.params.name, o.params.arguments])).toEqual([['commerce_get_product', pair(30)]]);
+  });
+
  });
 }

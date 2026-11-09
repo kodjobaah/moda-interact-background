@@ -184,3 +184,27 @@ describe("ARCH-066 single Shared composition boundary", () => {
     }
   });
 });
+
+// Native pair receipts follow the actual bounded Shared composer candidate.
+describe('ARCH067 rendered presentation receipts', () => {
+ it.each([0, 3900, 4050])('records full/first/minimal candidate with wrapper header length %s', async headerLength => {
+  const { CommerceProductSchema } = await import('@modainteract/moda-interact-shared/commerce');
+  const { verifyCommerceProductFacts } = await import('@modainteract/moda-interact-shared/commerce/presentation');
+  const pairs = ['30','10','20'].map(id => ({ productId: id, variantId: null }));
+  const products = pairs.map((pair, index) => CommerceProductSchema.parse({ ...pair, title: `Tree ${index}`, url: null, available: true, unitPrice: null, currency: null, productType: null, vendor: null, observedAt: '2026-11-09T12:00:00Z', stock: { status:'KNOWN', quantity:2, scope:'PRODUCT' }, description: { status:'AVAILABLE', text:'d'.repeat(80) } }));
+  const facts = verifyCommerceProductFacts(pairs, products);
+  if(facts.kind !== 'verified') throw Error('invalid fixture');
+  const presentation: CommercePresentationInput = { envelope: { ...exampleFinal, answerKind:'ANSWER', referralReason:null, details:{productDetailSelections:pairs} }, verified:{ schemaVersion:1, brandName:null, locale:'en', disposition:'PRODUCT_DETAILS', storeUrl:'https://shop.example', products:[], productFacts:facts.productFacts, optionFacts:[], requiresShipping:null,policyUrl:null,includeNoVerifiedOffer:false } };
+  const wrapperSlot = slot('AI');
+  const preparedValue = { ...prepared, header: [{kind:'text',value:'h'.repeat(Math.min(1500, headerLength))}], body: [{kind:'text',value:'h'.repeat(Math.max(0,headerLength-1500))}, {kind:'responseSlot',name:'response.body'}] };
+  wrapperSlot.definition.locales[0]!.localeAst = {schemaVersion:1,prepared:preparedValue};
+  wrapperSlot.definition.locales[0]!.contentHash = digest(stableJson(preparedValue));
+  const test = harness(headerLength ? [wrapperSlot] : [], { ...context, conversationLanguageTag:'en' });
+  const result = await test.service.renderConversationResponse({...input,commercePresentation:presentation});
+  expect(['rendered','no-wrapper']).toContain(result.kind);
+  if(result.kind === 'rendered' || result.kind === 'no-wrapper') {
+   expect(result.presentedPairs).toEqual(headerLength === 0 ? pairs : headerLength === 3900 ? pairs.slice(0,1) : []);
+   expect(result.body.length).toBeLessThanOrEqual(4096);
+  }
+ });
+});

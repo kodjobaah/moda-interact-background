@@ -627,3 +627,7 @@ Moda Interact is built around a few core architectural principles:
 
 7. **Avoid premature infrastructure complexity**  
    PostgreSQL and Redis provide sufficient scalability for the current system while preserving clear future boundaries for higher-volume workloads.
+
+### Product reference and current stock deployment (ARCH-067)
+
+Background pins Shared5.11.0 and always reads legacy and extended schemaVersion1 JSON in the existing reference JSONB column. Deploy both Background and Studio readers before the MCP stock writer (local Studio reader/writer deploy together). Keep server-only `COMMERCE_PRODUCT_REFERENCE_V2_WRITE_ENABLED` absent or `false` until both readers have deployment receipts in the manual terminal system test. Only the literal value `true` enables selectedOptions/presentation persistence; all other values strip those additive fields while preserving IDs, titles and timestamps. Stock verification and tenant/CAS fences always apply. No schema migration or cleanup is required. Source acceptance does not enable deployment or this operational gate.
