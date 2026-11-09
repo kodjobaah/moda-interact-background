@@ -16,6 +16,7 @@ export type AiOutboundComposition =
   | Readonly<{
       kind: "ready";
       text: string;
+      presentedPairs?: readonly { productId: string; variantId: string | null }[];
       wrapper: null | Readonly<{
         applicationKey: string;
         wrapperDefinitionId: string;
@@ -60,6 +61,7 @@ export async function composeAiOutbound(
     return {
       kind: "ready",
       text: result.body,
+      ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),
       wrapper: {
         applicationKey: result.applicationKey,
         wrapperDefinitionId: result.wrapperDefinitionId,
@@ -75,7 +77,7 @@ export async function composeAiOutbound(
     if (!input.commercePresentation && result.body !== input.generatedResponse) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
-    return { kind: "ready", text: result.body, wrapper: null };
+    return { kind: "ready", text: result.body, ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
   }
   return { kind: "refused", reason: result.reason };
 }

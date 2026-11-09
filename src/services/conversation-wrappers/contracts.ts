@@ -2,7 +2,7 @@
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceVerifiedPresentation, WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal } from "@modainteract/moda-interact-shared/commerce/presentation";
 export type { WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal };
-export type CommercePresentationInput = Readonly<{ envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation }>;
+export type CommercePresentationInput = Readonly<{ envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; productPairs?: readonly { productId: string; variantId: string | null }[] }>;
 
 export type WrapperReadPort = Readonly<{
   loadContext(conversationId: string): Promise<VerifiedWrapperContext | "TENANT_MISMATCH" | null>;
@@ -24,10 +24,11 @@ export type WrappedResult = Readonly<{
   applicationKey: string;
   responseDigest: string;
   replayed: boolean;
+  presentedPairs?: readonly { productId: string; variantId: string | null }[];
 }>;
 
 export type WrapperRenderResult = WrappedResult
-  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED" }>
+  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
   | Readonly<{ kind: "unavailable" | "rejected"; reason: WrapperRefusal }>;
 
 export type RenderConversationResponseInput = Readonly<{

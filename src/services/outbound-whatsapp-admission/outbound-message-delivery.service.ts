@@ -1,3 +1,4 @@
+import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { MessageStatus } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
@@ -90,6 +91,7 @@ export class OutboundMessageDeliveryService {
     replyToProviderMessageId,
     expectedControlRevision,
     expectedInboundVersion,
+    productContextUpdate,
   }: AdmittedOutbound & {
     to: string;
     text: string;
@@ -97,6 +99,7 @@ export class OutboundMessageDeliveryService {
     replyToProviderMessageId?: string;
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
+    productContextUpdate?: CommerceConversationProductContext;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
     // Check the durable admission before any failure/usage side effects. An
@@ -122,6 +125,7 @@ export class OutboundMessageDeliveryService {
     const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to, expectedContent: outboundText,
       executionScope, deliveryKind: "TEXT",
+      ...(productContextUpdate ? { productContextUpdate } : {}),
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
       ...(expectedInboundVersion === undefined ? {} : { expectedInboundVersion }),
     });
@@ -438,6 +442,7 @@ export class OutboundMessageDeliveryService {
     shopId: string; conversationId: string; messageId: string; to: string;
     expectedContent: string; expectedControlRevision?: number; expectedInboundVersion?: number;
     executionScope?: "general" | "recovery";
+    productContextUpdate?: CommerceConversationProductContext;
     template?: { name: string; languageCode: string;
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
     deliveryKind: "TEXT" | "TEMPLATE";
@@ -447,6 +452,10 @@ export class OutboundMessageDeliveryService {
     if (input.initialOutreach && ownership?.recoveryId !== input.initialOutreach.recoveryId)
       return { kind: "suppressed", reason: "conversation-invalid" };
     if (!ownership) {
+      if (input.productContextUpdate) {
+        await this.failPrepared(input.messageId);
+        return { kind: "suppressed", reason: "conversation-invalid" };
+      }
       // A recovery-scoped reservation may not bypass the recovery consent/STOP
       // fence merely because ownership resolution returned no row.
       if (input.executionScope === "recovery") {
@@ -503,6 +512,7 @@ export class OutboundMessageDeliveryService {
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
       ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
       messageId: input.messageId, recipient: input.to, now: new Date(),
+      ...(input.productContextUpdate ? { productContextUpdate: input.productContextUpdate, expectedContent: input.expectedContent } : {}),
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
       ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),

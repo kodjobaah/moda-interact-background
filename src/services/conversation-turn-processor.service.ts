@@ -1,6 +1,6 @@
+import { presentedProductContext } from "../commerce/product-context-write.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import type { CommercePresentationInput } from "./conversation-wrappers/contracts.js";
-import { createCommerceProductContextRepository } from "../commerce/product-context-repository.js";
 import type {
   ConversationService,
   ConversationTurnState,
@@ -107,6 +107,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
         text: string;
         expectedControlRevision?: number;
         expectedInboundVersion?: number;
+        productContextUpdate?: CommerceConversationProductContext;
       },
     ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
@@ -134,7 +135,6 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
   runAgent: (context: TContext) => Promise<TResult>;
   /** BG005 prepared wrapper; required even when no active slot is configured. */
   aiWrapper: AiConversationWrapper;
-  productContextRepository?: Pick<ReturnType<typeof createCommerceProductContextRepository>, "write">;
   getResult: (result: TResult) => {
     replyText: string;
     detectedLanguageTag: string | null;
@@ -334,7 +334,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       await this.dependencies.admission.failPrepared(messageId);
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string },
+      input: Admitted & { to: string; text: string; productContextUpdate?: CommerceConversationProductContext },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
@@ -637,30 +637,17 @@ export class ConversationTurnProcessor<TContext, TResult> {
         return;
       }
 
-      if (agentResult.productContextUpdate && agentResult.commercePresentation && !composed.wrapper?.replayed) {
-        const repository = this.dependencies.productContextRepository ?? createCommerceProductContextRepository();
-        const writeResult = await repository.write({ shopId: loaded.shopId, conversationId,
-          expectedInboundVersion: observedVersion, context: agentResult.productContextUpdate, now: this.now() });
-        if (writeResult === "STALE" || writeResult === "CONFLICT") {
-          await failPrepared(reserved.messageId);
-          await this.finishSuppressedTurn(conversationId, observedVersion, controlRevision);
-          return;
-        }
-        // A takeover/new inbound can arrive while the short cache transaction awaits.
-        if (!(await checkControl("after-await", loaded.shopId)) ||
-            await this.dependencies.conversation.hasChanged(conversationId, observedVersion)) {
-          await failPrepared(reserved.messageId);
-          await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
-          const latest = await this.dependencies.conversation.getTurnState(conversationId);
-          await this.enqueue(conversationId, latest.inboundVersion);
-          return;
-        }
-      }
+      // Carry the proposed snapshot only. The final permit transaction commits it
+      // after moderation/control checks, atomically with durable message admission.
+      const productContextUpdate = agentResult.productContextUpdate && agentResult.commercePresentation && !composed.wrapper?.replayed
+        ? (composed.presentedPairs ? presentedProductContext(agentResult.productContextUpdate, composed.presentedPairs, this.now()) : agentResult.productContextUpdate)
+        : undefined;
 
       await sendPreparedText({
         ...reserved,
         to: loaded.to,
         text: composed.text,
+        ...(productContextUpdate ? { productContextUpdate } : {}),
       });
       await completeOwnedTurn();
       this.logger.debug("whatsapp.turn.completed", {

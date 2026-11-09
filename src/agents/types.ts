@@ -47,6 +47,6 @@ export interface RecoveryAgentContext {
 
 export type CommerceAgentResult = Omit<CommerceFinalResponse, "details"> & {
   hostComposedReplyCandidates?: readonly string[];
-  commercePresentation?: { envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation };
+  commercePresentation?: { envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; productPairs?: readonly { productId: string; variantId: string | null }[] };
   productContextUpdate?: CommerceConversationProductContext;
 };

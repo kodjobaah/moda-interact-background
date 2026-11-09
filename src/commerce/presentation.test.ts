@@ -12,7 +12,7 @@ describe("host product facts verification", () => {
   expect(input.readProduct).toHaveBeenCalledExactlyOnceWith(pair); expect(input.consumeBudget).toHaveBeenCalledTimes(1); expect(input.assertCurrent).toHaveBeenCalledTimes(2);
   const result=composeCommerceWhatsAppPreview({envelope:input.envelope,presentation:p!});
   expect(result.kind).toBe("ready"); if(result.kind!=="ready") return;
-  expect(result.body).toBe("Shirt\nSize: S, M, L\nProduct information is incomplete.");
+  expect(result.body).toBe("Shirt\nStock is unavailable.\nSize: S, M, L\nProduct information is incomplete.");
   expect(p).toMatchObject({products:[],includeNoVerifiedOffer:false,disposition:"PRODUCT_DETAILS"});
  });
  it.each([{productDetailSelections:[pair,pair]},{productDetailSelections:[{...pair,title:"forged"}]},{productDetailSelections:[pair],productOptionSelections:[pair]},{productDetailSelections:[{...pair,variantId:"invented"}]}])("rejects invalid, duplicate, mixed or unobserved exact pairs before reads",async details=>{
@@ -44,5 +44,18 @@ it("matches Studio's identical synthetic Tree fixture byte-for-byte", async () =
  expect(actual).toEqual(studioExpected);
  if (actual.kind !== "ready" || studioExpected.kind !== "ready") throw Error("fixture refused");
  expect(Buffer.from(actual.body)).toEqual(Buffer.from(studioExpected.body));
- expect(actual.body).toBe("Tree\nOak & fern\nHeight: 30 cm");
+ expect(actual.body).toBe("Tree\nStock is unavailable.\nOak & fern\nHeight: 30 cm");
+});
+
+// Fresh exact-pair reads are the sole stock authority, independently of model prose.
+it.each([{status:'KNOWN',quantity:0,scope:'VARIANT'}, {status:'KNOWN',quantity:2,scope:'PRODUCT'}, {status:'NOT_TRACKED'}, {status:'UNAVAILABLE'}] as const)('composes current provider stock %j through the public verifier', async stock => {
+ const input = setup({productDetailSelections:[pair]});
+ input.envelope.replyText = 'There are 999 in stock';
+ input.readProduct.mockResolvedValue({product:{...product, stock}} as never);
+ const verified = await prepareProductFactsPresentation(input);
+ const result = composeCommerceWhatsAppPreview({envelope:input.envelope,presentation:verified!});
+ expect(verified?.productFacts?.[0]?.stock).toEqual(stock);
+ expect(result.kind).toBe('ready');
+ if(result.kind==='ready') { expect(result.body).not.toContain('999'); if(stock.status==='KNOWN') expect(result.body).toContain(String(stock.quantity)); }
+ expect(input.readProduct).toHaveBeenCalledTimes(1);
 });

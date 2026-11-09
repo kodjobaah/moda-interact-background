@@ -70,7 +70,7 @@ describe("ARCH-055-BACKGROUND-001 persisted human follow-up identity", () => {
       if (sql.includes('FROM "whatsapp"."Conversation" c')) return [context];
       if (sql.includes('SELECT "id" FROM "commerce"."Shop"')) return [{ id: "shop" }];
       if (sql.includes('SELECT "id" FROM "whatsapp"."Conversation"')) return [{ id: "conversation" }];
-      if (sql.includes('SELECT "status"::text FROM "commerce"."Shop"')) return [{ status: "ACTIVE" }];
+      if (sql.includes('SELECT "status"::text,"platform"::text FROM "commerce"."Shop"')) return [{ status: "ACTIVE", platform: "SHOPIFY" }];
       if (sql.includes('FROM "whatsapp"."MerchantConversationSendCommand"')) return [command];
       return [];
     });

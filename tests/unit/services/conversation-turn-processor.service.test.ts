@@ -119,7 +119,6 @@ function harness(overrides: Partial<any> = {}) {
     loadTurn: vi.fn().mockResolvedValue(loaded),
     runAgent,
     aiWrapper,
-    ...(overrides.productContextRepository ? { productContextRepository: overrides.productContextRepository } : {}),
     getResult: (result: any) => result,
     now,
     runtimeConfig,

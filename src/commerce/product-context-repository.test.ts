@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { createProductContextRepository } from './product-context-repository.js';
 import type { CommerceConversationProductContext } from '@modainteract/moda-interact-shared/commerce';
@@ -18,6 +18,7 @@ describe.skipIf(!url)('real PostgreSQL reference cache transaction contract', ()
   const second = url ? new PrismaClient({ datasourceUrl: url }) : new PrismaClient();
   const repository = createProductContextRepository({ db, logger: { warn: vi.fn() } });
   const other = createProductContextRepository({ db: second, logger: { warn: vi.fn() } });
+  afterEach(() => vi.unstubAllEnvs());
   const input = (conversationId = 'checkout', version = 1) => ({ shopId: 'shop-a', conversationId, now, expectedInboundVersion: version, context: context(conversationId) });
   beforeAll(async () => {
     await db.$executeRawUnsafe(`INSERT INTO commerce."Shop" (id,platform) VALUES ('shop-a','SHOPIFY'),('shop-b','SHOPIFY')`);
@@ -83,4 +84,5 @@ describe.skipIf(!url)('real PostgreSQL reference cache transaction contract', ()
     expect(results.sort()).toEqual(['CONFLICT', 'WRITTEN']);
     expect((await db.commerceConversationProductContext.findUniqueOrThrow({ where: { conversationId: 'simultaneous' } })).revision).toBe(1);
   });
+
 });

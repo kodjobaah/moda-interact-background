@@ -1,3 +1,4 @@
+import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
@@ -159,6 +160,7 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
+      productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {
     return this.delivery.sendPreparedText(input);
