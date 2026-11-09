@@ -1,3 +1,5 @@
+import { commitAdmittedProductContext, ProductContextAdmissionError } from "../../commerce/product-context-repository.js";
+import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -31,6 +33,8 @@ export type DispatchInput = {
   conversationId: string; shopId: string; recoveryId: string;
   expectedControlRevision: number;
   expectedInboundVersion?: number;
+  productContextUpdate?: CommerceConversationProductContext;
+  expectedContent?: string;
   commandId?: string; leaseToken?: string; messageId?: string;
   recipient: string; now: Date;
   /** Provider-verified BEFORE this SQL transaction, never fetched inside it. */
@@ -73,6 +77,9 @@ export class OutboundSendFenceService {
         input.deliveryKind !== "TEMPLATE" || !input.proactive ||
         input.initialOutreach.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}`))
       return { kind: "suppressed", reason: "invalid-initial-scope" };
+    if (input.productContextUpdate && (input.senderType !== 'AGENT' || input.deliveryKind !== 'TEXT' ||
+        input.expectedInboundVersion === undefined || !input.expectedContent))
+      return { kind: 'suppressed', reason: 'product-context-invalid-scope' };
     const durableEligibility = this.durableEligibility;
     if (!durableEligibility) return { kind: "suppressed", reason: "durable-eligibility-unavailable" };
     try {
@@ -331,9 +338,19 @@ export class OutboundSendFenceService {
         messageId, dispatchKey, context.revision, context.id, input.senderType,
         ...(initial ? [initial.expectedContent] : []));
       if (!message.length) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
+      if (input.productContextUpdate) {
+        await commitAdmittedProductContext(tx, {
+          shopId: input.shopId, conversationId: input.conversationId, now: permitNow,
+          expectedInboundVersion: input.expectedInboundVersion!, context: input.productContextUpdate,
+          messageId, body: input.expectedContent!, dispatchKey,
+        });
+      }
       return { kind: "admitted", messageId, dispatchKey, admittedAt: message[0]!.providerDispatchAdmittedAt } as const;
     });
     } catch (error) {
+      // The transaction has rolled back both permit and context before suppression.
+      if (error instanceof ProductContextAdmissionError)
+        return { kind: 'suppressed', reason: 'product-context-conflict' };
       if (input.initialOutreach) logger.error("recovery.initial_outreach.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, conversationId: input.conversationId,
         attemptId: input.initialOutreach.outreachAttemptId, messageId: input.messageId,

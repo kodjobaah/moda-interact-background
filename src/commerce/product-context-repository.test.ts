@@ -84,19 +84,5 @@ describe.skipIf(!url)('real PostgreSQL reference cache transaction contract', ()
     expect(results.sort()).toEqual(['CONFLICT', 'WRITTEN']);
     expect((await db.commerceConversationProductContext.findUniqueOrThrow({ where: { conversationId: 'simultaneous' } })).revision).toBe(1);
   });
-  it('atomically commits extended context with the exact composed reply and rolls back invalid message preparation', async () => {
-    vi.stubEnv('COMMERCE_PRODUCT_REFERENCE_V2_WRITE_ENABLED', 'true');
-    await db.$executeRawUnsafe(`INSERT INTO whatsapp."Conversation" (id,"shopId","checkoutRecoveryId","inboundVersion") VALUES ('atomic','shop-a','recovery-a',1),('rollback','shop-a','recovery-a',1)`);
-    await db.$executeRawUnsafe(`INSERT INTO whatsapp."ConversationMessage" (id,"conversationId",direction,"senderType",status,content) VALUES ('atomic-message','atomic','OUTBOUND','AGENT','PENDING','[Pending automated WhatsApp message]')`);
-    const extended = { ...context('atomic'), references: context('atomic').references.map(ref => ({ ...ref, selectedOptions: [{ name: 'Finish', value: 'Green' }] })), presentation: { references: [{ productId: 'gid://shopify/Product/123', variantId: null }], presentedAt: new Date(now).toISOString() } };
-    const reply = { messageId: 'atomic-message', body: 'Tree\nStock: 2' };
-    expect(await repository.write({ ...input('atomic'), context: extended, reply })).toBe('WRITTEN');
-    expect(await repository.read(input('atomic'))).toEqual(extended);
-    expect((await db.conversationMessage.findUniqueOrThrow({ where: { id: reply.messageId }, select: { content: true } })).content).toBe(reply.body);
-    expect(await repository.write({ ...input('atomic'), context: extended, reply })).toBe('UNCHANGED');
-    expect(await repository.write({ ...input('atomic'), context: extended, reply: { ...reply, body: 'Stock: 7' } })).toBe('CONFLICT');
-    expect(await repository.write({ ...input('rollback'), reply: { messageId: 'missing-message', body: 'Uncommitted reply' } })).toBe('SKIPPED');
-    expect(await db.commerceConversationProductContext.findUnique({ where: { conversationId: 'rollback' } })).toBeNull();
-  });
 
 });

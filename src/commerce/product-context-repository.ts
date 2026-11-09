@@ -53,7 +53,7 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
         return context;
       } catch { warn(identity, 'DATABASE_UNAVAILABLE'); return null; }
     },
-    async write(input: Identity & { expectedInboundVersion: number; context: CommerceConversationProductContext; reply?: { messageId: string; body: string } }): Promise<ProductContextWriteResult> {
+    async write(input: Identity & { expectedInboundVersion: number; context: CommerceConversationProductContext }): Promise<ProductContextWriteResult> {
       if (!Number.isSafeInteger(input.expectedInboundVersion) || input.expectedInboundVersion < 0 || !Number.isFinite(Number(input.now))) { warn(input, 'INPUT_INVALID'); return 'SKIPPED'; }
       try {
         return await db.$transaction(async tx => {
@@ -71,10 +71,6 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
             if (existing.shopId !== input.shopId || existing.sourceInboundVersion > input.expectedInboundVersion) return 'STALE';
             if (existing.sourceInboundVersion === input.expectedInboundVersion) {
               if (existing.schemaVersion !== context.schemaVersion || canonicalJson(existing.references) !== json) return 'CONFLICT';
-              if (input.reply) {
-                const message = await tx.conversationMessage.findFirst({ where: { id: input.reply.messageId, conversationId: input.conversationId, direction: 'OUTBOUND', senderType: 'AGENT', content: input.reply.body }, select: { id: true } });
-                if (!message) return 'CONFLICT';
-              }
               return 'UNCHANGED';
             }
           }
@@ -86,13 +82,6 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
             const changed = await tx.commerceConversationProductContext.updateMany({ where: { conversationId: input.conversationId, shopId: input.shopId, revision: existing.revision }, data: { ...data, revision: { increment: 1 } } });
             if (changed.count !== 1) return 'CONFLICT';
           }
-          if (input.reply) {
-            if (!input.reply.body.trim() || input.reply.body.length > 4096) throw new Error('REPLY_INVALID');
-            const prepared = await tx.conversationMessage.updateMany({ where: { id: input.reply.messageId, conversationId: input.conversationId,
-              direction: 'OUTBOUND', senderType: 'AGENT', status: 'PENDING', providerDispatchKey: null, providerDispatchAdmittedAt: null,
-              content: { in: ['[Pending automated WhatsApp message]', input.reply.body] } }, data: { content: input.reply.body } });
-            if (prepared.count !== 1) throw new Error('REPLY_NOT_CURRENT');
-          }
           return 'WRITTEN';
         });
       } catch (error) {
@@ -103,3 +92,66 @@ export function createProductContextRepository(deps: { db?: PrismaClient; logger
   };
 }
 export const createCommerceProductContextRepository = createProductContextRepository;
+
+/** A context failure aborts the enclosing final-permit transaction as well. */
+export class ProductContextAdmissionError extends Error {
+  constructor() { super('PRODUCT_CONTEXT_ADMISSION_REJECTED'); this.name = 'ProductContextAdmissionError'; }
+}
+
+/** Database-only participant in the Shop -> Conversation -> message permit transaction.
+ * The caller has passed moderation and locked/updated the exact AGENT message.
+ * Do not call through a separate transaction or before final eligibility checks.
+ */
+export async function commitAdmittedProductContext(
+  tx: Pick<Prisma.TransactionClient, '$queryRawUnsafe'>,
+  input: Identity & { expectedInboundVersion: number; context: CommerceConversationProductContext; messageId: string; body: string; dispatchKey: string },
+): Promise<void> {
+  const reject = (): never => { throw new ProductContextAdmissionError(); };
+  if (!Number.isSafeInteger(input.expectedInboundVersion) || input.expectedInboundVersion < 0 ||
+      !input.body.trim() || input.body.length > 4096 || !input.dispatchKey) reject();
+  const owners = await tx.$queryRawUnsafe<{ platform: string }[]>(`
+    SELECT s."platform"::text FROM "whatsapp"."Conversation" c
+    JOIN "commerce"."CheckoutRecovery" r ON r."id"=c."checkoutRecoveryId"
+    JOIN "commerce"."Shop" s ON s."id"=r."shopId"
+    WHERE c."id"=$1 AND r."shopId"=$2 AND (c."shopId" IS NULL OR c."shopId"=r."shopId")
+      AND c."inboundVersion"=$3`, input.conversationId, input.shopId, input.expectedInboundVersion);
+  if (owners.length !== 1) reject();
+  let context: CommerceConversationProductContext | null = null;
+  try { context = validated(productContextForPersistence(input.context), input, owners[0]!.platform); } catch { reject(); }
+  if (!context) return reject();
+  const json = canonicalJson(context);
+  const sizes = await tx.$queryRawUnsafe<{ bytes: number }[]>('SELECT pg_column_size($1::jsonb) AS bytes', json);
+  if (sizes.length !== 1 || sizes[0]!.bytes > MAX_BYTES) reject();
+  // The exact moderated body and durable permit identify this context commit.
+  const messages = await tx.$queryRawUnsafe<{ id: string }[]>(`
+    SELECT "id" FROM "whatsapp"."ConversationMessage"
+    WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"='AGENT'
+      AND "status"='PENDING' AND "content"=$3 AND "providerDispatchKey"=$4
+      AND "providerDispatchAdmittedAt" IS NOT NULL FOR UPDATE`, input.messageId, input.conversationId, input.body, input.dispatchKey);
+  if (messages.length !== 1) reject();
+  const previous = await tx.$queryRawUnsafe<{ shopId: string; sourceInboundVersion: number; revision: number; references: unknown; schemaVersion: number }[]>(`
+    SELECT "shopId","sourceInboundVersion","revision","references","schemaVersion"
+    FROM "whatsapp"."CommerceConversationProductContext" WHERE "conversationId"=$1 FOR UPDATE`, input.conversationId);
+  const row = previous[0];
+  if (row) {
+    if (row.shopId !== input.shopId || row.sourceInboundVersion > input.expectedInboundVersion) reject();
+    if (row.sourceInboundVersion === input.expectedInboundVersion) {
+      if (row.schemaVersion !== context.schemaVersion || canonicalJson(row.references) !== json) reject();
+      return;
+    }
+  }
+  const expiresAt = new Date(Number(input.now) + TTL);
+  const changed = row
+    ? await tx.$queryRawUnsafe<{ revision: number }[]>(`
+      UPDATE "whatsapp"."CommerceConversationProductContext"
+      SET "references"=$1::jsonb,"schemaVersion"=$2,"sourceInboundVersion"=$3,"expiresAt"=$4,
+        "revision"="revision"+1,"updatedAt"=statement_timestamp()
+      WHERE "conversationId"=$5 AND "shopId"=$6 AND "revision"=$7 RETURNING "revision"`,
+      json, context.schemaVersion, input.expectedInboundVersion, expiresAt, input.conversationId, input.shopId, row.revision)
+    : await tx.$queryRawUnsafe<{ revision: number }[]>(`
+      INSERT INTO "whatsapp"."CommerceConversationProductContext"
+        ("conversationId","shopId","schemaVersion","sourceInboundVersion","references","expiresAt","revision","updatedAt")
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,1,statement_timestamp()) RETURNING "revision"`,
+      input.conversationId, input.shopId, context.schemaVersion, input.expectedInboundVersion, json, expiresAt);
+  if (changed.length !== 1) reject();
+}
