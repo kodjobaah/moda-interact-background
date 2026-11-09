@@ -1,3 +1,4 @@
+import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { RecoveryTemplatePreparer } from "../../../../src/services/recovery-template-preparation/recovery-template-preparer.service.js";
@@ -18,6 +19,7 @@ const input = (override: Partial<RecoveryTemplatePreparationInput> = {}): Recove
   conversationLanguageTag: "en-US", merchantLanguageTag: "en",
   customerFirstName: "Alex", shopName: { shopId: "shop-1", value: "Merchant" }, checkout,
   checkoutItems: { shopId: "shop-1", lineItems: [{ title: "Saved item", quantity: 1 }] },
+  outreachEvaluation: readyEvaluation(override.shopId ?? "shop-1", "attempt-1", override.checkoutItems?.lineItems, override.verifiedOffer),
   ...override,
 });
 
@@ -158,20 +160,9 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
         product: { productId: "product-2", variantId: "variant-2", title: "Blue jacket", url: productUrl } },
     });
     const prepared = await service.prepare(request);
-    expect(prepared).toMatchObject({ outcome: "prepared", template: { components: [
-      { type: "body", parameters: [
-        { text: "Blue jacket" }, { text: "a current sale price" }, { text: productUrl }, { text: "Merchant" },
-        { text: "1 × Saved item" },
-      ] },
-      { type: "button", index: "0", parameters: [{ text: encodeURIComponent(sourceUrl) }] },
-      { type: "button", index: "1", parameters: [{ text: encodeURIComponent(productUrl) }] },
-    ] } });
-
-    await unavailable(service, "PROMOTION_PRODUCT_URL_UNAVAILABLE", {
-      ...request,
-      promotionalProduct: { ...request.promotionalProduct!, product: {
-        ...request.promotionalProduct!.product, url: "http://shop.example/products/blue-jacket",
-      } },
+    expect(prepared).toMatchObject({ outcome: "unavailable", reason: "OUTSIDE_CHECKOUT" });
+    await unavailable(service, "OUTSIDE_CHECKOUT", { ...request,
+      promotionalProduct: { ...request.promotionalProduct!, product: { ...request.promotionalProduct!.product, url: "http://shop.example/products/blue-jacket" } },
     });
   });
 
@@ -348,11 +339,7 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     const preparedChangedValue = await setup([changedValueWithRedirect]).service.prepare(input({
       checkout: { ...checkout, url: differentStoredValue },
     }));
-    expect(preparedChangedValue).toMatchObject({ outcome: "prepared", template: { components: [
-      { type: "body", parameters: [{ text: differentStoredValue }, { text: "Merchant" },
-        { text: "1 × Saved item" }] },
-      { type: "button", parameters: [{ text: encodeURIComponent(differentStoredValue) }] },
-    ] } });
+    expect(preparedChangedValue).toMatchObject({ outcome: "unavailable", reason: "CHECKOUT_UNTRUSTED" });
   });
 
   it("reads only the sending shop's brand once and refuses raw original image URLs", async () => {
@@ -662,7 +649,7 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       { title: "Water bottle", quantity: 1 },
     ] } }));
     expect(result).toMatchObject({ outcome: "prepared", template: { components: [{
-      parameters: [{ text: "2 × Shoes (Blue) and 1 × Water bottle" }, { text: "Verified Outfitters" }],
+      parameters: [{ text: "2 × Shoes and 1 × Water bottle" }, { text: "Verified Outfitters" }],
     }] } });
 
     const nameTemplate = fixture({ components: [{ type: "BODY", text: "{{1}}" }],
@@ -692,4 +679,47 @@ describe("ARCH-052 saved basket and merchant bindings", () => {
       ],
     } }));
   });
+});
+
+describe("ARCH066 published frozen-brand compatibility", () => {
+ it.each([
+  ["shopBrand.logoAltText", "Saved logo alt"], ["shopBrand.logoWidth", "100"],
+  ["shopBrand.logoHeight", "200"], ["shopBrand.squareLogoAltText", "Saved square alt"],
+ ])("preserves valid mandatory %s in the shared INITIAL renderer", async (key, expected) => {
+  const row = fixture({ components: [{ type: "BODY", text: "Brand {{1}} from {{2}}" }], bindings: {
+   promotionTarget: "CHECKOUT", header: [], body: [{ position: 1, variable: key }, { position: 2, variable: "shop.name" }], buttons: [],
+  } });
+  const brand: ShopBrandRow = { brandName: "Saved brand", logoUrl: null, logoAltText: "Saved logo alt", logoWidth: 100,
+   logoHeight: 200, squareLogoUrl: null, squareLogoAltText: "Saved square alt", coverImageUrl: null };
+  const result = await setup([row], { brand }).service.prepare(input());
+  // Strict5.9 saved-brand projection must preserve the required semantic and both mandatory INITIAL slots.
+  expect(result).toMatchObject({ outcome: "prepared", template: { components: [{ type: "body", parameters: [{ type: "text", text: expected }, { type: "text", text: "Saved brand" }, { type: "text", text: "1 × Saved item" }] }] } });
+ });
+});
+
+it("matches Shared's frozen initial parameters, full body and provenance for identical recorded inputs", async () => {
+ const { renderInitialOutreachPreview } = await import("@modainteract/moda-interact-shared/commerce/outreach");
+ const row = fixture(); const request = input();
+ const canonical = { schemaVersion: 1 as const, evaluation: request.outreachEvaluation!,
+  preparedProjection: JSON.parse(JSON.stringify({ variant: row, canonicalLanguageTag: "en", selectionSource: "merchant-fallback" })),
+  variables: { shopName: "Merchant", customerFirstName: "Alex", checkoutUrl: sourceUrl, shopCategory: null }, headerMedia: null };
+ const expected = renderInitialOutreachPreview(canonical);
+ const actual = await setup([row]).service.prepare(request);
+ expect(expected.kind).toBe("ready"); expect(actual.outcome).toBe("prepared");
+ if(expected.kind !== "ready" || actual.outcome !== "prepared") throw Error("supported fixture refused");
+ expect(actual.template.components).toEqual(expected.parameters); expect(actual.renderedText).toBe(expected.renderedText);
+ expect(Buffer.from(actual.renderedText!)).toEqual(Buffer.from(expected.renderedText));
+ expect({ variantId: actual.variantId, registrationId: actual.registrationId, definitionId: actual.definitionId,
+  providerTemplateId: actual.providerTemplateId, providerTemplateName: actual.providerTemplateName, providerLanguageCode: actual.providerLanguageCode,
+  submittedContentHash: actual.submittedContentHash, bindingFingerprint: actual.bindingFingerprint }).toEqual(expected.templateProvenance);
+});
+
+it("does not mask a missing mandatory IMAGE BODY brand by falling back on unavailable product media", async () => {
+ const image = fixture({ variant: { id: "image" }, components: [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "{{1}} from {{2}}" }],
+  bindings: { schemaVersion: 1, headerMediaRole: "CHECKOUT_PRODUCT", header: [], body: [{ position: 1, variable: "shopBrand.brandName" }, { position: 2, variable: "shop.name" }], buttons: [] } });
+ const text = fixture({ variant: { id: "text" } }); const configured = setup([image, text]);
+ const service = new RecoveryTemplatePreparer(configured.repo, configured.resolveConfiguredSender, configured.resolveMedia, [], () => now, { warn: vi.fn(), error: vi.fn() },
+  () => ({ prepareForBinding: async () => ({ result: { kind: "UNAVAILABLE", reason: "MEDIA_NOT_READY" } }) }) as never);
+ const result = await service.prepare(input({ productImage: { shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1", generation: 1, productId: "gid://shopify/Product/1", variantId: null } }));
+ expect(result).toMatchObject({ outcome: "unavailable", reason: "BINDING_VALUE_UNAVAILABLE" });
 });

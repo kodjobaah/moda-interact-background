@@ -1,3 +1,4 @@
+import { InitialOutreachEvaluationResultSchema } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type { PrismaClient } from "@prisma/client";
 import type { CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
 import {
@@ -210,8 +211,21 @@ export class InitialOutreachOfferSelectionService {
         signal,
       };
     }
+    const evaluation = result.kind === "NO_VERIFIED_OFFER" || result.kind === "CHECKOUT_DISCOUNT" ? result.evaluation : undefined;
+    const admittedResult = revalidated.result;
+    // Keep the production revalidator's actual current decision; evaluation is
+    // read-only catalogue/render evidence, never the admission token.
+    const renderEvaluation = evaluation?.kind === "ready" ? InitialOutreachEvaluationResultSchema.parse({ ...evaluation,
+      offerDecision: admittedResult.kind === "NO_VERIFIED_OFFER"
+        ? { kind: "NO_VERIFIED_OFFER" as const, reasonCode: admittedResult.reason, discoveryIncomplete: admittedResult.discoveryIncomplete }
+        : admittedResult.kind === "CHECKOUT_DISCOUNT"
+          ? { kind: "CHECKOUT_DISCOUNT" as const, offerSet: admittedResult.offerSet, members: admittedResult.members, group: admittedResult.group, discoveryIncomplete: admittedResult.discoveryIncomplete }
+          : evaluation.offerDecision,
+    }) : undefined;
     return {
-      result: revalidated.result, context, currentContext: revalidated.context, signal,
+      result: renderEvaluation && admittedResult.kind !== "ALTERNATIVE_PRODUCT_PROMOTION"
+        ? { ...admittedResult, evaluation: renderEvaluation } : admittedResult,
+      context, currentContext: revalidated.context, signal,
       admissionToken: revalidated.admissionToken,
     };
   }

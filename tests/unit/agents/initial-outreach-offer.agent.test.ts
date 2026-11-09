@@ -1,132 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 import { runInitialOutreachOfferAgent } from "../../../src/agents/initial-outreach-offer.agent.js";
-import { CommerceHostError, type McpSourceFailure } from "../../../src/commerce/mcp-client.js";
+import { clock, outreachContext, exactProduct } from "../fixtures/outreach-context.js";
+describe("Shared initial evaluation production agent facade", () => {
+ it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("verifies %s NONE products twice without model/offer calls and retains historical quantity/prices", async platform => {
+  const context = outreachContext(platform), call = vi.fn(async (_name: string) => ({ contractVersion: "commerce.v1", status: "OK", data: { product: exactProduct(context) }, renderedText: "Fixture" }));
+  const selector = { connect: vi.fn(), tools: vi.fn(async () => [{ name: "commerce_get_product" }, { name: "commerce_get_discount_options" }, { name: "commerce_get_discount_details" }]), call, close: vi.fn() }; const createModelInvoker = vi.fn();
+  const result = await runInitialOutreachOfferAgent(context, { signal: new AbortController().signal, now: () => clock, createSelector: () => selector as never, createModelInvoker });
+  expect(result).toMatchObject({ kind: "NO_VERIFIED_OFFER", evaluation: { kind: "ready", currentMerchandiseSubtotal: { amountDecimal: "24.00", currency: "GBP" }, lines: [{ quantity: 2, checkoutUnitPrice: "12.50", comparison: "DIFFERENT", currentProduct: { unitPrice: "12.00", title: "Live shirt" } }] } });
+  expect(call.mock.calls.map(args => args[0])).toEqual(["commerce_get_product", "commerce_get_product"]); expect(createModelInvoker).not.toHaveBeenCalled(); expect(selector.close).toHaveBeenCalledOnce();
+ });
+ it("refuses malformed native identities before provider/model IO", async () => { const context = outreachContext(); context.basket.items[0]!.productId = "invented"; const call = vi.fn(); const result = await runInitialOutreachOfferAgent(context, { signal: new AbortController().signal, now: () => clock, createSelector: () => ({ call, close: vi.fn() }) as never }); expect(result).toMatchObject({ kind: "FAILURE", reasonCode: "OUTREACH_EVALUATION_INPUT_INVALID" }); expect(call).not.toHaveBeenCalled(); });
+});
 
-function context(overrides: Record<string, unknown> = {}) {
-  return {
-    shopId: "shop-1",
-    checkoutRecoveryId: "recovery-1",
-    outreachAttemptId: "attempt-1",
-    environment: "TEST",
-    platform: "SHOPIFY",
-    mode: "NONE",
-    authorisedDiscountIds: [],
-    basket: {
-      currency: "GBP",
-      subtotalMinor: null,
-      totalMinor: null,
-      fingerprint: "a".repeat(64),
-      generation: 1,
-      items: [{ lineKey: "line-0001", productId: "product-1", variantId: "variant-1",
-        categoryIds: null, collectionIds: null, isSaleItem: null, title: "Item", category: null,
-        quantity: 1, lineTotalMinor: null }],
-    },
-    priceReconciliation: null,
-    platformInstructions: "Platform safety.",
-    merchantInstructions: null,
-    platformInstructionRevisionId: "platform-revision-1",
-    merchantInstructionRevisionId: null,
-    ...overrides,
-  };
-}
+it("refuses changed product facts on the mandatory second exact read", async () => {
+ const context = outreachContext(); let count = 0;
+ const call = vi.fn(async (_name: string) => ({ contractVersion: "commerce.v1", status: "OK", data: { product: { ...exactProduct(context), unitPrice: ++count === 1 ? "12.00" : "13.00" } }, renderedText: "Fixture" }));
+ const result = await runInitialOutreachOfferAgent(context, { signal: new AbortController().signal, now: () => clock, createSelector: () => ({ connect: vi.fn(), tools: vi.fn(async () => [{ name: "commerce_get_product" }, { name: "commerce_get_discount_options" }, { name: "commerce_get_discount_details" }]), call, close: vi.fn() }) as never });
+ expect(result).toMatchObject({ kind: "FAILURE", reasonCode: "OUTREACH_EVALUATION_CURRENT_FACTS_CHANGED" }); expect(call).toHaveBeenCalledTimes(2);
+});
+it("refuses an alternative-product choice for initial outreach", async () => {
+ const context = { ...outreachContext(), mode: "AI_BEST_APPLICABLE" };
+ const call = vi.fn(async (_name: string) => ({ contractVersion: "commerce.v1", status: "OK", data: { product: exactProduct() }, renderedText: "Fixture" }));
+ const result = await runInitialOutreachOfferAgent(context, { signal: new AbortController().signal, now: () => clock, createSelector: () => ({ connect: vi.fn(), tools: vi.fn(async () => [{ name: "commerce_get_product" }, { name: "commerce_get_discount_options" }, { name: "commerce_get_discount_details" }]), call, close: vi.fn() }) as never,
+  modelInvoker: { invoke: async () => ({ calls: [{ name: "submitInitialOutreachOffer", arguments: { kind: "ALTERNATIVE_PRODUCT_PROMOTION", productId: "gid://shopify/Product/999", variantId: null, offerId: "offer-other" } }], outputTokens: 10 }) } });
+ expect(result).toMatchObject({ kind: "FAILURE", reasonCode: "OUTREACH_EVALUATION_OUTSIDE_CHECKOUT" }); expect(call.mock.calls.map(c => c[0])).toEqual(["commerce_get_product"]);
+});
 
-describe("runInitialOutreachOfferAgent", () => {
-  it("returns POLICY_NONE without constructing an MCP client or model invoker", async () => {
-    const createSelector = vi.fn();
-    const createModelInvoker = vi.fn();
-    const result = await runInitialOutreachOfferAgent(context(), {
-      signal: new AbortController().signal,
-      createSelector,
-      createModelInvoker,
-    });
-
-    expect(result).toEqual({ kind: "NO_VERIFIED_OFFER", reason: "POLICY_NONE", discoveryIncomplete: false });
-    expect(createSelector).not.toHaveBeenCalled();
-    expect(createModelInvoker).not.toHaveBeenCalled();
-  });
-
-  it("returns NO_AUTHORISED_DISCOUNTS without tool discovery or model creation for empty FIXED policy", async () => {
-    const createSelector = vi.fn();
-    const createModelInvoker = vi.fn();
-    const result = await runInitialOutreachOfferAgent(context({ mode: "FIXED" }), {
-      signal: new AbortController().signal,
-      createSelector,
-      createModelInvoker,
-    });
-
-    expect(result).toEqual({ kind: "NO_VERIFIED_OFFER", reason: "NO_AUTHORISED_DISCOUNTS", discoveryIncomplete: false });
-    expect(createSelector).not.toHaveBeenCalled();
-    expect(createModelInvoker).not.toHaveBeenCalled();
-  });
-
-  it("rejects stale attempt-scoped price reports before creating external dependencies", async () => {
-    const createSelector = vi.fn();
-    const createModelInvoker = vi.fn();
-    const result = await runInitialOutreachOfferAgent(context({
-      mode: "AI_BEST_APPLICABLE",
-      priceReconciliation: {
-        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "another-attempt",
-        generation: 1, basketFingerprint: "a".repeat(64), evaluatedAt: "2026-10-31T12:00:00.000Z",
-        lines: [], reasonCodes: [], currentMerchandiseSubtotal: null, completeness: "PARTIAL",
-      },
-    }), {
-      signal: new AbortController().signal,
-      createSelector,
-      createModelInvoker,
-    });
-
-    expect(result).toMatchObject({ kind: "FAILURE", code: "INVALID_RESULT", reasonCode: "PRICE_PREFLIGHT_IDENTITY_MISMATCH" });
-    expect(createSelector).not.toHaveBeenCalled();
-    expect(createModelInvoker).not.toHaveBeenCalled();
-  });
-
-  it("logs a source-preserved MCP response once with outreach correlation and retains DENIED", async () => {
-    const sourceFailure: McpSourceFailure = {
-      origin: "mcp_response",
-      provider: "commerce-mcp",
-      operation: "initialize",
-      httpStatus: 401,
-      providerRequestId: "request-safe-1",
-      providerError: { code: "AUTH_FAILED", message: "MCP assertion rejected" },
-      redactionApplied: false,
-      truncated: false,
-    };
-    const connectError = new CommerceHostError("DENIED", false, undefined, undefined, sourceFailure);
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const result = await runInitialOutreachOfferAgent(context({
-      mode: "AI_BEST_APPLICABLE",
-      priceReconciliation: {
-        shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
-        generation: 1, basketFingerprint: "a".repeat(64), evaluatedAt: "2026-10-31T12:00:00.000Z",
-        lines: [{ lineKey: "line-0001", productId: "product-1", variantId: "variant-1", quantity: 1,
-          checkoutUnitPrice: null, checkoutCurrency: null, catalogueUnitPrice: null, catalogueCurrency: null,
-          catalogueObservedAt: null, catalogueComparison: "INCOMPARABLE", checkoutPriceChange: "UNVERIFIABLE", reasonCodes: [] }],
-        reasonCodes: [], currentMerchandiseSubtotal: null, completeness: "PARTIAL",
-      },
-    }), {
-      signal: new AbortController().signal,
-      logger,
-      createSelector: () => ({
-        connect: vi.fn().mockRejectedValue(connectError),
-        tools: vi.fn(),
-        call: vi.fn(),
-        close: vi.fn().mockRejectedValue(new Error("MCP close handshake failed")),
-      } as never),
-      modelInvoker: { invoke: vi.fn() } as never,
-    });
-
-    expect(result).toMatchObject({ kind: "FAILURE", code: "DENIED", reasonCode: "MCP_DENIED" });
-    const sourceEvents = logger.error.mock.calls.filter(([, fields]) => fields.origin === "mcp_response");
-    expect(sourceEvents).toHaveLength(1);
-    expect(sourceEvents[0]).toEqual(["outreach.offer_agent.failed", expect.objectContaining({
-      shopId: "shop-1", recoveryId: "recovery-1", outreachAttemptId: "attempt-1",
-      operation: "initialize", reasonCode: "MCP_DENIED", httpStatus: 401,
-      providerError: { code: "AUTH_FAILED", message: "MCP assertion rejected" },
-    })]);
-    expect(logger.error).toHaveBeenCalledWith("outreach.offer_agent.failed", expect.objectContaining({
-      operation: "mcp.close", origin: "sdk_exception",
-      sourceError: { name: "Error", message: "MCP close handshake failed" },
-      primaryFailurePresent: true,
-    }));
-  });
+it("prefers an explicitly injected model to production credential creation", async () => {
+ const context = { ...outreachContext(), mode: "AI_BEST_APPLICABLE" }; let step = 0;
+ const invoke = vi.fn(async () => ({ calls: ++step === 1 ? [{ name: "commerce_get_discount_options", arguments: { limit: 10, cursor: null } }] : [{ name: "submitInitialOutreachOffer", arguments: { kind: "NO_VERIFIED_OFFER" } }], outputTokens: 10 }));
+ const createModelInvoker = vi.fn(async () => { throw Error("must not read production credentials"); });
+ const call = vi.fn(async (name: string) => ({ contractVersion: "commerce.v1", status: "OK", data: name === "commerce_get_product" ? { product: exactProduct() } : { mode: "AI_BEST_APPLICABLE", offers: [], cursor: null, truncated: false }, renderedText: "Fixture" }));
+ const result = await runInitialOutreachOfferAgent(context, { signal: new AbortController().signal, now: () => clock, modelInvoker: { invoke }, createModelInvoker,
+  createSelector: () => ({ connect: vi.fn(), tools: async () => [{ name: "commerce_get_product" }, { name: "commerce_get_discount_options" }], call, close: vi.fn() }) as never });
+ expect(result.kind).toBe("NO_VERIFIED_OFFER"); expect(invoke).toHaveBeenCalledTimes(2); expect(createModelInvoker).not.toHaveBeenCalled();
 });

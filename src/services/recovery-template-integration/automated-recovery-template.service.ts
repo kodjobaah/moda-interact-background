@@ -1,3 +1,4 @@
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
@@ -16,7 +17,7 @@ import type {
 import { recoveryTemplatePreparer } from "../recovery-template-preparation/recovery-template-preparer.service.js";
 import type {
   PreparedRecoveryTemplate, RecoveryTemplatePreparationInput, RecoveryPromotionTarget,
-  SourceBoundPromotionalProduct, TrustedOffer,
+  TrustedOffer,
 } from "../recovery-template-preparation/recovery-template.types.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import type { RecoveryPolicySnapshot } from "../recovery-policy.service.js";
@@ -232,10 +233,14 @@ export class AutomatedRecoveryTemplateService {
       });
       return { kind: "unavailable", reason };
     };
+    let evaluatedGeneration: number | undefined;
+    let evaluatedBasketFingerprint: string | undefined;
+    let evaluatedFallback: RecoveryTemplatePreparationInput["outreachEvaluation"];
     const prepareFallback = async (
       trigger: InitialFallbackTrigger,
       originatingError?: unknown,
     ): Promise<AutomatedTemplateResult> => {
+      if (!evaluatedFallback || evaluatedGeneration === undefined || evaluatedBasketFingerprint === undefined) return unavailable("INITIAL_EVALUATION_MISSING");
       const decision = classifyInitialOutreachFallback({
         kind: "OPTIONAL_ENRICHMENT_FAILURE",
         trigger,
@@ -249,6 +254,8 @@ export class AutomatedRecoveryTemplateService {
         recoveryId: input.recoveryId,
         outreachAttemptId: input.outreachAttemptId!,
         trigger: decision.trigger,
+        expectedGeneration: evaluatedGeneration, expectedBasketFingerprint: evaluatedBasketFingerprint,
+        outreachEvaluation: { ...evaluatedFallback, offerDecision: { kind: "NO_VERIFIED_OFFER", reasonCode: "VERIFIED_FALLBACK", discoveryIncomplete: false } },
       });
       try {
         this.log.warn("recovery_template.initial_fallback.degraded", {
@@ -369,18 +376,15 @@ export class AutomatedRecoveryTemplateService {
           return unavailable("PREVIOUS_OFFER_UNKNOWN");
         }
       }
-      let offerPresentation: RecoveryTemplatePreparationInput["offerPresentation"];
-      let promotionTarget: RecoveryPromotionTarget = "CHECKOUT";
+      let offerPresentation: RecoveryTemplatePreparationInput["offerPresentation"] = "NO_OFFER";
+      const promotionTarget: RecoveryPromotionTarget = "CHECKOUT";
       let verifiedOffer: TrustedOffer | undefined;
-      let promotionalProduct: SourceBoundPromotionalProduct | undefined;
       let productImageIdentity: { productId: string; variantId: string | null } | null = null;
-      let recoveryPromise: RecoveryOfferPromise;
+      let recoveryPromise: RecoveryOfferPromise = { kind: "NO_OFFER" };
       let admissionToken: CurrentOutreachOfferAdmissionToken | undefined;
+      let outreachEvaluation: RecoveryTemplatePreparationInput["outreachEvaluation"];
       if (input.stage === "INITIAL") {
         if (!input.outreachAttemptId) return unavailable("OUTREACH_ATTEMPT_UNAVAILABLE");
-        if (input.policy.recoveryOfferMode === "NONE") {
-          return await prepareFallback("MERCHANT_MODE_NONE");
-        }
         let selected: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>;
         try {
           selected = await this.initialOffers.resolve({
@@ -399,6 +403,18 @@ export class AutomatedRecoveryTemplateService {
           if (trigger) return await prepareFallback(trigger);
           return unavailable(result.reasonCode);
         }
+        if (result.kind === "ALTERNATIVE_PRODUCT_PROMOTION") return unavailable("OUTSIDE_CHECKOUT");
+        if (result.evaluation?.kind !== "ready") return unavailable("INITIAL_EVALUATION_MISSING");
+        const evaluatedDecision = result.evaluation.offerDecision;
+        if (result.evaluation.shopId !== input.shopId || result.evaluation.runId !== input.outreachAttemptId ||
+            evaluatedDecision.kind !== result.kind ||
+            result.kind === "CHECKOUT_DISCOUNT" && canonicalJson(evaluatedDecision) !== canonicalJson({ kind: result.kind,
+              offerSet: result.offerSet, members: result.members, group: result.group, discoveryIncomplete: result.discoveryIncomplete })) {
+          return unavailable("INITIAL_EVALUATION_MISMATCH");
+        }
+        outreachEvaluation = result.evaluation;
+        evaluatedFallback = result.evaluation;
+        evaluatedGeneration = context.basket.generation; evaluatedBasketFingerprint = context.basket.fingerprint;
         admissionToken = selected.admissionToken;
         const fingerprint = currentBasketFingerprint(recovery);
         if (context.shopId !== input.shopId || context.checkoutRecoveryId !== input.recoveryId ||
@@ -409,7 +425,7 @@ export class AutomatedRecoveryTemplateService {
         }
         if (!fingerprint || !sameCurrentOfferContext(context, currentContext) ||
             context.basket.generation !== recovery.generation || context.basket.fingerprint !== fingerprint) {
-          return await prepareFallback("DISCOUNT_REVALIDATION_UNAVAILABLE");
+          return unavailable("CURRENT_FACTS_CHANGED");
         }
         if (context.mode !== input.policy.recoveryOfferMode ||
             (context.mode === "FIXED" && context.authorisedDiscountIds[0] !== input.policy.fixedShopifyDiscountId)) {
@@ -467,43 +483,6 @@ export class AutomatedRecoveryTemplateService {
             description,
           };
           recoveryPromise = { kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet };
-        } else {
-          if (result.shopId !== input.shopId || result.checkoutRecoveryId !== input.recoveryId ||
-              result.outreachAttemptId !== input.outreachAttemptId) {
-            return unavailable("INITIAL_OFFER_IDENTITY_MISMATCH");
-          }
-          if (result.generation !== recovery.generation || result.fingerprint !== fingerprint ||
-              result.discoveryIncomplete ||
-              result.product.sourceTool !== "commerce_get_product" ||
-              result.product.authenticatedShopId !== input.shopId || result.product.shopId !== input.shopId ||
-              result.product.product.productId !== result.productId ||
-              result.product.product.variantId !== result.variantId) {
-            return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
-          }
-          promotionTarget = "ALTERNATIVE_PRODUCT";
-          offerPresentation = result.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
-          if (offerPresentation === "CODE_OFFER" && !result.code) {
-            return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
-          }
-          verifiedOffer = {
-            shopId: input.shopId, kind: offerPresentation, verified: true,
-            verifiedAt: now, expiresAt: null,
-            ...(result.code ? { code: result.code } : {}), description: result.description,
-          };
-          const product = result.product.product;
-          productImageIdentity = { productId: product.productId, variantId: product.variantId };
-          promotionalProduct = {
-            sourceTool: result.product.sourceTool,
-            authenticatedShopId: result.product.authenticatedShopId,
-            product: { productId: product.productId, variantId: product.variantId,
-              title: product.title, url: product.url },
-          };
-          recoveryPromise = {
-            kind: "ALTERNATIVE_PRODUCT_PROMOTION", promotionTarget: "ALTERNATIVE_PRODUCT",
-            offerId: result.offerId, providerDiscountId: result.providerDiscountId,
-            ...(result.method === "CODE" ? { method: "CODE", code: result.code! } : { method: "AUTOMATIC" }),
-            productId: result.productId, variantId: result.variantId, productTitle: result.product.product.title,
-          };
         }
       } else {
         const offerInput: ResolveRecoveryOfferInput = {
@@ -557,6 +536,7 @@ export class AutomatedRecoveryTemplateService {
           variantId: productImageIdentity.variantId,
         } : null;
       const prep: RecoveryTemplatePreparationInput = {
+        ...(outreachEvaluation ? { outreachEvaluation } : {}),
         shopId: input.shopId,
         senderWabaId: await this.senderWaba(),
         stage: input.stage,
@@ -575,16 +555,11 @@ export class AutomatedRecoveryTemplateService {
           approvedHosts: authorisedHosts(recovery.shop.domain),
         } : null,
         ...(verifiedOffer ? { verifiedOffer } : {}),
-        ...(promotionalProduct ? { promotionalProduct } : {}),
         productImage,
       };
       const prepared = await this.preparer.prepare(prep);
       if (prepared.outcome !== "prepared") {
-        if (input.stage === "INITIAL" && promotionTarget === "ALTERNATIVE_PRODUCT" &&
-            !["SENDER_UNAVAILABLE", "SENDER_MISMATCH", "SHOP_UNAVAILABLE", "IDENTITY_MISMATCH"]
-              .includes(prepared.reason)) {
-          return await prepareFallback("ALTERNATIVE_PRODUCT_UNVERIFIABLE");
-        }
+
         return unavailable(prepared.reason);
       }
       return { kind: "prepared", prepared, send: templateSendFields(prepared, recoveryPromise, promotionTarget),

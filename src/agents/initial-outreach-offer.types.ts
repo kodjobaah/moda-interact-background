@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { InitialOutreachEvaluationResultSchema } from "@modainteract/moda-interact-shared/commerce/outreach";
 import {
   CommerceToolOutputs,
   CommerceDiscountDetailsSchema,
@@ -27,6 +28,7 @@ const CheckoutLineSchema = z.strictObject({
   title: z.string().max(160),
   category: z.string().max(128).nullable(),
   quantity: z.number().int().positive().safe(),
+  checkoutUnitPrice: z.string().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/).nullable().optional(),
   lineTotalMinor: z.number().int().nonnegative().safe().nullable(),
 });
 
@@ -34,6 +36,7 @@ export const InitialOutreachAgentContextSchema = z.strictObject({
   shopId: z.string().min(1).max(191),
   checkoutRecoveryId: z.string().min(1).max(191),
   outreachAttemptId: z.string().min(1).max(191),
+  checkoutUrl: z.string().optional(),
   environment: CommerceEnvironmentSchema,
   platform: z.enum(["SHOPIFY", "WOOCOMMERCE"]),
   mode: z.enum(["NONE", "FIXED", "AI_BEST_APPLICABLE"]),
@@ -105,12 +108,6 @@ export const InitialOutreachModelChoiceSchema = z.discriminatedUnion("kind", [
       issue.addIssue({ code: "custom", path: ["offerIds"], message: "Offer IDs must be unique" });
     }
   }),
-  z.strictObject({
-    kind: z.literal("ALTERNATIVE_PRODUCT_PROMOTION"),
-    offerId: z.string().min(1).max(191),
-    productId: z.string().min(1).max(191),
-    variantId: z.string().min(1).max(191).nullable(),
-  }),
   z.strictObject({ kind: z.literal("NO_VERIFIED_OFFER") }),
 ]);
 
@@ -119,6 +116,7 @@ export type InitialOutreachModelChoice = z.infer<typeof InitialOutreachModelChoi
 export const InitialOutreachAgentResultSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("CHECKOUT_DISCOUNT"),
+    evaluation: InitialOutreachEvaluationResultSchema.optional(),
     offerSet: InitialOutreachCheckoutOfferSetSchema,
     members: z.array(z.strictObject({
       offerId: z.string().min(1),
@@ -161,6 +159,7 @@ export const InitialOutreachAgentResultSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({
     kind: z.literal("NO_VERIFIED_OFFER"),
+    evaluation: InitialOutreachEvaluationResultSchema.optional(),
     reason: z.string().min(1).max(96),
     discoveryIncomplete: z.boolean(),
   }),

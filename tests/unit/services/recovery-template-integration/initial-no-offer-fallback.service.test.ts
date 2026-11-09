@@ -1,3 +1,5 @@
+import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
+import { fingerprintRecoveryPricingBasket } from "../../../../src/services/recovery-pricing/price-comparison.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type LogRecord, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 const outbound = vi.hoisted(() => ({ inspectInitialOutreachAdmission: vi.fn() }));
@@ -30,7 +32,7 @@ const preparedTemplate: PreparedRecoveryTemplate = {
 
 function fixture(log = { warn: vi.fn(), error: vi.fn() }) {
   const recovery = {
-    id: "recovery-1", shopId: "shop-1", generation: 3, status: "DETECTED",
+    id: "recovery-1", shopId: "shop-1", generation: 3, status: "DETECTED", currency: "GBP",
     checkoutUrl, lineItems: [{ title: "Shoes", variantTitle: "Default Title", quantity: 2 }],
     lastExternalActivityAt: new Date(now.getTime() - 60_000), expiredAt: null,
     customer: { firstName: "Alice" },
@@ -56,7 +58,13 @@ function fixture(log = { warn: vi.fn(), error: vi.fn() }) {
     database as never, preparer as never, async () => "waba-1", () => now,
     log as never, lifetimeReader,
   );
-  return { service, database, preparer, log, lifetimeReader, recovery, attempt };
+  const proof = { expectedGeneration: recovery.generation,
+    expectedBasketFingerprint: fingerprintRecoveryPricingBasket({ shopId: recovery.shopId, checkoutRecoveryId: recovery.id,
+      generation: recovery.generation, currency: recovery.currency, lineItems: recovery.lineItems }),
+    outreachEvaluation: readyEvaluation(recovery.shopId, attempt.id, recovery.lineItems),
+  };
+  const verifiedService = { prepare: (input: Parameters<InitialNoOfferFallbackService["prepare"]>[0]) => service.prepare({ ...proof, ...input }) };
+  return { service: verifiedService, rawService: service, database, preparer, log, lifetimeReader, recovery, attempt };
 }
 
 beforeEach(() => {
@@ -197,4 +205,12 @@ describe("InitialNoOfferFallbackService", () => {
     expect(f.log.error).toHaveBeenCalledWith("recovery_template.initial_fallback.failed",
       expect.objectContaining({ sourceError: expect.objectContaining({ message: failure.message }), reason: "REQUIRED_STATE_UNAVAILABLE" }));
   });
+});
+
+it("rejects a changed checkout generation before rendering a verified fallback", async () => {
+ const f = fixture(); const expectedGeneration = f.recovery.generation;
+ const expectedBasketFingerprint = fingerprintRecoveryPricingBasket({ shopId: f.recovery.shopId, checkoutRecoveryId: f.recovery.id, generation: expectedGeneration, currency: f.recovery.currency, lineItems: f.recovery.lineItems });
+ f.recovery.generation++;
+ expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1", outreachAttemptId: "attempt-1", trigger: "NO_VERIFIED_PROMOTION", expectedGeneration, expectedBasketFingerprint, outreachEvaluation: readyEvaluation() })).toEqual({ kind: "BLOCKED", reason: "INVALID_ATTEMPT" });
+ expect(f.preparer.prepare).not.toHaveBeenCalled();
 });

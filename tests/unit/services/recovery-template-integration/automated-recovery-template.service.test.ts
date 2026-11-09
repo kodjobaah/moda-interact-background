@@ -1,3 +1,5 @@
+import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
+import { InitialOutreachEvaluationResultSchema } from "@modainteract/moda-interact-shared/commerce/outreach";
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type LogRecord, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -11,8 +13,6 @@ import { RecoveryTemplatePreparer } from
   "../../../../src/services/recovery-template-preparation/recovery-template-preparer.service.js";
 import { templateSendFields } from
   "../../../../src/services/recovery-template-integration/prepared-template-send.js";
-import { InitialOfferEnrichmentError } from
-  "../../../../src/services/recovery-offers/initial-outreach-offer-selection.service.js";
 import { CheckoutRecoveryLifetimePolicyUnavailableError } from
   "../../../../src/services/recovery-lifetime/checkout-recovery-lifetime.js";
 import type { AssignedVariantRow, RecoveryTemplateRepository } from
@@ -80,6 +80,7 @@ function fixture(recovery = recovered, log = { warn: vi.fn(), error: vi.fn() }) 
       select: { checkoutRecoveryLifetimeDays: true } });
     const prepared = await preparer.prepare({
       shopId: recovery.shopId, senderWabaId: "waba-1", stage: "INITIAL",
+      outreachEvaluation: readyEvaluation(recovery.shopId, "attempt-1", recovery.lineItems),
       promotionTarget: "CHECKOUT", offerPresentation: "NO_OFFER", conversationLanguageTag: null,
       merchantLanguageTag: recovery.shop.defaultLanguageTag,
       customerFirstName: recovery.customer.firstName,
@@ -116,14 +117,31 @@ function fixture(recovery = recovered, log = { warn: vi.fn(), error: vi.fn() }) 
       },
     } as never);
   };
+  // Only structurally valid explicit successful fixtures carry evaluation;
+  // malformed discounts and error/alternative results never acquire new proof.
+  const evaluatedInitialOffers = { resolve: async (request: never) => {
+    const selected = await initialOffers.resolve(request) as any;
+    if (selected.result.kind === "FAILURE" || selected.result.kind === "ALTERNATIVE_PRODUCT_PROMOTION" || selected.result.evaluation) return selected;
+    const evaluation = readyEvaluation(recovery.shopId, "attempt-1", recovery.lineItems.map(line => ({ ...line, selectedOptions: line.variantTitle ? [{ name: "Colour", value: line.variantTitle }] : [] })));
+    if (selected.result.kind === "CHECKOUT_DISCOUNT") {
+      const candidate = InitialOutreachEvaluationResultSchema.safeParse({ ...evaluation, offerDecision: {
+        kind: "CHECKOUT_DISCOUNT", offerSet: selected.result.offerSet,
+        members: selected.result.members.map((member: any) => ({ ...member, eligibility: { ...member.eligibility, offerId: member.offerId } })),
+        group: selected.result.group, discoveryIncomplete: selected.result.discoveryIncomplete,
+      } });
+      if (candidate.success && candidate.data.kind === "ready" && candidate.data.offerDecision.kind === "CHECKOUT_DISCOUNT") return { ...selected, result: { ...selected.result, members: candidate.data.offerDecision.members, evaluation: candidate.data } };
+      return selected;
+    }
+    return { ...selected, result: { ...selected.result, evaluation } };
+  } };
   const implementation = new AutomatedRecoveryTemplateService(offers as never,
     preparer as never, database as never, async () => "waba-1", () => now, log as never,
-    undefined, initialOffers as never, undefined, initialFallback as never);
+    undefined, evaluatedInitialOffers as never, undefined, initialFallback as never);
   const service = { prepare: (input: Parameters<typeof implementation.prepare>[0]) =>
     implementation.prepare(input.stage === "INITIAL" && !input.outreachAttemptId
       ? { ...input, outreachAttemptId: "attempt-1" } : input) };
   return { offers, preparer, database, logger: log, service, initialOffers, initialFallback,
-    context, setCheckoutDecision };
+    context, setCheckoutDecision, evaluatedInitialOffers };
 }
 
 function stableJson(value: unknown): string {
@@ -186,10 +204,8 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     expect(result.send).toMatchObject({ bodyParameters: ["2 × Shoes (Blue)"], recoveryPromise: { kind: "NO_OFFER" },
       templateRegistration: { variantId: "variant-1", shopId: "shop-1" } });
     expect(f.offers.resolve).not.toHaveBeenCalled();
-    expect(f.initialOffers.resolve).not.toHaveBeenCalled();
-    expect(f.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      trigger: "MERCHANT_MODE_NONE",
-    }));
+    expect(f.initialOffers.resolve).toHaveBeenCalledOnce();
+    expect(f.initialFallback.prepare).not.toHaveBeenCalled();
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       stage: "INITIAL", offerPresentation: "NO_OFFER", conversationLanguageTag: null,
       merchantLanguageTag: "en-GB", senderWabaId: "waba-1", customerFirstName: "Alice",
@@ -326,7 +342,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       ], f.logger);
       const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
         f.database as never, async () => "waba-1", () => now, f.logger as never,
-        undefined, f.initialOffers as never);
+        undefined, f.evaluatedInitialOffers as never);
 
       const result = await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
         stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
@@ -374,7 +390,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const realPreparer = createRealPreparer([approvedCodeVariant("offer.code")], f.logger);
     const service = new AutomatedRecoveryTemplateService(f.offers as never, realPreparer,
       f.database as never, async () => "waba-1", () => now, f.logger as never,
-      undefined, f.initialOffers as never);
+      undefined, f.evaluatedInitialOffers as never);
 
     expect(await service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
@@ -405,19 +421,9 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const prepared = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
       conversationLanguageTag: null });
-    expect(prepared.kind).toBe("prepared");
-    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      promotionTarget: "ALTERNATIVE_PRODUCT",
-      promotionalProduct: { sourceTool: "commerce_get_product", authenticatedShopId: "shop-1",
-        product: { productId: "product-2", variantId: "variant-2", title: "Matching scarf",
-          url: "https://shop.example/products/scarf" } },
-    }));
-    if (prepared.kind === "prepared") expect(prepared.send.recoveryPromise).toMatchObject({
-      kind: "ALTERNATIVE_PRODUCT_PROMOTION", promotionTarget: "ALTERNATIVE_PRODUCT",
-      productId: "product-2", variantId: "variant-2",
-      providerDiscountId: "provider-offer-1", productTitle: "Matching scarf",
-    });
-    if (prepared.kind === "prepared") expect(prepared.send.recoveryPromise).not.toHaveProperty("code");
+    expect(prepared).toEqual({ kind: "unavailable", reason: "OUTSIDE_CHECKOUT" });
+    expect(f.preparer.prepare).not.toHaveBeenCalled();
+    expect(f.initialFallback.prepare).not.toHaveBeenCalled();
 
     const crossShop = fixture();
     crossShop.context.mode = "AI_BEST_APPLICABLE";
@@ -428,14 +434,9 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const crossShopResult = await crossShop.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
       conversationLanguageTag: null });
-    expect(crossShopResult.kind).toBe("prepared");
-    expect(crossShop.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      trigger: "ALTERNATIVE_PRODUCT_UNVERIFIABLE",
-    }));
-    expect(crossShop.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      offerPresentation: "NO_OFFER",
-    }));
-    expect(crossShop.preparer.prepare.mock.calls[0]?.[0]).not.toHaveProperty("promotionalProduct");
+    expect(crossShopResult).toEqual({ kind: "unavailable", reason: "OUTSIDE_CHECKOUT" });
+    expect(crossShop.initialFallback.prepare).not.toHaveBeenCalled();
+    expect(crossShop.preparer.prepare).not.toHaveBeenCalled();
   });
 
   it("uses conversation language and a persisted sent promise on sequence two", async () => {
@@ -577,13 +578,20 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
       conversationLanguageTag: null });
 
-    expect(selected.kind).toBe("prepared");
     expect(f.initialOffers.resolve).toHaveBeenCalledOnce();
-    expect(f.initialFallback.prepare).toHaveBeenCalledOnce();
-    expect(f.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({ trigger }));
-    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({ offerPresentation: "NO_OFFER" }));
-    expect(f.logger.warn).toHaveBeenCalledWith("recovery_template.initial_fallback.degraded",
-      expect.objectContaining({ trigger, outcome: "prepared", shopId: "shop-1", recoveryId: "recovery-1" }));
+    if (result.kind === "FAILURE") {
+      // An error without successful current product evidence cannot authorize
+      // even an otherwise configured neutral template or reserve/send work.
+      expect(selected).toEqual({ kind: "unavailable", reason: "INITIAL_EVALUATION_MISSING" });
+      expect(f.initialFallback.prepare).not.toHaveBeenCalled();
+      expect(f.preparer.prepare).not.toHaveBeenCalled();
+    } else {
+      expect(selected.kind).toBe("prepared");
+      expect(f.initialFallback.prepare).toHaveBeenCalledOnce();
+      expect(f.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({ trigger, outreachEvaluation: expect.objectContaining({ kind: "ready" }) }));
+      expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({ offerPresentation: "NO_OFFER" }));
+      expect(f.logger.warn).toHaveBeenCalledWith("recovery_template.initial_fallback.degraded", expect.objectContaining({ trigger, outcome: "prepared", shopId: "shop-1", recoveryId: "recovery-1" }));
+    }
   });
 
   it.each([
@@ -628,10 +636,9 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const fallback = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
       conversationLanguageTag: null });
-    expect(fallback.kind).toBe("prepared");
-    expect(f.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      trigger: "DISCOUNT_REVALIDATION_UNAVAILABLE",
-    }));
+    expect(fallback).toEqual({ kind: "unavailable", reason: "CURRENT_FACTS_CHANGED" });
+    expect(f.initialFallback.prepare).not.toHaveBeenCalled();
+    expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
   it("rejects changed BG016 price evidence observed after BG010 before template preparation", async () => {
@@ -659,10 +666,9 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const fallback = await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
       conversationLanguageTag: null });
-    expect(fallback.kind).toBe("prepared");
-    expect(f.initialFallback.prepare).toHaveBeenCalledWith(expect.objectContaining({
-      trigger: "DISCOUNT_REVALIDATION_UNAVAILABLE",
-    }));
+    expect(fallback).toEqual({ kind: "unavailable", reason: "CURRENT_FACTS_CHANGED" });
+    expect(f.initialFallback.prepare).not.toHaveBeenCalled();
+    expect(f.preparer.prepare).not.toHaveBeenCalled();
   });
 
   it("treats incomplete media as typed unavailability, without reserving or sending", async () => {
@@ -725,10 +731,9 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
 
   it("keeps a required fallback exception as the thrown cause instead of substituting an optional offer error", async () => {
     const f = fixture();
-    const optionalFailure = new Error("optional MCP detail");
     const requiredFailure = new Error("required fallback database detail");
     f.context.mode = "AI_BEST_APPLICABLE";
-    f.initialOffers.resolve.mockRejectedValueOnce(new InitialOfferEnrichmentError("MCP_UNAVAILABLE", optionalFailure));
+    f.initialOffers.resolve.mockResolvedValueOnce({ context: f.context, currentContext: f.context, signal: new AbortController().signal, result: { kind: "NO_VERIFIED_OFFER", reason: "MCP_UNAVAILABLE", discoveryIncomplete: true } } as never);
     f.initialFallback.prepare.mockRejectedValueOnce(requiredFailure);
 
     await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
@@ -744,9 +749,8 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test",
       sink: (record) => records.push(JSON.parse(JSON.stringify(record)) as LogRecord) });
     const f = fixture(recovered, logger as Pick<StructuredLogger, "warn" | "error">);
-    const source = Object.assign(new Error("MCP unavailable for +447000111222"), { code: "ECONNRESET" });
     f.context.mode = "AI_BEST_APPLICABLE";
-    f.initialOffers.resolve.mockRejectedValueOnce(new InitialOfferEnrichmentError("MCP_UNAVAILABLE", source));
+    f.initialOffers.resolve.mockResolvedValueOnce({ context: f.context, currentContext: f.context, signal: new AbortController().signal, result: { kind: "NO_VERIFIED_OFFER", reason: "MCP_UNAVAILABLE", discoveryIncomplete: true } } as never);
 
     await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
       stage: "INITIAL", policy: { ...policy, recoveryOfferMode: "AI_BEST_APPLICABLE" } as never,
@@ -755,8 +759,7 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
     expect(records).toContainEqual(expect.objectContaining({
       event: "recovery_template.initial_fallback.degraded", level: "warn",
       data: expect.objectContaining({
-        trigger: "MCP_UNAVAILABLE", outcome: "prepared",
-        sourceError: expect.objectContaining({ message: "MCP unavailable for [REDACTED_PHONE]", code: "ECONNRESET" }),
+        trigger: "DISCOUNT_REVALIDATION_UNAVAILABLE", outcome: "prepared",
       }),
     }));
     expect(JSON.stringify(records)).not.toContain("+447000111222");

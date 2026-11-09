@@ -97,6 +97,7 @@ function projectLine(raw: unknown, index: number, currency: string) {
     title,
     category,
     quantity,
+    checkoutUnitPrice: typeof line.price === "string" && MONEY.test(line.price) ? line.price : null,
     lineTotalMinor: lineTotalMinor(line, currency),
   };
 }
@@ -168,7 +169,7 @@ export class InitialOutreachAgentContextService {
     const [recovery, attempt, shop, configurations] = await Promise.all([
       this.dependencies.db.checkoutRecovery.findFirst({
         where: { id: input.checkoutRecoveryId, shopId: input.shopId },
-        select: { id: true, shopId: true, generation: true, currency: true, totalPrice: true, lineItems: true, status: true },
+        select: { id: true, shopId: true, generation: true, currency: true, totalPrice: true, lineItems: true, status: true, checkoutUrl: true },
       }),
       this.dependencies.db.recoveryOutreachAttempt.findFirst({
         where: { id: input.outreachAttemptId, checkoutRecoveryId: input.checkoutRecoveryId },
@@ -253,6 +254,7 @@ export class InitialOutreachAgentContextService {
       shopId: input.shopId,
       checkoutRecoveryId: recovery.id,
       outreachAttemptId: attempt.id,
+      ...(recovery.checkoutUrl ? { checkoutUrl: recovery.checkoutUrl } : {}),
       environment: this.dependencies.environment,
       platform: shop.platform,
       mode,

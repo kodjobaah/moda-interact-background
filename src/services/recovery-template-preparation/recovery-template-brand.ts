@@ -1,3 +1,4 @@
+import type { PreparedOutreachBrand, PreparedOutreachBrandMediaItem } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type {
   BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
   RecoveryTemplateHeaderMediaRole,
@@ -105,6 +106,19 @@ export class RecoveryVariableResolver {
   private brand(): Promise<ShopBrandRow | null> {
     this.brandRead ??= this.readBrand(this.input.shopId);
     return this.brandRead;
+  }
+
+  async preparedBrand(): Promise<PreparedOutreachBrand> {
+    const saved = await this.brand();
+    return { shopId: this.input.shopId, brandName: saved?.brandName ?? null,
+      logoAltText: saved?.logoAltText ?? null, logoWidth: saved?.logoWidth ?? null,
+      logoHeight: saved?.logoHeight ?? null, squareLogoAltText: saved?.squareLogoAltText ?? null };
+  }
+
+  async preparedBrandMedia(role: BrandMediaRole): Promise<PreparedOutreachBrandMediaItem> {
+    // readyMedia checks the actual host-owned derivative's tenant, role,
+    // status, kind and configured host before this immutable projection.
+    return { shopId: this.input.shopId, role, status: "READY", kind: "R2_DERIVATIVE", httpsUrl: await this.readyMedia(role) };
   }
 
   checkout(): string {

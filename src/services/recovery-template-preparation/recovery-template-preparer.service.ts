@@ -1,3 +1,4 @@
+import { renderInitialOutreachPreview, InitialOutreachRenderInputSchema, type InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { whatsAppService } from "../whatsapp.service.js";
@@ -72,6 +73,7 @@ export class RecoveryTemplatePreparer {
           (input.stage === "INITIAL" && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(input.promotionTarget)))) {
         return unavailable("INVALID_REQUEST");
       }
+      if (input.stage === "INITIAL" && input.promotionTarget !== "CHECKOUT") return unavailable("OUTSIDE_CHECKOUT");
       purpose = purposeFor(input.stage, input.offerPresentation);
       // This trust check is required even though the caller passes a resolved
       // WABA. No request-supplied string can select another provider account.
@@ -106,8 +108,9 @@ export class RecoveryTemplatePreparer {
       let productMedia: PreparedOutreachProductMedia | undefined;
       if (selected.outcome === "selected" && input.productImage) {
         productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
-        if (productMedia.result.kind === "READY") selectedFormat = "IMAGE";
-        else selected = { outcome: "unavailable", reason: "NO_APPROVED_ASSIGNMENT" };
+        // Retain the approved IMAGE assignment until its mandatory BODY
+        // evidence has been validated. Only header availability may select TEXT.
+        selectedFormat = "IMAGE";
       }
       if (selected.outcome !== "selected") {
         if (selected.reason === "IDENTITY_MISMATCH") return unavailable(selected.reason);
@@ -136,12 +139,64 @@ export class RecoveryTemplatePreparer {
         readyProduct?.result.kind === "READY" ? readyProduct.result.publicImageUrl : undefined,
         readyProduct?.result.kind === "READY" ? readyProduct.validateBeforeBinding : undefined,
       );
+      let renderedText: string | undefined;
+      let headerAvailabilityFailure = false;
+      const prepareSelected = async (readyProduct?: PreparedOutreachProductMedia) => {
+        const variables = variablesFor(readyProduct);
+        if (input.stage !== "INITIAL") return prepareFrozenComponents({ registration, variables });
+        if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== input.shopId) throw new BindingUnavailable("INVALID_REQUEST");
+        if (!input.checkoutItems || input.checkoutItems.shopId !== input.shopId || !Array.isArray(input.checkoutItems.lineItems) || input.checkoutItems.lineItems.length === 0) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        if (input.checkoutItems.lineItems.length !== input.outreachEvaluation.lines.length || input.checkoutItems.lineItems.some((raw, index) => {
+          const line = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+          const verified = input.outreachEvaluation!.lines[index]!;
+          return !line || !Number.isSafeInteger(line.quantity) || Number(line.quantity) <= 0 || line.quantity !== verified.quantity ||
+            typeof line.productId === "string" && line.productId !== verified.productId ||
+            (typeof line.variantId === "string" || line.variantId === null) && line.variantId !== verified.variantId;
+        })) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
+        // Preserve host-owned mandatory saved-brand/media validation. Shared's
+        // generic shopName cannot supply a missing required semantic binding.
+        const bindings = registration.parameterBindingsSnapshot as { header?: { variable: string }[]; body?: { variable: string }[] };
+        for (const binding of [...(bindings.header ?? []), ...(bindings.body ?? [])]) {
+          if (binding.variable !== "checkout.itemsSummary") await variables.resolve(binding.variable as Parameters<typeof variables.resolve>[0]);
+        }
+        const checkoutUrl = variables.checkout();
+        if (!URL.canParse(checkoutUrl) || new URL(checkoutUrl).protocol !== "https:") throw new BindingUnavailable("CHECKOUT_UNTRUSTED");
+        const preparedBrand = await variables.preparedBrand();
+        const textKeys = new Set([...(bindings.header ?? []), ...(bindings.body ?? [])].map(binding => binding.variable));
+        const preparedBrandMedia = {
+          logo: textKeys.has("shopBrand.logoUrl") ? await variables.preparedBrandMedia("LOGO") : null,
+          squareLogo: textKeys.has("shopBrand.squareLogoUrl") ? await variables.preparedBrandMedia("SQUARE_LOGO") : null,
+          coverImage: textKeys.has("shopBrand.coverImageUrl") ? await variables.preparedBrandMedia("COVER_IMAGE") : null,
+        };
+        const role = (registration.parameterBindingsSnapshot as { headerMediaRole?: "LOGO" | "SQUARE_LOGO" | "COVER_IMAGE" | "CHECKOUT_PRODUCT" }).headerMediaRole;
+        let headerMedia: InitialOutreachRenderInput["headerMedia"] = null;
+        try {
+          if (selectedFormat === "IMAGE" && role) headerMedia = { shopId: input.shopId, role,
+            status: "READY", kind: "R2_DERIVATIVE", httpsUrl: await variables.imageHeader(role) };
+        } catch (error) {
+          headerAvailabilityFailure = error instanceof BindingUnavailable && error.reason === "MEDIA_NOT_READY";
+          throw error;
+        }
+        const projection = JSON.parse(JSON.stringify(selectedAssignment));
+        const renderInput = { schemaVersion: 1, evaluation: input.outreachEvaluation,
+          preparedProjection: projection as InitialOutreachRenderInput["preparedProjection"],
+          preparedBrand, preparedBrandMedia,
+          variables: { shopName: await variables.resolve("shop.name"), customerFirstName: input.customerFirstName ?? null,
+            checkoutUrl, shopCategory: JSON.stringify(registration.parameterBindingsSnapshot).includes("shop.categoryName")
+              ? await variables.resolve("shop.categoryName") : null }, headerMedia } as const;
+        const checkedInput = InitialOutreachRenderInputSchema.safeParse(renderInput);
+        if (!checkedInput.success) throw new BindingUnavailable(checkedInput.error.issues.some(issue => issue.path.includes("componentsSnapshot") || issue.path.includes("parameterBindingsSnapshot")) ? "BINDINGS_INVALID" : "INVALID_REQUEST");
+        const rendered = renderInitialOutreachPreview(checkedInput.data);
+        if (rendered.kind !== "ready") throw new BindingUnavailable(rendered.reasonCode);
+        renderedText = rendered.renderedText;
+        return { components: rendered.parameters, bindingFingerprint: rendered.templateProvenance.bindingFingerprint };
+      };
       let preparedBindings: Awaited<ReturnType<typeof prepareFrozenComponents>>;
       try {
-        preparedBindings = await prepareFrozenComponents({ registration, variables: variablesFor(productMedia) });
+        preparedBindings = await prepareSelected(productMedia);
       } catch (error) {
         if (selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
-            error.reason !== "MEDIA_NOT_READY") throw error;
+            error.reason !== "MEDIA_NOT_READY" || (input.stage === "INITIAL" && !headerAvailabilityFailure)) throw error;
         const textFallback = select("TEXT");
         if (textFallback.outcome !== "selected") return unavailable(textFallback.reason);
         selectedAssignment = textFallback.value;
@@ -151,9 +206,10 @@ export class RecoveryTemplatePreparer {
           stage: input.stage, parameterBindingsSnapshot: registration.parameterBindingsSnapshot,
         });
         if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
-        preparedBindings = await prepareFrozenComponents({ registration, variables: variablesFor(undefined) });
+        preparedBindings = await prepareSelected(undefined);
       }
       return {
+        ...(renderedText !== undefined ? { renderedText } : {}),
         outcome: "prepared", shopId: input.shopId, senderWabaId: configuredSender,
         purpose, variantId: selectedAssignment.variant.id, registrationId: registration.id,
         definitionId: registration.locale.definition.id,
