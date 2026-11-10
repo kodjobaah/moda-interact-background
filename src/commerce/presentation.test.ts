@@ -59,3 +59,11 @@ it.each([{status:'KNOWN',quantity:0,scope:'VARIANT'}, {status:'KNOWN',quantity:2
  if(result.kind==='ready') { expect(result.body).not.toContain('999'); if(stock.status==='KNOWN') expect(result.body).toContain(String(stock.quantity)); }
  expect(input.readProduct).toHaveBeenCalledTimes(1);
 });
+it('preserves the exact shared selection conflict reason before refreshing products',async()=>{
+ const input=setup({productDetailSelections:[pair],productRecommendations:[pair]});
+ await expect(prepareProductFactsPresentation(input)).rejects.toMatchObject({code:'RECOMMENDATION_FACT_SELECTION_CONFLICT'});expect(input.readProduct).not.toHaveBeenCalled();
+});
+it('accepts empty optional recommendation fields for a detail answer',async()=>{
+ const input=setup({productDetailSelections:[pair],productRecommendations:[],productRecommendationVersion:'1'});
+ expect(await prepareProductFactsPresentation(input)).toMatchObject({disposition:'PRODUCT_DETAILS'});
+});

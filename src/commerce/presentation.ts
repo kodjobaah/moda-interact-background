@@ -1,3 +1,4 @@
+import { normalizeCommerceProductSelections, commerceProductSelectionConflict } from '@modainteract/moda-interact-shared/commerce';
 import { verifyCommerceAnswerPresentationSelection } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type { ModaSupportedLanguageTag } from "@modainteract/moda-interact-shared/internationalization";
@@ -15,6 +16,8 @@ export async function prepareProductFactsPresentation(input: {
  consumeBudget: () => void; assertCurrent: () => void | Promise<void>;
  brandName: string | null; locale: ModaSupportedLanguageTag; storeUrl: string;
 }): Promise<CommerceVerifiedPresentation | null> {
+ input={...input,envelope:{...input.envelope,details:normalizeCommerceProductSelections(input.envelope.details)}};
+ const conflict=commerceProductSelectionConflict(input.envelope.details);if(conflict)throw new PresentationVerificationError(conflict);
  if (input.envelope.answerKind === "REFER_TO_STORE") return null;
  const selection = verifyCommerceAnswerPresentationSelection(Object.fromEntries(
   ["productOptionSelections", "productDetailSelections", "responseDisposition", "shippingInformationSelection"]
