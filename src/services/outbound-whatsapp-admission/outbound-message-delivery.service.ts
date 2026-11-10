@@ -1,3 +1,6 @@
+import { Prisma } from "@prisma/client";
+import { ConversationDeliveryPlanSchema, type ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { MessageStatus } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -79,7 +82,14 @@ export class OutboundMessageDeliveryService {
     return this.provider.getProviderAccountId();
   }
 
-  async sendPreparedText({
+  async sendPreparedText(input: AdmittedOutbound & {
+    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string;
+    expectedControlRevision?: number; expectedInboundVersion?: number; productContextUpdate?: CommerceConversationProductContext;
+  }): Promise<OutboundAdmissionResult> {
+    return this.sendPreparedConversation({...input});
+  }
+
+  async sendPreparedConversation({
     messageId,
     shopId,
     conversationId,
@@ -92,6 +102,8 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision,
     expectedInboundVersion,
     productContextUpdate,
+    deliveryPlan,
+    presentationReceipt,
   }: AdmittedOutbound & {
     to: string;
     text: string;
@@ -100,8 +112,13 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
     productContextUpdate?: CommerceConversationProductContext;
+    deliveryPlan?: ConversationDeliveryPlan;
+    presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
     const outboundText = terminal ? TERMINAL_MESSAGE : text;
+    const plan = deliveryPlan ? ConversationDeliveryPlanSchema.parse(deliveryPlan) : undefined;
+    if (plan && (expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt)))
+      return {kind: "suppressed", reason: "conversation-invalid"};
     // Check the durable admission before any failure/usage side effects. An
     // already-admitted message must never be re-prepared or dispatched again.
     if (await this.hasCompletedPreparation(messageId))
@@ -116,7 +133,7 @@ export class OutboundMessageDeliveryService {
     });
     if (suppression) return suppression;
 
-    if (!(await this.prepareUnadmittedContent(messageId, outboundText)))
+    if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId})))
       return { kind: "suppressed", reason: "duplicate" };
     if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
       await this.failPrepared(messageId);
@@ -124,7 +141,8 @@ export class OutboundMessageDeliveryService {
     }
     const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to, expectedContent: outboundText,
-      executionScope, deliveryKind: "TEXT",
+      executionScope, deliveryKind: plan?.kind ?? "TEXT",
+      ...(plan ? {deliveryPlan: plan, presentationReceipt} : {}),
       ...(productContextUpdate ? { productContextUpdate } : {}),
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
       ...(expectedInboundVersion === undefined ? {} : { expectedInboundVersion }),
@@ -133,7 +151,8 @@ export class OutboundMessageDeliveryService {
 
     let result: Awaited<ReturnType<typeof this.provider.sendWhatsAppText>>;
     try {
-      result = await this.provider.sendWhatsAppText({
+      result = plan?.kind === "IMAGE" ? await this.provider.sendWhatsAppImage({to, link: plan.image.publicUrl,
+        caption: plan.body, ...(replyToProviderMessageId ? {replyToProviderMessageId} : {})}) : await this.provider.sendWhatsAppText({
         to,
         text: outboundText,
         ...(previewUrl !== undefined ? { previewUrl } : {}),
@@ -380,13 +399,29 @@ export class OutboundMessageDeliveryService {
    * Nullable unique fields belong in a nested WhereInput, not at the top level
    * of Prisma's WhereUniqueInput (which rejects null for providerDispatchKey).
    */
-  private async prepareUnadmittedContent(messageId: string, content: string): Promise<boolean> {
+  private async prepareUnadmittedContent(messageId: string, content: string, plan?: ConversationDeliveryPlan, scope?: {shopId: string; conversationId: string}): Promise<boolean> {
+    if (plan) return this.database.$transaction(async tx => {
+      const rows = await tx.$queryRawUnsafe<{content: string; outboundPresentation: unknown; senderType: string; status: string; providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null}[]>(`
+        SELECT "content","outboundPresentation","senderType"::text,"status"::text,"providerDispatchKey","providerDispatchAdmittedAt"
+        FROM "whatsapp"."ConversationMessage" m
+        WHERE m."id"=$1 AND m."conversationId"=$2 AND m."direction"='OUTBOUND'
+          AND EXISTS (SELECT 1 FROM "whatsapp"."Conversation" c
+            LEFT JOIN "commerce"."CheckoutRecovery" r ON r."id"=c."checkoutRecoveryId"
+            WHERE c."id"=m."conversationId" AND COALESCE(r."shopId",c."shopId")=$3
+              AND (c."shopId" IS NULL OR c."shopId"=$3)) FOR UPDATE`, messageId, scope?.conversationId, scope?.shopId);
+      const row = rows[0];
+      if (!row || row.senderType !== "AGENT" || row.status !== "PENDING" || row.providerDispatchKey || row.providerDispatchAdmittedAt) return false;
+      if (row.outboundPresentation !== null && (!sameConversationPlan(row.outboundPresentation, plan) || row.content !== content)) return false;
+      await tx.conversationMessage.update({where: {id: messageId}, data: {content, outboundPresentation: plan as unknown as Prisma.InputJsonValue}});
+      return true;
+    });
     try {
       await this.database.conversationMessage.update({
         where: {
           id: messageId,
           AND: {
             status: MessageStatus.PENDING,
+            outboundPresentation: { equals: Prisma.DbNull },
             providerDispatchKey: null,
             providerDispatchAdmittedAt: null,
           },
@@ -445,7 +480,8 @@ export class OutboundMessageDeliveryService {
     productContextUpdate?: CommerceConversationProductContext;
     template?: { name: string; languageCode: string;
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
-    deliveryKind: "TEXT" | "TEMPLATE";
+    deliveryKind: "TEXT" | "IMAGE" | "TEMPLATE";
+    deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
     initialOutreach?: NonNullable<DispatchInput["initialOutreach"]> & { recoveryId: string };
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
@@ -466,6 +502,7 @@ export class OutboundMessageDeliveryService {
         shopId: input.shopId, conversationId: input.conversationId,
         messageId: input.messageId, recipient: input.to,
         expectedContent: input.expectedContent,
+        ...(input.deliveryPlan ? {deliveryPlan: input.deliveryPlan, presentationReceipt: input.presentationReceipt, expectedControlRevision: input.expectedControlRevision} : {}),
         ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
       });
       if (permit.kind === "admitted") return null;
@@ -515,6 +552,7 @@ export class OutboundMessageDeliveryService {
       ...(input.productContextUpdate ? { productContextUpdate: input.productContextUpdate, expectedContent: input.expectedContent } : {}),
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
+      ...(input.deliveryPlan ? {deliveryPlan: input.deliveryPlan, presentationReceipt: input.presentationReceipt, expectedContent: input.expectedContent} : {}),
       ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
     });
     if (permit.kind === "admitted") return null;

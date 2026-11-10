@@ -241,3 +241,11 @@ it("does not send a model result after HUMAN takeover and subsequent AI resume",
     conversationId: "conversation-1", expectedRevision: 2, phase: "after-await", shopId: "shop-1",
   });
 });
+
+it('does not dispatch or replace context when media composition outlives the host turn signal',async()=>{
+ const test=harness();const controller=new AbortController();
+ test.runAgent.mockResolvedValue({replyText:'A grounded tree answer',commercePresentation:{signal:controller.signal}});
+ test.aiWrapper.renderConversationResponse.mockImplementation(async()=>{controller.abort();return {kind:'no-wrapper',reason:'NOT_CONFIGURED',body:'A grounded tree answer',deliveryPlan:{schemaVersion:1,kind:'TEXT',body:'A grounded tree answer'}};});
+ await test.processor.process({conversationId:'conversation-1',observedVersion:3});
+ expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith('message-1');
+});

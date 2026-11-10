@@ -1,3 +1,5 @@
+import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
+import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { commitAdmittedProductContext, ProductContextAdmissionError } from "../../commerce/product-context-repository.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
@@ -40,7 +42,8 @@ export type DispatchInput = {
   /** Provider-verified BEFORE this SQL transaction, never fetched inside it. */
   proactive?: RecoveryMarketingPermit;
   /** Explicitly distinguish approved Meta templates from automated free text. */
-  deliveryKind?: "TEXT" | "TEMPLATE";
+  deliveryKind?: "TEXT" | "IMAGE" | "TEMPLATE";
+  deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
   initialOutreach?: {
     outreachAttemptId: string;
     idempotencyKey: string;
@@ -69,6 +72,9 @@ export class OutboundSendFenceService {
   }
 
   async admitFinalSend(input: DispatchInput): Promise<DispatchPermit> {
+    if ((input.deliveryKind === "IMAGE" && !input.deliveryPlan) ||
+        (input.deliveryPlan && (input.senderType !== "AGENT" || input.deliveryKind !== input.deliveryPlan.kind)))
+      return {kind: "suppressed", reason: "invalid-presentation"};
     if (input.senderType === "HUMAN" && (!input.commandId || !input.leaseToken))
       return { kind: "suppressed", reason: "invalid-lease" };
     if (input.senderType !== "HUMAN" && !input.messageId)
@@ -77,7 +83,7 @@ export class OutboundSendFenceService {
         input.deliveryKind !== "TEMPLATE" || !input.proactive ||
         input.initialOutreach.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}`))
       return { kind: "suppressed", reason: "invalid-initial-scope" };
-    if (input.productContextUpdate && (input.senderType !== 'AGENT' || input.deliveryKind !== 'TEXT' ||
+    if (input.productContextUpdate && (input.senderType !== 'AGENT' || !['TEXT', 'IMAGE'].includes(input.deliveryKind ?? '') ||
         input.expectedInboundVersion === undefined || !input.expectedContent))
       return { kind: 'suppressed', reason: 'product-context-invalid-scope' };
     const durableEligibility = this.durableEligibility;
@@ -323,6 +329,15 @@ export class OutboundSendFenceService {
           admittedAt: cmd[0]!.providerDispatchAdmittedAt,
           ...(command!.kind === "HUMAN_TEXT" ? { messageContent: admittedMessage[0]!.content } : {}),
         } as const;
+      }
+      if (input.deliveryPlan) {
+        const stored = await rows<{content: string; outboundPresentation: unknown}>(tx, `
+          SELECT "content","outboundPresentation" FROM "whatsapp"."ConversationMessage"
+          WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"='AGENT' FOR UPDATE`, messageId, context.id);
+        if (!matchesConversationReceipt(input.presentationReceipt, {...input, messageId}) || stored.length !== 1 || !sameConversationPlan(stored[0]!.outboundPresentation, input.deliveryPlan) ||
+            !validConversationPlan(input.deliveryPlan, stored[0]!.content, context.shopId, input.presentationReceipt) ||
+            input.expectedContent !== stored[0]!.content)
+          return {kind: "suppressed", reason: "invalid-presentation"} as const;
       }
       const message = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
         UPDATE "whatsapp"."ConversationMessage"

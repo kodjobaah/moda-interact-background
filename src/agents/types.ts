@@ -1,4 +1,3 @@
-import type { CommerceVerifiedPresentation } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type { CommerceConversationProductContext, CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type {
   CheckoutRecoveryStatus,
@@ -47,6 +46,6 @@ export interface RecoveryAgentContext {
 
 export type CommerceAgentResult = Omit<CommerceFinalResponse, "details"> & {
   hostComposedReplyCandidates?: readonly string[];
-  commercePresentation?: { envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; productPairs?: readonly { productId: string; variantId: string | null }[] };
+  commercePresentation?: import("../services/conversation-wrappers/contracts.js").CommercePresentationInput;
   productContextUpdate?: CommerceConversationProductContext;
 };

@@ -16,7 +16,7 @@ export function registerRecommendationHostTests() {
       expect(f.observations.filter((call) => call.method === "tools/call")).toHaveLength(0);
     });
 
-    it("replaces model prose with an exact refreshed product answer", async () => {
+    it("preserves agent prose with exact freshly verified product presentation", async () => {
       const descriptor = f.active.capabilities[0]!.toolDescriptor;
       descriptor.name = "commerce_get_product";
       descriptor.description = "Read a current product and variant.";
@@ -56,22 +56,15 @@ export function registerRecommendationHostTests() {
           expect(request.tools.map((tool) => tool.name)).toContain("commerce_get_product");
           return { calls: [{ name: "commerce_get_product", arguments: { productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" } }], outputTokens: 10 };
         }
-        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "MODEL PROSE MUST BE DISCARDED",
+        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "The blue linen shirt is available for you.",
           details: { productRecommendationVersion: "1", productRecommendations: [{ scope: "PRODUCT_ONLY",
             basketLineId: null, productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", quantity: 1,
             promotionKind: "NONE", offerIds: [] }] } });
       });
-      expect(result.replyText).toBe([
-        "For a proposed purchase of 1:",
-        "Blue linen shirt",
-        "Current listed price: £24.00",
-        "View product: https://fixture.myshopify.com/products/blue-linen-shirt",
-      ].join("\n"));
-      expect(result.replyText).not.toContain("MODEL PROSE");
-      expect(result.hostComposedReplyCandidates).toEqual([
-        result.replyText,
-        "Store: https://fixture.myshopify.com",
-      ]);
+      expect(result.replyText).toBe("The blue linen shirt is available for you.");
+      expect(result.commercePresentation?.verified.products).toMatchObject([{title:"Blue linen shirt"}]);
+      expect(result.commercePresentation?.verifiedProducts?.products).toMatchObject([{productId:"gid://shopify/Product/101",variantId:"gid://shopify/ProductVariant/101"}]);
+      expect(result).not.toHaveProperty("hostComposedReplyCandidates");
       expect(f.observations.filter((call) => call.method === "tools/call" && call.params.name === "commerce_get_product")).toHaveLength(2);
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);
     });
@@ -110,7 +103,7 @@ export function registerRecommendationHostTests() {
           expect(request.tools.map((tool) => tool.name)).toContain("commerce_get_product");
           return { calls: [{ name: "commerce_get_product", arguments: { productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" } }], outputTokens: 10 };
         }
-        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "MODEL PROSE MUST BE DISCARDED",
+        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "The blue linen shirt is available for you.",
           details: { productDetailSelections: [{ productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" }] } });
       }, laterContext);
       expect(f.observations.every(call => call.claims.shopId === laterContext.shopId)).toBe(true);
@@ -203,20 +196,14 @@ export function registerRecommendationHostTests() {
         if (step === 2) return { calls: [{ name: "commerce_search_products", arguments: {
           query: null, browse: true, availableOnly: true, limit: 5, cursor: null,
         } }], outputTokens: 10 };
-        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "UNTRUSTED MODEL PROSE",
+        return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "I can help with the product you were viewing.",
           details: { responseDisposition: "OUT_OF_SCOPE_REDIRECT", productRecommendationVersion: "1",
             productRecommendations: [proposal(browseProduct), proposal(currentProduct)] } });
       });
 
-      expect(response.replyText).toBe([
-        "I can help with this store's products, but I can't answer that question.",
-        "For a proposed purchase of 1:",
-        "Customer context shirt",
-        "Current listed price: £18.00",
-        "View product: https://fixture.myshopify.com/products/customer-context",
-      ].join("\n"));
-      expect(response.replyText).not.toContain("Browse shirt");
-      expect(response.replyText).not.toContain("UNTRUSTED MODEL PROSE");
+      expect(response.replyText).toBe("I can help with the product you were viewing.");
+      expect(response.commercePresentation?.productPairs).toEqual([{productId:currentProduct.productId,variantId:currentProduct.variantId}]);
+      expect(response.commercePresentation?.verified.products).not.toEqual(expect.arrayContaining([expect.objectContaining({title:"Browse shirt"})]));
       expect(f.observations.filter((call) => call.method === "tools/call").map((call) => call.params.name)).toEqual([
         "commerce_search_products", "commerce_search_products", "commerce_get_product",
       ]);

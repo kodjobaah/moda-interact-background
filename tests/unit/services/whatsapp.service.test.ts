@@ -32,6 +32,13 @@ describe("WhatsAppService API base URL", () => {
     vi.stubEnv("WHATSAPP_ACCESS_TOKEN", accessToken);
   });
 
+  it("sends one image request with the entire caption and reply context", async () => {
+    const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({messages:[{id:"image-receipt"}]}), {status:200}));
+    await expect(new WhatsAppService(transport).sendWhatsAppImage({to:input.to,link:"https://media.example/tree.jpg",caption:"Complete agent answer",replyToProviderMessageId:"inbound-1"})).resolves.toEqual({providerMessageId:"image-receipt"});
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(transport.mock.calls[0]![1]!.body as string)).toEqual({messaging_product:"whatsapp",to:input.to,type:"image",image:{link:"https://media.example/tree.jpg",caption:"Complete agent answer"},context:{message_id:"inbound-1"}});
+  });
+
   it.each([undefined, "", "   "])(
     "uses the production Graph API default when base URL is %s",
     async (baseUrl) => {

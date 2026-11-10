@@ -162,6 +162,16 @@ describe("ARCH-066 single Shared composition boundary", () => {
       commercePresentation: presentation("changed"), previousApplication: first }))
       .toEqual({ kind: "rejected", reason: "REPLAY_MISMATCH" });
   });
+  it("reuses a validated frozen plan across operational deadline/signal changes and rejects plan tampering", async () => {
+    const {service, read} = harness([slot("AI")]);
+    const request = {...input, commercePresentation:{...presentation(response), deadlineAt:Date.now()+5000, signal:new AbortController().signal}};
+    const first = await service.renderConversationResponse(request);
+    if(first.kind !== "rendered") throw new Error("expected rendered");
+    expect(first.deliveryPlan).toEqual({schemaVersion:1,kind:"TEXT",body:first.body});
+    read.loadContext.mockRejectedValue(new Error("no media/config/context retry"));
+    expect(await service.renderConversationResponse({...request, commercePresentation:{...request.commercePresentation,deadlineAt:Date.now()+10000,signal:new AbortController().signal},previousApplication:first})).toEqual({...first,replayed:true});
+    expect(await service.renderConversationResponse({...request,previousApplication:{...first,deliveryPlan:{schemaVersion:1,kind:"TEXT",body:"tampered"}}})).toEqual({kind:"rejected",reason:"REPLAY_MISMATCH"});
+  });
   it("refuses configured invalid projection, missing locale and untrusted brand", async () => {
     const typed = { ...input, commercePresentation: presentation(response) };
     expect(await harness([slot("AI", { preparedMissing: true })]).service.renderConversationResponse(typed))
@@ -185,9 +195,9 @@ describe("ARCH-066 single Shared composition boundary", () => {
   });
 });
 
-// Native pair receipts follow the actual bounded Shared composer candidate.
+// AGENT style retains the complete answer and all verified pair order, never a shortened fact dump.
 describe('ARCH067 rendered presentation receipts', () => {
- it.each([0, 3900, 4050])('records full/first/minimal candidate with wrapper header length %s', async headerLength => {
+ it.each([0, 3900, 4050])('retains complete agent content or refuses oversized wrapper with header length %s', async headerLength => {
   const { CommerceProductSchema } = await import('@modainteract/moda-interact-shared/commerce');
   const { verifyCommerceProductFacts } = await import('@modainteract/moda-interact-shared/commerce/presentation');
   const pairs = ['30','10','20'].map(id => ({ productId: id, variantId: null }));
@@ -201,9 +211,11 @@ describe('ARCH067 rendered presentation receipts', () => {
   wrapperSlot.definition.locales[0]!.contentHash = digest(stableJson(preparedValue));
   const test = harness(headerLength ? [wrapperSlot] : [], { ...context, conversationLanguageTag:'en' });
   const result = await test.service.renderConversationResponse({...input,commercePresentation:presentation});
+  if(headerLength === 4050) {expect(result).toEqual({kind:'rejected',reason:'OUTPUT_TOO_LONG'});return;}
   expect(['rendered','no-wrapper']).toContain(result.kind);
   if(result.kind === 'rendered' || result.kind === 'no-wrapper') {
-   expect(result.presentedPairs).toEqual(headerLength === 0 ? pairs : headerLength === 3900 ? pairs.slice(0,1) : []);
+   expect(result.presentedPairs).toEqual(pairs);
+   expect(result.body).toContain(presentation.envelope.replyText);
    expect(result.body.length).toBeLessThanOrEqual(4096);
   }
  });
@@ -217,4 +229,28 @@ it('records composition outcome without reply content and tolerates a failed dia
   expect(JSON.stringify((logger.info as ReturnType<typeof vi.fn>).mock.calls)).not.toContain('Hello');
   (logger.info as ReturnType<typeof vi.fn>).mockImplementation(()=>{throw new Error('sink unavailable');});
   expect(await service.renderConversationResponse(request)).toMatchObject({kind:'no-wrapper',body:'Hello'});
+});
+
+describe('ARCH068 complete wrapper product image plans',()=>{
+ it.each(['SHOPIFY','WOOCOMMERCE'] as const)('preserves agent prose and first selected pair for %s',async platform=>{
+  const {CommerceProductSchema}=await import('@modainteract/moda-interact-shared/commerce');
+  const {verifyCommerceProductFacts,buildConversationDeliveryPlan}=await import('@modainteract/moda-interact-shared/commerce/presentation');
+  const pairs=[{productId:'second-search-result',variantId:platform==='SHOPIFY'?'exact-variant':null},{productId:'first-search-result',variantId:null}];
+  const products=pairs.map(pair=>CommerceProductSchema.parse({...pair,title:'Tree',observedAt:'2026-11-09T12:00:00Z',imageUrl:'https://merchant.example/tree.jpg',url:null,available:true,unitPrice:null,currency:null,productType:null,vendor:null}));
+  const facts=verifyCommerceProductFacts(pairs,products);if(facts.kind!=='verified')throw Error('fixture');
+  const projection={...prepared,productImage:{variable:'response.productImage',placement:'BEFORE_BODY',optional:true}};
+  const active=slot('AI');for(const locale of active.definition.locales){locale.localeAst={schemaVersion:1,prepared:projection};locale.contentHash=digest(stableJson(projection));}
+  const image={schemaVersion:1,shopId:'shop',...pairs[0]!,publicUrl:'https://media.example/tree.jpg',objectKey:`conversation-products/v1/${'a'.repeat(64)}/${'b'.repeat(64)}/${'c'.repeat(64)}.jpg`,contentSha256:'c'.repeat(64),contentType:'image/jpeg',byteLength:100,width:1125,height:600} as const;
+  const prepareConversationProductImage=vi.fn(async()=>({kind:'READY',image,stage:'READY',durationMs:1} as const));
+  const mediaDependencies={readShopBrandPublicMediaConfiguration:vi.fn(async()=>({publicOrigin:'https://media.example',bucketName:'media-bucket'})),readR2Configuration:vi.fn(async()=>({endpoint:'https://fixture.r2.cloudflarestorage.com',accessKeyId:'fixture',secretAccessKey:'fixture'})),prepareConversationProductImage};
+  const service=new ConversationWrapperService({repository:{loadContext:async()=>({...context,conversationLanguageTag:'en'}),loadSlots:async()=>[active]},mediaDependencies:mediaDependencies as never});
+  const request={...input,responseBody:'My grounded, natural answer.',commercePresentation:{envelope:{...exampleFinal,answerKind:'ANSWER' as const,referralReason:null,replyText:'My grounded, natural answer.',details:{productDetailSelections:pairs}},verified:{...presentation('').verified,locale:'en' as const,disposition:'PRODUCT_DETAILS' as const,productFacts:facts.productFacts},verifiedProducts:{shopId:'shop',platform,products},deadlineAt:Date.now()+10000}};
+  const result=await service.renderConversationResponse(request);expect(result.kind).toBe('rendered');if(result.kind!=='rendered')return;
+  expect(result.body).toBe('Header\nMy grounded, natural answer.\nFooter');expect(result.presentedPairs).toEqual(pairs);
+  expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);expect(prepareConversationProductImage.mock.calls[0]?.[0]).toMatchObject({source:{shopId:'shop',...pairs[0]}});
+  expect(result.deliveryPlan).toEqual(buildConversationDeliveryPlan({body:result.body,binding:projection.productImage as never,image,shopId:'shop',displayedPairs:pairs}).plan);
+  await service.renderConversationResponse({...request,previousApplication:result});expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
+  const missing={...request,commercePresentation:{...request.commercePresentation,verifiedProducts:{...request.commercePresentation.verifiedProducts,products:products.map((product,index)=>index===0?{...product,imageUrl:null}:product)}}};
+  expect((await service.renderConversationResponse(missing))).toMatchObject({deliveryPlan:{kind:'TEXT',body:result.body}});expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
+ });
 });

@@ -5,6 +5,7 @@ import type {
   SendMessageResult,
   SendTemplateInput,
   SendTextInput,
+  SendImageInput,
 } from "../integration/whatsapp/types.js";
 
 export const DEFAULT_WHATSAPP_API_BASE_URL =
@@ -134,6 +135,87 @@ export class WhatsAppService {
 
     if (!response.ok) {
       this.logProviderFailure("sendWhatsAppText", response, body);
+      throw new WhatsAppServiceError(
+        "provider-rejected",
+        "WhatsApp provider rejected the message",
+        extractProviderCode(body),
+      );
+    }
+
+    const providerMessageId = body.messages?.[0]?.id;
+
+    if (!providerMessageId) {
+      throw new WhatsAppServiceError(
+        "invalid-provider-response",
+        "WhatsApp response did not contain a message id",
+      );
+    }
+
+    return {
+      providerMessageId,
+    };
+  }
+
+  async sendWhatsAppImage({
+    to,
+    link,
+    caption,
+    replyToProviderMessageId,
+  }: SendImageInput, signal?: AbortSignal): Promise<SendMessageResult> {
+    const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
+    const accessToken = senderConfig.accessToken;
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
+    if (!accessToken?.trim()) {
+      throw new WhatsAppServiceError(
+        "configuration-missing",
+        "WhatsApp configuration is missing",
+      );
+    }
+
+    const apiBaseUrl = (
+      process.env.WHATSAPP_API_BASE_URL?.trim() ||
+      DEFAULT_WHATSAPP_API_BASE_URL
+    ).replace(/\/+$/, "");
+
+    let response: Response;
+    try {
+      response = await this.fetchImplementation(
+        `${apiBaseUrl}/${sender.providerPhoneNumberId}/messages`,
+        {
+        method: "POST",
+
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+
+          to,
+
+          type: "image",
+
+          ...(replyToProviderMessageId
+            ? { context: { message_id: replyToProviderMessageId } }
+            : {}),
+          image: { link, caption },
+        }),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS)]) : AbortSignal.timeout(WHATSAPP_SEND_TIMEOUT_MS),
+        },
+      );
+    } catch (error) {
+      this.logSdkFailure("sendWhatsAppImage", error);
+      throw error;
+    }
+
+    // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
+    // A successful response with invalid JSON remains an uncertain send result.
+    const body = response.ok ? await response.json() : await rejectedResponseBody(response);
+
+    if (!response.ok) {
+      this.logProviderFailure("sendWhatsAppImage", response, body);
       throw new WhatsAppServiceError(
         "provider-rejected",
         "WhatsApp provider rejected the message",

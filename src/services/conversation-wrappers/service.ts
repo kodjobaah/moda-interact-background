@@ -1,5 +1,5 @@
-import { presentationCandidates } from "../../commerce/presentation-receipt.js";
-import { composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { prepareConversationDelivery } from "../conversation-product-media.js";
+import { ConversationDeliveryPlanSchema, composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
   createLogger, type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
@@ -22,6 +22,7 @@ const defaultLogger = createLogger({
 
 export type ConversationWrapperDependencies = Readonly<{
   repository?: WrapperReadPort;
+  mediaDependencies?: Parameters<typeof prepareConversationDelivery>[1];
   logger?: StructuredLogger;
   /** No wrapper is returned as unavailable unless policy opts into safe passthrough. */
   onMissingSlot?: "unavailable" | "passthrough";
@@ -47,7 +48,7 @@ export class ConversationWrapperService {
     }
     if (input.commercePresentation && input.source !== "AI") return { kind: "rejected", reason: "INVALID_INPUT" };
     const candidates = input.commercePresentation ? undefined : input.hostComposedReplyCandidates;
-    const presentationDigest = input.commercePresentation ? digest(stableJson(input.commercePresentation)) : null;
+    const presentationDigest = input.commercePresentation ? digest(stableJson({envelope: input.commercePresentation.envelope, verified: input.commercePresentation.verified, productPairs: input.commercePresentation.productPairs ?? [], verifiedProducts: input.commercePresentation.verifiedProducts ?? null})) : null;
     if (candidates !== undefined && (input.source !== "AI" || !Array.isArray(candidates) ||
         candidates.length < 1 || candidates.length > 3 ||
         candidates.some((candidate) => typeof candidate !== "string" || !candidate.trim() || candidate.length > MAX_WHATSAPP_TEXT_LENGTH) ||
@@ -65,7 +66,7 @@ export class ConversationWrapperService {
       if (input.previousApplication) {
         const prior = input.previousApplication;
         const matchedBody = presentationDigest !== null
-          ? (presentationDigest === prior.responseDigest ? input.responseBody : undefined)
+          ? ((prior.deliveryPlan ? ConversationDeliveryPlanSchema.safeParse(prior.deliveryPlan).success && prior.deliveryPlan.body === prior.body && digest(stableJson({presentationDigest, deliveryPlan: prior.deliveryPlan})) === prior.responseDigest : presentationDigest === prior.responseDigest) ? input.responseBody : undefined)
           : responseBodies.find((body) => digest(body) === prior.responseDigest);
         if (prior.kind !== "rendered" || prior.source !== input.source ||
             prior.messageIdentity !== input.messageIdentity || !matchedBody ||
@@ -77,6 +78,7 @@ export class ConversationWrapperService {
               localeId: prior.localeId, contentHash: prior.contentHash,
               editVersion: prior.slotEditVersion, responseDigest: prior.responseDigest,
               bodyDigest: digest(prior.body),
+              ...(prior.deliveryPlan ? {deliveryPlanDigest: digest(stableJson(prior.deliveryPlan))} : {}),
             }))) return this.refuse("rejected", "REPLAY_MISMATCH", input);
         this.logger.info("conversation_wrapper.replay_reused", {
           conversationId: input.conversationId, source: input.source,
@@ -92,6 +94,7 @@ export class ConversationWrapperService {
       const slots = await this.repository.loadSlots();
       if (input.commercePresentation) {
         const composed = composeCommerceWhatsAppPreview({
+          responseStyle: "AGENT",
           envelope: input.commercePresentation.envelope,
           presentation: input.commercePresentation.verified,
           ...(context.conversationLanguageTag ? { locale: context.conversationLanguageTag } : {}),
@@ -108,29 +111,40 @@ export class ConversationWrapperService {
           reason: composed.kind === 'refused' ? composed.reason : null,
         }); } catch { /* Diagnostics must never affect delivery. */ }
         if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
-        const receipts = presentationCandidates(input.commercePresentation);
-        if (!composed.wrapper) return { kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED",
-          ...(receipts.length ? { presentedPairs: receipts.find(receipt => receipt.body === composed.body)?.pairs ?? [] } : {}) };
+        const p = input.commercePresentation.verified;
+        const facts = p.disposition === 'PRODUCT_DETAILS' ? p.productFacts : p.disposition === 'PRODUCT_OPTIONS' ? p.optionFacts : null;
+        const presentedPairs = input.commercePresentation.envelope.answerKind === 'ANSWER'
+          ? facts ? facts.map(({productId, variantId}) => ({productId, variantId})) : [...(input.commercePresentation.productPairs ?? [])] : [];
+        const planInput = {body: composed.body, shopId: context.shopId, displayedPairs: presentedPairs,
+          verifiedProducts: input.commercePresentation.verifiedProducts,
+          deadlineAt: input.commercePresentation.deadlineAt ?? Date.now(), signal: input.commercePresentation.signal};
+        if (!composed.wrapper) {
+          const {plan} = await prepareConversationDelivery(planInput, this.dependencies.mediaDependencies);
+          return {kind: "no-wrapper", body: composed.body, reason: "NOT_CONFIGURED", presentedPairs, deliveryPlan: plan};
+        }
         const selected = chooseSlot(slots, "AI");
         if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
         const localeRow = selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)!;
         const prepared = readPreparedWrapper(localeRow.localeAst, localeRow.contentHash);
         if (prepared.kind !== "ok") return this.refuse("rejected", "PREPARED_INVALID", input);
-        // Replay the same bounded candidate rendering to retain the chosen candidate's native pairs.
-        const chosen = composed.candidates.find(candidate => renderPreparedWrapper({ prepared: prepared.prepared, context, responseBody: candidate }).kind === "rendered");
-        const presentedPairs = receipts.length ? receipts.find(receipt => receipt.body === chosen)?.pairs ?? [] : undefined;
-        const responseDigest = presentationDigest!;
+        const mediaResult = await prepareConversationDelivery({...planInput, binding: prepared.prepared.productImage}, this.dependencies.mediaDependencies);
+        const deliveryPlan = mediaResult.plan;
+        const mediaLog = mediaResult.mediaOmission === "IMAGE_IDENTITY_MISMATCH" ? this.logger.error.bind(this.logger) : this.logger.info.bind(this.logger);
+        mediaLog("conversation.product_media", {shopId:context.shopId,conversationId:input.conversationId,
+          messageIdentity:input.messageIdentity,planKind:deliveryPlan.kind, omission:mediaResult.mediaOmission,
+          stage:mediaResult.mediaStage, durationMs:mediaResult.durationMs, productId:presentedPairs[0]?.productId ?? null, variantId:presentedPairs[0]?.variantId ?? null});
+        const responseDigest = digest(stableJson({presentationDigest, deliveryPlan}));
         const applicationKey = digest(stableJson({
           conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
           wrapperDefinitionId: composed.wrapper.definitionId, localeId: composed.wrapper.localeId,
           contentHash: composed.wrapper.contentHash, editVersion: composed.wrapper.slotEditVersion,
-          responseDigest, bodyDigest: digest(composed.body),
+          responseDigest, bodyDigest: digest(composed.body), deliveryPlanDigest: digest(stableJson(deliveryPlan)),
         }));
         return { kind: "rendered", body: composed.body, wrapperDefinitionId: composed.wrapper.definitionId,
           localeId: composed.wrapper.localeId, contentHash: composed.wrapper.contentHash,
           slotEditVersion: composed.wrapper.slotEditVersion, audience: selected.audience as WrappedResult["audience"],
           languageTag: selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)?.languageTag ?? "en",
-          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, replayed: false, ...(presentedPairs ? { presentedPairs } : {}) };
+          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, deliveryPlan, replayed: false, ...(presentedPairs ? { presentedPairs } : {}) };
       }
       const slot = chooseSlot(slots, input.source);
       if (slot === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);

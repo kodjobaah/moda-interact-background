@@ -166,6 +166,22 @@ export class OutboundWhatsAppAdmissionService {
     return this.delivery.sendPreparedText(input);
   }
 
+  async sendPreparedConversation(
+    input: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
+      deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan;
+      presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
+      to: string;
+      text: string;
+      previewUrl?: boolean;
+      replyToProviderMessageId?: string;
+      expectedControlRevision?: number;
+      expectedInboundVersion?: number;
+      productContextUpdate?: CommerceConversationProductContext;
+    },
+  ): Promise<OutboundAdmissionResult> {
+    return this.delivery.sendPreparedConversation(input);
+  }
+
   async failPrepared(messageId: string): Promise<void> {
     await this.delivery.failPrepared(messageId);
   }
