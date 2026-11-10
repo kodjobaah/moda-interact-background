@@ -254,3 +254,10 @@ describe('ARCH068 complete wrapper product image plans',()=>{
   expect((await service.renderConversationResponse(missing))).toMatchObject({deliveryPlan:{kind:'TEXT',body:result.body}});expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
  });
 });
+
+it('retains the exact shared composition refusal with a non-null failure code',async()=>{
+ const {service,logger}=harness([]);
+ const rejected=presentation('Hello');rejected.envelope.answerKind='ANSWER';rejected.envelope.referralReason=null;rejected.envelope.details={productDetailSelections:[{productId:'unverified',variantId:null}]};
+ expect(await service.renderConversationResponse({...input,commercePresentation:rejected})).toMatchObject({kind:'rejected',reason:'UNOBSERVED_SELECTION'});
+ expect(logger.info).toHaveBeenCalledWith('commerce.response.composition',expect.objectContaining({failureCode:'INVALID_FINAL',failureStage:'response.compose',reasonCode:'UNOBSERVED_SELECTION'}));
+});

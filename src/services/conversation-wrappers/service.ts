@@ -109,6 +109,7 @@ export class ConversationWrapperService {
           optionCount: input.commercePresentation.verified.optionFacts.length,
           detailCount: (input.commercePresentation.verified.productFacts?.length ?? 0),
           reason: composed.kind === 'refused' ? composed.reason : null,
+          ...(composed.kind === 'refused' ? {failureCode: composed.reason === 'DEADLINE' ? 'DEADLINE' : composed.reason === 'BUDGET_EXHAUSTED' ? 'BUDGET_EXHAUSTED' : 'INVALID_FINAL', failureStage: 'response.compose', reasonCode: composed.reason} : {}),
         }); } catch { /* Diagnostics must never affect delivery. */ }
         if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
         const p = input.commercePresentation.verified;
