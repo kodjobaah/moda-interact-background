@@ -4,6 +4,7 @@ import prisma from "../lib/db.js";
 import { deliverableWooCode } from "../providers/woo-coupon-normalization.js";
 
 export type RecoveryPolicySnapshot = ReturnType<typeof parseEffectiveRecoveryPolicy> & {
+  authorisedDiscountIds?: string[];
   offerSnapshot: Record<string, unknown> | null;
 };
 
@@ -51,7 +52,7 @@ export class RecoveryPolicyService {
     const discount = source.fixedShopifyDiscount;
     // Resolve the trusted Shop platform, never infer it from coupon metadata.
     // Shopify's established eligibility checks must remain unchanged.
-    const shop = configuredOfferMode === "FIXED" && discount !== null
+    const shop = configuredOfferMode === "FIXED"
       ? await this.database.shop.findUnique({ where: { id: shopId }, select: { platform: true } })
       : null;
     const wooSelectedCode = shop?.platform === "WOOCOMMERCE" && discount !== null &&
@@ -78,8 +79,21 @@ export class RecoveryPolicyService {
       source: source === override ? "ADMIN_OVERRIDE" : "MERCHANT",
     });
 
+    let authorisedDiscountIds: string[] | undefined;
+    if (shop?.platform === "WOOCOMMERCE" && source !== override) {
+      const catalogue = await this.database.shopifyDiscountCatalogue.findUnique({ where: { shopId } });
+      const selected = catalogue?.status === "CURRENT" ? await this.database.shopifyDiscount.findMany({
+        where: { shopId, isAvailable: true, fixedSelectable: true, providerType: "WooCoupon:code",
+          unavailableAt: null, providerStatus: "ACTIVE", lastSeenSyncGeneration: catalogue.syncGeneration,
+          AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+            { OR: [{ endsAt: null }, { endsAt: { gt: now } }] }] },
+        select: { id: true }, orderBy: { id: "asc" }, take: 50,
+      }) : [];
+      authorisedDiscountIds = selected.map(row => row.id);
+    }
     return {
       ...policy,
+      ...(authorisedDiscountIds ? { authorisedDiscountIds } : {}),
       offerSnapshot: fixedUsable && discount
         ? {
             id: discount.id,

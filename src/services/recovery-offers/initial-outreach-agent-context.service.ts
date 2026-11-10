@@ -218,8 +218,8 @@ export class InitialOutreachAgentContextService {
     const items = recovery.lineItems.map((line, index) => projectLine(line, index, currency));
     const policy = await this.policyService.resolve(input.shopId, this.now());
     const mode = policy.recoveryOfferMode;
-    const authorisedDiscountIds = mode === "FIXED" && policy.fixedShopifyDiscountId
-      ? [policy.fixedShopifyDiscountId] : [];
+    const authorisedDiscountIds = mode === "FIXED"
+      ? policy.authorisedDiscountIds ?? (policy.fixedShopifyDiscountId ? [policy.fixedShopifyDiscountId] : []) : [];
     const priceReconciliation = mode === "NONE" ? null : await this.dependencies.priceReconciliationService.reconcile({
       shopId: input.shopId,
       checkoutRecoveryId: input.checkoutRecoveryId,

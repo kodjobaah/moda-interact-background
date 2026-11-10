@@ -30,6 +30,7 @@ type FenceInput = Readonly<{
   shopId: string;
   checkoutRecoveryId: string;
   selectedOfferIds: readonly string[];
+  mode?: "FIXED" | "AI_BEST_APPLICABLE" | "NONE";
   signal: AbortSignal;
 }>;
 
@@ -39,14 +40,15 @@ function dateValue(value: unknown): string | null | undefined {
   return value.toISOString();
 }
 
-function validSnapshotRow(row: Record<string, unknown>, shopId: string, ids: readonly string[], generation: number): boolean {
+function validSnapshotRow(row: Record<string, unknown>, shopId: string, ids: readonly string[], generation: number, allowUnselectedWoo: boolean): boolean {
   return typeof row.id === "string" && ids.includes(row.id) && row.shopId === shopId &&
     typeof row.shopifyDiscountNodeId === "string" && row.shopifyDiscountNodeId.length > 0 &&
     (row.method === "CODE" || row.method === "AUTOMATIC") &&
     typeof row.providerStatus === "string" && row.providerStatus.length > 0 &&
     (row.singleRedeemCode === null || typeof row.singleRedeemCode === "string") &&
     (row.codeCount === null || Number.isSafeInteger(row.codeCount) && (row.codeCount as number) >= 0) &&
-    typeof row.fixedSelectable === "boolean" && row.isAvailable === true &&
+    typeof row.fixedSelectable === "boolean" && typeof row.isAvailable === "boolean" &&
+    (row.isAvailable || (allowUnselectedWoo && row.providerStatus === "ACTIVE")) &&
     row.unavailableAt === null && row.lastSeenSyncGeneration === generation &&
     row.shopId === shopId && row.providerSnapshot !== null && typeof row.providerSnapshot === "object" &&
     !Array.isArray(row.providerSnapshot);
@@ -110,7 +112,8 @@ export async function readCurrentDiscountSourceFence(
         throw new Error("CATALOGUE_UNAVAILABLE");
       }
       if (rows.length !== ids.length || rows.some((row) =>
-          !validSnapshotRow(row as unknown as Record<string, unknown>, input.shopId, ids, catalogue.syncGeneration))) {
+          !validSnapshotRow(row as unknown as Record<string, unknown>, input.shopId, ids, catalogue.syncGeneration,
+          shop.platform === "WOOCOMMERCE" && input.mode === "AI_BEST_APPLICABLE"))) {
         throw new Error("SOURCE_ROW_UNAVAILABLE");
       }
 

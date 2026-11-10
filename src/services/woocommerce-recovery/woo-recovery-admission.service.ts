@@ -409,6 +409,14 @@ export class WooRecoveryAdmissionService implements WooRecoveryAdmissionEvaluato
           return { kind: "denied", reason: "CONSENT_CHANGED" };
         }
 
+        const capturedFirstName = checkout.contact?.firstName?.trim();
+        if (capturedFirstName) {
+          await tx.customer.updateMany({
+            where: { id: snapshot.customerId, shopId: ref.shopId, OR: [{ firstName: null }, { firstName: "" }] },
+            data: { firstName: capturedFirstName },
+          });
+        }
+
         // Only mint entropy after this transaction has proved that no recovery
         // already exists. An entropy failure aborts before any row is inserted.
         const linkToken = linkPlan.kind === "ready" ? generateWooRecoveryToken() : null;

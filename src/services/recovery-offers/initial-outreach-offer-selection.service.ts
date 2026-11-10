@@ -66,7 +66,7 @@ function createTrustedRecoveryAttemptReader(db: PrismaClient): TrustedRecoveryAt
         db.checkoutRecovery.findFirst({
           where: { id: input.checkoutRecoveryId, shopId: input.shopId },
           select: { id: true, shopId: true, generation: true, currency: true,
-            lineItems: true, platform: true, status: true },
+            lineItems: true, shop: { select: { platform: true } }, status: true },
         }),
         db.recoveryOutreachAttempt.findFirst({
           where: { id: input.outreachAttemptId, checkoutRecoveryId: input.checkoutRecoveryId },
@@ -74,7 +74,7 @@ function createTrustedRecoveryAttemptReader(db: PrismaClient): TrustedRecoveryAt
             status: true, initiatedBy: true },
         }),
       ]);
-      return recovery && attempt ? { recovery, attempt } : null;
+      return recovery && attempt ? { recovery: { ...recovery, platform: recovery.shop.platform }, attempt } : null;
     },
   };
 }
