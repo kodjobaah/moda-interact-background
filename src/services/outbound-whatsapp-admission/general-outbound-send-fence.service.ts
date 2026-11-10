@@ -1,3 +1,6 @@
+import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
+import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { customerWindow } from "../recovery-conversation/recovery-follow-up-policy.service.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
@@ -16,7 +19,8 @@ export class GeneralOutboundSendFenceService {
 
   async admitFinalSend(input: {
     shopId: string; conversationId: string; messageId: string; recipient: string;
-    expectedContent: string; expectedInboundVersion?: number;
+    expectedContent: string; expectedInboundVersion?: number; expectedControlRevision?: number;
+    deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<GeneralSendPermit> {
     return this.database.$transaction(async (tx): Promise<GeneralSendPermit> => {
       const shops = await tx.$queryRawUnsafe<Array<{ status: string }>>(`
@@ -26,8 +30,8 @@ export class GeneralOutboundSendFenceService {
 
       // Shop -> Conversation -> message is the common ordering contract. Do not
       // accidentally treat a recovery conversation as a general-send fallback.
-      const conversations = await tx.$queryRawUnsafe<Array<{ controlRevision: number; inboundVersion: number }>>(`
-        SELECT "controlRevision","inboundVersion" FROM "whatsapp"."Conversation"
+      const conversations = await tx.$queryRawUnsafe<Array<{ controlRevision: number; inboundVersion: number; lastInboundAt: Date | null; controlMode: string }>>(`
+        SELECT "controlRevision","inboundVersion","lastInboundAt","controlMode"::text FROM "whatsapp"."Conversation"
         WHERE "id"=$1 AND "shopId"=$2 AND "checkoutRecoveryId" IS NULL
           AND "type" <> 'RECOVERY'
         FOR UPDATE`, input.conversationId, input.shopId);
@@ -36,11 +40,14 @@ export class GeneralOutboundSendFenceService {
             conversations[0]!.inboundVersion !== input.expectedInboundVersion)
           return { kind: "suppressed", reason: "stale-inbound-version" };
 
+      if (input.deliveryPlan && (input.expectedInboundVersion === undefined || input.expectedControlRevision === undefined || conversations[0]!.controlMode !== "AI" ||
+          conversations[0]!.controlRevision !== input.expectedControlRevision || !customerWindow(conversations[0]!.lastInboundAt, new Date()).open))
+        return {kind: "suppressed", reason: "invalid-scope"};
       const messages = await tx.$queryRawUnsafe<Array<{
-        status: string; content: string;
+        status: string; content: string; senderType: string; outboundPresentation: unknown;
         providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null;
       }>>(`
-        SELECT "status"::text,"content","providerDispatchKey","providerDispatchAdmittedAt"
+        SELECT "status"::text,"content","senderType"::text,"outboundPresentation","providerDispatchKey","providerDispatchAdmittedAt"
         FROM "whatsapp"."ConversationMessage"
         WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND'
           AND "senderType" IN ('AGENT','AUTOMATION')
@@ -54,6 +61,10 @@ export class GeneralOutboundSendFenceService {
       if (messages[0]!.content !== input.expectedContent)
         return { kind: "suppressed", reason: "invalid-scope" };
 
+      if (input.deliveryPlan && (messages[0]!.senderType !== 'AGENT' || !matchesConversationReceipt(input.presentationReceipt, input) ||
+          !sameConversationPlan(messages[0]!.outboundPresentation, input.deliveryPlan) ||
+          !validConversationPlan(input.deliveryPlan, messages[0]!.content, input.shopId, input.presentationReceipt)))
+        return {kind: "suppressed", reason: "invalid-scope"};
       if (await hasLocalNoContact(tx, { shopId: input.shopId, recipient: input.recipient }))
         return { kind: "suppressed", reason: "local-no-contact" };
 

@@ -52,8 +52,7 @@ import { loadRecommendationContext, refreshRecommendationContext, refreshRecomme
 import { TurnRecommendationObservations } from "./recommendations/observations.js";
 import { evaluateRecommendationDiscountInspection } from "./recommendations/observations.js";
 import { readRecommendationSelection } from "./recommendations/disposition.js";
-import { renderRecommendationReply, type RenderRecommendationProduct } from "./recommendations/render.js";
-import { buildReplyCandidates } from "./recommendations/candidates.js";
+import { type RenderRecommendationProduct } from "./recommendations/render.js";
 import { planRecommendationRefreshes } from "./recommendations/revalidation.js";
 import { decimalToMinorUnits, isValidDecimal, minorUnitsToDecimal, sumPurchaseSubtotal } from "./recommendations/money.js";
 import { evaluatePurchaseDiscount, type DiscountEvaluationPurchase, type ObservedDiscount } from "./recommendations/eligibility.js";
@@ -217,6 +216,7 @@ async function execute(
     }
     throw error;
   }
+  const mediaTurnStartedAt = Date.now();
   const signal = AbortSignal.any([
     AbortSignal.timeout(budget.deadlineMs),
     ...(deps.signal ? [deps.signal] : []),
@@ -678,7 +678,6 @@ async function execute(
         });
       }
     }
-    let hostComposedReplyCandidates: readonly string[] | undefined;
     let commerceVerifiedPresentation: CommerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
       schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null,
       locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
@@ -692,6 +691,7 @@ async function execute(
         : (() => { const product = CommerceToolOutputs.commerce_get_product.parse(observation.output).product; return product ? [product] : []; })();
       return { toolName: observation.toolName, products, observedAt: observation.observedAt };
     });
+    const imageProducts: NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>[] = [];
     const authorizedPairs = [ ...(productContext?.references ?? []), ...productObservations().flatMap(item => item.products) ];
     let presentedRecommendationPairs: { productId: string; variantId: string | null }[] = [];
     let factsPresentation: CommerceVerifiedPresentation | null = null;
@@ -714,6 +714,7 @@ async function execute(
             hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID"), parsed.error);
           recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(descriptors.find(d => d.name === "commerce_get_product")), arguments: pair, output: parsed.data });
           if (parsed.data.product) {
+            imageProducts.push(parsed.data.product);
             const product = parsed.data.product;
             try { logger.info("commerce.product.lookup.verified", { shopId: turn.shopId, conversationId: turn.conversationId, recoveryId: recovery.id,
               productId: product.productId, variantId: product.variantId, stockStatus: product.stock?.status ?? "UNAVAILABLE",
@@ -1044,6 +1045,7 @@ async function execute(
         await refreshRecommendationPolicy({ context: recommendationContext, db: prisma, signal, assertCurrent });
         const locale = resolveModaConfigurationLocale(languageEvaluation.languageTag);
         const disposition = selection?.responseDisposition ?? "STANDARD";
+        imageProducts.push(...retained.map(item => item.product));
         presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
         if (disposition === "STANDARD" && !selection?.shippingInformationSelection && renderedProducts.length === 0 && initialProductObservations.some(observation => {
@@ -1063,34 +1065,23 @@ async function execute(
           optionFacts: [], productFacts: [], includeNoVerifiedOffer,
           requiresShipping: shippingPresentation?.requiresShipping ?? null, policyUrl: shippingPresentation?.policyUrl ?? null,
         });
-        const fullBody = renderRecommendationReply({ locale, disposition, storeUrl: recommendationContext.storeUrl,
-          products: renderedProducts,
-          includeNoVerifiedOffer,
-          ...(shippingPresentation ? { requiresShipping: shippingPresentation.requiresShipping,
-            policyUrl: shippingPresentation.policyUrl } : {}) });
-        const firstBody = renderedProducts.length > 1
-          ? renderRecommendationReply({ locale, disposition, storeUrl: recommendationContext.storeUrl, products: [renderedProducts[0]!],
-            includeNoVerifiedOffer,
-            ...(shippingPresentation ? { requiresShipping: shippingPresentation.requiresShipping,
-              policyUrl: shippingPresentation.policyUrl } : {}) })
-          : renderedProducts[0] ? fullBody : null;
-        const minimalBody = renderRecommendationReply({ locale, disposition, storeUrl: recommendationContext.storeUrl, products: [],
-          ...(shippingPresentation ? { requiresShipping: shippingPresentation.requiresShipping,
-            policyUrl: shippingPresentation.policyUrl } : {}) });
-        hostComposedReplyCandidates = buildReplyCandidates({ fullBody, firstProductBody: firstBody, minimalBody });
+
       }
     }
     compositionDiagnostic({ stage: 'VERIFIED_PROJECTION', disposition: commerceVerifiedPresentation.disposition, productCount: commerceVerifiedPresentation.products.length, optionCount: commerceVerifiedPresentation.optionFacts.length, detailCount: (commerceVerifiedPresentation.productFacts?.length ?? 0) });
+    // Referrals retain the trusted contact/language grounding boundary. Only
+    // grounded ANSWER content is preserved verbatim through AGENT composition.
+    const deliveredEnvelope = envelope.answerKind === "REFER_TO_STORE"
+      ? {...envelope, replyText: renderStoreReferral(recovery.shop.domain, language, context.conversation.messages, envelope)} : envelope;
     // Custom details are intentionally not returned to the delivery adapter.
     return {
       answerKind: envelope.answerKind,
       referralReason: envelope.referralReason,
       evidenceIds: envelope.evidenceIds,
-      replyText: hostComposedReplyCandidates?.[0] ?? (envelope.answerKind === "REFER_TO_STORE" ? renderStoreReferral(
-        recovery.shop.domain, language, context.conversation.messages, envelope,
-      ) : envelope.replyText),
-      ...(hostComposedReplyCandidates ? { hostComposedReplyCandidates } : {}),
-      commercePresentation: { envelope, verified: commerceVerifiedPresentation, productPairs: presentedRecommendationPairs },
+      replyText: deliveredEnvelope.replyText,
+      commercePresentation: { envelope: deliveredEnvelope, verified: commerceVerifiedPresentation, productPairs: presentedRecommendationPairs,
+        verifiedProducts: {shopId: turn.shopId, platform: recommendationContext.provider, products: [...new Map(imageProducts.map(product => [JSON.stringify([product.productId, product.variantId]), product])).values()].slice(0,3)},
+        deadlineAt: mediaTurnStartedAt + budget.deadlineMs, signal },
       ...(envelope.answerKind === "ANSWER" && productObservations().length ? {
         productContextUpdate: mergeConversationProductContext(result.productContextUpdate ?? productContext, productObservations(), {
           shopId: turn.shopId, conversationId: turn.conversationId, platform: recommendationContext.provider, now: Date.now(),

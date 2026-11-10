@@ -1,8 +1,9 @@
 /** ARCH-047-BG005: Background-only runtime seam. No Admin AST imports. */
+import type { ConversationDeliveryPlan, ConversationVerifiedProducts } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceVerifiedPresentation, WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal } from "@modainteract/moda-interact-shared/commerce/presentation";
 export type { WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal };
-export type CommercePresentationInput = Readonly<{ envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; productPairs?: readonly { productId: string; variantId: string | null }[] }>;
+export type CommercePresentationInput = Readonly<{ envelope: CommerceFinalResponse; verified: CommerceVerifiedPresentation; verifiedProducts?: ConversationVerifiedProducts; deadlineAt?: number; signal?: AbortSignal; productPairs?: readonly { productId: string; variantId: string | null }[] }>;
 
 export type WrapperReadPort = Readonly<{
   loadContext(conversationId: string): Promise<VerifiedWrapperContext | "TENANT_MISMATCH" | null>;
@@ -24,11 +25,12 @@ export type WrappedResult = Readonly<{
   applicationKey: string;
   responseDigest: string;
   replayed: boolean;
+  deliveryPlan?: ConversationDeliveryPlan;
   presentedPairs?: readonly { productId: string; variantId: string | null }[];
 }>;
 
 export type WrapperRenderResult = WrappedResult
-  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
+  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; deliveryPlan?: ConversationDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
   | Readonly<{ kind: "unavailable" | "rejected"; reason: WrapperRefusal }>;
 
 export type RenderConversationResponseInput = Readonly<{

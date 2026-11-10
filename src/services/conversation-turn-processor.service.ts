@@ -110,6 +110,17 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
         productContextUpdate?: CommerceConversationProductContext;
       },
     ) => Promise<OutboundAdmissionResult>;
+    sendPreparedConversation?: (
+      input: Admitted & {
+        deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan;
+        presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
+        to: string;
+        text: string;
+        expectedControlRevision?: number;
+        expectedInboundVersion?: number;
+        productContextUpdate?: CommerceConversationProductContext;
+      },
+    ) => Promise<OutboundAdmissionResult>;
     failPrepared: (messageId: string) => Promise<void>;
   };
   ownership?: Pick<AiTurnOwnershipService, "readTurnOwnership" | "checkAutomatedTurn">;
@@ -334,14 +345,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
       await this.dependencies.admission.failPrepared(messageId);
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; productContextUpdate?: CommerceConversationProductContext },
+      input: Admitted & { to: string; text: string; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
         return { kind: "suppressed", reason: "conversation-invalid" } as const;
       }
       providerSendAttempted = true;
-      return this.dependencies.admission.sendPreparedText({
+      if (input.deliveryPlan && !this.dependencies.admission.sendPreparedConversation) {
+        await failPrepared(input.messageId);
+        return {kind: "suppressed", reason: "conversation-invalid"} as const;
+      }
+      const sender = input.deliveryPlan ? this.dependencies.admission.sendPreparedConversation!.bind(this.dependencies.admission)
+        : this.dependencies.admission.sendPreparedText.bind(this.dependencies.admission);
+      return sender({
         ...input,
         ...(controlRevision === undefined ? {} : { expectedControlRevision: controlRevision }),
         expectedInboundVersion: observedVersion,
@@ -601,6 +618,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
           ? { hostComposedReplyCandidates: agentResult.hostComposedReplyCandidates }
           : {}),
       });
+      if (agentResult.commercePresentation?.signal?.aborted) {
+        await failPrepared(reserved.messageId);
+        await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
       if (composed.kind === "refused") {
         this.logger.warn("whatsapp.turn.ai_wrapper_refused", {
           conversationId, observedVersion, messageId: reserved.messageId,
@@ -647,6 +669,8 @@ export class ConversationTurnProcessor<TContext, TResult> {
         ...reserved,
         to: loaded.to,
         text: composed.text,
+        ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
+          presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
       });
       await completeOwnedTurn();

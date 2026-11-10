@@ -1,3 +1,4 @@
+import {Prisma} from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 const capture = vi.hoisted(() => ({ records: [] as unknown[] }));
@@ -40,7 +41,7 @@ function harness({
   const conversationMessageFindUnique = vi.fn().mockImplementation(async () => ({
     conversationId: "conversation-1", senderType: "AGENT", direction: "OUTBOUND", content: currentText,
     conversation: { shopId: "shop-1", checkoutRecovery: null },
-    status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+    status: "PENDING", outboundPresentation: {equals:Prisma.DbNull}, providerDispatchKey: null, providerDispatchAdmittedAt: null,
   }));
   const conversationUpdate = vi.fn().mockResolvedValue({});
   const usageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -381,7 +382,7 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.executionEligibility.evaluate).toHaveBeenCalledWith("shop-1");
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
       where: { id: "message-1", AND: {
-        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+        status: "PENDING", outboundPresentation: {equals:Prisma.DbNull}, providerDispatchKey: null, providerDispatchAdmittedAt: null,
       } },
       data: { content: "Hello" },
     });
@@ -468,7 +469,7 @@ describe("OutboundMessageDeliveryService", () => {
     });
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
       where: { id: "message-1", AND: {
-        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+        status: "PENDING", outboundPresentation: {equals:Prisma.DbNull}, providerDispatchKey: null, providerDispatchAdmittedAt: null,
       } },
       data: { content: TERMINAL_MESSAGE },
     });
@@ -483,7 +484,7 @@ describe("OutboundMessageDeliveryService", () => {
       .resolves.toMatchObject({ kind: "admitted" });
     expect(test.database.conversationMessage.update).toHaveBeenNthCalledWith(1, {
       where: { id: "message-1", AND: {
-        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+        status: "PENDING", outboundPresentation: {equals:Prisma.DbNull}, providerDispatchKey: null, providerDispatchAdmittedAt: null,
       } }, data: { content: effectiveText },
     });
     expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({
@@ -689,7 +690,7 @@ describe("OutboundMessageDeliveryService", () => {
     expect(test.database.conversationMessage.update).toHaveBeenCalledTimes(1);
     expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
       where: { id: "message-1", AND: {
-        status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+        status: "PENDING", outboundPresentation: {equals:Prisma.DbNull}, providerDispatchKey: null, providerDispatchAdmittedAt: null,
       } },
       data: { content: "Hello" },
     });

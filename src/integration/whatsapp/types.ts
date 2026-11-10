@@ -8,6 +8,13 @@ export interface SendMessageResult {
   providerMessageId: string;
 }
 
+export interface SendImageInput {
+  to: string;
+  link: string;
+  caption: string;
+  replyToProviderMessageId?: string;
+}
+
 export interface SendTextInput {
   to: string;
   text: string;

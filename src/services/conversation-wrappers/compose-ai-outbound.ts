@@ -1,3 +1,4 @@
+import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type {
   RenderConversationResponseInput,
   CommercePresentationInput,
@@ -16,6 +17,7 @@ export type AiOutboundComposition =
   | Readonly<{
       kind: "ready";
       text: string;
+      deliveryPlan?: ConversationDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];
       wrapper: null | Readonly<{
         applicationKey: string;
@@ -61,6 +63,7 @@ export async function composeAiOutbound(
     return {
       kind: "ready",
       text: result.body,
+      ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
       ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),
       wrapper: {
         applicationKey: result.applicationKey,
@@ -77,7 +80,7 @@ export async function composeAiOutbound(
     if (!input.commercePresentation && result.body !== input.generatedResponse) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
-    return { kind: "ready", text: result.body, ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
+    return { kind: "ready", text: result.body, ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
   }
   return { kind: "refused", reason: result.reason };
 }
