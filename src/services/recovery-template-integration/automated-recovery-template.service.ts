@@ -1,3 +1,4 @@
+import { sameReconciledPrices } from "../recovery-pricing/same-reconciled-prices.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
@@ -5,7 +6,6 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 import { recoveryOfferResolver } from "../recovery-offers/recovery-offer-resolver.service.js";
 import { initialOutreachOfferSelectionService } from "../recovery-offers/initial-outreach-offer-selection.service.js";
 import { fingerprintRecoveryPricingBasket } from "../recovery-pricing/price-comparison.js";
-import type { CheckoutPriceReconciliation } from "../recovery-pricing/checkout-price-reconciliation.types.js";
 import {
   InitialOfferEnrichmentError,
   type InitialOutreachOfferSelectionService,
@@ -155,15 +155,7 @@ function currentBasketFingerprint(recovery: {
   }
 }
 
-function samePriceEvidence(
-  left: CheckoutPriceReconciliation | null,
-  right: CheckoutPriceReconciliation | null,
-): boolean {
-  if (left === null || right === null) return left === right;
-  const { evaluatedAt: _leftEvaluatedAt, ...leftFacts } = left;
-  const { evaluatedAt: _rightEvaluatedAt, ...rightFacts } = right;
-  return JSON.stringify(leftFacts) === JSON.stringify(rightFacts);
-}
+
 
 function sameCurrentOfferContext(
   original: Awaited<ReturnType<InitialOutreachOfferSelectionService["resolve"]>>["context"],
@@ -178,7 +170,7 @@ function sameCurrentOfferContext(
     original.merchantInstructionRevisionId === current.merchantInstructionRevisionId &&
     original.basket.generation === current.basket.generation &&
     original.basket.fingerprint === current.basket.fingerprint &&
-    samePriceEvidence(original.priceReconciliation, current.priceReconciliation);
+    sameReconciledPrices(original.priceReconciliation, current.priceReconciliation);
 }
 
 function checkoutImageProduct(lineItems: unknown): { productId: string; variantId: string | null } | null {
@@ -428,7 +420,8 @@ export class AutomatedRecoveryTemplateService {
           return unavailable("CURRENT_FACTS_CHANGED");
         }
         if (context.mode !== input.policy.recoveryOfferMode ||
-            (context.mode === "FIXED" && context.authorisedDiscountIds[0] !== input.policy.fixedShopifyDiscountId)) {
+            (context.mode === "FIXED" && canonicalJson(context.authorisedDiscountIds) !== canonicalJson(
+              input.policy.authorisedDiscountIds ?? (input.policy.fixedShopifyDiscountId ? [input.policy.fixedShopifyDiscountId] : [])))) {
           return unavailable("INITIAL_OFFER_POLICY_CHANGED");
         }
         if (result.kind === "NO_VERIFIED_OFFER") {
@@ -442,7 +435,7 @@ export class AutomatedRecoveryTemplateService {
           }
           if (result.generation !== recovery.generation || result.fingerprint !== fingerprint ||
               result.group.verdict !== "SUPPORTED" ||
-              !samePriceEvidence(result.priceReconciliation, context.priceReconciliation) ||
+              !sameReconciledPrices(result.priceReconciliation, context.priceReconciliation) ||
               result.group.offerIds.length !== result.offerSet.offers.length ||
               result.members.length !== result.offerSet.offers.length) {
             return await prepareFallback("DISCOUNT_INVALID_OR_INCOMPATIBLE");
