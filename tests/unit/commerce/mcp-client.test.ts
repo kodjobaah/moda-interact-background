@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommerceHostError, CommerceMcpClient } from "../../../src/commerce/mcp-client.js";
 
+const logged=vi.hoisted(()=>({warn:vi.fn()}));
+vi.mock('@modainteract/moda-interact-shared/logging',()=>({createLogger:()=>({warn:logged.warn})}));
+
 const outreachTurn = {
   shopId: "shop-safe",
   toolContext: { purpose: "INITIAL_RECOVERY_OUTREACH" as const },
@@ -117,4 +120,12 @@ describe("CommerceMcpClient HTTP source diagnostics", () => {
     );
     await expect(client.connect()).rejects.toMatchObject({ code: "CANCELLED" });
   });
+});
+it('logs structured tool errors without changing the returned contract',async()=>{
+ const client=new CommerceMcpClient({endpoint:new URL('https://commerce.example/api/mcp')},{shopId:'shop-safe'} as never,new AbortController().signal);
+ const value={contractVersion:'commerce.v1',status:'ERROR',code:'UNAVAILABLE',retryable:false};
+ const sdk=(client as unknown as {client:{callTool:()=>Promise<unknown>}}).client;
+ vi.spyOn(sdk,'callTool').mockResolvedValue({isError:true,structuredContent:value});
+ expect(await client.call('commerce_search_products',{})).toEqual(value);
+ expect(logged.warn).toHaveBeenCalledWith('commerce.mcp.tool.failed',expect.objectContaining({toolName:'commerce_search_products',errorCode:'UNAVAILABLE',stage:'mcp.tool_result'}));
 });

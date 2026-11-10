@@ -1,3 +1,4 @@
+import { createLogger } from '@modainteract/moda-interact-shared/logging';
 import { isDeepStrictEqual } from "node:util";
 import { observeCommerceTool } from "./observe-tool.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -444,6 +445,12 @@ export class CommerceMcpClient {
       if (!parsed.success) throw new CommerceHostError("UNAVAILABLE", true,
         hostDiagnostic("mcp.tool_result", "MCP_TOOL_RESULT_SCHEMA_INVALID", { operation: "call_tool" }));
       const value = parsed.data;
+      if (value.status === 'ERROR') {
+        try { createLogger({serviceName:'moda-interact-background',environment:process.env.DEPLOYMENT_ENVIRONMENT_NAME ?? 'development'}).warn('commerce.mcp.tool.failed', {
+          shopId:this.turn.shopId, toolName:name, errorCode:value.code, retryable:value.retryable,
+          stage:'mcp.tool_result', operation:'call_tool',
+        }); } catch { /* Diagnostics must not affect delivery. */ }
+      }
       if ((value.status === "ERROR") !== Boolean(result.isError))
         throw new CommerceHostError("INVALID_INPUT", false,
           hostDiagnostic("mcp.tool_result", "MCP_TOOL_ERROR_FLAG_MISMATCH", { operation: "call_tool" }));
