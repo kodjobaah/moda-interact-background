@@ -1,3 +1,4 @@
+import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
 import { createProductContextRepository } from "./product-context-repository.js";
 import { prepareProductFactsPresentation, PresentationVerificationError } from "./presentation.js";
 import { CommerceVerifiedPresentationSchema, type CommerceVerifiedPresentation } from "@modainteract/moda-interact-shared/commerce/presentation";
@@ -447,7 +448,7 @@ async function execute(
       // Legacy explicit-source rows remain readable, without imposing preference
       // precedence on recovery. Supply their retained tag as context instead.
       language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
-      budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens, remoteCalls: 6 },
+      budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens, remoteCalls: planCommerceVerificationBudget(10).discoveryCalls },
       dependencies: {
         model: {
           invoke: async (request, modelSignal) => preserveRunnerFailure(async () => {

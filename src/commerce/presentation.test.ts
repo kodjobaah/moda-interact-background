@@ -67,3 +67,9 @@ it('accepts empty optional recommendation fields for a detail answer',async()=>{
  const input=setup({productDetailSelections:[pair],productRecommendations:[],productRecommendationVersion:'1'});
  expect(await prepareProductFactsPresentation(input)).toMatchObject({disposition:'PRODUCT_DETAILS'});
 });
+it('retains verification capacity for three products after discovery',async()=>{
+ const {planCommerceVerificationBudget}=await import('@modainteract/moda-interact-shared/commerce');const budget=planCommerceVerificationBudget(10);let used=budget.discoveryCalls;
+ const pairs=[1,2,3].map(i=>({productId:`p${i}`,variantId:null}));
+ const input={...setup({productDetailSelections:pairs}),authorizedPairs:pairs,readProduct:vi.fn(async(p:{productId:string;variantId:string|null})=>({product:{...product,...p}})),consumeBudget:()=>{if(used>=budget.totalCalls)throw Error('BUDGET_EXHAUSTED');used++;}};
+ expect(await prepareProductFactsPresentation(input)).toMatchObject({disposition:'PRODUCT_DETAILS'});expect(used).toBe(9);
+});
