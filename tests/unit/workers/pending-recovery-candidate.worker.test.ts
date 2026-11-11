@@ -105,7 +105,8 @@ vi.mock("../../../src/lib/db.js", () => ({
 vi.mock("../../../src/services/customer.service.js", () => ({
   customerService: { resolveCustomer: hoisted.resolveCustomer },
 }));
-vi.mock("../../../src/services/recovery-policy.service.js", () => ({
+vi.mock("../../../src/services/recovery-policy.service.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../src/services/recovery-policy.service.js")>(),
   recoveryPolicyService: { resolve: hoisted.resolvePolicy },
 }));
 vi.mock("../../../src/services/recovery-outreach-attempt.service.js", () => ({

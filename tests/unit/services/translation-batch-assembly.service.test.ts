@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { TranslationBatchAssemblyService } from "../../../src/services/translation-batch-assembly.service.js";
 
-process.env.TRANSLATION_MODEL = "test-model";
+vi.mock("../../../src/lib/db.js", () => ({
+  default: { commerceTranslationModelConfiguration: { findFirst: vi.fn(async () => ({ provider: "openai", providerModelId: "test-model" })) } },
+}));
 
 function runtimeConfig(translationBatchMaxRequests = 100) {
   return { current: vi.fn(() => ({ translationBatchMaxRequests })) } as any;
@@ -75,7 +77,6 @@ describe("TranslationBatchAssemblyService", () => {
     const service = new TranslationBatchAssemblyService({
       database: database.database,
       queue: { add },
-      runtimeConfig: runtimeConfig(10),
       runtimeConfig: runtimeConfig(1),
     });
 

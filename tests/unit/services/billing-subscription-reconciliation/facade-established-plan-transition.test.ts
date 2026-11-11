@@ -1,10 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+vi.mock("../../../../src/services/recovery-capacity-resume.service.js", () => ({
+  recoveryCapacityResumeService: { schedule: vi.fn(async () => undefined) },
+}));
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSubscriptionReconcilePayload } from "../../../../src/services/billing-subscription-reconciliation.service.js";
 import { ShopifyPlanChangeTransitionService } from "../../../../src/services/shopify-plan-change-transition.service.js";
 import { recoveryCapacityResumeService } from "../../../../src/services/recovery-capacity-resume.service.js";
 import { now, harness, pendingRow, paidProvider, paidPlan, payload, establishedCurrentPlan, establishedTargetPlan, establishedProvider, establishedRow } from "./facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
+  beforeEach(() => vi.clearAllMocks());
   it.each([
     "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
     "MISSING_BILLING_CYCLE",
