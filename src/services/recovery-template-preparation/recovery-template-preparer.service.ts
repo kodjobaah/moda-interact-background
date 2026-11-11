@@ -103,9 +103,7 @@ export class RecoveryTemplatePreparer {
         ...selectionInput, headerFormat, checkoutProductHeaderAvailable: Boolean(input.productImage),
       });
       let selectedFormat: "TEXT" | "IMAGE" = "TEXT";
-      let selected = input.stage === "INITIAL"
-        ? select("IMAGE")
-        : { outcome: "unavailable" as const, reason: "NO_APPROVED_ASSIGNMENT" as const };
+      let selected = select("IMAGE");
       let productMedia: PreparedOutreachProductMedia | undefined;
       if (selected.outcome === "selected") {
         const bindings = selected.value.variant.metaRegistration!.parameterBindingsSnapshot as { headerMediaRole?: string };
@@ -202,7 +200,8 @@ export class RecoveryTemplatePreparer {
         if (selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
             error.reason !== "MEDIA_NOT_READY" || (input.stage === "INITIAL" && !headerAvailabilityFailure)) throw error;
         const textFallback = select("TEXT");
-        if (textFallback.outcome !== "selected") return unavailable(textFallback.reason);
+        if (textFallback.outcome !== "selected") return unavailable(
+          textFallback.reason === "NO_APPROVED_ASSIGNMENT" ? error.reason : textFallback.reason);
         selectedAssignment = textFallback.value;
         selectedFormat = "TEXT";
         registration = selectedAssignment.variant.metaRegistration!;

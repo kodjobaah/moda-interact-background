@@ -75,6 +75,7 @@ export class InvalidPriceReconciliationAttemptError extends Error {
 }
 
 export type CheckoutPriceReconciliationServiceDependencies = Readonly<{
+  stage?: "INITIAL" | "FOLLOW_UP";
   recoveryAttemptReader: TrustedRecoveryAttemptReader;
   productReader: ExactProductReader;
   environment?: string;
@@ -424,11 +425,14 @@ export class CheckoutPriceReconciliationService {
     input.signal.throwIfAborted();
     if (!state || state.recovery.id !== input.checkoutRecoveryId || state.recovery.shopId !== input.shopId ||
         state.recovery.generation !== input.expectedGeneration ||
-        !ACTIVE_RECOVERY_STATUSES.has(state.recovery.status) ||
+        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(state.recovery.status) : !ACTIVE_RECOVERY_STATUSES.has(state.recovery.status)) ||
         !state.attempt || state.attempt.id !== input.outreachAttemptId ||
         state.attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
-        state.attempt.sequence !== 1 || state.attempt.trigger !== "INITIAL" ||
-        !ACTIVE_ATTEMPT_STATUSES.has(state.attempt.status) || state.attempt.initiatedBy === "HUMAN") {
+        (this.dependencies.stage === "FOLLOW_UP"
+          ? state.attempt.sequence !== 2 || state.attempt.trigger !== "POST_WINDOW_FOLLOW_UP" ||
+            state.attempt.initiatedBy !== "HUMAN" || !["PENDING", "CAPACITY_BLOCKED"].includes(state.attempt.status)
+          : state.attempt.sequence !== 1 || state.attempt.trigger !== "INITIAL" ||
+            !ACTIVE_ATTEMPT_STATUSES.has(state.attempt.status) || state.attempt.initiatedBy === "HUMAN")) {
       throw new InvalidPriceReconciliationAttemptError("RECOVERY_ATTEMPT_LINEAGE_INVALID");
     }
     let fingerprint: string;

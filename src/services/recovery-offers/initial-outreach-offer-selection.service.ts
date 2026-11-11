@@ -99,18 +99,19 @@ function createExactProductReader(
   };
 }
 
-function productionContextBuilder(
+export function productionContextBuilder(
   db: PrismaClient,
   environment: CommerceEnvironment,
   createSelector: NonNullable<InitialOutreachOfferSelectionDependencies["createSelector"]>,
+  stage: "INITIAL" | "FOLLOW_UP" = "INITIAL",
 ): ContextBuilder {
   const prices = new CheckoutPriceReconciliationService({
-    recoveryAttemptReader: createTrustedRecoveryAttemptReader(db),
+    stage, recoveryAttemptReader: createTrustedRecoveryAttemptReader(db),
     productReader: createExactProductReader(createSelector),
     environment,
     logger,
   });
-  return new InitialOutreachAgentContextService({ db, environment, priceReconciliationService: prices });
+  return new InitialOutreachAgentContextService({ db, environment, stage, priceReconciliationService: prices });
 }
 
 /** Composes current trusted context, BG016 source-price evidence and BG010's validated decision. */

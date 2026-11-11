@@ -1,3 +1,5 @@
+import { merchantFollowUpOfferService } from "../recovery-offers/merchant-follow-up-offer.service.js";
+import type { CurrentOutreachOfferAdmissionToken } from "../recovery-offers/current-outreach-offer-revalidation.service.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createHash } from "node:crypto";
 import { connectionRedis } from "../../lib/redis.js";
@@ -58,6 +60,7 @@ export type HumanDispatcherDependencies = {
   /** Both are required by production for merchant post-window templates. */
   storedConsent?: StoredRecoveryConsentReader;
   followUpTemplates?: Pick<MerchantFollowUpTemplateService, "resolve">;
+  followUpOfferAdmission?: Pick<typeof merchantFollowUpOfferService, "validateAdmission">;
 };
 
 export function createHumanDispatcherDependencies(): HumanDispatcherDependencies {
@@ -82,6 +85,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
     recipientFailure: synchronousRecipientFailureService,
     storedConsent: recoveryStoredConsentService,
     followUpTemplates: merchantFollowUpTemplateService,
+    followUpOfferAdmission: merchantFollowUpOfferService,
   };
 }
 
@@ -311,6 +315,7 @@ export class HumanCommandDispatcherService {
       return;
     }
 
+    let followUpOfferToken: CurrentOutreachOfferAdmissionToken | undefined;
     // Only post-window recovery templates require proactive consent. Their
     // frozen header/body/button values and registration are re-resolved from
     // BG001/BG004, not the merchant request or Meta's category GET API.
@@ -341,6 +346,7 @@ export class HumanCommandDispatcherService {
         return;
       }
       preparedSend = selected.send;
+      followUpOfferToken = selected.admissionToken;
       proactive = {
         consent: permission.snapshot, verifiedCategory: "MARKETING",
         templateName: selected.send.templateName,
@@ -372,6 +378,12 @@ export class HumanCommandDispatcherService {
     }))) {
       if (credit?.kind === "admitted") await this.deps.billing.releaseBeforePermit(credit.admission);
       await this.defer(commandId, leaseToken, "moderation_content_stale");
+      return;
+    }
+    if (followUpOfferToken && (!this.deps.followUpOfferAdmission ||
+        !(await this.deps.followUpOfferAdmission.validateAdmission(
+          followUpOfferToken, AbortSignal.timeout(30_000))))) {
+      await this.rejectTerminal(commandId, leaseToken, "follow_up_unavailable");
       return;
     }
     // Final provider admission commits before Meta request. No HTTP call or
