@@ -33,9 +33,9 @@ function setup(initial: ConfigurationRow[]) {
 
 
 describe("ARCH-043 Background typed configuration read boundary", () => {
-  it("recognises 19 exact registry identities, reads eleven purposes, and denies the other eight", async () => {
-    expect(new Set(REGISTERED_KEYS).size).toBe(19);
-    expect(new Set(BACKGROUND_READABLE_KEYS).size).toBe(11);
+  it("recognises 20 exact registry identities, reads twelve purposes, and denies the other eight", async () => {
+    expect(new Set(REGISTERED_KEYS).size).toBe(20);
+    expect(new Set(BACKGROUND_READABLE_KEYS).size).toBe(12);
     const { service, readRows } = setup([]);
     for (const key of REGISTERED_KEYS.filter((key) => !BACKGROUND_READABLE_KEYS.includes(key as never))) {
       await expect(service.read(key as never)).rejects.toMatchObject({ code: "DENIED" });
