@@ -19,9 +19,10 @@ export async function runInitialOutreachOfferAgent(rawContext: unknown, deps: Ru
  const executionLimits = deps.executionLimits;
  const signal = AbortSignal.any([deps.signal, AbortSignal.timeout(executionLimits?.deadlineMs ?? MAX_OUTREACH_DEADLINE_MS)]);
  const maxMcpCalls = deps.maxMcpCalls ?? executionLimits?.toolCalls ?? DEFAULT_MAX_MCP_CALLS;
- const selector = (deps.createSelector ?? (input => new RecoveryOutreachMcpSelectorService(input)))({ shopId: context.shopId, signal, maxCalls: maxMcpCalls, maxProductDetailReads: executionLimits?.maxProductDetailReads, maxToolResultBytes: executionLimits?.maxToolResultBytes });
+ const selector = (deps.createSelector ?? (input => new RecoveryOutreachMcpSelectorService(input)))({ shopId: context.shopId, signal, maxCalls: maxMcpCalls,
+  ...(executionLimits ? { maxProductDetailReads: executionLimits.maxProductDetailReads, maxToolResultBytes: executionLimits.maxToolResultBytes } : {}) });
  try {
-  const result = await createInitialOutreachOfferGraph({ context, selector, maxMcpCalls, executionLimits, signal, startedAt: (deps.now?.() ?? new Date()).getTime(),
+  const result = await createInitialOutreachOfferGraph({ context, selector, maxMcpCalls, ...(executionLimits ? { executionLimits } : {}), signal, startedAt: (deps.now?.() ?? new Date()).getTime(),
    ...(deps.now ? { now: deps.now } : {}), modelInvoker: deps.modelInvoker ?? deps.createModelInvoker ?? { invoke: async () => { throw Error("MODEL_INVOKER_UNAVAILABLE"); } },
   }).invoke();
   try { logger.info("outreach.offer_agent.completed", { shopId: context.shopId, recoveryId: context.checkoutRecoveryId,

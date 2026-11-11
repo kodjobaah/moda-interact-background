@@ -54,9 +54,10 @@ export type CurrentOutreachOfferDecision =
 
 export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   contextBuilder: ContextBuilder;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => Selector;
+  createSelector?: (input: { shopId: string; signal: AbortSignal; maxProductDetailReads?: number }) => Selector;
   readFence?: (input: {
     shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; mode?: InitialOutreachAgentContext["mode"]; signal: AbortSignal;
+    maxReadMs?: number;
   }) => Promise<DiscountSourceFenceResult>;
   readBudgetMs?: number;
   clock?: () => Date;
@@ -237,7 +238,8 @@ export class CurrentOutreachOfferRevalidationService {
     }
     const deadline = AbortSignal.timeout(input.readBudgetMs ?? this.readBudgetMs);
     const signal = AbortSignal.any([input.signal, deadline]);
-    const selector = this.createSelector({ shopId: input.shopId, signal, maxProductDetailReads: input.maxProductDetailReads });
+    const selector = this.createSelector({ shopId: input.shopId, signal,
+      ...(input.maxProductDetailReads !== undefined ? { maxProductDetailReads: input.maxProductDetailReads } : {}) });
     let primaryError: unknown;
     let closeError: unknown;
     let discoveryIncomplete = false;
