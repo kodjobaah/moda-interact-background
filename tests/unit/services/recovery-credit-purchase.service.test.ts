@@ -1,3 +1,8 @@
+// Queue delivery is covered by the capacity-resume integration tests.
+vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
+  recoveryCapacityResumeService: { schedule: vi.fn(async () => undefined) },
+}));
+
 import { describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { deriveShopifyProviderContextIdentity } from "@modainteract/moda-interact-shared/billing";

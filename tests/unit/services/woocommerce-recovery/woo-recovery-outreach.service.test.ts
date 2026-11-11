@@ -452,7 +452,8 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(JSON.stringify(record)).not.toContain("+447000111222");
     expect(JSON.stringify(record)).not.toContain("private-value");
     const installed = JSON.parse(readFileSync(new URL("../../../../node_modules/@modainteract/moda-interact-shared/package.json", import.meta.url), "utf8")) as { version: string };
-    expect(installed.version).toBe("3.0.0");
+    const manifest = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string> };
+    expect(installed.version).toBe(manifest.dependencies["@modainteract/moda-interact-shared"]);
     expect(import.meta.resolve("@modainteract/moda-interact-shared/logging")).toContain("@modainteract/moda-interact-shared");
   });
 
