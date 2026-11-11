@@ -82,12 +82,13 @@ export class RecoveryPolicyService {
     let authorisedDiscountIds: string[] | undefined;
     if (shop?.platform === "WOOCOMMERCE" && source !== override) {
       const catalogue = await this.database.shopifyDiscountCatalogue.findUnique({ where: { shopId } });
-      const selected = catalogue?.status === "CURRENT" ? await this.database.shopifyDiscount.findMany({
-        where: { shopId, isAvailable: true, fixedSelectable: true, providerType: "WooCoupon:code",
+      const selectedId = source.fixedShopifyDiscountId;
+      const selected = catalogue?.status === "CURRENT" && selectedId ? await this.database.shopifyDiscount.findMany({
+        where: { id: selectedId, shopId, isAvailable: true, fixedSelectable: true, providerType: "WooCoupon:code",
           unavailableAt: null, providerStatus: "ACTIVE", lastSeenSyncGeneration: catalogue.syncGeneration,
           AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
             { OR: [{ endsAt: null }, { endsAt: { gt: now } }] }] },
-        select: { id: true }, orderBy: { id: "asc" }, take: 50,
+        select: { id: true }, take: 1,
       }) : [];
       authorisedDiscountIds = selected.map(row => row.id);
     }

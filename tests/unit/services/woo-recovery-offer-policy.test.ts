@@ -31,6 +31,20 @@ function fixture(platform: "WOOCOMMERCE" | "SHOPIFY", row: Record<string, unknow
 }
 
 describe("ARCH-036 BACKGROUND-005 Woo selected coupon policy", () => {
+  it("authorizes only the configured Woo coupon, not every selectable code in the catalogue", async () => {
+    const { policy, db } = fixture("WOOCOMMERCE", discount());
+    db.shopifyDiscountCatalogue.findUnique.mockResolvedValue({ status: "CURRENT", syncGeneration: 7 });
+    db.shopifyDiscount.findMany.mockResolvedValue([{ id: "db-discount-1" }]);
+
+    const result = await policy.resolve(shopId, NOW);
+
+    expect(result.authorisedDiscountIds).toEqual(["db-discount-1"]);
+    expect(db.shopifyDiscount.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "db-discount-1", shopId }),
+      take: 1,
+    }));
+  });
+
   it("keeps the Woo FIXED snapshot despite unknown type, zero amount, expired usage and catalogue ERROR", async () => {
     const row = discount({
       fixedSelectable: false, providerStatus: "EXPIRED", endsAt: new Date("2026-01-01T00:00:00Z"),
