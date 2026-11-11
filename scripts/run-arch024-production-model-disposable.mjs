@@ -352,9 +352,10 @@ try {
   );
 
   const keyring = { "disposable-key": encryptionKey };
-  process.env.COMMERCE_CONNECTION_KEYS_JSON = JSON.stringify({
+  process.env.MODA_ENCRYPTION_KEYS_JSON = JSON.stringify({
     "disposable-key": encryptionKeyBase64,
   });
+  process.env.MODA_ENCRYPTION_ACTIVE_KEY_ID = "disposable-key";
   const credentialResolver = createOpenRouterCredentialResolver({ db: client, keyring });
   const firstCredential = sealCredential("credential-A");
   await client.commerceOpenRouterCredential.create({
@@ -421,7 +422,8 @@ try {
   console.log("ARCH-024 disposable production-model proof passed (selection, pending-plan, Shop scope, credential rotation, and turn stability)");
 } finally {
   if (client) await client.$disconnect().catch(() => {});
-  delete process.env.COMMERCE_CONNECTION_KEYS_JSON;
+  delete process.env.MODA_ENCRYPTION_KEYS_JSON;
+  delete process.env.MODA_ENCRYPTION_ACTIVE_KEY_ID;
   try { docker(["rm", "--force", container]); } catch { /* best-effort cleanup */ }
   try { docker(["network", "rm", network]); } catch { /* best-effort cleanup */ }
 }

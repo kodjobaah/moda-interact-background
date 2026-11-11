@@ -20,10 +20,10 @@ export type WooCouponGrantDatabase = Pick<PrismaClient, "wooCommerceInstallation
 
 /** Reader-only configuration: one canonical keyring, no active-key or HMAC dependency. */
 export function loadWooCouponReadKeyring(
-  environment: Readonly<{ COMMERCE_CONNECTION_KEYS_JSON?: string }>,
+  environment: Readonly<{ MODA_ENCRYPTION_KEYS_JSON?: string }>,
 ): CredentialKeyring {
   try {
-    return parseCredentialKeyring(environment.COMMERCE_CONNECTION_KEYS_JSON);
+    return parseCredentialKeyring(environment.MODA_ENCRYPTION_KEYS_JSON);
   } catch (error) {
     throw new WooCouponReadError("grant_configuration", {
       cause: error,

@@ -8,7 +8,7 @@ Configure the MCP and deployment settings on the messaging worker. The shared cr
 
 - `COMMERCE_MCP_URL`: fixed private Commerce URL ending in `/api/mcp`. No credentials, query or fragment. HTTP is supported for the private service network; redirects are rejected.
 - `DEPLOYMENT_ENVIRONMENT_NAME`: existing shared environment identity; match Commerce.
-- `COMMERCE_CONNECTION_KEYS_JSON`: shared 32-byte AES keyring used to decrypt the environment's encrypted OpenRouter credential and WooCommerce API-007 read grants. API and Background share this one canonical keyring (standard padded Base64); no Woo-specific keyring or base64url configuration is permitted.
+- `MODA_ENCRYPTION_KEYS_JSON`: shared 32-byte AES keyring used to decrypt the environment's encrypted OpenRouter credential and WooCommerce API-007 read grants. API and Background share this one canonical keyring (standard padded Base64); no Woo-specific keyring or base64url configuration is permitted.
 - The single Moda WhatsApp sender configuration remains required. The legacy conversational Groq model selector is not used by the CommerceAgent; `GROQ_API_KEY` may remain required independently for Groq speech transcription.
 
 ## Production model resolution
@@ -142,3 +142,5 @@ lists Ogg among supported inputs and recommends an identifying filename/content
 type. That documentation and local parsing are not proof of live acceptance of a
 particular WhatsApp recording. There is no demonstrated incompatibility requiring
 conversion; deterministic provider mocks prove workflow only.
+
+Encryption configuration is deployment-owned: all workers use `MODA_ENCRYPTION_KEYS_JSON` and `MODA_ENCRYPTION_ACTIVE_KEY_ID`. Preserve the union of historical platform wrapping and commerce credential keys under their original IDs before switching. New encryption selects the active ID; decryption uses each record's stored key ID and unchanged authenticated data. The historical `commerce.connectionKeys` database decoder remains for compatibility, but production credential consumers no longer read that row. Do not edit it to rotate keys. Command HMAC secrets remain separate from encryption material.

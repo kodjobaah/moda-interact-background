@@ -18,9 +18,8 @@ export async function readR2Configuration() {
   return (await configuration.read("merchant.knowledge.r2")).value;
 }
 export async function readCommerceKeyring() {
-  const value = (await configuration.read("commerce.connectionKeys")).value;
-  const keyring = parseCredentialKeyring(value.connectionKeysJson);
-  resolveActiveCredentialKey(keyring, value.activeKeyId);
+  const keyring = parseCredentialKeyring(process.env.MODA_ENCRYPTION_KEYS_JSON);
+  resolveActiveCredentialKey(keyring, process.env.MODA_ENCRYPTION_ACTIVE_KEY_ID);
   return keyring;
 }
 export async function readSpeechOperation() {
