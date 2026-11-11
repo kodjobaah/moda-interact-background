@@ -705,7 +705,8 @@ describe("OutboundMessageDeliveryService", () => {
     const test = harness({ provider: { sendWhatsAppText: vi.fn().mockRejectedValue(error) } });
     const service = new OutboundMessageDeliveryService(
       test.database as never, test.providerMock as never, test.executionEligibility as never,
-      undefined, undefined, test.moderationMock as never, failureAdapter as never,
+      { readTurnOwnership: vi.fn(async () => null) } as never, undefined,
+      test.moderationMock as never, failureAdapter as never,
     );
 
     await expect(service.sendPreparedText({ ...admission, to: "+15551234567", text: "Hello" }))

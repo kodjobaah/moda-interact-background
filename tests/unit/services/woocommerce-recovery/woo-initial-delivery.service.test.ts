@@ -115,12 +115,21 @@ describe("ARCH-046 Woo prepared-template delivery reuses existing provider pipel
     expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
   });
 
-  it("propagates technical moderation failure and cleans only pre-permit reservation", async () => {
-    const f = harness(); f.moderation.assessText.mockRejectedValueOnce(new Error("moderation API unavailable"));
+  it("preserves the prepared initial message for retry after a technical moderation failure", async () => {
+    const f = harness();
+    const failure = new Error("moderation API unavailable");
+    f.moderation.assessText.mockRejectedValueOnce(failure);
     await expect(f.service.sendPreparedWooInitialTemplate(admission, template, wooScope))
-      .rejects.toThrow("moderation API unavailable");
-    expect(f.failPrepared).toHaveBeenCalled();
+      .rejects.toBe(failure);
+    expect(f.failPrepared).not.toHaveBeenCalled();
     expect(f.admitFinalSend).not.toHaveBeenCalled();
+    expect(f.sendWhatsAppTemplate).not.toHaveBeenCalled();
+    expect(f.afterProviderError).not.toHaveBeenCalled();
+    expect(JSON.parse(f.content)).toMatchObject({
+      templateName: template.templateName, languageCode: template.languageCode,
+      recoveryPromise: template.recoveryPromise,
+    });
+    expect(f.moderation.assessText).toHaveBeenCalledWith(expect.objectContaining({ effectiveText: f.content }));
   });
 
   it("never clears committed Woo provider idempotency on an uncertain error", async () => {
