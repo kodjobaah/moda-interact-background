@@ -73,6 +73,7 @@ const hoisted = vi.hoisted(() => {
         providerMessageId: "wamid-1",
       })),
       getProviderAccountId: vi.fn(() => "provider-account-1"),
+    inspectInitialOutreachAdmission: vi.fn(async () => ({ kind: "absent" })),
     },
     automatedTemplateMock: {
       prepare: vi.fn(async () => ({
@@ -87,6 +88,7 @@ const hoisted = vi.hoisted(() => {
       withCheckoutLock: vi.fn(async (_shopId, _checkoutToken, callback) => callback()),
     },
     recoveryBillingServiceMock: {
+      revalidateExistingInitialOutreach: vi.fn(async () => ({ kind: "absent" })),
       admit: vi.fn(async () => ({
         kind: "admitted",
         admission: {
@@ -157,6 +159,7 @@ vi.mock("../../../src/services/recovery-billing.service.js", () => ({
 vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: {
     getProviderAccountId: vi.fn(() => "provider-account-1"),
+    inspectInitialOutreachAdmission: vi.fn(async () => ({ kind: "absent" })),
   },
 }));
 

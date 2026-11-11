@@ -12,6 +12,7 @@ export function registerActivityCases(context: CandidateFacadeContext) {
       cartToken: "cart_context_merge",
       abandonedCheckoutUrl: null,
       checkoutCreatedAt: "2026-10-06T00:00:00Z",
+      activityAt: "2026-10-06T00:00:00Z",
       internationalContext: {
         languageTag: "en-GB",
         languageSource: "shopify",

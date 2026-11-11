@@ -163,9 +163,9 @@ describe("ARCH-039 Shared Woo grant reader parity", () => {
 
   it("rejects partial/invalid keyring and forbids local mode in production", () => {
     expect(() => loadWooCouponReadKeyring({})).toThrow("grant_configuration");
-    expect(() => loadWooCouponReadKeyring({ COMMERCE_CONNECTION_KEYS_JSON: "{}" })).toThrow("grant_configuration");
+    expect(() => loadWooCouponReadKeyring({ MODA_ENCRYPTION_KEYS_JSON: "{}" })).toThrow("grant_configuration");
     const parsed = loadWooCouponReadKeyring({
-      COMMERCE_CONNECTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64") }),
+      MODA_ENCRYPTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64") }),
     });
     expect(parsed.hasKey(keyId)).toBe(true);
     expect(parsed.keyIds).toEqual([keyId]);
@@ -174,7 +174,7 @@ describe("ARCH-039 Shared Woo grant reader parity", () => {
       MODA_WOO_REST_READ_KEYRING: JSON.stringify({ [keyId]: key.toString("base64url") }),
     } as NodeJS.ProcessEnv)).toThrow("grant_configuration");
     expect(() => loadWooCouponReadKeyring({
-      COMMERCE_CONNECTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64url") }),
+      MODA_ENCRYPTION_KEYS_JSON: JSON.stringify({ [keyId]: key.toString("base64url") }),
     })).toThrow("grant_configuration");
     expect(() => loadWooCouponConnectionMode({ MODA_WOOCOMMERCE_CONNECTION_MODE: "local-development", NODE_ENV: "production" })).toThrow("grant_configuration");
   });

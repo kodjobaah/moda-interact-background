@@ -23,6 +23,8 @@ function fixture(platform: "WOOCOMMERCE" | "SHOPIFY", row: Record<string, unknow
   const db = {
     shop: { findUnique: vi.fn().mockResolvedValue({ platform }) },
     shopSettings: { findUnique: vi.fn().mockResolvedValue(settings(row)) },
+    shopifyDiscountCatalogue: { findUnique: vi.fn().mockResolvedValue(null) },
+    shopifyDiscount: { findMany: vi.fn().mockResolvedValue([]) },
     shopRecoveryPolicyOverride: { findUnique: vi.fn().mockResolvedValue(null) },
   };
   return { db, policy: new RecoveryPolicyService(db as never) };

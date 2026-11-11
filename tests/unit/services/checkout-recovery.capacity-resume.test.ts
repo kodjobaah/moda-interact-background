@@ -44,6 +44,7 @@ vi.mock("../../../src/lib/db.js", () => ({
     shop: {
       findUnique: vi.fn(async () => ({
         id: "shop-1",
+        platform: "SHOPIFY",
         settings: null,
       })),
       findUniqueOrThrow: vi.fn(async () => ({ id: "shop-1" })),
@@ -54,6 +55,7 @@ vi.mock("../../../src/lib/db.js", () => ({
       update: hoisted.update,
       updateMany: hoisted.updateMany,
     },
+    recoveryOutreachAttempt: { findFirst: vi.fn(async () => null) },
     whatsAppRecipientReachability: {
       findUnique: vi.fn(async () => null),
     },

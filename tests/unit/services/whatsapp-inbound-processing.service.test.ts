@@ -75,7 +75,7 @@ beforeEach(() => {
   h.findMessage.mockResolvedValue(null);
   h.createMessage.mockResolvedValue(undefined);
   h.reachability.mockResolvedValue(undefined);
-  h.turnState.mockResolvedValue({ inboundVersion: 2 });
+  h.turnState.mockResolvedValue({ inboundVersion: 2, controlMode: "AI", pendingTurnStartedAt: new Date(event.occurredAt) });
   h.turnOwnership.mockResolvedValue({ revision: 3 });
   h.sendText.mockResolvedValue(undefined);
 });

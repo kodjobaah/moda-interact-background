@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 const mocked = vi.hoisted(() => ({ read: vi.fn(), readBundle: vi.fn() }));
 vi.mock("../../../../src/services/platform-configuration/production.js", () => ({
@@ -6,7 +6,7 @@ vi.mock("../../../../src/services/platform-configuration/production.js", () => (
 }));
 
 import {
-  readWooCouponPolicy, readR2Configuration, readSpeechOperation,
+  readWooCouponPolicy, readR2Configuration, readSpeechOperation, readCommerceKeyring,
 } from "../../../../src/services/platform-configuration/consumers.js";
 
 const wooPolicy = {
@@ -23,6 +23,17 @@ const r2 = {
 
 describe("ARCH-043 Background consumer configuration snapshots", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("loads the unified deployment key map without reading a database keyring", async () => {
+    vi.stubEnv("MODA_ENCRYPTION_KEYS_JSON", JSON.stringify({ historical: Buffer.alloc(32, 1).toString("base64"), current: Buffer.alloc(32, 2).toString("base64") }));
+    vi.stubEnv("MODA_ENCRYPTION_ACTIVE_KEY_ID", "current");
+    expect((await readCommerceKeyring()).keyIds).toEqual(["current", "historical"]);
+    expect(mocked.read).not.toHaveBeenCalled();
+    vi.stubEnv("MODA_ENCRYPTION_ACTIVE_KEY_ID", "missing");
+    await expect(readCommerceKeyring()).rejects.toThrow();
+    expect(mocked.read).not.toHaveBeenCalled();
+  });
 
   it("reads Woo policy for every separate operation rather than memoizing a revision", async () => {
     mocked.read.mockResolvedValueOnce({ key: "woo.couponSync", version: 1, value: wooPolicy })

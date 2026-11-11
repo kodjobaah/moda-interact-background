@@ -1,3 +1,8 @@
+// Queue delivery is covered by the capacity-resume integration tests.
+vi.mock("../../../src/services/recovery-capacity-resume.service.js", () => ({
+  recoveryCapacityResumeService: { schedule: vi.fn(async () => undefined) },
+}));
+
 import { describe, expect, it, vi } from "vitest";
 
 import { ShopifySubscriptionLifecycleReconciliationService } from "../../../src/services/shopify-subscription-lifecycle-reconciliation.service.js";

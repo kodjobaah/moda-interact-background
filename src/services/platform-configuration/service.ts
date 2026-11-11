@@ -49,9 +49,9 @@ export type UnsealKeyringProvider = () => CredentialKeyring;
 export function createExternalUnsealKeyringProvider(environment: Readonly<NodeJS.ProcessEnv> = process.env): UnsealKeyringProvider {
   return () => {
     try {
-      const ring = parseCredentialKeyring(environment.MODA_CONFIG_UNSEAL_KEY);
+      const ring = parseCredentialKeyring(environment.MODA_ENCRYPTION_KEYS_JSON);
       // Verify the active key is valid even though reading old rows uses their persisted key ID.
-      resolveActiveCredentialKey(ring, environment.MODA_CONFIG_UNSEAL_ACTIVE_KEY_ID);
+      resolveActiveCredentialKey(ring, environment.MODA_ENCRYPTION_ACTIVE_KEY_ID);
       return ring;
     } catch { throw new PlatformConfigurationFailure("UNSEAL_FAILED", "configuration-root"); }
   };
@@ -105,6 +105,7 @@ export function createBackgroundPlatformConfigurationService(input: {
       } catch { throw new PlatformConfigurationFailure("UNSEAL_FAILED", key); }
     }
     const result = decodeConfiguration(key, plaintext);
+    // Historical rows remain decodable; runtime credentials use the deployment key map.
     if (key === "commerce.connectionKeys") {
       try {
         const value = result as KeyValues["commerce.connectionKeys"];

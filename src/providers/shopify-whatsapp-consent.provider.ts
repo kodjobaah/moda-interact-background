@@ -148,7 +148,7 @@ export class ShopifyWhatsAppConsentProvider implements ShopifyWhatsAppConsentRea
 }
 
 function buildConsentEndpoint(shop: string): URL | undefined {
-  if (!shop || shop.length > 255 || /[\u0000-\u0020\u007f]/.test(shop)) return undefined;
+  if (!shop || shop.length > 255 || Array.from(shop).some((character) => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127)) return undefined;
   try {
     const endpoint = new URL(`https://${shop}${CONSENT_PATH}`);
     if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.port ||

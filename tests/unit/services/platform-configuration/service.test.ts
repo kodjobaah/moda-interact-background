@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { encryptCredential, parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 import { BACKGROUND_READABLE_KEYS, REGISTERED_KEYS } from "../../../../src/services/platform-configuration/contracts.js";
-import { createBackgroundPlatformConfigurationService } from "../../../../src/services/platform-configuration/service.js";
+import { createBackgroundPlatformConfigurationService, createExternalUnsealKeyringProvider } from "../../../../src/services/platform-configuration/service.js";
 import type { ConfigurationRow } from "../../../../src/services/platform-configuration/repository.js";
 
 const environment = "test";
@@ -351,4 +351,17 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
     expect(new Set(correlations).size).toBe(correlations.length);
   });
 
+});
+
+
+describe("unified deployment encryption configuration", () => {
+  it("retains historical decryption keys while validating the active key", () => {
+    const configuration = {
+      MODA_ENCRYPTION_KEYS_JSON: JSON.stringify({ historical: Buffer.alloc(32, 1).toString("base64"), current: Buffer.alloc(32, 2).toString("base64") }),
+      MODA_ENCRYPTION_ACTIVE_KEY_ID: "current",
+    };
+    expect(createExternalUnsealKeyringProvider(configuration)().keyIds).toEqual(["current", "historical"]);
+    expect(() => createExternalUnsealKeyringProvider({ ...configuration, MODA_ENCRYPTION_ACTIVE_KEY_ID: "missing" })()).toThrow("unseal_failed");
+    expect(() => createExternalUnsealKeyringProvider({})()).toThrow("unseal_failed");
+  });
 });
