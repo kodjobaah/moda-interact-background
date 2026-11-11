@@ -1,3 +1,4 @@
+import { merchantFollowUpOfferService } from "../recovery-offers/merchant-follow-up-offer.service.js";
 import { sameReconciledPrices } from "../recovery-pricing/same-reconciled-prices.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -214,6 +215,7 @@ export class AutomatedRecoveryTemplateService {
     private readonly admissionValidator: Pick<InitialOutreachOfferSelectionService, "validateAdmission"> =
       initialOutreachOfferSelectionService,
     private readonly initialFallback: InitialNoOfferFallbackPort = initialNoOfferFallbackService,
+    private readonly followUpOffers: Pick<typeof merchantFollowUpOfferService, "verify"> = merchantFollowUpOfferService,
   ) {
     this.lifetimeReader = lifetimeReader ?? new PersistedCheckoutRecoveryLifetimeReader(database);
   }
@@ -351,6 +353,7 @@ export class AutomatedRecoveryTemplateService {
         })) return unavailable("CHECKOUT_UNAVAILABLE");
       }
       let prior: PreviouslyPromisedOffer | undefined;
+      let priorOfferSet: unknown;
       if (input.stage === "FOLLOW_UP") {
         const initial = recovery.outreachAttempts[0];
         if (!initial?.sentAt || !initial.outboundMessageId) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
@@ -364,6 +367,8 @@ export class AutomatedRecoveryTemplateService {
         const parsed = previousPromise(message.content);
         if (!parsed) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         prior = parsed;
+        const receipt = JSON.parse(message.content);
+        if (receipt.recoveryPromise?.kind === "CHECKOUT_DISCOUNT") priorOfferSet = receipt.recoveryPromise.offerSet;
         if (prior.kind !== "NO_OFFER" && prior.promotionTarget === undefined) {
           return unavailable("PREVIOUS_OFFER_UNKNOWN");
         }
@@ -477,6 +482,23 @@ export class AutomatedRecoveryTemplateService {
           };
           recoveryPromise = { kind: "CHECKOUT_DISCOUNT", promotionTarget: "CHECKOUT", offerSet };
         }
+      } else if (priorOfferSet && input.outreachAttemptId) {
+        const current = await this.followUpOffers.verify({ shopId: input.shopId,
+          checkoutRecoveryId: input.recoveryId, outreachAttemptId: input.outreachAttemptId,
+          offerSet: priorOfferSet });
+        if (!current || !prior || prior.kind === "NO_OFFER") return unavailable("PREVIOUS_OFFER_UNVERIFIED");
+        const member = current.member;
+        offerPresentation = member.method === "CODE" ? "CODE_OFFER" : "AUTOMATIC_OFFER";
+        if (offerPresentation !== prior.kind || member.providerDiscountId !== prior.providerDiscountId ||
+            member.method === "CODE" && member.code !== prior.code) return unavailable("FOLLOW_UP_OFFER_CHANGED");
+        admissionToken = current.admissionToken;
+        if (offerPresentation === "CODE_OFFER" && !member.code) return unavailable("PREVIOUS_OFFER_UNVERIFIED");
+        recoveryPromise = offerPresentation === "CODE_OFFER"
+          ? { kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: member.providerDiscountId, code: member.code! }
+          : { kind: "AUTOMATIC_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: member.providerDiscountId };
+        verifiedOffer = { shopId: input.shopId, kind: offerPresentation, verified: true,
+          verifiedAt: now, expiresAt: new Date(now.getTime() + 30_000),
+          ...(member.code ? { code: member.code } : {}), description: member.description };
       } else {
         const offerInput: ResolveRecoveryOfferInput = {
           shopId: input.shopId, checkoutRecoveryId: input.recoveryId,

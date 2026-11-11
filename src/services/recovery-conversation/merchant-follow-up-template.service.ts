@@ -57,6 +57,7 @@ export class MerchantFollowUpTemplateService {
       const policy = await this.policy.resolve(command.shopId);
       const selection = await this.templates.prepare({
         shopId: command.shopId, recoveryId, stage: "FOLLOW_UP", policy,
+        outreachAttemptId: command.recoveryOutreachAttemptId,
         conversationLanguageTag: conversation.languageTag ?? null,
       });
       if (selection.kind !== "prepared") {
