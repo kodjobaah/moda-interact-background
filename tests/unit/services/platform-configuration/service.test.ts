@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { encryptCredential, parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
-import { BACKGROUND_READABLE_KEYS, REGISTERED_KEYS } from "../../../../src/services/platform-configuration/contracts.js";
+import { BACKGROUND_READABLE_KEYS, RECOVERY_EXECUTION_DEFAULTS, REGISTERED_KEYS } from "../../../../src/services/platform-configuration/contracts.js";
 import { createBackgroundPlatformConfigurationService, createExternalUnsealKeyringProvider } from "../../../../src/services/platform-configuration/service.js";
 import type { ConfigurationRow } from "../../../../src/services/platform-configuration/repository.js";
 
@@ -95,16 +95,17 @@ describe("ARCH-043 Background typed configuration read boundary", () => {
       "messaging.sender": { accessToken: "meta-private", phoneNumberId: "12345", businessAccountId: "98765" },
       "merchant.knowledge.r2": r2,
       "shopBrand.publicMedia": { publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands" },
+      "commerce.recoveryExecution": RECOVERY_EXECUTION_DEFAULTS,
       "ai.providers": { openAiApiKey: "openai-generic-secret", groqApiKey: "groq-generic-secret" },
       "omini.moderation": moderation,
     };
     const rows = Object.entries(values).map(([key, value]) => row(key,
-      ["woo.couponSync", "speech.transcription", "omini.moderation", "shopBrand.publicMedia"].includes(key) ? value : seal(key, 1, value)));
+      ["woo.couponSync", "speech.transcription", "omini.moderation", "shopBrand.publicMedia", "commerce.recoveryExecution"].includes(key) ? value : seal(key, 1, value)));
     const context = setup(rows);
     for (const key of BACKGROUND_READABLE_KEYS) {
       expect((await context.service.read(key)).value).toEqual(values[key]);
     }
-    expect(context.readRows).toHaveBeenCalledTimes(11);
+    expect(context.readRows).toHaveBeenCalledTimes(12);
   });
 
   it("uses the approved public ShopBrand media defaults on read without creating a row", async () => {

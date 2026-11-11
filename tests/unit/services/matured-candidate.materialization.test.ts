@@ -20,6 +20,9 @@ const hoisted = vi.hoisted(() => {
         update: vi.fn(),
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
+      platformConfiguration: {
+        findMany: vi.fn(async () => []),
+      },
       whatsAppRecipientReachability: {
         findUnique: vi.fn(async () => null),
       },

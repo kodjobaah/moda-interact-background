@@ -43,7 +43,8 @@ describe("InitialOutreachOfferSelectionService", () => {
     expect(agent).toHaveBeenCalledWith(builtContext, expect.objectContaining({ signal, modelInvoker }));
     expect(revalidator.revalidateCurrentOutreachOffer).toHaveBeenCalledWith({
       shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1",
-      proposed: agentResult, signal,
+      proposed: agentResult, signal, readBudgetMs: 15_000,
+      discountSourceReadTimeoutMs: 10_000, maxProductDetailReads: 5,
     });
     expect(result).toEqual({ result: agentResult, context: builtContext,
       currentContext: builtContext, signal, admissionToken });
