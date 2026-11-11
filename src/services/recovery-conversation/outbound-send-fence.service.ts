@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { FollowUpClaimKeyIntegrityError } from "./merchant-send-command.service.js";
 import { first, rows, lockRecoveryContext, readRecoveryWindowEvidence, recoveryDatabase, terminalRecovery,
   type RecoveryContext, type RecoveryDatabase, type SqlTransaction } from "./recovery-conversation.sql.js";
-import { customerWindow } from "./recovery-follow-up-policy.service.js";
+import { customerWindow, followUpDue } from "./recovery-follow-up-policy.service.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import type { StoredRecoveryConsentSnapshot } from "./recovery-stored-consent.service.js";
 import { checkFinalTemplateRegistration, type FinalTemplateEligibility,
@@ -256,7 +256,7 @@ export class OutboundSendFenceService {
           return { kind: "suppressed", reason: "customer-window-closed" } as const;
         if (command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
           if (open) return { kind: "suppressed", reason: "customer-window-open" } as const;
-          if (!evidence.followUpDueAt || evidence.followUpDueAt > permitNow)
+          if (!followUpDue(evidence, permitNow, "merchant_post_window"))
             return { kind: "suppressed", reason: "follow-up-not-due" } as const;
           if (evidence.recipient !== input.recipient)
             return { kind: "suppressed", reason: "recipient-mismatch" } as const;

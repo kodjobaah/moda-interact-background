@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { first, rows, changed, recoveryDatabase, readRecoveryContext, readRecoveryWindowEvidence, lockRecoveryContext,
-  terminalRecovery, type RecoveryDatabase } from "./recovery-conversation.sql.js";
+  terminalRecovery, type RecoveryDatabase, type RecoveryWindowEvidence } from "./recovery-conversation.sql.js";
 
 export const CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
 export type FollowUpClaim = { kind: "claimed"; attemptId: string; billingSource: string }
@@ -17,6 +17,14 @@ export function customerWindow(lastVerifiedInbound: Date | null, now: Date) {
   const closesAt = lastVerifiedInbound ? new Date(lastVerifiedInbound.getTime() + CUSTOMER_WINDOW_MS) : null;
   return { open: closesAt !== null && lastVerifiedInbound!.getTime() <= now.getTime() &&
     now.getTime() < closesAt.getTime(), closesAt };
+}
+
+export function followUpDue(evidence: RecoveryWindowEvidence, now: Date, initiator: FollowUpInitiation): boolean {
+  if (initiator === "merchant_post_window" && evidence.platform === "WOOCOMMERCE") {
+    if (!evidence.initialSentAt || now.getTime() - evidence.initialSentAt.getTime() < CUSTOMER_WINDOW_MS) return false;
+    if (!evidence.followUpDueAt) return evidence.verifiedInboundAt === null;
+  }
+  return evidence.followUpDueAt !== null && evidence.followUpDueAt <= now;
 }
 
 export class RecoveryFollowUpPolicyService {
@@ -47,7 +55,7 @@ export class RecoveryFollowUpPolicyService {
       return { kind: "suppressed", reason: "no-initial-outreach" } as const;
     if (customerWindow(evidence.verifiedInboundAt, input.now).open)
       return { kind: "suppressed", reason: "customer-window-open" } as const;
-    if (!evidence.followUpDueAt || evidence.followUpDueAt > input.now)
+    if (!followUpDue(evidence, input.now, "merchant_post_window"))
       return { kind: "suppressed", reason: "follow-up-not-due" } as const;
     return { kind: "allowed" } as const;
   }
@@ -112,9 +120,7 @@ export class RecoveryFollowUpPolicyService {
         return { kind: "suppressed", reason: "recipient-mismatch" } as const;
       if (input.initiator === "merchant_post_window" && customerWindow(evidence.verifiedInboundAt, input.now).open)
         return { kind: "suppressed", reason: "customer-window-open" } as const;
-      // Effective due time is persisted when sequence 1 is finalised; never
-      // recompute it from mutable shop settings or impose a fixed 24-hour wait.
-      if (!evidence.followUpDueAt || evidence.followUpDueAt > input.now)
+      if (!followUpDue(evidence, input.now, input.initiator))
         return { kind: "suppressed", reason: "follow-up-not-due" } as const;
       if (input.initiator === "scheduled_no_response") {
         const inbound = await first<{ id: string }>(tx, `

@@ -77,6 +77,7 @@ export const denied = (reason: string): Decision => ({ kind: "denied", reason })
  * lockInitial preserves claim's initial-outreach row lock before sequence 2.
  */
 export type RecoveryWindowEvidence = {
+  platform: string;
   initialAttemptId: string;
   recipient: string;
   initialSentAt: Date | null;
@@ -89,10 +90,12 @@ export async function readRecoveryWindowEvidence(
   input: { recoveryId: string; conversationId: string; now: Date; lockInitial?: boolean },
 ): Promise<RecoveryWindowEvidence | null> {
   return first<RecoveryWindowEvidence>(tx, `
-    SELECT initial."id" AS "initialAttemptId", initial."recipient",
+    SELECT shop."platform"::text AS "platform", initial."id" AS "initialAttemptId", initial."recipient",
       initial."sentAt" AS "initialSentAt", initial."followUpDueAt",
       verified."createdAt" AS "verifiedInboundAt"
     FROM "commerce"."RecoveryOutreachAttempt" initial
+    JOIN "commerce"."CheckoutRecovery" recovery ON recovery."id"=initial."checkoutRecoveryId"
+    JOIN "commerce"."Shop" shop ON shop."id"=recovery."shopId"
     LEFT JOIN LATERAL (
       SELECT msg."createdAt"
       FROM "whatsapp"."ConversationMessage" msg

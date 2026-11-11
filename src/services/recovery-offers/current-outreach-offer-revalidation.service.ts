@@ -1,3 +1,4 @@
+import { sameReconciledPrices } from "../recovery-pricing/same-reconciled-prices.js";
 import {
   CommerceToolOutputs,
   InitialOutreachCheckoutOfferSetSchema,
@@ -55,7 +56,7 @@ export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   contextBuilder: ContextBuilder;
   createSelector?: (input: { shopId: string; signal: AbortSignal }) => Selector;
   readFence?: (input: {
-    shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; signal: AbortSignal;
+    shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; mode?: InitialOutreachAgentContext["mode"]; signal: AbortSignal;
   }) => Promise<DiscountSourceFenceResult>;
   readBudgetMs?: number;
   clock?: () => Date;
@@ -69,12 +70,7 @@ function fenceMatches(left: DiscountSourceFence, right: DiscountSourceFence): bo
     left.snapshotDigest === right.snapshotDigest;
 }
 
-function samePrice(left: CheckoutPriceReconciliation | null, right: CheckoutPriceReconciliation | null): boolean {
-  if (left === null || right === null) return left === right;
-  const { evaluatedAt: _leftAt, ...leftFacts } = left;
-  const { evaluatedAt: _rightAt, ...rightFacts } = right;
-  return JSON.stringify(leftFacts) === JSON.stringify(rightFacts);
-}
+
 
 function tokenFor(
   context: InitialOutreachAgentContext,
@@ -228,7 +224,7 @@ export class CurrentOutreachOfferRevalidationService {
       return { kind: "FAILURE", reasonCode: "PROPOSED_OFFER_STALE_OR_UNAUTHORISED", retryable: false };
     }
 
-    const first = await this.readFence({ ...input, selectedOfferIds: ids });
+    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode });
     if (first.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
@@ -336,7 +332,7 @@ export class CurrentOutreachOfferRevalidationService {
     if (deadline.aborted) {
       return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true };
     }
-    const second = await this.readFence({ ...input, selectedOfferIds: ids });
+    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode });
     if (second.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
@@ -359,7 +355,7 @@ export class CurrentOutreachOfferRevalidationService {
         JSON.stringify(context.authorisedDiscountIds) !== JSON.stringify(initial.authorisedDiscountIds) ||
         context.basket.generation !== initial.basket.generation ||
         context.basket.fingerprint !== initial.basket.fingerprint ||
-        !samePrice(context.priceReconciliation, initial.priceReconciliation)) {
+        !sameReconciledPrices(context.priceReconciliation, initial.priceReconciliation)) {
       return { kind: "FAILURE", reasonCode: "CURRENT_CONTEXT_CHANGED_DURING_SOURCE_READ", retryable: true };
     }
     const admissionToken = tokenFor(context, second.fence);
@@ -412,7 +408,7 @@ export class CurrentOutreachOfferRevalidationService {
         context.outreachAttemptId !== token.outreachAttemptId || context.basket.generation !== token.generation ||
         context.basket.fingerprint !== token.fingerprint || context.mode !== token.mode ||
         JSON.stringify(context.authorisedDiscountIds) !== JSON.stringify(token.authorisedDiscountIds) ||
-        !samePrice(context.priceReconciliation, token.priceReconciliation)) {
+        !sameReconciledPrices(context.priceReconciliation, token.priceReconciliation)) {
       this.log.warn("recovery_offer.current_source.admission_changed", {
         shopId: token.shopId, recoveryId: token.checkoutRecoveryId,
         attemptId: token.outreachAttemptId, stage: "F3", reasonCode: "CONTEXT_CHANGED",
@@ -423,7 +419,7 @@ export class CurrentOutreachOfferRevalidationService {
     if (!token.sourceFence) return true;
     const current = await this.readFence({
       shopId: token.shopId, checkoutRecoveryId: token.checkoutRecoveryId,
-      selectedOfferIds: token.sourceFence.selectedOfferIds, signal,
+      selectedOfferIds: token.sourceFence.selectedOfferIds, mode: context.mode, signal,
     });
     const matches = current.kind === "AVAILABLE" && fenceMatches(token.sourceFence, current.fence);
     if (!matches) {

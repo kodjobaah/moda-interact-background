@@ -44,6 +44,8 @@ export function selectRecoveryAssignment(input: {
   platformFallbackEnabled: boolean;
   platformFallbackLanguageTag: string | null;
   headerFormat?: "TEXT" | "IMAGE";
+  checkoutProductHeaderAvailable?: boolean;
+  hasCustomerFirstName?: boolean;
   logger: Pick<StructuredLogger, "warn">;
 }): AssignmentSelection {
   // The published projection uses ISO dates; repository Date values remain host-owned.

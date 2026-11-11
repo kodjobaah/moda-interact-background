@@ -90,6 +90,7 @@ export class RecoveryTemplatePreparer {
         shop: catalogue.shop, shopId: input.shopId, senderWabaId: configuredSender,
         purpose, variants: catalogue.variants,
         stage: input.stage, offer: input.offerPresentation,
+        hasCustomerFirstName: Boolean(input.customerFirstName?.trim()),
         offerCount: input.verifiedOffer?.codes?.length ?? 1,
         ...(input.promotionTarget ? { promotionTarget: input.promotionTarget } : {}),
         conversationLanguageTag: input.conversationLanguageTag,
@@ -99,15 +100,18 @@ export class RecoveryTemplatePreparer {
         logger: this.logger,
       } as const;
       const select = (headerFormat: "TEXT" | "IMAGE") => selectRecoveryAssignment({
-        ...selectionInput, headerFormat,
+        ...selectionInput, headerFormat, checkoutProductHeaderAvailable: Boolean(input.productImage),
       });
       let selectedFormat: "TEXT" | "IMAGE" = "TEXT";
-      let selected = input.stage === "INITIAL" && input.productImage
+      let selected = input.stage === "INITIAL"
         ? select("IMAGE")
         : { outcome: "unavailable" as const, reason: "NO_APPROVED_ASSIGNMENT" as const };
       let productMedia: PreparedOutreachProductMedia | undefined;
-      if (selected.outcome === "selected" && input.productImage) {
-        productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+      if (selected.outcome === "selected") {
+        const bindings = selected.value.variant.metaRegistration!.parameterBindingsSnapshot as { headerMediaRole?: string };
+        if (bindings.headerMediaRole === "CHECKOUT_PRODUCT" && input.productImage) {
+          productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+        }
         // Retain the approved IMAGE assignment until its mandatory BODY
         // evidence has been validated. Only header availability may select TEXT.
         selectedFormat = "IMAGE";
