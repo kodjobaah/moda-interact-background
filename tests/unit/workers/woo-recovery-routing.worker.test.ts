@@ -107,7 +107,7 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
   });
 
   it("rethrows service failures without cleanup or a completed event", async () => {
-    const failure = new Error("provider error private phone number");
+    const failure = new Error("provider error phone +447000111222 token=private-value");
     mocked.wooMature.mockRejectedValueOnce(failure);
     await expect(run(job(wooData, "evaluate-pending-recovery", wooCandidateJobId(wooData, wooData.generation))))
       .rejects.toBe(failure);
@@ -115,7 +115,11 @@ describe("ARCH-048-BG005 shared maturity queue source routing", () => {
     expect(mocked.logger.info).not.toHaveBeenCalledWith("woocommerce.recovery.job.completed", expect.anything());
     expect(mocked.logger.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.anything());
     expect(mocked.logger.error).toHaveBeenCalledWith("woocommerce.recovery.job.failed", expect.objectContaining({
-      errorMessage: "provider error private phone number", error: failure,
+      errorMessage: "provider error phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]",
+      sourceError: expect.objectContaining({ name: "Error", redactionApplied: true,
+        message: "provider error phone [REDACTED_PHONE] [REDACTED_CREDENTIAL]" }),
     }));
+    expect(JSON.stringify(mocked.logger.error.mock.calls)).not.toContain("+447000111222");
+    expect(JSON.stringify(mocked.logger.error.mock.calls)).not.toContain("private-value");
   });
 });
