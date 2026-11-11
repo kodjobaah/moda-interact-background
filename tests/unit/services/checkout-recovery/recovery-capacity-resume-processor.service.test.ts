@@ -803,6 +803,8 @@ describe("RecoveryCapacityResumeProcessorService", () => {
         resolveForCustomerInShop: async () => "15551234567",
       } as never,
       admission,
+      { schedule },
+      { resolve: vi.fn(async () => ({ recoveryDelayMinutes: 30 })) } as never,
     );
 
     await expect(processor.resume("recovery-1", originalWakeup!.trigger)).resolves.toMatchObject({
