@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InitialOutreachAgentContextService } from "../../../../src/services/recovery-offers/initial-outreach-agent-context.service.js";
 
-function fixture(input: { mode?: "NONE" | "AI_BEST_APPLICABLE"; invalidShopPrompt?: boolean } = {}) {
+function fixture(input: { mode?: "NONE" | "AI_BEST_APPLICABLE"; invalidShopPrompt?: boolean; stage?: "INITIAL" | "FOLLOW_UP" } = {}) {
   const shopId = "shop-context";
   const recoveryId = "recovery-context";
   const attemptId = "attempt-context";
@@ -39,7 +39,7 @@ function fixture(input: { mode?: "NONE" | "AI_BEST_APPLICABLE"; invalidShopPromp
     commerceAgentConfiguration: { findMany: vi.fn(async () => configurations) },
   };
   const service = new InitialOutreachAgentContextService({
-    db: db as never,
+    db: db as never, stage: input.stage,
     environment: "TEST",
     policyService: { resolve: vi.fn(async () => ({
       recoveryOfferMode: input.mode ?? "AI_BEST_APPLICABLE", fixedShopifyDiscountId: null,
@@ -47,7 +47,7 @@ function fixture(input: { mode?: "NONE" | "AI_BEST_APPLICABLE"; invalidShopPromp
     priceReconciliationService: { reconcile } as never,
     now: () => new Date("2026-10-31T12:00:00.000Z"),
   });
-  return { service, reconcile, shopId, recoveryId, attemptId };
+  return { service, reconcile, shopId, recoveryId, attemptId, recovery, attempt };
 }
 
 describe("InitialOutreachAgentContextService", () => {
@@ -68,4 +68,19 @@ describe("InitialOutreachAgentContextService", () => {
     expect(context).toMatchObject({ mode: "NONE", priceReconciliation: null, authorisedDiscountIds: [] });
     expect(test.reconcile).not.toHaveBeenCalled();
   });
+});
+it("only explicit follow-up context accepts a pending human sequence-two attempt", async () => {
+  for (const stage of ["INITIAL", "FOLLOW_UP"] as const) {
+    const test = fixture({ mode: "NONE", stage });
+    test.recovery.status = "MESSAGE_SENT";
+    Object.assign(test.attempt, { sequence: 2, trigger: "POST_WINDOW_FOLLOW_UP", initiatedBy: "HUMAN" });
+    const request = { shopId: test.shopId, checkoutRecoveryId: test.recoveryId,
+      outreachAttemptId: test.attemptId, signal: new AbortController().signal };
+    if (stage === "INITIAL") await expect(test.service.build(request)).rejects.toThrow();
+    else {
+      await expect(test.service.build(request)).resolves.toMatchObject({ mode: "NONE" });
+      test.attempt.status = "SENT";
+      await expect(test.service.build(request)).rejects.toThrow("OUTREACH_ATTEMPT_INVALID");
+    }
+  }
 });
