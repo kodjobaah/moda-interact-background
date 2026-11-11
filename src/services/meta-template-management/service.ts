@@ -252,15 +252,22 @@ export class MetaTemplateManagementService {
     "duplicate" | "unmatched" | ReconcileOutcome["kind"]
   > {
     try {
+      // Meta's webhook samples use BCP-47 separators (pt-BR), while persisted
+      // template registrations use Meta provider codes (pt_BR). Normalize before
+      // lookup and receipt deduplication, without changing the authenticated input.
+      const language = input?.providerLanguageCode;
+      const providerLanguageCode = typeof language === "string" && language.length <= 16 && language === language.trim() &&
+        /^[A-Za-z]{2,8}(?:[-_][A-Za-z]{2,8}){0,2}$/.test(language)
+        ? language.replaceAll("-", "_") : null;
       if (!input || !/^[A-Za-z0-9:_.-]{1,191}$/.test(input.eventIdentity) ||
           !/^\d{1,32}$/.test(input.wabaId) ||
           !/^[A-Za-z0-9_]{1,255}$/.test(input.providerTemplateName) ||
-          !/^[A-Za-z_]{2,16}$/.test(input.providerLanguageCode) ||
+          !providerLanguageCode ||
           !Number.isFinite(Date.parse(input.occurredAt)) ||
           !/^[A-Za-z_]{1,32}$/.test(input.providerStatus)) {
         throw new MetaManagementError("INVALID_AUTHENTICATED_OBSERVATION", "blocked");
       }
-      const receipt = await this.repository.recordObservation(input);
+      const receipt = await this.repository.recordObservation({ ...input, providerLanguageCode });
       // An already-inserted receipt can represent a crash/error between the
       // initial insert and the Meta GET. Retry projection on linked duplicates.
       if (receipt.duplicate && !receipt.registrationId) return "duplicate";

@@ -216,6 +216,51 @@ describe("BG003 Meta template management", () => {
     expect(f.provider.find).not.toHaveBeenCalled();
   });
 
+  it.each(["pt-BR", "pt_BR", "en", "en-US", "zh-Hant-TW"])(
+    "accepts webhook language %s and records the canonical provider code", async (language) => {
+      const f = fixture();
+      const event = { eventIdentity: "sample-1", wabaId: "123456", providerTemplateId: "12345678",
+        providerTemplateName: "my_message_template", providerLanguageCode: language,
+        providerStatus: "APPROVED", occurredAt: now.toISOString() };
+      f.repository.recordObservation.mockResolvedValueOnce({ duplicate: false, registrationId: null } as never);
+      await expect(f.service.processTemplateStatusObservation(event)).resolves.toBe("unmatched");
+      expect(f.repository.recordObservation).toHaveBeenCalledWith({
+        ...event, providerLanguageCode: language.replaceAll("-", "_"),
+      });
+      expect(event.providerLanguageCode).toBe(language);
+      expect(f.provider.find).not.toHaveBeenCalled();
+      expect(f.provider.create).not.toHaveBeenCalled();
+    });
+
+  it("reconciles a pt-BR observation against the existing pt_BR registration using authoritative GET", async () => {
+    const f = fixture();
+    const event = { eventIdentity: "sample-linked", wabaId: "123456", providerTemplateName: record.providerTemplateName,
+      providerLanguageCode: "pt-BR", providerStatus: "APPROVED", occurredAt: now.toISOString() };
+    f.repository.recordObservation.mockImplementationOnce(async (...args: unknown[]) => ({
+      duplicate: false,
+      registrationId: (args[0] as { providerLanguageCode: string }).providerLanguageCode === "pt_BR" ? "reg-1" : null,
+    }) as never);
+    f.repository.load.mockResolvedValueOnce({ ...record, providerLanguageCode: "pt_BR",
+      submissionState: "SUBMITTED", providerTemplateId: "meta-1" } as never);
+    f.provider.find.mockResolvedValueOnce({ kind: "found", template: {
+      ...claim, language: "pt_BR", id: "meta-1", status: "PAUSED", category: "MARKETING", components: compiled,
+    } } as never);
+    await expect(f.service.processTemplateStatusObservation(event)).resolves.toBe("current");
+    expect(f.provider.find).toHaveBeenCalledTimes(1);
+    expect(f.repository.recordReconciliation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "PAUSED" }));
+  });
+
+  it.each(["", "p", "pt--BR", "-pt-BR", "pt-BR-", "pt BR", "pt/BR", "pt_BR\n", "pt-123", "a".repeat(17)])(
+    "rejects malformed language %j before persistence or provider access", async (language) => {
+      const f = fixture();
+      await expect(f.service.processTemplateStatusObservation({ eventIdentity: "invalid-language", wabaId: "123456",
+        providerTemplateName: "my_message_template", providerLanguageCode: language,
+        providerStatus: "APPROVED", occurredAt: now.toISOString(),
+      })).rejects.toThrow("INVALID_AUTHENTICATED_OBSERVATION");
+      expect(f.repository.recordObservation).not.toHaveBeenCalled();
+      expect(f.provider.find).not.toHaveBeenCalled();
+    });
+
   it("a repeated linked event retries GET after failure between receipt and reconciliation", async () => {
     const f = fixture();
     f.repository.recordObservation.mockResolvedValueOnce({ duplicate: true, registrationId: "reg-1" });
