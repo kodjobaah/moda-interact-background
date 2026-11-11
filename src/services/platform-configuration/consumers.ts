@@ -14,6 +14,9 @@ export async function readWooCouponPolicy(): Promise<Readonly<WooCouponSyncConfi
 export async function readShopBrandPublicMediaConfiguration() {
   return (await configuration.read("shopBrand.publicMedia")).value;
 }
+export async function readRecoveryExecutionPolicy() {
+  return (await configuration.read("commerce.recoveryExecution")).value;
+}
 export async function readR2Configuration() {
   return (await configuration.read("merchant.knowledge.r2")).value;
 }

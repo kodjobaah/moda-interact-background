@@ -8,6 +8,7 @@ import { Queue } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import { connectionRedis } from "../lib/redis.js";
+import { readRecoveryExecutionPolicy } from "./platform-configuration/consumers.js";
 import type { CheckoutCreatedContractInput } from "../events/shopify-contract-adapter.js";
 import { createPendingRecoveryCandidateJobId } from "@modainteract/moda-interact-shared/shopify/node";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
@@ -402,5 +403,5 @@ export class PendingRecoveryCandidateService {
 }
 
 export const pendingRecoveryCandidateService =
-  new PendingRecoveryCandidateService();
+  new PendingRecoveryCandidateService(new PendingRecoveryCandidateIndexStore(readRecoveryExecutionPolicy));
 

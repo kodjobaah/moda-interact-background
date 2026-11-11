@@ -8,6 +8,8 @@ import {
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
 import { CommerceHostError } from "../../commerce/mcp-client.js";
+import { resolveLiveBudget } from "../../commerce/live-budget.js";
+import { DEFAULT_MAX_MCP_CALLS, type InitialOutreachExecutionLimits } from "../../agents/initial-outreach-offer.graph.js";
 import { runInitialOutreachOfferAgent } from "../../agents/initial-outreach-offer.agent.js";
 import type { InitialOutreachAgentResult } from "../../agents/initial-outreach-offer.types.js";
 import { createProductionCommerceModelInvoker } from "../../commerce/production-model.js";
@@ -22,6 +24,8 @@ import { CheckoutPriceReconciliationService } from "../recovery-pricing/checkout
 import type {
   ExactProductReader, RecoveryPricingState, TrustedRecoveryAttemptReader,
 } from "../recovery-pricing/checkout-price-reconciliation.types.js";
+import { readRecoveryExecutionPolicy } from "../platform-configuration/consumers.js";
+import { RECOVERY_EXECUTION_DEFAULTS, type RecoveryExecutionPolicy } from "../platform-configuration/contracts.js";
 
 const logger = createLogger({
   serviceName: "moda-recovery-worker",
@@ -52,8 +56,10 @@ export type InitialOutreachOfferSelectionDependencies = Readonly<{
   environment?: CommerceEnvironment;
   contextBuilder?: ContextBuilder;
   modelInvoker?: CommerceModelInvoker;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => RecoveryOutreachMcpSelectorService;
+  createSelector?: (input: { shopId: string; signal: AbortSignal; maxCalls?: number; maxProductDetailReads?: number; maxToolResultBytes?: number }) => RecoveryOutreachMcpSelectorService;
   agent?: typeof runInitialOutreachOfferAgent;
+  maxMcpCalls?: number;
+  readExecutionPolicy?: () => Promise<RecoveryExecutionPolicy>;
   logger?: Pick<StructuredLogger, "info" | "warn" | "error">;
   revalidator?: Pick<CurrentOutreachOfferRevalidationService,
     "revalidateCurrentOutreachOffer" | "validateAdmission">;
@@ -121,6 +127,8 @@ export class InitialOutreachOfferSelectionService {
   private contextBuilder: ContextBuilder | null;
   private readonly createSelector: NonNullable<InitialOutreachOfferSelectionDependencies["createSelector"]>;
   private readonly agent: typeof runInitialOutreachOfferAgent;
+  private readonly maxMcpCallsOverride: number | undefined;
+  private readonly readExecutionPolicy: () => Promise<RecoveryExecutionPolicy>;
   private readonly logger: Pick<StructuredLogger, "info" | "warn" | "error">;
   private revalidator: Pick<CurrentOutreachOfferRevalidationService,
     "revalidateCurrentOutreachOffer" | "validateAdmission"> | null;
@@ -135,6 +143,8 @@ export class InitialOutreachOfferSelectionService {
     this.logger = dependencies.logger ?? logger;
     this.revalidator = dependencies.revalidator ?? null;
     this.agent = dependencies.agent ?? runInitialOutreachOfferAgent;
+    this.maxMcpCallsOverride = dependencies.maxMcpCalls;
+    this.readExecutionPolicy = dependencies.readExecutionPolicy ?? readRecoveryExecutionPolicy;
     this.injectedModelInvoker = dependencies.modelInvoker;
   }
 
@@ -151,6 +161,7 @@ export class InitialOutreachOfferSelectionService {
     admissionToken?: CurrentOutreachOfferAdmissionToken;
   }>> {
     const signal = input.signal ?? AbortSignal.timeout(65_000);
+    const productionContext = this.contextBuilder === null;
     const contextBuilder = this.getContextBuilder();
     const revalidator = this.getRevalidator();
     const context = await contextBuilder.build({
@@ -159,12 +170,28 @@ export class InitialOutreachOfferSelectionService {
       outreachAttemptId: input.outreachAttemptId,
       signal,
     });
+    const runtimePolicy = productionContext ? await this.readExecutionPolicy() : RECOVERY_EXECUTION_DEFAULTS;
+    const platformBudget = productionContext ? await resolveLiveBudget({ db: this.db, environment: this.environment,
+      shopId: input.shopId, conversationId: input.outreachAttemptId,
+      recoveryId: input.checkoutRecoveryId, inboundVersion: context.basket.generation }) : null;
+    const maxMcpCalls = this.maxMcpCallsOverride ?? platformBudget?.initialOutreachToolCalls ?? runtimePolicy.initialOutreachToolCalls ?? DEFAULT_MAX_MCP_CALLS;
+    const executionLimits: InitialOutreachExecutionLimits = {
+      modelSteps: runtimePolicy.initialOutreachModelSteps,
+      toolCalls: maxMcpCalls,
+      deadlineMs: Math.min(runtimePolicy.initialOutreachDeadlineMs, platformBudget?.deadlineMs ?? runtimePolicy.initialOutreachDeadlineMs),
+      outputTokens: Math.min(runtimePolicy.initialOutreachOutputTokens, platformBudget?.outputTokens ?? runtimePolicy.initialOutreachOutputTokens),
+      maxProductDetailReads: runtimePolicy.initialOutreachMaxProductDetailReads,
+      maxToolResultBytes: runtimePolicy.initialOutreachMaxToolResultBytes,
+      maxModelRequestBytes: runtimePolicy.initialOutreachMaxModelRequestBytes,
+    };
     let result: InitialOutreachAgentResult;
     try {
       result = await this.agent(context, {
         signal,
         ...(this.dependenciesModelInvoker ? { modelInvoker: this.dependenciesModelInvoker } : {}),
         createSelector: this.createSelector,
+        maxMcpCalls,
+        executionLimits,
         createModelInvoker: () => this.createModelInvoker(input.shopId),
         logger: this.logger,
       });
@@ -203,6 +230,9 @@ export class InitialOutreachOfferSelectionService {
       outreachAttemptId: input.outreachAttemptId,
       proposed: result,
       signal,
+      readBudgetMs: runtimePolicy.outreachRevalidationTimeoutMs,
+      discountSourceReadTimeoutMs: runtimePolicy.discountSourceReadTimeoutMs,
+      maxProductDetailReads: runtimePolicy.initialOutreachMaxProductDetailReads,
     });
     if (revalidated.kind === "FAILURE") {
       return {

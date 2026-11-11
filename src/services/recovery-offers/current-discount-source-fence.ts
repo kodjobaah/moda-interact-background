@@ -32,6 +32,7 @@ type FenceInput = Readonly<{
   selectedOfferIds: readonly string[];
   mode?: "FIXED" | "AI_BEST_APPLICABLE" | "NONE";
   signal: AbortSignal;
+  maxReadMs?: number;
 }>;
 
 function dateValue(value: unknown): string | null | undefined {
@@ -72,6 +73,7 @@ export async function readCurrentDiscountSourceFence(
 
   const database = dependencies.database ?? prisma;
   const clock = dependencies.clock ?? Date.now;
+  const maxReadMs = input.maxReadMs ?? MAX_READ_MS;
   const startedAt = clock();
   try {
     const fence = await database.$transaction(async (tx) => {
@@ -170,10 +172,10 @@ export async function readCurrentDiscountSourceFence(
     }, {
       isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
       maxWait: 2_000,
-      timeout: MAX_READ_MS,
+      timeout: maxReadMs,
     });
     if (input.signal.aborted) return unavailable("CANCELLED");
-    if (clock() - startedAt > MAX_READ_MS) return unavailable("READ_DEADLINE_EXCEEDED");
+    if (clock() - startedAt > maxReadMs) return unavailable("READ_DEADLINE_EXCEEDED");
     return { kind: "AVAILABLE", fence };
   } catch (error) {
     if (input.signal.aborted || error instanceof Error && error.message === "CANCELLED") {
@@ -183,7 +185,7 @@ export async function readCurrentDiscountSourceFence(
       "SOURCE_ROW_UNAVAILABLE", "SOURCE_DATA_INVALID", "SOURCE_TOO_LARGE"].includes(error.message)) {
       return unavailable(error.message);
     }
-    if (clock() - startedAt > MAX_READ_MS) return unavailable("READ_DEADLINE_EXCEEDED");
+    if (clock() - startedAt > maxReadMs) return unavailable("READ_DEADLINE_EXCEEDED");
     return unavailable("READ_FAILED");
   }
 }

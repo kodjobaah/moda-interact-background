@@ -5,6 +5,8 @@ import {
   pendingCandidateShopIndexKey,
 } from "../../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../../lib/redis.js";
+import type { RecoveryExecutionPolicy } from "../platform-configuration/contracts.js";
+import { readRecoveryExecutionPolicy } from "../platform-configuration/consumers.js";
 
 /** Identity-only storage: Woo and Shopify share the index keys but not their
  * candidate payloads. The Woo source is retained in its BullMQ job data. */
@@ -15,6 +17,7 @@ type CandidateIndexIdentity = {
 };
 
 export class PendingRecoveryCandidateIndexStore {
+  constructor(private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
   async findByCheckout(input: { shopId: string; checkoutToken: string }) {
     return connectionRedis.get(
       pendingCandidateCheckoutIndexKey({
@@ -42,7 +45,8 @@ export class PendingRecoveryCandidateIndexStore {
     /** Woo's outage/replay horizon can exceed the legacy Shopify index TTL. */
     retentionMs?: number;
   }) {
-    const ttlMs = input.retentionMs ?? pendingCandidateIndexTtlMs(input.delayMinutes);
+    const retentionBufferMs = this.readPolicy ? (await this.readPolicy()).recoveryCandidateTtlBufferMs : undefined;
+    const ttlMs = input.retentionMs ?? pendingCandidateIndexTtlMs(input.delayMinutes, retentionBufferMs);
 
     await connectionRedis.set(
       pendingCandidateCheckoutIndexKey({
@@ -131,11 +135,12 @@ export class PendingRecoveryCandidateIndexStore {
   }
 
   async addCartAlias(shopId: string, cartToken: string, jobId: string, delayMinutes: number) {
+    const retentionBufferMs = this.readPolicy ? (await this.readPolicy()).recoveryCandidateTtlBufferMs : undefined;
     await connectionRedis.set(
       pendingCandidateCartIndexKey({ shopId, cartToken }),
       jobId,
       "PX",
-      pendingCandidateIndexTtlMs(delayMinutes),
+      pendingCandidateIndexTtlMs(delayMinutes, retentionBufferMs),
     );
   }
 }

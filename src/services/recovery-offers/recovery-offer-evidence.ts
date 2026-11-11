@@ -46,6 +46,8 @@ export function verifiedDecision(input: {
   evidence: CheckoutRuleEvidence;
   now: Date;
   fingerprint: string;
+  maxEvidenceAgeMs?: number;
+  maxEvidenceLifetimeMs?: number;
 }): VerifiedRecoveryOffer | null {
   const { evidence, checkout, discount, now } = input;
   const evaluated = evidence.evaluatedAt?.getTime();
@@ -58,8 +60,8 @@ export function verifiedDecision(input: {
       typeof checkout.currency !== "string" || !/^[A-Z]{3}$/.test(checkout.currency) ||
       evidence.currency !== checkout.currency ||
       !Number.isFinite(evaluated) || !Number.isFinite(expires) ||
-      evaluated! > current || current - evaluated! > MAX_EVIDENCE_AGE_MS ||
-      expires! <= current || expires! - evaluated! > MAX_EVIDENCE_LIFETIME_MS ||
+      evaluated! > current || current - evaluated! > (input.maxEvidenceAgeMs ?? MAX_EVIDENCE_AGE_MS) ||
+      expires! <= current || expires! - evaluated! > (input.maxEvidenceLifetimeMs ?? MAX_EVIDENCE_LIFETIME_MS) ||
       !Number.isSafeInteger(evidence.savingsMinor) || evidence.savingsMinor <= 0 ||
       !Array.isArray(evidence.verifiedConstraints) || evidence.verifiedConstraints.length > 12 ||
       evidence.verifiedConstraints.some((code) => typeof code !== "string" ||

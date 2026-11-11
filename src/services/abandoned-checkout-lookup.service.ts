@@ -24,6 +24,8 @@ import {
   type NormalizedAbandonedCheckout,
 } from "../domain/abandoned-checkout.js";
 import { getShopifyAccessToken } from "./shopify-session.service.js";
+import { readRecoveryExecutionPolicy } from "./platform-configuration/consumers.js";
+import type { RecoveryExecutionPolicy } from "./platform-configuration/contracts.js";
 import {
   canonicaliseLanguageTag,
   normalizeCountryCode,
@@ -80,6 +82,7 @@ type AbandonedCheckoutGraphqlResponse = {
 };
 
 export class AbandonedCheckoutLookupService {
+  constructor(private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
   async resolveShopDomain(shopId: string): Promise<string> {
     const shop = await prisma.shop.findUnique({
       where: { id: shopId },
@@ -97,6 +100,9 @@ export class AbandonedCheckoutLookupService {
     input: AbandonedCheckoutLookupInput,
     options: { signal?: AbortSignal } = {},
   ): Promise<AbandonedCheckoutLookupOutcome> {
+    const policy = this.readPolicy ? await this.readPolicy() : null;
+    const maxCandidates = policy?.abandonedCheckoutMaxCandidates ?? ABANDONED_CHECKOUT_MAX_CANDIDATES;
+    const lookupWindowMs = policy?.abandonedCheckoutLookupWindowMs ?? ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS;
     // Exact URL matching is the recovery identity. Without it the lookup cannot
     // be completed deterministically.
     if (!input.abandonedCheckoutUrl) {
@@ -104,7 +110,7 @@ export class AbandonedCheckoutLookupService {
     }
 
     // The time scope is required to keep the query narrow and bounded.
-    const timeRange = this.buildCreatedAtFilter(input.checkoutCreatedAt);
+    const timeRange = this.buildCreatedAtFilter(input.checkoutCreatedAt, lookupWindowMs);
     if (!timeRange) {
       return { kind: "not-found" };
     }
@@ -116,6 +122,7 @@ export class AbandonedCheckoutLookupService {
       accessToken,
       timeRange,
       options.signal,
+      maxCandidates,
     );
 
     if (count === null) {
@@ -125,7 +132,7 @@ export class AbandonedCheckoutLookupService {
       };
     }
 
-    if (count > ABANDONED_CHECKOUT_MAX_CANDIDATES) {
+    if (count > maxCandidates) {
       return {
         kind: "bounded-limit-exceeded",
         candidateCount: count,
@@ -142,6 +149,7 @@ export class AbandonedCheckoutLookupService {
       accessToken,
       timeRange,
       options.signal,
+      maxCandidates,
     );
 
     if (candidates === null) {
@@ -170,6 +178,7 @@ export class AbandonedCheckoutLookupService {
 
   private buildCreatedAtFilter(
     checkoutCreatedAt: string | null,
+    lookupWindowMs: number,
   ): { fromIso: string; toIso: string } | null {
     if (!checkoutCreatedAt) {
       return null;
@@ -180,8 +189,8 @@ export class AbandonedCheckoutLookupService {
       return null;
     }
 
-    const from = new Date(created.getTime() - ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS);
-    const to = new Date(created.getTime() + ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS);
+    const from = new Date(created.getTime() - lookupWindowMs);
+    const to = new Date(created.getTime() + lookupWindowMs);
 
     return {
       fromIso: from.toISOString(),
@@ -200,6 +209,7 @@ export class AbandonedCheckoutLookupService {
     accessToken: string,
     timeRange: { fromIso: string; toIso: string },
     signal?: AbortSignal,
+    maxCandidates = ABANDONED_CHECKOUT_MAX_CANDIDATES,
   ): Promise<number | null> {
     const query = this.buildFilterQuery(timeRange);
 
@@ -213,7 +223,7 @@ export class AbandonedCheckoutLookupService {
       `,
       variables: {
         query,
-        limit: ABANDONED_CHECKOUT_MAX_CANDIDATES + 1,
+        limit: maxCandidates + 1,
       },
     };
 
@@ -230,6 +240,7 @@ export class AbandonedCheckoutLookupService {
     accessToken: string,
     timeRange: { fromIso: string; toIso: string },
     signal?: AbortSignal,
+    maxCandidates = ABANDONED_CHECKOUT_MAX_CANDIDATES,
   ): Promise<NormalizedAbandonedCheckout[] | null> {
     const query = this.buildFilterQuery(timeRange);
 
@@ -291,7 +302,7 @@ export class AbandonedCheckoutLookupService {
       `,
       variables: {
         query,
-        first: ABANDONED_CHECKOUT_MAX_CANDIDATES,
+        first: maxCandidates,
       },
     };
 
@@ -398,7 +409,7 @@ export class AbandonedCheckoutLookupService {
   }
 }
 
-export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService();
+export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService(readRecoveryExecutionPolicy);
 function normalizeInternationalContext(node: ShopifyAbandonedCheckoutNode): InternationalContext {
   const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
   const billingAddress = node?.billingAddress;
