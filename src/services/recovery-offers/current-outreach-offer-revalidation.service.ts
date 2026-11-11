@@ -228,7 +228,8 @@ export class CurrentOutreachOfferRevalidationService {
       return { kind: "FAILURE", reasonCode: "PROPOSED_OFFER_STALE_OR_UNAUTHORISED", retryable: false };
     }
 
-    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode, maxReadMs: input.discountSourceReadTimeoutMs });
+    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
     if (first.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
@@ -337,7 +338,8 @@ export class CurrentOutreachOfferRevalidationService {
     if (deadline.aborted) {
       return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true };
     }
-    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode, maxReadMs: input.discountSourceReadTimeoutMs });
+    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
     if (second.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
