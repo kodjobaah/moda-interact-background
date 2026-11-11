@@ -5,14 +5,21 @@ import type { InitialOutreachAgentContext, InitialOutreachAgentResult } from "./
 import type { RecoveryOutreachMcpSelectorService } from "../services/recovery-offers/recovery-outreach-mcp-selector.service.js";
 
 export const MAX_MODEL_STEPS = 8;
-export const MAX_MCP_CALLS = 16;
+export const DEFAULT_MAX_MCP_CALLS = 16;
+export const MAX_CONFIGURED_MCP_CALLS = 64;
 export const MAX_PRODUCT_SEARCHES = 3; // historical caller compatibility; new checkout evaluator never searches
 export const MAX_PRODUCT_DETAIL_READS = 5;
 export const MAX_OUTREACH_DEADLINE_MS = 45_000;
 export const MAX_TOOL_RESULT_BYTES = 32 * 1024;
 export const MAX_TOOL_MESSAGES_BYTES = 128 * 1024;
+export type InitialOutreachExecutionLimits = Readonly<{
+ modelSteps: number; toolCalls: number; deadlineMs: number; outputTokens: number;
+ maxProductDetailReads: number; maxToolResultBytes: number; maxModelRequestBytes: number;
+}>;
 export type InitialOutreachOfferGraphDependencies = Readonly<{
  context: InitialOutreachAgentContext; selector: RecoveryOutreachMcpSelectorService;
+ maxMcpCalls?: number;
+ executionLimits?: InitialOutreachExecutionLimits;
  modelInvoker: CommerceModelInvoker | (() => Promise<CommerceModelInvoker>); signal: AbortSignal;
  startedAt: number; now?: () => Date;
  onEvent?: (event: "model_step" | "tool_called", details: Readonly<Record<string, unknown>>) => void;
@@ -21,6 +28,10 @@ export type InitialOutreachOfferGraphDependencies = Readonly<{
 export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphDependencies) {
  return { async invoke() {
   const context = deps.context;
+  const limits = deps.executionLimits;
+  const maxMcpCalls = deps.maxMcpCalls ?? limits?.toolCalls ?? DEFAULT_MAX_MCP_CALLS;
+  if (!Number.isSafeInteger(maxMcpCalls) || maxMcpCalls < 1 || maxMcpCalls > MAX_CONFIGURED_MCP_CALLS)
+   throw Object.assign(new Error("OUTREACH_CALL_BUDGET_INVALID"), { code: "BUDGET_EXHAUSTED" });
   let connected = false;
   let listed = new Set<string>();
   let model: CommerceModelInvoker | undefined;
@@ -35,7 +46,7 @@ export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphD
    instructions: { platformText: context.platformInstructions, platformRevisionId: context.platformInstructionRevisionId,
     merchantText: context.merchantInstructions, merchantRevisionId: context.merchantInstructionRevisionId,
     purposeText: "Evaluate only the real checkout items. Never propose another product or grant send admission.", purposeProfileRevisionId: "background-checkout-outreach-policy-v1" },
-   limits: { deadlineMs: Math.max(1, MAX_OUTREACH_DEADLINE_MS - ((deps.now?.() ?? new Date()).getTime() - deps.startedAt)), modelSteps: MAX_MODEL_STEPS, remoteCalls: MAX_MCP_CALLS, outputTokens: 512 },
+   limits: { deadlineMs: Math.max(1, (limits?.deadlineMs ?? MAX_OUTREACH_DEADLINE_MS) - ((deps.now?.() ?? new Date()).getTime() - deps.startedAt)), modelSteps: limits?.modelSteps ?? MAX_MODEL_STEPS, remoteCalls: maxMcpCalls, outputTokens: limits?.outputTokens ?? 512 },
   } as InitialOutreachEvaluationInput;
   const evaluation = await evaluateInitialOutreach(raw, {
    signal: deps.signal, now: deps.now ?? (() => new Date()),
@@ -54,7 +65,7 @@ export function createInitialOutreachOfferGraph(deps: InitialOutreachOfferGraphD
     modelSteps++; deps.onEvent?.("model_step", { modelStep: modelSteps });
     const trustedRequest = { ...request, instructions: [...request.instructions, INITIAL_OUTREACH_HOST_INVARIANTS,
       ...(publishedBehaviourPrompt ? [publishedBehaviourPrompt] : [])] };
-    if (Buffer.byteLength(JSON.stringify(trustedRequest), "utf8") > MAX_TOOL_MESSAGES_BYTES) throw Object.assign(new Error("OUTREACH_MESSAGE_BUDGET_EXHAUSTED"), { code: "BUDGET_EXHAUSTED" });
+    if (Buffer.byteLength(JSON.stringify(trustedRequest), "utf8") > (limits?.maxModelRequestBytes ?? MAX_TOOL_MESSAGES_BYTES)) throw Object.assign(new Error("OUTREACH_MESSAGE_BUDGET_EXHAUSTED"), { code: "BUDGET_EXHAUSTED" });
     return model.invoke(trustedRequest, signal);
    } },
    log: () => {},

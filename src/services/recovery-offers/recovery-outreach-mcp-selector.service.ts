@@ -8,6 +8,7 @@ import {
 } from "@modainteract/moda-interact-shared/commerce";
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
+import { Buffer } from "node:buffer";
 import {
   CommerceHostError,
   CommerceMcpClient,
@@ -19,7 +20,8 @@ import {
 export type OutreachMcpToolName = string;
 export type OutreachMcpToolDescriptor = Readonly<{ name: string; description: string; inputSchema: unknown }>;
 export type OutreachMcpResult = z.infer<typeof CommerceToolResultSchema>;
-const MAX_MCP_CALLS = 16;
+const DEFAULT_MAX_MCP_CALLS = 16;
+const MAX_CONFIGURED_MCP_CALLS = 64;
 const MAX_PRODUCT_SEARCHES = 3;
 const MAX_PRODUCT_DETAIL_READS = 5;
 type Client = Pick<CommerceMcpClient, "connect" | "manifest" | "pinOutreachProfile" | "tools" | "call" | "close">;
@@ -45,12 +47,16 @@ export class RecoveryOutreachMcpSelectorService {
   private calls = 0;
   private productSearches = 0;
   private productDetailReads = 0;
+  private readonly maxCalls: number;
 
   constructor(
-    private readonly input: Readonly<{ shopId: string; signal: AbortSignal }>,
+    private readonly input: Readonly<{ shopId: string; signal: AbortSignal; maxCalls?: number; maxProductDetailReads?: number; maxToolResultBytes?: number }>,
     dependencies: RecoveryOutreachMcpSelectorDependencies = {},
   ) {
     if (!input.shopId || !input.signal) throw invalidInput("OUTREACH_SELECTOR_INPUT_INVALID");
+    this.maxCalls = input.maxCalls ?? DEFAULT_MAX_MCP_CALLS;
+    if (!Number.isSafeInteger(this.maxCalls) || this.maxCalls < 1 || this.maxCalls > MAX_CONFIGURED_MCP_CALLS)
+      throw invalidInput("OUTREACH_SELECTOR_CALL_BUDGET_INVALID");
     const identity: CommerceOutreachMcpIdentity = {
       shopId: input.shopId,
       toolContext: { purpose: "INITIAL_RECOVERY_OUTREACH" },
@@ -105,11 +111,11 @@ export class RecoveryOutreachMcpSelectorService {
     const parsedArguments = compileSubset(member.inputSchema, "input").safeParse(rawArguments);
     if (!parsedArguments.success || !isRecord(parsedArguments.data)) throw invalidInput("OUTREACH_TOOL_ARGUMENTS_SCHEMA_INVALID");
     const toolName = name;
-    if (this.calls >= MAX_MCP_CALLS) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_MCP_CALL_BUDGET_EXHAUSTED"));
+    if (this.calls >= this.maxCalls) throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_MCP_CALL_BUDGET_EXHAUSTED"));
     if (toolName === "commerce_search_products" && this.productSearches >= MAX_PRODUCT_SEARCHES) {
       throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_PRODUCT_SEARCH_BUDGET_EXHAUSTED"));
     }
-    if (toolName === "commerce_get_product" && this.productDetailReads >= MAX_PRODUCT_DETAIL_READS) {
+    if (toolName === "commerce_get_product" && this.productDetailReads >= (this.input.maxProductDetailReads ?? MAX_PRODUCT_DETAIL_READS)) {
       throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_PRODUCT_READ_BUDGET_EXHAUSTED"));
     }
     signal.throwIfAborted();
@@ -117,6 +123,9 @@ export class RecoveryOutreachMcpSelectorService {
     if (toolName === "commerce_search_products") this.productSearches += 1;
     if (toolName === "commerce_get_product") this.productDetailReads += 1;
     const result = CommerceToolResultSchema.parse(await this.client.call(toolName, parsedArguments.data, signal));
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > (this.input.maxToolResultBytes ?? 32 * 1024)) {
+      throw new CommerceHostError("UNAVAILABLE", true, undefined, new Error("OUTREACH_TOOL_RESULT_BUDGET_EXHAUSTED"));
+    }
     if (result.status === "OK") {
       const data = member.outputSchema.properties?.values && isRecord(result.data)
         ? { values: result.data.values } : result.data;

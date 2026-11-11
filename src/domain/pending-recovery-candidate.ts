@@ -59,10 +59,10 @@ export function checkoutOrderCompletedKey(input: {
   return `pending-recovery:order-completed:${input.shopId}:${input.checkoutToken}`;
 }
 
-export function pendingCandidateIndexTtlMs(delayMinutes: number): number {
+export function pendingCandidateIndexTtlMs(delayMinutes: number, retentionBufferMs = RECOVERY_CANDIDATE_TTL_BUFFER_MS): number {
   return Math.max(
-    delayMinutes * 60_000 + RECOVERY_CANDIDATE_TTL_BUFFER_MS,
-    RECOVERY_CANDIDATE_TTL_BUFFER_MS,
+    delayMinutes * 60_000 + retentionBufferMs,
+    retentionBufferMs,
   );
 }
 

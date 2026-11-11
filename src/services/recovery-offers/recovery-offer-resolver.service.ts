@@ -10,6 +10,8 @@ import type {
   ReadOnlyProviderEligibility, RecoveryOfferDecision, RecoveryOfferRepository,
   RecoveryOfferReporter, ResolveRecoveryOfferInput, VerifiedRecoveryOffer,
 } from "./recovery-offer.types.js";
+import { readRecoveryExecutionPolicy } from "../platform-configuration/consumers.js";
+import { RECOVERY_EXECUTION_DEFAULTS, type RecoveryExecutionPolicy } from "../platform-configuration/contracts.js";
 
 export type { ResolveRecoveryOfferInput, RecoveryOfferDecision, RecoveryOfferPolicy,
   VerifiedRecoveryOffer, PreviouslyPromisedOffer, RecoveryOfferRepository,
@@ -40,6 +42,7 @@ export class RecoveryOfferResolver {
     private readonly woo: ReadOnlyProviderEligibility = new WooReadOnlyOfferAdapter(),
     private readonly ai: ReadOnlyOfferRecommender | null = null,
     private readonly reporting: RecoveryOfferReporter = logger,
+    private readonly readExecutionPolicy?: () => Promise<RecoveryExecutionPolicy>,
   ) {}
 
   /** Resolve an effective merchant/override policy via the existing owner when
@@ -75,6 +78,7 @@ export class RecoveryOfferResolver {
       // NONE requires neither a provider read nor an LLM evaluation.
       if (input.policy.recoveryOfferMode === "NONE") return noOffer("POLICY_NONE");
       const { stage, now, checkoutRecoveryId } = input;
+      const execution = this.readExecutionPolicy ? await this.readExecutionPolicy() : RECOVERY_EXECUTION_DEFAULTS;
       const previous = input.previouslyPromisedOffer;
       if (stage === "FOLLOW_UP" && !previous) return noOffer("PREVIOUS_OFFER_UNKNOWN");
       if (stage === "FOLLOW_UP" && previous?.kind === "NO_OFFER") return noOffer("PREVIOUS_OFFER_UNAVAILABLE");
@@ -104,9 +108,9 @@ export class RecoveryOfferResolver {
       const fixed = input.policy.recoveryOfferMode === "FIXED";
       const ids = fixed ? authorisedIds(input.policy) : null;
       if (fixed && (!ids || !ids.length)) return noOffer("NO_AUTHORISED_DISCOUNTS");
-      if (ids !== null && ids.length > MAX_CANDIDATES) return noOffer("CANDIDATE_LIMIT");
-      const candidates = await this.repository.readDiscounts(shopId, ids, MAX_CANDIDATES + 1);
-      if (candidates.length > MAX_CANDIDATES) return noOffer("CANDIDATE_LIMIT");
+      if (ids !== null && ids.length > execution.offerMaxCandidates) return noOffer("CANDIDATE_LIMIT");
+      const candidates = await this.repository.readDiscounts(shopId, ids, execution.offerMaxCandidates + 1);
+      if (candidates.length > execution.offerMaxCandidates) return noOffer("CANDIDATE_LIMIT");
       if (fixed && candidates.length !== ids!.length) return noOffer("CANDIDATE_UNAVAILABLE");
       if (!candidates.length) return noOffer("NO_ELIGIBLE_DISCOUNTS");
 
@@ -133,7 +137,7 @@ export class RecoveryOfferResolver {
           result = await withinOfferDeadline((signal) => reader.evaluate({
             shopId, checkout, checkoutFingerprint: fingerprint,
             discount: candidate, now, signal,
-          }), VERIFICATION_TIMEOUT_MS);
+          }), execution.offerVerificationTimeoutMs);
         } catch (error) {
           if (error instanceof RecoveryOfferTimeout) {
             this.reporting.warn("recovery_offer.provider.timeout", { shopId, platform, stage });
@@ -147,6 +151,8 @@ export class RecoveryOfferResolver {
         const selected = verifiedDecision({
           platform, shopId, checkout, discount: candidate,
           kind, evidence: result.evidence, now, fingerprint,
+          maxEvidenceAgeMs: execution.offerEvidenceMaxAgeMs,
+          maxEvidenceLifetimeMs: execution.offerEvidenceMaxLifetimeMs,
         });
         if (selected) verified.push(selected);
       }
@@ -173,7 +179,7 @@ export class RecoveryOfferResolver {
             catalogueDiscountId: offer.catalogueDiscountId,
             savingsMinor: offer.evidence.savingsMinor, kind: offer.kind,
           }))), maxOutputTokens: 32, signal,
-        }), AI_TIMEOUT_MS);
+        }), execution.offerAiTimeoutMs);
       } catch (error) {
         if (error instanceof RecoveryOfferTimeout) {
           this.reporting.warn("recovery_offer.ai.timeout", { shopId, stage });
@@ -211,7 +217,7 @@ function authorisedIds(policy: ResolveRecoveryOfferInput["policy"]): string[] {
   return unique.sort();
 }
 
-export const recoveryOfferResolver = new RecoveryOfferResolver();
+export const recoveryOfferResolver = new RecoveryOfferResolver(undefined, undefined, undefined, undefined, logger, readRecoveryExecutionPolicy);
 
 /** Background-local function seam for the thin outbound integration tasks. */
 export function resolveRecoveryOffer(input: ResolveRecoveryOfferInput): Promise<RecoveryOfferDecision> {

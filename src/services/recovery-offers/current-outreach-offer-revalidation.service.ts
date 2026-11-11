@@ -54,9 +54,10 @@ export type CurrentOutreachOfferDecision =
 
 export type CurrentOutreachOfferRevalidationDependencies = Readonly<{
   contextBuilder: ContextBuilder;
-  createSelector?: (input: { shopId: string; signal: AbortSignal }) => Selector;
+  createSelector?: (input: { shopId: string; signal: AbortSignal; maxProductDetailReads?: number }) => Selector;
   readFence?: (input: {
     shopId: string; checkoutRecoveryId: string; selectedOfferIds: readonly string[]; mode?: InitialOutreachAgentContext["mode"]; signal: AbortSignal;
+    maxReadMs?: number;
   }) => Promise<DiscountSourceFenceResult>;
   readBudgetMs?: number;
   clock?: () => Date;
@@ -197,6 +198,9 @@ export class CurrentOutreachOfferRevalidationService {
     outreachAttemptId: string;
     proposed: InitialOutreachAgentResult;
     signal: AbortSignal;
+    readBudgetMs?: number;
+    discountSourceReadTimeoutMs?: number;
+    maxProductDetailReads?: number;
   }>): Promise<CurrentOutreachOfferDecision> {
     const initial = await this.dependencies.contextBuilder.build(input);
     if (initial.shopId !== input.shopId || initial.checkoutRecoveryId !== input.checkoutRecoveryId ||
@@ -224,7 +228,8 @@ export class CurrentOutreachOfferRevalidationService {
       return { kind: "FAILURE", reasonCode: "PROPOSED_OFFER_STALE_OR_UNAUTHORISED", retryable: false };
     }
 
-    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode });
+    const first = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
     if (first.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,
@@ -232,9 +237,10 @@ export class CurrentOutreachOfferRevalidationService {
       });
       return { kind: "FAILURE", reasonCode: `SOURCE_FENCE_F1_${first.reasonCode}`, retryable: true };
     }
-    const deadline = AbortSignal.timeout(this.readBudgetMs);
+    const deadline = AbortSignal.timeout(input.readBudgetMs ?? this.readBudgetMs);
     const signal = AbortSignal.any([input.signal, deadline]);
-    const selector = this.createSelector({ shopId: input.shopId, signal });
+    const selector = this.createSelector({ shopId: input.shopId, signal,
+      ...(input.maxProductDetailReads !== undefined ? { maxProductDetailReads: input.maxProductDetailReads } : {}) });
     let primaryError: unknown;
     let closeError: unknown;
     let discoveryIncomplete = false;
@@ -332,7 +338,8 @@ export class CurrentOutreachOfferRevalidationService {
     if (deadline.aborted) {
       return { kind: "FAILURE", reasonCode: "CURRENT_SOURCE_READ_DEADLINE", retryable: true };
     }
-    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode });
+    const second = await this.readFence({ ...input, selectedOfferIds: ids, mode: initial.mode,
+      ...(input.discountSourceReadTimeoutMs !== undefined ? { maxReadMs: input.discountSourceReadTimeoutMs } : {}) });
     if (second.kind !== "AVAILABLE") {
       this.log.warn("recovery_offer.current_source.fence_unavailable", {
         shopId: input.shopId, recoveryId: input.checkoutRecoveryId,

@@ -11,8 +11,10 @@ export type ResolvedLiveBudget = Readonly<{
   environment: CommerceEnvironment;
   deadlineMs: number;
   outputTokens: number;
+  initialOutreachToolCalls?: number;
   deadlineSource: LiveBudgetSource;
   outputTokenSource: LiveBudgetSource;
+  initialOutreachToolCallsSource?: LiveBudgetSource;
   merchantPricingPlanId: string | null;
   shopifyPlanHandle: string | null;
   policyEditVersions: Readonly<{ platform: number; pricePlan: number | null; merchant: number | null }>;
@@ -28,7 +30,7 @@ export class LiveBudgetPolicyError extends Error {
   }
 }
 
-const BUDGET_KEYS = ["deadlineMs", "outputTokens"] as const;
+const BUDGET_KEYS = ["deadlineMs", "outputTokens", "initialOutreachToolCalls"] as const;
 type Key = (typeof BUDGET_KEYS)[number];
 type Budget = Partial<Record<Key, number>>;
 
@@ -55,9 +57,12 @@ function parseBudget(row: Policy): Budget {
     const number = (value as Record<string, unknown>)[key];
     if (typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0)
       throw new LiveBudgetPolicyError("INVALID_BUDGET_VALUE");
+    if (key === "initialOutreachToolCalls" && number > 64)
+      throw new LiveBudgetPolicyError("INVALID_INITIAL_OUTREACH_TOOL_CALL_BUDGET");
     result[key as Key] = number;
   }
-  if (row.scope === "PLATFORM" && keys.length !== 2)
+  if (row.scope === "PLATFORM" &&
+      (!Object.hasOwn(value, "deadlineMs") || !Object.hasOwn(value, "outputTokens") || (keys.length !== 2 && keys.length !== 3)))
     throw new LiveBudgetPolicyError("PLATFORM_BUDGET_INCOMPLETE");
   if (row.scope !== "PLATFORM" && keys.length === 0)
     throw new LiveBudgetPolicyError("EMPTY_OVERRIDE");
@@ -125,12 +130,15 @@ export async function resolveLiveBudget(input: {
     const shop = merchant ? parseBudget(merchant) : {};
     const deadlineMs = shop.deadlineMs ?? plan.deadlineMs ?? base.deadlineMs!;
     const outputTokens = shop.outputTokens ?? plan.outputTokens ?? base.outputTokens!;
+    const initialOutreachToolCalls = shop.initialOutreachToolCalls ?? plan.initialOutreachToolCalls ?? base.initialOutreachToolCalls ?? 16;
     return {
       shopId, conversationId: input.conversationId, recoveryId: input.recoveryId,
       inboundVersion: input.inboundVersion, environment,
-      deadlineMs, outputTokens,
+      deadlineMs, outputTokens, initialOutreachToolCalls,
       deadlineSource: shop.deadlineMs !== undefined ? "MERCHANT" : plan.deadlineMs !== undefined ? "PRICE_PLAN" : "PLATFORM",
       outputTokenSource: shop.outputTokens !== undefined ? "MERCHANT" : plan.outputTokens !== undefined ? "PRICE_PLAN" : "PLATFORM",
+      initialOutreachToolCallsSource: shop.initialOutreachToolCalls !== undefined ? "MERCHANT" :
+        plan.initialOutreachToolCalls !== undefined ? "PRICE_PLAN" : "PLATFORM",
       merchantPricingPlanId: planId, shopifyPlanHandle: handle,
       policyEditVersions: { platform: platform.editVersion, pricePlan: pricePlan?.editVersion ?? null, merchant: merchant?.editVersion ?? null },
       resolvedAt: (input.now ?? (() => new Date()))().toISOString(),

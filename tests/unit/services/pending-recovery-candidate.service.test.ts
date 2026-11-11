@@ -110,6 +110,9 @@ const redisMock = {
 };
 
 const prismaMock = {
+  platformConfiguration: {
+    findMany: vi.fn(async () => []),
+  },
   shop: {
     findUnique: vi.fn(async () => ({
       id: "shop_1",

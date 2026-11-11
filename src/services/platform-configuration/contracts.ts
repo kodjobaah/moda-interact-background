@@ -8,14 +8,14 @@ export const REGISTERED_KEYS = [
   "shopify.oauth", "shopify.partner", "shopify.appEvents", "merchant.knowledge.r2",
   "woocommerce.auth", "woocommerce.billing", "messaging.meta", "messaging.sender",
   "ai.providers", "speech.transcription", "woo.couponSync", "admin.grafana",
-  "commerce.preview", "omini.moderation", "shopBrand.publicMedia",
+  "commerce.preview", "omini.moderation", "shopBrand.publicMedia", "commerce.recoveryExecution",
 ] as const;
 export type RegisteredKey = typeof REGISTERED_KEYS[number];
 
 export const BACKGROUND_READABLE_KEYS = [
   "commerce.connectionKeys", "shopify.oauth", "shopify.partner", "shopify.appEvents",
   "merchant.knowledge.r2", "messaging.sender", "ai.providers", "speech.transcription",
-  "woo.couponSync", "omini.moderation", "shopBrand.publicMedia",
+  "woo.couponSync", "omini.moderation", "shopBrand.publicMedia", "commerce.recoveryExecution",
 ] as const;
 export type BackgroundReadableKey = typeof BACKGROUND_READABLE_KEYS[number];
 const allowed = new Set<string>(BACKGROUND_READABLE_KEYS);
@@ -28,6 +28,26 @@ export const SHOP_BRAND_PUBLIC_MEDIA_DEFAULTS: ShopBrandPublicMediaSettings = Ob
   publicOrigin: "https://shop-brands.modainteract.com", bucketName: "moda-interact-shop-brands",
 });
 export type ModerationPolicy = Readonly<{ baseUrl: string | null; modelId: string }>;
+export type RecoveryExecutionPolicy = Readonly<Record<
+  | "initialOutreachModelSteps" | "initialOutreachToolCalls" | "initialOutreachDeadlineMs" | "initialOutreachOutputTokens"
+  | "initialOutreachMaxProductDetailReads" | "initialOutreachMaxToolResultBytes" | "initialOutreachMaxModelRequestBytes"
+  | "offerMaxCandidates" | "offerVerificationTimeoutMs" | "offerAiTimeoutMs" | "offerEvidenceMaxAgeMs"
+  | "offerEvidenceMaxLifetimeMs" | "outreachRevalidationTimeoutMs" | "discountSourceReadTimeoutMs"
+  | "recoveryDelayMinutes" | "recoveryCandidateTtlBufferMs" | "abandonedCheckoutMaxCandidates"
+  | "abandonedCheckoutLookupWindowMs"
+  | "studioPreviewModelSteps" | "studioPreviewRemoteCalls" | "studioPreviewDeadlineMs" | "studioPreviewOutputTokens", number>>;
+export const RECOVERY_EXECUTION_DEFAULTS: RecoveryExecutionPolicy = Object.freeze({
+  initialOutreachModelSteps: 8, initialOutreachToolCalls: 16, initialOutreachDeadlineMs: 45000,
+  initialOutreachOutputTokens: 512, initialOutreachMaxProductDetailReads: 5,
+  initialOutreachMaxToolResultBytes: 32768, initialOutreachMaxModelRequestBytes: 131072,
+  offerMaxCandidates: 8, offerVerificationTimeoutMs: 2000, offerAiTimeoutMs: 1500,
+  offerEvidenceMaxAgeMs: 60000, offerEvidenceMaxLifetimeMs: 60000,
+  outreachRevalidationTimeoutMs: 15000, discountSourceReadTimeoutMs: 10000,
+  recoveryDelayMinutes: 30, recoveryCandidateTtlBufferMs: 3600000,
+  abandonedCheckoutMaxCandidates: 20, abandonedCheckoutLookupWindowMs: 600000,
+  studioPreviewModelSteps: 4,
+  studioPreviewRemoteCalls: 4, studioPreviewDeadlineMs: 60000, studioPreviewOutputTokens: 1200,
+});
 export type WooCouponSyncPolicy = Readonly<{
   dispatchBatchSize: number; refreshIntervalMinutes: number; dispatchCooldownMinutes: number;
   unavailableRecheckMinutes: number; staleScanMinutes: number; maxPages: number;
@@ -60,6 +80,7 @@ export type KeyValues = {
   "ai.providers": ProviderApiKeys;
   "speech.transcription": SpeechPolicy;
   "woo.couponSync": WooCouponSyncPolicy;
+  "commerce.recoveryExecution": RecoveryExecutionPolicy;
   "omini.moderation": ModerationPolicy;
 };
 export type ConfigurationSnapshot<K extends BackgroundReadableKey> = Readonly<{
@@ -153,6 +174,28 @@ export function decodeConfiguration<K extends BackgroundReadableKey>(key: K, raw
       const row = objectFor(key, raw, Object.keys(wooFields));
       const values: Record<string, number> = {};
       for (const [field, [min, max]] of Object.entries(wooFields)) values[field] = integer(key, row[field], min, max);
+      return values as KeyValues[K];
+    }
+    case "commerce.recoveryExecution": {
+      const defaults = RECOVERY_EXECUTION_DEFAULTS;
+      const row = objectFor(key, raw, Object.keys(defaults));
+      const bounds: Record<keyof RecoveryExecutionPolicy, readonly [number, number]> = {
+        initialOutreachModelSteps: [1, 64], initialOutreachToolCalls: [1, 64], initialOutreachDeadlineMs: [1000, 90000],
+        initialOutreachOutputTokens: [1, 32768], initialOutreachMaxProductDetailReads: [1, 50],
+        initialOutreachMaxToolResultBytes: [1024, 1048576], initialOutreachMaxModelRequestBytes: [1024, 4194304],
+        offerMaxCandidates: [1, 100], offerVerificationTimeoutMs: [100, 30000], offerAiTimeoutMs: [100, 30000],
+        offerEvidenceMaxAgeMs: [1000, 600000], offerEvidenceMaxLifetimeMs: [1000, 600000],
+        outreachRevalidationTimeoutMs: [100, 60000], discountSourceReadTimeoutMs: [100, 60000],
+        recoveryDelayMinutes: [1, 1440], recoveryCandidateTtlBufferMs: [60000, 86400000],
+        abandonedCheckoutMaxCandidates: [1, 100], abandonedCheckoutLookupWindowMs: [60000, 3600000],
+        studioPreviewModelSteps: [1, 64],
+        studioPreviewRemoteCalls: [1, 64], studioPreviewDeadlineMs: [1000, 90000], studioPreviewOutputTokens: [1, 32768],
+      };
+      const values = {} as Record<keyof RecoveryExecutionPolicy, number>;
+      for (const field of Object.keys(defaults) as (keyof RecoveryExecutionPolicy)[]) {
+        const [min, max] = bounds[field];
+        values[field] = integer(key, row[field], min, max);
+      }
       return values as KeyValues[K];
     }
     case "speech.transcription": {

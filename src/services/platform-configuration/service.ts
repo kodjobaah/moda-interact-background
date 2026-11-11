@@ -7,7 +7,7 @@ import {
 } from "@modainteract/moda-interact-shared/security/credentials/node";
 import {
   assertReadable, BACKGROUND_READABLE_KEYS, decodeConfiguration, type BackgroundReadableKey,
-  type ConfigurationSnapshot, type KeyValues, SHOP_BRAND_PUBLIC_MEDIA_DEFAULTS,
+  type ConfigurationSnapshot, type KeyValues, SHOP_BRAND_PUBLIC_MEDIA_DEFAULTS, RECOVERY_EXECUTION_DEFAULTS,
 } from "./contracts.js";
 import type { ConfigurationRepository, ConfigurationRow } from "./repository.js";
 import { PlatformConfigurationFailure } from "./errors.js";
@@ -15,7 +15,7 @@ import { PlatformConfigurationFailure } from "./errors.js";
 const validEnvironments = new Set(["local", "test", "development", "staging", "production"]);
 const keyIdPattern = /^[A-Za-z0-9_-]{1,64}$/;
 const b64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const policies = new Set<string>(["woo.couponSync", "speech.transcription", "omini.moderation", "shopBrand.publicMedia"]);
+const policies = new Set<string>(["woo.couponSync", "speech.transcription", "omini.moderation", "shopBrand.publicMedia", "commerce.recoveryExecution"]);
 
 function strictB64(input: unknown, length?: number): Uint8Array {
   if (typeof input !== "string" || !input || !b64.test(input)) throw new Error("invalid");
@@ -146,6 +146,12 @@ export function createBackgroundPlatformConfigurationService(input: {
         // Admin's defaultsOnRead policy: no implicit DB writes, no cache, revision 0.
         output[key] = Object.freeze({ key, version: 0,
           value: Object.freeze(decodeConfiguration("shopBrand.publicMedia", SHOP_BRAND_PUBLIC_MEDIA_DEFAULTS)),
+        });
+        continue;
+      }
+      if (!row && key === "commerce.recoveryExecution") {
+        output[key] = Object.freeze({ key, version: 0,
+          value: Object.freeze(decodeConfiguration("commerce.recoveryExecution", RECOVERY_EXECUTION_DEFAULTS)),
         });
         continue;
       }

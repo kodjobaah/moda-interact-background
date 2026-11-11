@@ -2,6 +2,8 @@ import { RecoveryOfferMode } from "@prisma/client";
 import { parseEffectiveRecoveryPolicy } from "@modainteract/moda-interact-shared/recovery-policy";
 import prisma from "../lib/db.js";
 import { deliverableWooCode } from "../providers/woo-coupon-normalization.js";
+import { readRecoveryExecutionPolicy } from "./platform-configuration/consumers.js";
+import type { RecoveryExecutionPolicy } from "./platform-configuration/contracts.js";
 
 export type RecoveryPolicySnapshot = ReturnType<typeof parseEffectiveRecoveryPolicy> & {
   authorisedDiscountIds?: string[];
@@ -9,12 +11,15 @@ export type RecoveryPolicySnapshot = ReturnType<typeof parseEffectiveRecoveryPol
 };
 
 export class RecoveryPolicyService {
-  constructor(private readonly database = prisma) {}
+  constructor(private readonly database = prisma, private readonly readExecutionPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
 
   async resolve(shopId: string, now = new Date()): Promise<RecoveryPolicySnapshot> {
+    const defaultDelay = async () => this.readExecutionPolicy
+      ? (await this.readExecutionPolicy()).recoveryDelayMinutes
+      : 30;
     if (!this.database.shopSettings || !this.database.shopRecoveryPolicyOverride) {
       return {
-        recoveryDelayMinutes: 30,
+        recoveryDelayMinutes: await defaultDelay(),
         recoveryOfferMode: "NONE",
         fixedShopifyDiscountId: null,
         followUpEnabled: false,
@@ -38,7 +43,7 @@ export class RecoveryPolicyService {
       : settings;
     if (!source) {
       return {
-        recoveryDelayMinutes: 30,
+        recoveryDelayMinutes: await defaultDelay(),
         recoveryOfferMode: "NONE",
         fixedShopifyDiscountId: null,
         followUpEnabled: false,
@@ -111,4 +116,4 @@ export class RecoveryPolicyService {
   }
 }
 
-export const recoveryPolicyService = new RecoveryPolicyService();
+export const recoveryPolicyService = new RecoveryPolicyService(prisma, readRecoveryExecutionPolicy);
