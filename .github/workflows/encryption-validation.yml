@@ -1,0 +1,56 @@
+name: Isolated encryption validation
+on:
+  push:
+    branches: [codex/unified-encryption-validation]
+permissions:
+  contents: read
+concurrency:
+  group: background-encryption-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      DATABASE_URL: postgresql://test:test@127.0.0.1:1/moda_isolated_test
+      REDIS_URL: redis://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+  disposable-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run prisma:generate
+      - name: Run six suites on disposable PostgreSQL and Redis
+        run: >-
+          node scripts/test-integration.mjs
+          tests/integration/platform-configuration-reader.integration.test.ts
+          tests/integration/background-runtime-lease-cadence.concurrency.integration.test.ts
+          tests/integration/translation-batch-assembly.concurrency.integration.test.ts
+          tests/integration/bullmq-telemetry.integration.test.ts
+          tests/integration/conversation-turn-scheduling.integration.test.ts
+          tests/integration/translation-enum-bindings.integration.test.ts
+          --maxWorkers=1
