@@ -245,7 +245,7 @@ describe("RecoveryInitialOutreachSupportNoticeService", () => {
 
   it("emits the redacted Support failure and bounded cause through the installed Shared logger", async () => {
     emittedRecords.length = 0;
-    expect(sharedPackageJson.version).toBe("5.13.2");
+    expect(sharedPackageJson.version).toBe("5.13.3");
     expect(sharedLoggerResolution).toContain("@modainteract/moda-interact-shared");
     const f = context({ sharedLogger: true });
     const cause = Object.assign(new Error("Support database unavailable for phone +447000111222"), {
