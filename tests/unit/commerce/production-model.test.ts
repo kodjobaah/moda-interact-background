@@ -86,6 +86,15 @@ const createInvoker = (options: {
 });
 
 describe("createProductionCommerceModelInvoker", () => {
+  it("forwards the typed current-customer carrier through the actual production proxy unchanged", async () => {
+    const deps = dependencies(["credential-A"]); const invoker = await createInvoker(deps);
+    const currentCustomerMessages = [{ role: "user" as const, content: "How about the new named product?" }];
+    const typedRequest: ModelRequest = { ...request, currentCustomerMessages };
+    const signal = new AbortController().signal;
+    await invoker.invoke(typedRequest, signal);
+    expect(deps.created[0]!.client.invoke).toHaveBeenCalledWith(typedRequest, signal);
+    expect(vi.mocked(deps.created[0]!.client.invoke).mock.calls[0]![0].currentCustomerMessages).toBe(currentCustomerMessages);
+  });
   it("resolves model identity once and resolves a fresh credential/client per invocation", async () => {
     const deps = dependencies(["credential-A", "credential-B"]);
     const invoker = await createInvoker(deps);

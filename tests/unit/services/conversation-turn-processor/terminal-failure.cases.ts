@@ -5,9 +5,9 @@ import type { ConversationTurnFacadeContext } from "../conversation-turn-process
 export function registerTerminalFailureCases(context: ConversationTurnFacadeContext) {
   const { harness, state } = context;
 
-  it("consumes a typed nonretryable host failure after reservation cleanup without sending", async () => {
+  it.each(["INVALID_FINAL", "INVALID_INPUT"] as const)("consumes typed nonretryable %s after reservation cleanup without sending", async code => {
     const test = harness();
-    const failure = new CommerceHostError("INVALID_FINAL", false);
+    const failure = new CommerceHostError(code, false);
     test.runAgent.mockRejectedValue(failure);
     test.conversation.getTurnState.mockResolvedValue(state({ pendingAiControlRevision: 7 }));
 
@@ -20,7 +20,7 @@ export function registerTerminalFailureCases(context: ConversationTurnFacadeCont
     expect(test.conversation.applyDetectedLanguage).not.toHaveBeenCalled();
     expect(test.conversation.releaseTurn).not.toHaveBeenCalled();
     expect(test.logger.warn).toHaveBeenCalledWith("whatsapp.turn.terminal_failure", {
-      conversationId: "conversation-1", observedVersion: 3, errorCode: "INVALID_FINAL", outcome: "non-retryable-agent-failure",
+      conversationId: "conversation-1", observedVersion: 3, errorCode: code, outcome: "non-retryable-agent-failure",
     });
   });
 

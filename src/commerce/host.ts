@@ -9,6 +9,8 @@ import { renderStoreReferral } from "./referral.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   canonicalJson,
+  prepareCurrentCustomerMessages,
+  type CommerceCurrentCustomerMessages,
   isCommerceShippingObservationForSelection,
   mergeConversationProductContext,
   type CommerceProductObservation,
@@ -186,6 +188,16 @@ async function execute(
   if (Date.now() - current.processingStartedAt.getTime() >= 120_000)
     throw new CommerceHostError("STALE_TURN", false,
       hostDiagnostic("host.turn_state", "HOST_PROCESSING_LEASE_EXPIRED"));
+  let currentCustomerMessages: CommerceCurrentCustomerMessages;
+  try {
+    // Only the server-loaded current CUSTOMER/INBOUND window supplies objective.
+    // Preserve exact roles/content; do not promote history or manufacture a fallback.
+    currentCustomerMessages = prepareCurrentCustomerMessages(context.conversation.messages);
+  } catch {
+    // Never retain the Zod cause: it may contain private current-message content.
+    throw new CommerceHostError("INVALID_INPUT", false,
+      hostDiagnostic("host.turn_state", "HOST_CURRENT_CUSTOMER_INPUT_INVALID"));
+  }
   // Resolve LIVE policy once for this invocation, after trusted Shop and
   // processing-version checks. A later invocation may use updated policy;
   // no Redis key or persistent policy snapshot is created.
@@ -443,8 +455,8 @@ async function execute(
         recoveryOfferMode: recommendationContext.policy.mode,
         authorisedDiscountIds: recommendationContext.policy.authorisedDiscountIds,
         basket: recommendationContext.basket,
-        currentMessages: context.conversation.messages,
       },
+      currentCustomerMessages,
       history: context.conversation.history ?? [],
       // Legacy explicit-source rows remain readable, without imposing preference
       // precedence on recovery. Supply their retained tag as context instead.

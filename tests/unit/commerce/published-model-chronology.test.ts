@@ -85,3 +85,23 @@ describe("published Shared model chronology adoption", () => {
     expect(result.networkCalls).toBe(0);
   });
 });
+
+
+describe("published typed current-customer message serialization", () => {
+  it.each(["How about the Studio Camera?", "How about the Stduio Camra?"])("keeps the new subject in its own Human message exactly once: %s", current => {
+    const result = serializeAtModelBoundary({ ...base,
+      context: { trustedRecovery: { status: "ENGAGED" }, productReferences: { references: [{ title: "Ski Wax", productId: "old" }] } },
+      currentCustomerMessages: [{ role: "user", content: current }],
+      history: [{ role: "user", content: "Tell me about Ski Wax" }, { role: "assistant", content: "Ski Wax has options" }],
+      messages: [{ tool: "commerce_get_product", result: { contractVersion: "commerce.v1", status: "OK", data: { productId: "new" }, renderedText: "Current lookup data" } }],
+    });
+    expect(result.messages.map(message => message.role)).toEqual(["system", "human", "ai", "human", "human", "human"]);
+    expect(result.messages[3]!.content).toContain("Trusted commerce context JSON");
+    expect(result.messages[3]!.content).not.toContain(current);
+    expect(result.messages[4]!.content).toBe(current);
+    expect(result.messages[5]!.content).toContain("commerce_get_product");
+    expect(result.messages.filter(message => message.content.includes(current))).toHaveLength(1);
+    expect(result.messages[0]!.content).toContain("A newly named product takes precedence");
+    expect(result.networkCalls).toBe(0);
+  });
+});
