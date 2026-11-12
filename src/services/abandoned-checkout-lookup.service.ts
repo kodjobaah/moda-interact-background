@@ -5,7 +5,8 @@
 // strategy is:
 //
 //   1. derive a narrow server-side `created_at` filter from the candidate's
-//      checkoutCreatedAt;
+//      checkoutCreatedAt through evaluation time (Shopify creates its abandoned
+//      checkout record after the original checkout);
 //   2. enforce a hard candidate bound (count pre-check) so no unbounded
 //      pagination is ever possible;
 //   3. fetch a bounded result set;
@@ -70,7 +71,10 @@ type ShopifyAbandonedCheckoutNode = {
     countryCodeV2?: string | null;
     timeZone?: string | null;
   } | null;
-  lineItems?: { nodes?: ShopifyAbandonedCheckoutLineItem[] | null } | null;
+  lineItems?: {
+    nodes?: ShopifyAbandonedCheckoutLineItem[] | null;
+    pageInfo?: { hasNextPage?: boolean };
+  } | null;
 };
 
 type AbandonedCheckoutGraphqlResponse = {
@@ -82,7 +86,10 @@ type AbandonedCheckoutGraphqlResponse = {
 };
 
 export class AbandonedCheckoutLookupService {
-  constructor(private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>) {}
+  constructor(
+    private readonly readPolicy?: () => Promise<RecoveryExecutionPolicy>,
+    private readonly now: () => number = Date.now,
+  ) {}
   async resolveShopDomain(shopId: string): Promise<string> {
     const shop = await prisma.shop.findUnique({
       where: { id: shopId },
@@ -190,7 +197,11 @@ export class AbandonedCheckoutLookupService {
     }
 
     const from = new Date(created.getTime() - lookupWindowMs);
-    const to = new Date(created.getTime() + lookupWindowMs);
+    // AbandonedCheckout.createdAt is when Shopify records the abandonment,
+    // which can be later than the checkout/create webhook by many minutes.
+    // Keep the original lower bound and include the elapsed checkout lifetime.
+    // The count pre-check still prevents enumerating more than maxCandidates.
+    const to = new Date(Math.max(created.getTime(), this.now()) + lookupWindowMs);
 
     return {
       fromIso: from.toISOString(),
@@ -275,7 +286,8 @@ export class AbandonedCheckoutLookupService {
                 countryCodeV2
                 timeZone
               }
-              lineItems {
+              lineItems(first: 100) {
+                pageInfo { hasNextPage }
                 nodes {
                   id
                   product {
@@ -316,6 +328,10 @@ export class AbandonedCheckoutLookupService {
       return null;
     }
 
+    // Never send a recovery with a silently truncated basket snapshot.
+    if (nodes.some((node) => node.lineItems?.pageInfo?.hasNextPage)) {
+      throw new Error("Shopify abandoned checkout exceeds the 100 line-item lookup bound");
+    }
     return nodes.map((node) => this.normalize(node));
   }
 
