@@ -104,7 +104,7 @@ export function updateObservedSource(document: BrandDocument, observed: SourceOb
   const slot: BrandSlot = changed ? {
     source, work: newWork(source.url ? "PENDING" : "MISSING"), ready: previous?.ready ?? null,
   } : { ...previous!, source };
-  return { document: { schemaVersion: 1, roles: { ...document.roles, [observed.role]: slot } }, changed };
+  return { document: { ...document, roles: { ...document.roles, [observed.role]: slot } }, changed };
 }
 
 function due(value: string | null, now: number): boolean {
@@ -206,7 +206,7 @@ export function claimRole(document: BrandDocument, shopId: string, domain: strin
 }
 
 function putRole(doc: BrandDocument, role: BrandRole, slot: BrandSlot): BrandDocument {
-  return { schemaVersion: 1, roles: { ...doc.roles, [role]: slot } };
+  return { ...doc, roles: { ...doc.roles, [role]: slot } };
 }
 
 export function claimStillCurrent(slot: BrandSlot | undefined, claim: BrandClaim, at: Date,

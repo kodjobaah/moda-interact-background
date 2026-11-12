@@ -60,6 +60,8 @@ void startReadyWorkerProcess({
     // ARCH-049: independent durable ShopBrand JSONB sweep; no BullMQ wake required.
     const { startShopBrandMediaReconciler } = await import("../services/shop-brand-media-orchestration/runner.js");
     const stopShopBrandMediaReconciler = await startShopBrandMediaReconciler();
+    const { startShopifyShopNameSync } = await import("../services/shopify-shop-name/runner.js");
+    const stopShopifyShopNameSync = await startShopifyShopNameSync();
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -145,6 +147,7 @@ void startReadyWorkerProcess({
           stopExpiryScheduler,
           stopWooCouponDispatcher,
           stopShopBrandMediaReconciler,
+          stopShopifyShopNameSync,
           closeWorkerObservability,
           () => backgroundRuntimeConfigService.close(),
           () => recoveryCapacityResumeService.close(),
