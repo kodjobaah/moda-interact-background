@@ -89,7 +89,9 @@ export class OutboundMessageDeliveryService {
 
   /** Resolve outside moderation/admission transactions; never append after the permit. */
   private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<{body: string; recoveryShopHeader?: RecoveryShopHeaderReceipt} | null> {
-    if (admission.executionScope !== "recovery") return {body};
+    const owner = await this.ownership.readTurnOwnership(admission.conversationId);
+    if (!owner) return admission.executionScope === "recovery" ? null : {body};
+    if (owner.shopId !== admission.shopId || owner.mode !== "AI") return null;
     const context = await this.recoveryFooterContext.loadContext(admission.conversationId);
     if (!context || context === "TENANT_MISMATCH" || context.shopId !== admission.shopId || context.conversationId !== admission.conversationId) return null;
     const prepared = prepareRecoveryReplyBody({body, source: "AI", context});
@@ -170,14 +172,29 @@ export class OutboundMessageDeliveryService {
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
     let outboundText = terminal ? TERMINAL_MESSAGE : text;
-    let plan = deliveryPlan ? ConversationMediaDeliveryPlanSchema.parse(deliveryPlan) : undefined;
-    if (plan && (prepareRecoveryFooter || expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt)))
-      return {kind: "suppressed", reason: "conversation-invalid"};
-    if (plan?.kind === "BRAND_IMAGE" && executionScope !== "recovery") return {kind: "suppressed", reason: "conversation-invalid"};
-    // Check the durable admission before any failure/usage side effects. An
-    // already-admitted message must never be re-prepared or dispatched again.
+    // A replay/uncertain permit is immutable even if a newly supplied plan is invalid.
     if (await this.hasCompletedPreparation(messageId))
       return { kind: "suppressed", reason: "duplicate" };
+    const parsed = deliveryPlan === undefined ? undefined : ConversationMediaDeliveryPlanSchema.safeParse(deliveryPlan);
+    if (parsed && !parsed.success) {
+      await this.failPrepared(messageId, {shopId, conversationId, unpreparedOnly: true});
+      return {kind: "suppressed", reason: "conversation-invalid"};
+    }
+    let plan = parsed?.success ? parsed.data : undefined;
+    if (plan && (prepareRecoveryFooter || expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt))) {
+      await this.failPrepared(messageId, {shopId, conversationId, unpreparedOnly: true});
+      return {kind: "suppressed", reason: "conversation-invalid"};
+    }
+    if (plan?.kind === "BRAND_IMAGE") {
+      // Billing scope is not relationship authority: normal contracts use general
+      // billing even for a durable recovery. Retain the ORIGINAL revision/tenant.
+      const decision = await this.ownership.checkAutomatedTurn({conversationId, shopId,
+        expectedRevision: expectedControlRevision!, phase: "before-provider"});
+      if (decision.kind !== "allowed") {
+        await this.failPrepared(messageId, {shopId, conversationId, unpreparedOnly: true});
+        return {kind: "suppressed", reason: "conversation-invalid"};
+      }
+    }
     const suppression = await this.revalidateBeforeProvider({
       kind: "admitted",
       shopId,
@@ -190,7 +207,7 @@ export class OutboundMessageDeliveryService {
     const frozen = await this.frozenPending({shopId, conversationId, messageId});
     if (frozen === "INVALID") { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
     if (frozen) { outboundText = frozen.body; plan = frozen.plan; recoveryShopHeader = frozen.header; brandMediaPolicy=frozen.policy; if (frozen.receipt) { presentationReceipt = frozen.receipt; expectedControlRevision = frozen.receipt.controlRevision; expectedInboundVersion = frozen.receipt.inboundVersion; } }
-    const identity = !frozen && (terminal || prepareRecoveryFooter) && executionScope === "recovery"
+    const identity = !frozen && (terminal || prepareRecoveryFooter)
       ? await this.noticeIdentity(shopId, conversationId, expectedControlRevision) : null;
     if (!frozen && (terminal || prepareRecoveryFooter)) {
       const preparedTerminal = await this.prepareRecoveryFreeformBody({shopId, conversationId, executionScope}, outboundText);
@@ -205,6 +222,13 @@ export class OutboundMessageDeliveryService {
       }
     }
 
+    if (plan?.kind === "BRAND_IMAGE") {
+      try { freezeBrandMedia(plan, messageBrandReceipt(presentationReceipt!), recoveryShopHeader!, brandMediaPolicy!); }
+      catch {
+        await this.failPrepared(messageId, {shopId, conversationId, unpreparedOnly: true});
+        return {kind: "suppressed", reason: "conversation-invalid"};
+      }
+    }
     if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId}, presentationReceipt, recoveryShopHeader, brandMediaPolicy)))
       return { kind: "suppressed", reason: "duplicate" };
     if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
@@ -325,7 +349,7 @@ export class OutboundMessageDeliveryService {
     if (frozenNotice === "INVALID") { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
     if (frozenNotice) { outboundText = frozenNotice.body; noticePlan = frozenNotice.plan; noticeReceipt = frozenNotice.receipt; recoveryShopHeader = frozenNotice.header; noticePolicy=frozenNotice.policy; }
     if (admission.terminal && !frozenNotice) {
-      noticeIdentity = admission.executionScope === "recovery" ? await this.noticeIdentity(admission.shopId, admission.conversationId, input.expectedControlRevision) : null;
+      noticeIdentity = await this.noticeIdentity(admission.shopId, admission.conversationId, input.expectedControlRevision);
       const preparedTerminal = await this.prepareRecoveryFreeformBody(admission, TERMINAL_MESSAGE);
       if (preparedTerminal === null) { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
       outboundText = preparedTerminal.body;
@@ -665,8 +689,9 @@ export class OutboundMessageDeliveryService {
       : "conversation-invalid" };
   }
 
-  async failPrepared(messageId: string): Promise<void> {
-    await this.providerFailure.failPrepared(messageId);
+  async failPrepared(messageId: string, expectedReservation?: import("./outbound-whatsapp-admission.types.js").UntouchedReservationIdentity): Promise<void> {
+    if (expectedReservation) await this.providerFailure.failPrepared(messageId, expectedReservation);
+    else await this.providerFailure.failPrepared(messageId);
   }
 
   private async revalidateBeforeProvider(

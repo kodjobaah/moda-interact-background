@@ -16,7 +16,7 @@ import type {
 } from "./outbound-whatsapp-admission.types.js";
 
 const MAX_TRANSACTION_RETRIES = 3;
-const PENDING_CONTENT = "[Pending automated WhatsApp message]";
+import { PENDING_AUTOMATED_WHATSAPP_CONTENT as PENDING_CONTENT } from "./outbound-whatsapp-admission.types.js";
 
 type AdmissionDatabase = Pick<
   PrismaClient,

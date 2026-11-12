@@ -57,6 +57,15 @@ export function registerOutboundCases(context: ConversationTurnFacadeContext) {
     );
   });
 
+  it.each(["conversation-invalid","duplicate"] as const)("reports returned %s suppression without claiming a send or second cleanup",async reason=>{
+    const test=harness();test.admission.sendPreparedText.mockResolvedValue({kind:"suppressed",reason});
+    await test.processor.process({conversationId:"conversation-1",observedVersion:3});
+    expect(test.logger.debug).toHaveBeenCalledWith("whatsapp.turn.completed",expect.objectContaining({observedVersion:3,outcome:"agent-response-suppressed",reason}));
+    expect(test.logger.debug).not.toHaveBeenCalledWith("whatsapp.turn.completed",expect.objectContaining({outcome:"agent-response-sent"}));
+    expect(test.conversation.completeTurn).toHaveBeenCalledWith("conversation-1",3);
+    expect(test.admission.failPrepared).not.toHaveBeenCalled();
+  });
+
   it("leaves an ambiguous provider reservation durable and releases the lease", async () => {
     const test = harness();
     const ambiguous = new Error("provider outcome unknown");

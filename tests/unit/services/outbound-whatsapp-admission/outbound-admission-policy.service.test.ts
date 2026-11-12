@@ -81,6 +81,12 @@ describe("OutboundAdmissionPolicyService", () => {
     expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
   });
 
+  it("retains normal-contract general billing classification for a linked recovery",async()=>{
+    const test=harness();
+    expect(await test.service.resolve(test.transaction as never,input,recoveryConversation("ENGAGED"))).toMatchObject({kind:"resolved",executionScope:"general"});
+    expect(test.postContractResolver.resolve).not.toHaveBeenCalled();
+  });
+
   it("maps a frozen subscription to subscription-frozen", async () => {
     const test = harness();
     test.effectiveResolver.resolve.mockRejectedValue(
