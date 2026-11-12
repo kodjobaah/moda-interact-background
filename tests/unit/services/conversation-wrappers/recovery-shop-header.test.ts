@@ -23,7 +23,7 @@ import { parsePreparedEvidence } from "../../../../src/services/recovery-convers
 import { digest } from "../../../../src/services/conversation-wrappers/projection.js";
 
 describe("trusted header boundaries", () => {
- it.each([null, "", "bad\nname", "<markup>", "x".repeat(513), "bad\u202ename"])("uses verified domain only for unsafe/missing name %j", name => {
+ it.each([null, "", "bad\nname", "<markup>", "x".repeat(513), "bad\u202ename", "bad\u200fname", "bad\u009fname"])("uses verified domain only for unsafe/missing name %j", name => {
   expect(verifiedRecoveryShopHeader("shop", "SHOP.example", name)).toEqual({...header, name: null});
  });
  it("preserves legitimate punctuation and names within the existing Shared bound",()=>{expect(verifiedRecoveryShopHeader("shop","shop.example","A_Boutique & Co.")).toEqual({...header,name:"A_Boutique & Co."});expect(verifiedRecoveryShopHeader("shop","shop.example","x".repeat(512))?.name).toHaveLength(512);});

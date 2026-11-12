@@ -17,7 +17,7 @@ function safeHeaderName(value: unknown): string | null {
   const name = value.trim();
   // Identity is a single plain-text line. Unsafe/oversized names use domain-only fallback.
   // eslint-disable-next-line no-control-regex
-  return name && name.length <= 512 && !/[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069`<>[\]]/.test(name) ? name : null;
+  return name && name.length <= 512 && !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u206f`<>[\]]/.test(name) ? name : null;
 }
 
 export function verifiedRecoveryShopHeader(shopId: string, domain: string, name: unknown): RecoveryShopHeaderReceipt | null {
