@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { readCommerceRecommendationSelection } from "@modainteract/moda-interact-shared/commerce";
 import { readRecommendationSelection } from "../../../../src/commerce/recommendations/disposition.js";
 
 describe("readRecommendationSelection", () => {
+  it("delegates to the exact published canonical helper", () => {
+    expect(readRecommendationSelection).toBe(readCommerceRecommendationSelection);
+  });
+  it.each([
+    { responseDisposition: "STANDARD", shippingInformationSelection: { productId: null, variantId: null } },
+    { shippingInformationSelection: { productId: null, variantId: null } },
+    { responseDisposition: "STANDARD", productRecommendations: [{ scope: "PRODUCT_ONLY", basketLineId: null,
+      productId: "p1", variantId: "v1", quantity: 1, promotionKind: "NONE", offerIds: [] }] },
+    { productRecommendationVersion: "1" },
+  ])("keeps canonical compatibility for %j", details => {
+    expect(readRecommendationSelection(details)).toEqual(readCommerceRecommendationSelection(details));
+  });
   it("extracts only the four host-owned fields", () => {
     expect(readRecommendationSelection({ responseDisposition: "OUT_OF_SCOPE_REDIRECT", unowned: "ignored" })).toEqual({
       responseDisposition: "OUT_OF_SCOPE_REDIRECT",

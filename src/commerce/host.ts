@@ -9,6 +9,7 @@ import { renderStoreReferral } from "./referral.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import {
   canonicalJson,
+  isCommerceShippingObservationForSelection,
   mergeConversationProductContext,
   type CommerceProductObservation,
   CommerceTurnIdentitySchema,
@@ -736,6 +737,19 @@ async function execute(
       const details = envelope.details && typeof envelope.details === "object" && !Array.isArray(envelope.details)
         ? envelope.details as Record<string, unknown> : {};
       const selection = readRecommendationSelection(details);
+      // Log only bounded structural states; never model prose or arbitrary detail keys.
+      const selectionArrayShape = (value: unknown) => value === undefined ? "ABSENT" : Array.isArray(value) ? "ARRAY" : "INVALID";
+      const selectionArrayCount = (value: unknown) => Array.isArray(value) ? Math.min(value.length, 4) : 0;
+      compositionDiagnostic({ stage: 'SELECTION_SHAPE',
+        recommendationVersion: details.productRecommendationVersion === undefined ? 'ABSENT' : details.productRecommendationVersion === '1' ? 'V1' : 'INVALID',
+        recommendationArray: selectionArrayShape(details.productRecommendations), recommendationCount: selectionArrayCount(details.productRecommendations),
+        detailArray: selectionArrayShape(details.productDetailSelections), detailCount: selectionArrayCount(details.productDetailSelections),
+        optionArray: selectionArrayShape(details.productOptionSelections), optionCount: selectionArrayCount(details.productOptionSelections),
+        disposition: details.responseDisposition === undefined ? 'ABSENT' :
+          typeof details.responseDisposition === 'string' && ['STANDARD', 'OUT_OF_SCOPE_REDIRECT', 'SHIPPING_INFORMATION_UNVERIFIED', 'PRODUCT_DETAILS', 'PRODUCT_OPTIONS'].includes(details.responseDisposition) ? details.responseDisposition : 'INVALID',
+        rawShippingSelectionPresent: Object.hasOwn(details, 'shippingInformationSelection'),
+        parsedShippingSelectionPresent: Boolean(selection?.shippingInformationSelection),
+        parsedRecommendationCount: Math.min(selection?.productRecommendations?.length ?? 0, 4) });
       compositionDiagnostic({ stage: 'RECOMMENDATION_SELECTION', answerKind: envelope.answerKind, selectionValid: selection !== null, disposition: selection?.responseDisposition ?? 'STANDARD', proposals: selection?.productRecommendations?.map(p => ({ productId: p.productId, variantId: p.variantId, promotionKind: p.promotionKind, scope: p.scope })) ?? [], reason: selection?.productRecommendations?.length ? null : 'MODEL_SELECTED_NO_RECOMMENDATIONS', factsPresentation: factsPresentation !== null });
       const ownsPresentation = ["productRecommendationVersion", "productRecommendations", "responseDisposition",
         "shippingInformationSelection"].some((key) => Object.hasOwn(details, key));
@@ -814,7 +828,12 @@ async function execute(
               availableOptions.set(offer.offerId, offer);
           }
         }
-        const shippingSelection = selection?.shippingInformationSelection;
+        const genericPolicySelection = { productId: null, variantId: null };
+        const observedGenericPolicy = recommendationObservations.latest("commerce_get_shipping_information", genericPolicySelection);
+        const shippingSelection = selection?.shippingInformationSelection ??
+          (selection?.responseDisposition === "SHIPPING_INFORMATION_UNVERIFIED" && observedGenericPolicy &&
+            isCommerceShippingObservationForSelection({ selection: genericPolicySelection, observation: observedGenericPolicy.output,
+              provider: recommendationContext.provider }) ? genericPolicySelection : undefined);
         const shippingArgs = shippingSelection
           ? { productId: shippingSelection.productId, variantId: shippingSelection.variantId } : null;
         const shippingObserved = shippingArgs && recommendationObservations.latest("commerce_get_shipping_information", shippingArgs);
@@ -847,7 +866,7 @@ async function execute(
             });
           } else currentBasket = refreshedBasket.basket;
         }
-        const budgeted = refreshPlan.proposals.map((item) => ({ ...item.proposal, offerIds: item.offerIds,
+        const budgeted = refreshPlan.proposals.map((item) => ({ ...item.proposal, offerIds: [...item.offerIds],
           promotionKind: item.proposal.promotionKind === "DISCOUNT" && item.offerIds.length === 0 ? "NONE" as const : item.proposal.promotionKind }));
         compositionDiagnostic({ stage: 'REFRESH_PLAN', selectedCount: proposalsToRefresh.length, plannedCount: budgeted.length, reason: budgeted.length < proposalsToRefresh.length ? 'REFRESH_BUDGET_OR_BASKET_CHANGED' : null });
         const shippingPlanned = refreshPlan.shippingCallKey !== null;
@@ -1029,7 +1048,9 @@ async function execute(
         if (shippingSelection && shippingArgs) {
           const args = shippingArgs;
           const observed = recommendationObservations.latest("commerce_get_shipping_information", args);
-          if (shippingPlanned && observed && usedCalls < 10 && (await available()).has("commerce_get_shipping_information")) {
+          if (shippingPlanned && observed && isCommerceShippingObservationForSelection({ selection: shippingSelection,
+            observation: observed.output, provider: recommendationContext.provider }) &&
+            usedCalls < 10 && (await available()).has("commerce_get_shipping_information")) {
             await assertCurrent();
             usedCalls += 1;
             const refreshed = await observeMcp(() => client.call("commerce_get_shipping_information", args, signal));
@@ -1042,7 +1063,8 @@ async function execute(
             recommendationObservations.record({ toolName: "commerce_get_shipping_information",
               descriptorIdentity: canonicalJson(descriptors.find((descriptor) => descriptor.name === "commerce_get_shipping_information")),
               arguments: args, output: output.data });
-            if ("product" in output.data) shippingPresentation = selectShippingPresentation({
+            if ("product" in output.data && isCommerceShippingObservationForSelection({ selection: shippingSelection, observation: output.data,
+              provider: recommendationContext.provider })) shippingPresentation = selectShippingPresentation({
               selection: shippingSelection,
               observation: observed.output as ReturnType<typeof CommerceToolOutputs.commerce_get_shipping_information.parse>,
               refreshed: output.data as ReturnType<typeof CommerceToolOutputs.commerce_get_shipping_information.parse>,
@@ -1055,10 +1077,13 @@ async function execute(
         imageProducts.push(...retained.map(item => item.product));
         presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
-        if (disposition === "STANDARD" && !selection?.shippingInformationSelection && renderedProducts.length === 0 && initialProductObservations.some(observation => {
+        compositionDiagnostic({ stage: 'SHIPPING_SELECTION_EVIDENCE', selected: Boolean(shippingSelection), verified: Boolean(shippingPresentation) });
+        const hasObservedProducts = initialProductObservations.some(observation => {
           const output = observation.output as { products?: Product[]; product?: Product | null };
           return Boolean(output.product) || Boolean(output.products?.length);
-        })) {
+        });
+        if (hasObservedProducts && !shippingPresentation &&
+          (disposition === "SHIPPING_INFORMATION_UNVERIFIED" || disposition === "STANDARD" && renderedProducts.length === 0)) {
           compositionDiagnostic({ stage: 'RESULT', outcome: 'REFUSED', reason: 'MISSING_VERIFIED_PRODUCT_SELECTION' });
           throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
         }

@@ -31,3 +31,6 @@ registerShippingResponseTests();
 
 import { registerProductContextAcceptanceTests } from "./host-suites/product-context-acceptance.js";
 registerProductContextAcceptanceTests();
+
+import { registerSelectionSemanticsTests } from "./host-suites/selection-semantics.js";
+registerSelectionSemanticsTests();
