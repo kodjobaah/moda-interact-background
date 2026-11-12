@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
-  processor: undefined as undefined | ((job: { name: string; data: unknown; id: string; attemptsMade: number; failedReason: string }) => Promise<unknown>),
+  processor: undefined as undefined | ((job: { name: string; data: unknown; id: string; attemptsMade: number; failedReason?: string }) => Promise<unknown>),
   listeners: new Map<string, Array<(...args: unknown[]) => void>>(),
   records: [] as Array<Record<string, unknown>>,
   materialize: vi.fn(async (_candidate?: unknown, _options?: unknown) => ({
@@ -207,6 +207,19 @@ describe("pending recovery candidate worker", () => {
     expect(hoisted.materialize).toHaveBeenCalledWith(job.data, {
       jobId: job.id,
       retrySuppressionAdmission: false,
+    });
+    expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
+  });
+
+  it("processes a manually retried job after BullMQ clears its failure reason", async () => {
+    const job = {
+      name: EVALUATE_PENDING_RECOVERY_JOB, id: "job-retry",
+      data: { shopId: "shop_1", checkoutToken: "checkout_1" },
+      attemptsMade: 3,
+    };
+    await hoisted.processor?.(job);
+    expect(hoisted.materialize).toHaveBeenCalledWith(job.data, {
+      jobId: job.id, retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
   });
