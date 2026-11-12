@@ -27,7 +27,7 @@ import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } fro
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 
 export async function humanDispatchFixture(
-  label: string, recipientOrOptions?: string | { recipient?: string },
+  label: string, recipientOrOptions?: string | { recipient?: string; checkoutLifetimeDays?: number },
 ) {
   const url = process.env.TEST_DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
@@ -105,7 +105,9 @@ export async function humanDispatchFixture(
   function createPreparation() {
     return new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
       new ConversationWrapperService({
-        repository: new PrismaConversationWrapperReadRepository(db), onMissingSlot: "passthrough",
+        repository: new PrismaConversationWrapperReadRepository(db, undefined,
+          typeof recipientOrOptions === "object" && recipientOrOptions.checkoutLifetimeDays !== undefined
+            ? { read: async () => recipientOrOptions.checkoutLifetimeDays! } : undefined), onMissingSlot: "passthrough",
       }),
     ));
   }

@@ -1,4 +1,4 @@
-import { validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter } from "./recovery-checkout-footer.js";
+import { validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter, withLegacyRecoveryCheckoutFooter, hasPreparedRecoveryCheckoutFooter } from "./recovery-checkout-footer.js";
 import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type {
   RenderConversationResponseInput,
@@ -79,12 +79,13 @@ export async function composeAiOutbound(
   if (result.kind === "no-wrapper") {
     // Only the trusted recovery footer may augment an unwrapped plain reply.
     if (result.recoveryCheckoutUrl !== undefined && (!validRecoveryCheckoutFooterUrl(result.recoveryCheckoutUrl) ||
-        withRecoveryCheckoutFooter(result.body, result.recoveryCheckoutUrl) !== result.body)) {
+        !hasPreparedRecoveryCheckoutFooter(result.body, result.recoveryCheckoutUrl))) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
     const expectedBody = result.recoveryCheckoutUrl
       ? withRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse;
-    if (!input.commercePresentation && result.body !== expectedBody) {
+    const legacyBody = result.recoveryCheckoutUrl ? withLegacyRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse;
+    if (!input.commercePresentation && result.body !== expectedBody && result.body !== legacyBody) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
     return { kind: "ready", text: result.body, ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };

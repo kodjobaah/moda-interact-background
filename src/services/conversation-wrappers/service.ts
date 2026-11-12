@@ -1,4 +1,4 @@
-import { appendRecoveryCheckoutFooter, validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter, recoveryReplyContentPreserved } from "./recovery-checkout-footer.js";
+import { appendRecoveryCheckoutFooter, validRecoveryCheckoutFooterUrl, hasPreparedRecoveryCheckoutFooter, recoveryReplyContentPreserved } from "./recovery-checkout-footer.js";
 import { prepareConversationDelivery } from "../conversation-product-media.js";
 import { ConversationDeliveryPlanSchema, composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
@@ -73,7 +73,7 @@ export class ConversationWrapperService {
             prior.messageIdentity !== input.messageIdentity || !matchedBody ||
             prior.body.length > MAX_WHATSAPP_TEXT_LENGTH ||
             (prior.recoveryCheckoutUrl !== undefined && (!validRecoveryCheckoutFooterUrl(prior.recoveryCheckoutUrl) ||
-              withRecoveryCheckoutFooter(prior.body, prior.recoveryCheckoutUrl) !== prior.body)) ||
+              !hasPreparedRecoveryCheckoutFooter(prior.body, prior.recoveryCheckoutUrl))) ||
             (!presentationDigest && (prior.recoveryCheckoutUrl
               ? !recoveryReplyContentPreserved(matchedBody, prior.body, prior.recoveryCheckoutUrl) : !prior.body.includes(matchedBody))) ||
             prior.applicationKey !== digest(stableJson({
@@ -96,7 +96,7 @@ export class ConversationWrapperService {
       const context = await this.repository.loadContext(input.conversationId);
       if (context === "TENANT_MISMATCH") return this.refuse("rejected", "TENANT_MISMATCH", input);
       if (!context) return this.refuse("unavailable", "CONVERSATION_UNAVAILABLE", input);
-      const checkoutUrl = input.source === "AI" && context.checkoutAvailable
+      const checkoutUrl = context.checkoutAvailable
         ? context.variables["checkout.url"] : undefined;
       if (checkoutUrl !== undefined && !validRecoveryCheckoutFooterUrl(checkoutUrl)) {
         return this.refuse("rejected", "VARIABLE_UNAVAILABLE", input);

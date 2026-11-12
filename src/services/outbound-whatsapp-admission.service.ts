@@ -115,6 +115,7 @@ export class OutboundWhatsAppAdmissionService {
       ...admission,
       to: input.to,
       text: admission.terminal ? TERMINAL_MESSAGE : input.text,
+      prepareRecoveryFooter: true,
       ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
       ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
       ...(input.replyToProviderMessageId
@@ -160,6 +161,7 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
+      prepareRecoveryFooter?: true;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {
@@ -176,6 +178,7 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
+      prepareRecoveryFooter?: true;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {

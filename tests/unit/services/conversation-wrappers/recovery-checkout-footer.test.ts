@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CommerceProductSchema, exampleFinal } from "@modainteract/moda-interact-shared/commerce";
 import { verifyCommerceProductFacts } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { composeAiOutbound } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
-import { appendRecoveryCheckoutFooter, withRecoveryCheckoutFooter } from "../../../../src/services/conversation-wrappers/recovery-checkout-footer.js";
+import { appendRecoveryCheckoutFooter, withRecoveryCheckoutFooter, withLegacyRecoveryCheckoutFooter, RECOVERY_CHECKOUT_SEPARATOR } from "../../../../src/services/conversation-wrappers/recovery-checkout-footer.js";
 import type { CommercePresentationInput } from "../../../../src/services/conversation-wrappers/contracts.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { ConversationWrapperService } from "../../../../src/services/conversation-wrappers/service.js";
@@ -27,7 +27,7 @@ describe("ARCH-070 recovery checkout footer", () => {
   const result = await harness().renderConversationResponse(input);
   expect(result.kind).toBe("rendered");
   if(result.kind !== "rendered") return;
-  expect(result.body).toBe(input.responseBody + "\n\n" + checkoutUrl);
+  expect(result.body).toBe(input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl);
  });
 });
 
@@ -40,7 +40,7 @@ function presentation(body: string, mode: "plain" | "details" | "recommendations
 }
 
 describe("trusted footer scope and canonicalization", () => {
- it.each([input.responseBody + "\n\n" + checkoutUrl, "Return here: " + checkoutUrl + "\nMore details.", "See " + checkoutUrl + ".\n" + checkoutUrl])("moves the exact trusted link to one final footer: %s", async body => {
+ it.each([input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl, "Return here: " + checkoutUrl + "\nMore details.", "See " + checkoutUrl + ".\n" + checkoutUrl])("moves the exact trusted link to one final footer: %s", async body => {
   const result = await harness().renderConversationResponse({...input, responseBody: body});
   expect(result.kind).toBe("rendered");
   if(result.kind !== "rendered") return;
@@ -52,19 +52,19 @@ describe("trusted footer scope and canonicalization", () => {
   const prepared: PreparedWrapper = {...plainPrepared, conditionals: [{when: "checkout.available", tokens: [{kind: "variable", name: "checkout.url"}]}]};
   const original = input.responseBody + "\n" + checkoutUrl;
   const result = await harness(context, [slot(prepared)]).renderConversationResponse({...input, responseBody: original});
-  expect(result).toMatchObject({kind: "rendered", body: input.responseBody + "\n\n" + checkoutUrl});
+  expect(result).toMatchObject({kind: "rendered", body: input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl});
  });
  it("moves a wrapper checkout section after the authored footer and leaves other links untouched", async () => {
   const prepared: PreparedWrapper = {...plainPrepared, conditionals: [{when: "checkout.available", tokens: [{kind: "text", value: "Your checkout: "}, {kind: "variable", name: "checkout.url"}]}], footer: [{kind: "text", value: "Merchant footer. https://shop.example/policies/refund"}]};
   const result = await harness(context, [slot(prepared)]).renderConversationResponse(input);
   expect(result.kind).toBe("rendered");
   if(result.kind !== "rendered") return;
-  expect(result.body).toBe(input.responseBody + "\nMerchant footer. https://shop.example/policies/refund\n\nYour checkout: " + checkoutUrl);
+  expect(result.body).toBe(input.responseBody + "\nMerchant footer. https://shop.example/policies/refund" + RECOVERY_CHECKOUT_SEPARATOR + "Your checkout: " + checkoutUrl);
   expect(result.body.split(checkoutUrl)).toHaveLength(2);
  });
  it("preserves embedded Markdown and parenthesized links without dangling empty markup", () => {
   for(const body of [`[Return to checkout](${checkoutUrl})`, `(${checkoutUrl})`, `prefix${checkoutUrl}`]) {
-   expect(withRecoveryCheckoutFooter(body, checkoutUrl)).toBe(body + "\n\n" + checkoutUrl);
+   expect(withRecoveryCheckoutFooter(body, checkoutUrl)).toBe(body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl);
   }
  });
  it("retains the unrelated already-wrapped guard", async () => {
@@ -82,7 +82,7 @@ describe("trusted footer scope and canonicalization", () => {
   const commercePresentation = presentation(input.responseBody + "\n" + checkoutUrl);
   const before = JSON.stringify(commercePresentation.envelope);
   const result = await harness(context, [slot(prepared)]).renderConversationResponse({...input, commercePresentation});
-  expect(result).toMatchObject({kind: "rendered", body: input.responseBody + "\n\n" + checkoutUrl});
+  expect(result).toMatchObject({kind: "rendered", body: input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl});
   expect(JSON.stringify(commercePresentation.envelope)).toBe(before);
  });
  it("is idempotent with multiple differently labelled checkout lines and a custom ending", () => {
@@ -90,7 +90,7 @@ describe("trusted footer scope and canonicalization", () => {
   const once = withRecoveryCheckoutFooter(body, checkoutUrl);
   expect(once).toContain("First checkout:");
   expect(once).toContain("Merchant footer.");
-  expect(once.endsWith("\n\nSecond checkout: " + checkoutUrl)).toBe(true);
+  expect(once.endsWith(RECOVERY_CHECKOUT_SEPARATOR + "Second checkout: " + checkoutUrl)).toBe(true);
   expect(once.split(checkoutUrl)).toHaveLength(2);
   expect(withRecoveryCheckoutFooter(once, checkoutUrl)).toBe(once);
  });
@@ -98,11 +98,11 @@ describe("trusted footer scope and canonicalization", () => {
   const other = checkoutUrl + "&discount=SAVE";
   const nested = "https://other.example/?redirect=" + checkoutUrl;
   const body = other + "\n" + nested;
-  expect(withRecoveryCheckoutFooter(body, checkoutUrl)).toBe(body + "\n\n" + checkoutUrl);
+  expect(withRecoveryCheckoutFooter(body, checkoutUrl)).toBe(body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl);
  });
- it("does not add links for nonrecovery/expired context, HUMAN source or tenant mismatch", async () => {
+ it("uses eligible HUMAN context while excluding inactive or mismatched context", async () => {
   expect(await harness({...context, checkoutAvailable: false, variables: {}}).renderConversationResponse(input)).toMatchObject({kind: "rendered", body: input.responseBody});
-  expect(await harness(context, []).renderConversationResponse({...input, source: "HUMAN"})).toEqual({kind: "no-wrapper", reason: "NOT_CONFIGURED", body: input.responseBody});
+  expect(await harness(context, []).renderConversationResponse({...input, source: "HUMAN"})).toEqual({kind: "no-wrapper", reason: "NOT_CONFIGURED", body: input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl, recoveryCheckoutUrl: checkoutUrl});
   expect(await harness("TENANT_MISMATCH").renderConversationResponse(input)).toEqual({kind: "rejected", reason: "TENANT_MISMATCH"});
  });
  it.each(["http://shop.example/checkout", "https://user:pass@shop.example/checkout", "https://shop.example:8443/checkout", "https://shop.example/checkout\n", "https://shop.invalid/checkout", "not-a-url"])("refuses unsafe trusted augmentation: %s", async url => {
@@ -116,7 +116,7 @@ describe("trusted footer scope and canonicalization", () => {
  });
  it("retains the original no-wrapper comparison unless the exact trusted footer augments it", async () => {
   const service = harness(context, []);
-  expect(await composeAiOutbound(service, {conversationId: input.conversationId, messageId: input.messageIdentity, generatedResponse: input.responseBody})).toMatchObject({kind: "ready", text: input.responseBody + "\n\n" + checkoutUrl, wrapper: null});
+  expect(await composeAiOutbound(service, {conversationId: input.conversationId, messageId: input.messageIdentity, generatedResponse: input.responseBody})).toMatchObject({kind: "ready", text: input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl, wrapper: null});
   for(const result of [{kind: "no-wrapper" as const, reason: "NOT_CONFIGURED" as const, body: "rewritten\n\n" + checkoutUrl, recoveryCheckoutUrl: checkoutUrl}, {kind: "no-wrapper" as const, reason: "NOT_CONFIGURED" as const, body: input.responseBody + "\n\nhttp://shop.example", recoveryCheckoutUrl: "http://shop.example"}]) {
    await expect(composeAiOutbound({renderConversationResponse: async () => result}, {conversationId: input.conversationId, messageId: input.messageIdentity, generatedResponse: input.responseBody})).rejects.toThrow("AI_WRAPPER_PASSTHROUGH_MISMATCH");
   }
@@ -126,7 +126,7 @@ describe("trusted footer scope and canonicalization", () => {
    const result = await harness(context, slots).renderConversationResponse({...input, commercePresentation: presentation(input.responseBody, mode)});
    expect(["rendered", "no-wrapper"]).toContain(result.kind);
    if(result.kind !== "rendered" && result.kind !== "no-wrapper") continue;
-   expect(result.body).toBe(input.responseBody + "\n\n" + checkoutUrl);
+   expect(result.body).toBe(input.responseBody + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl);
    expect(result.deliveryPlan?.body).toBe(result.body);
   }
  });
@@ -148,7 +148,7 @@ describe("trusted footer scope and canonicalization", () => {
   expect(first.body).not.toContain(checkoutUrl);
  });
  it("includes the footer in the 4096 limit and refuses overflow without cutting the URL", async () => {
-  const exact = "a".repeat(4096 - checkoutUrl.length - 2);
+  const exact = "a".repeat(4096 - checkoutUrl.length - RECOVERY_CHECKOUT_SEPARATOR.length);
   for(const slots of [[], [slot()]]) {
    const good = await harness(context, slots).renderConversationResponse({...input, responseBody: exact});
    expect(["rendered", "no-wrapper"]).toContain(good.kind);
@@ -168,8 +168,28 @@ describe("trusted footer scope and canonicalization", () => {
    expect(result.kind).toBe("rendered");
    if(result.kind !== "rendered") continue;
    expect(result.deliveryPlan?.kind).toBe(length === 100 ? "IMAGE" : "TEXT");
-   expect(result.deliveryPlan?.body).toBe(body + "\n\n" + checkoutUrl);
+   expect(result.deliveryPlan?.body).toBe(body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl);
   }
   expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
+ });
+});
+
+
+describe("legacy immutable footer replay", () => {
+ it("reuses a prior configured no-divider footer byte-identically", async () => {
+  const first = await harness().renderConversationResponse(input);
+  if(first.kind !== "rendered") throw new Error("expected rendered");
+  const body = withLegacyRecoveryCheckoutFooter(input.responseBody, checkoutUrl);
+  const previous = {...first, body, applicationKey: digest(stableJson({conversationId: input.conversationId, messageIdentity: first.messageIdentity,
+   source: first.source, wrapperDefinitionId: first.wrapperDefinitionId, localeId: first.localeId, contentHash: first.contentHash,
+   editVersion: first.slotEditVersion, responseDigest: first.responseDigest, bodyDigest: digest(body), recoveryCheckoutUrlDigest: digest(checkoutUrl)}))};
+  expect(await harness().renderConversationResponse({...input, previousApplication: previous})).toEqual({...previous, replayed:true});
+  expect(previous.body).not.toContain("──────────");
+ });
+ it("preserves an already prepared no-slot legacy footer in the AI compose adapter", async () => {
+  const body = withLegacyRecoveryCheckoutFooter(input.responseBody, checkoutUrl);
+  const result = await composeAiOutbound({renderConversationResponse: async () => ({kind:"no-wrapper", reason:"NOT_CONFIGURED", body, recoveryCheckoutUrl:checkoutUrl})},
+   {conversationId:input.conversationId,messageId:input.messageIdentity,generatedResponse:input.responseBody});
+  expect(result).toMatchObject({kind:"ready",text:body});
  });
 });

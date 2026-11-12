@@ -14,6 +14,7 @@ import {
   OutboundMessageDeliveryService, OutboundPreparationRetryError,
   TERMINAL_MESSAGE,
 } from "../../../../src/services/outbound-whatsapp-admission/outbound-message-delivery.service.js";
+import { RECOVERY_CHECKOUT_SEPARATOR } from "../../../../src/services/conversation-wrappers/recovery-checkout-footer.js";
 import { prepareAutomatedTemplateInput } from "../../../../src/services/conversation-moderation/automated-template-input.js";
 
 function harness({
@@ -25,6 +26,9 @@ function harness({
   currentAllowance = true,
   generalFence,
   wooFence,
+  recoveryFence,
+  ownership,
+  footerContext,
 }: {
   provider?: Record<string, unknown>;
   executionEligibility?: { evaluate: ReturnType<typeof vi.fn> };
@@ -32,6 +36,9 @@ function harness({
   currentAllowance?: boolean;
   generalFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
   wooFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
+  recoveryFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
+  ownership?: { readTurnOwnership: ReturnType<typeof vi.fn> };
+  footerContext?: { loadContext: ReturnType<typeof vi.fn> };
 } = {}) {
   let currentText = "Hello";
   const conversationMessageUpdate = vi.fn().mockImplementation(async ({ data }: { data: { content?: string } }) => {
@@ -102,11 +109,11 @@ function harness({
       database as never,
       providerMock as never,
       executionEligibility as never,
-      { readTurnOwnership: vi.fn(async () => null) } as never,
-      undefined,
+      (ownership ?? { readTurnOwnership: vi.fn(async () => null) }) as never,
+      recoveryFence as never,
       moderationMock as never,
       undefined, // providerFailure uses its production adapter
-      generalFence as never, undefined, wooFence as never,
+      generalFence as never, undefined, wooFence as never, footerContext as never,
     ),
   };
 }
@@ -715,4 +722,55 @@ describe("OutboundMessageDeliveryService", () => {
       "message-1", "+15551234567", error,
     );
   });
+});
+
+
+describe("unified known-recovery service and limit notice bodies",()=>{
+ const checkoutUrl="https://shop.example/checkouts/recover?key=synthetic";
+ const context={conversationId:"conversation-1",shopId:"shop-1",conversationLanguageTag:"en",merchantLanguageTag:"en",variables:{"checkout.url":checkoutUrl},checkoutAvailable:true};
+ function noticeHarness(value:unknown=context) {
+  const footerContext={loadContext:vi.fn(async()=>value)};
+  const recoveryFence={admitFinalSend:vi.fn(async()=>({kind:"admitted"}))};
+  const ownership={readTurnOwnership:vi.fn(async()=>({recoveryId:"recovery-1",revision:7}))};
+  return {...harness({footerContext,recoveryFence,ownership}),footerContext,recoveryFence};
+ }
+ it.each(["text","template"])("uses exact prepared/moderated/fenced terminal %s body at the provider",async mode=>{
+  const test=noticeHarness();const input={...admission,executionScope:"recovery" as const,terminal:true};
+  const expected=TERMINAL_MESSAGE+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl;
+  const result=mode==="text"?await test.service.sendPreparedText({...input,to:"15551234567",text:"Ignored cap reply"}):
+   await test.service.sendPreparedTemplate(input,{to:"15551234567",templateName:"approved_template",languageCode:"en"});
+  expect(result.kind).toBe("admitted");
+  expect(test.database.conversationMessage.update.mock.calls[0]![0].data.content).toBe(expected);
+  expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({effectiveText:expected}));
+  expect(test.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({expectedContent:expected,deliveryKind:"TEXT"}));
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:expected});
+  expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
+  expect(test.database.conversationMessage.update.mock.invocationCallOrder[0]).toBeLessThan(test.moderationMock.assessText.mock.invocationCallOrder[0]!);
+  expect(test.moderationMock.assessText.mock.invocationCallOrder[0]).toBeLessThan(test.recoveryFence.admitFinalSend.mock.invocationCallOrder[0]!);
+ });
+ it("prepares explicit audio/clarification service text, not ordinary already-prepared text",async()=>{
+  const test=noticeHarness();const text="Please send a shorter question.";
+  await test.service.sendPreparedText({...admission,executionScope:"recovery",prepareRecoveryFooter:true,to:"15551234567",text});
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:text+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
+  const untouched=noticeHarness();await untouched.service.sendPreparedText({...admission,executionScope:"recovery",to:"15551234567",text});
+  expect(untouched.footerContext.loadContext).not.toHaveBeenCalled();
+  expect(untouched.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text});
+ });
+ it.each([null,"TENANT_MISMATCH",{...context,shopId:"other-shop"},{...context,variables:{"checkout.url":"http://shop.example/unsafe"}}])("refuses untrusted terminal context %#",async value=>{
+  const test=noticeHarness(value);
+  expect(await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"})).toMatchObject({kind:"suppressed"});
+  expect(test.moderationMock.assessText).not.toHaveBeenCalled();expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+ });
+ it("does not fabricate URLs for expired context or resolve unbound general sends",async()=>{
+  const expired=noticeHarness({...context,checkoutAvailable:false,variables:{}});
+  await expired.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"});
+  expect(expired.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:TERMINAL_MESSAGE});
+  const general=noticeHarness();await general.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
+  expect(general.footerContext.loadContext).not.toHaveBeenCalled();
+ });
+ it("does not send when prepared-content final permit is refused after a race",async()=>{
+  const test=noticeHarness();test.recoveryFence.admitFinalSend.mockResolvedValue({kind:"suppressed",reason:"already-admitted-or-sent"} as any);
+  expect(await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"})).toMatchObject({kind:"suppressed"});
+  expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+ });
 });

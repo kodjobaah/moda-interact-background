@@ -348,10 +348,10 @@ export class OutboundSendFenceService {
           AND "providerDispatchKey" IS NULL AND "status"='PENDING'
           ${initial ? `AND "content"=$6 AND "providerDispatchAdmittedAt" IS NULL
             AND "providerDispatchControlRevision" IS NULL AND "providerMessageId" IS NULL
-            AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : ""}
+            AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : input.expectedContent !== undefined ? `AND "content"=$6` : ""}
         RETURNING "providerDispatchAdmittedAt"`,
         messageId, dispatchKey, context.revision, context.id, input.senderType,
-        ...(initial ? [initial.expectedContent] : []));
+        ...(initial ? [initial.expectedContent] : input.expectedContent !== undefined ? [input.expectedContent] : []));
       if (!message.length) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
       if (input.productContextUpdate) {
         await commitAdmittedProductContext(tx, {

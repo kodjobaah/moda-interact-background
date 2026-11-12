@@ -106,6 +106,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       input: Admitted & {
         to: string;
         text: string;
+        prepareRecoveryFooter?: true;
         expectedControlRevision?: number;
         expectedInboundVersion?: number;
         productContextUpdate?: CommerceConversationProductContext;
@@ -117,6 +118,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
+        prepareRecoveryFooter?: true;
         expectedControlRevision?: number;
         expectedInboundVersion?: number;
         productContextUpdate?: CommerceConversationProductContext;
@@ -348,7 +350,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
@@ -489,6 +491,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
           ...clarification,
           to: loaded.to,
           text: loaded.clarificationText,
+          prepareRecoveryFooter: true,
         });
         await completeOwnedTurn();
         this.logger.debug("whatsapp.turn.completed", {

@@ -1,12 +1,13 @@
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { WrapperRefusal, WrappedResult } from "../conversation-wrappers/contracts.js";
+import { validRecoveryCheckoutFooterUrl, withHumanRecoveryCheckoutFooter } from "../conversation-wrappers/recovery-checkout-footer.js";
 import { ConversationWrapperService } from "../conversation-wrappers/service.js";
 
 /** ARCH-047-BG009: deterministic rendering only; SQL freezing owns moderation identity. */
 export type HumanWrapperPreparation =
   | Readonly<{ kind: "not-applicable" }>
-  | Readonly<{ kind: "passthrough"; body: string }>
+  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string }>
   | Readonly<{ kind: "prepared"; body: string; application: WrappedResult }>
   | Readonly<{ kind: "refused"; reason: WrapperRefusal | "CONTENT_MISMATCH" }>;
 
@@ -49,8 +50,13 @@ export class HumanWrapperPreparationService {
         responseBody: command.textBody,
       });
       if (rendered.kind === "no-wrapper") {
-        return rendered.body === command.textBody
-          ? { kind: "passthrough", body: command.textBody }
+        if (rendered.recoveryCheckoutUrl !== undefined) {
+          return validRecoveryCheckoutFooterUrl(rendered.recoveryCheckoutUrl) &&
+            rendered.body === withHumanRecoveryCheckoutFooter(command.textBody, rendered.recoveryCheckoutUrl)
+            ? { kind: "passthrough", body: rendered.body, recoveryCheckoutUrl: rendered.recoveryCheckoutUrl }
+            : { kind: "refused", reason: "CONTENT_MISMATCH" };
+        }
+        return rendered.body === command.textBody ? { kind: "passthrough", body: command.textBody }
           : { kind: "refused", reason: "CONTENT_MISMATCH" };
       }
       if (rendered.kind === "rendered") {
