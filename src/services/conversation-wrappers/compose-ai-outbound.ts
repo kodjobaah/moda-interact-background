@@ -1,3 +1,4 @@
+import { validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter } from "./recovery-checkout-footer.js";
 import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type {
   RenderConversationResponseInput,
@@ -76,8 +77,14 @@ export async function composeAiOutbound(
     };
   }
   if (result.kind === "no-wrapper") {
-    // No-wrapper must not silently rewrite the original AI response either.
-    if (!input.commercePresentation && result.body !== input.generatedResponse) {
+    // Only the trusted recovery footer may augment an unwrapped plain reply.
+    if (result.recoveryCheckoutUrl !== undefined && (!validRecoveryCheckoutFooterUrl(result.recoveryCheckoutUrl) ||
+        withRecoveryCheckoutFooter(result.body, result.recoveryCheckoutUrl) !== result.body)) {
+      throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
+    }
+    const expectedBody = result.recoveryCheckoutUrl
+      ? withRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse;
+    if (!input.commercePresentation && result.body !== expectedBody) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
     return { kind: "ready", text: result.body, ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
