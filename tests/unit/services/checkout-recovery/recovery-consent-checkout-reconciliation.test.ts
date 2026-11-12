@@ -19,22 +19,22 @@ const checkout = {
   completedAt: null as string | null,
   abandonedCheckoutUrl: checkoutEvent.abandonedCheckoutUrl,
   createdAt: checkoutEvent.checkoutCreatedAt,
-  customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447700900001" },
+  customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
 };
 
 /** Test the ordinary checkout event -> matured candidate boundary, without a consent-specific scheduler. */
 function scenario() {
   let granted = false;
   let paidOrderRecorded = false;
-  let currentRecipient = "447700900001";
-  let authorisedRecipient = "447700900001";
+  let currentRecipient = "447400123456";
+  let authorisedRecipient = "447400123456";
   let currentCheckout = { ...checkout };
   let storedRecovery: { id: string; shopId: string; checkoutToken: string; status: string; generation: number } | null = null;
   const candidates: Array<Record<string, unknown>> = [];
   const writes = { recovery: vi.fn(), attempt: vi.fn(), charge: vi.fn(), send: vi.fn() };
   const notice = { notify: vi.fn(async () => "created" as const) };
   const native = {
-    evaluateRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === authorisedRecipient
+    evaluateRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === `+${authorisedRecipient}`
       ? { status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n }
       : { status: "NOT_AUTHORISED" as const, reason: "NATIVE_CONSENT_NOT_GRANTED" as const }),
     evaluateStoredRecipient: vi.fn(async () => ({ status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n })),
@@ -74,7 +74,7 @@ function scenario() {
     serializeLineItems: vi.fn(() => []),
     build: vi.fn(async (candidate: { checkoutToken: string }) => ({
       shop: checkoutEvent.shopDomain, checkoutToken: candidate.checkoutToken,
-      customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447700900001" },
+      customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
     })),
   };
   const recipientResolver = { resolve: vi.fn(async () => currentRecipient) };
@@ -148,7 +148,7 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
     expect(ctx.native.evaluateRecipient).toHaveBeenCalledTimes(2);
     for (const action of Object.values(ctx.writes)) expect(action).toHaveBeenCalledTimes(1);
-    expect(ctx.writes.send).toHaveBeenCalledWith("447700900001");
+    expect(ctx.writes.send).toHaveBeenCalledWith("447400123456");
     expect(ctx.candidates).toHaveLength(0);
   });
 
@@ -193,25 +193,25 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
   it("checks a changed active phone instead of reusing the old phone's consent", async () => {
     const ctx = scenario();
     ctx.setGrant(true);
-    ctx.setCurrentRecipient("447700900002");
+    ctx.setCurrentRecipient("447400123457");
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
     expect((await matureNext(ctx)).outcome).toBe("discarded-admission-denied");
     expect(ctx.native.evaluateRecipient).toHaveBeenCalledWith(expect.objectContaining({
-      recipient: "447700900002",
+      recipient: "+447400123457",
     }));
     for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
 
     // Granting the old number must never authorise the new active recipient.
     // Only a fresh native grant for that number on a separate checkout event can.
-    ctx.setAuthorisedRecipient("447700900002");
+    ctx.setAuthorisedRecipient("447400123457");
     await ctx.orchestrator.handleCheckoutUpdatedContract({
       ...checkoutEvent, activityAt: "2026-10-22T11:30:00Z",
     });
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
     expect(ctx.native.evaluateRecipient).toHaveBeenLastCalledWith(expect.objectContaining({
-      recipient: "447700900002",
+      recipient: "+447400123457",
     }));
-    expect(ctx.writes.send).toHaveBeenCalledWith("447700900002");
-    expect(ctx.writes.send).not.toHaveBeenCalledWith("447700900001");
+    expect(ctx.writes.send).toHaveBeenCalledWith("447400123457");
+    expect(ctx.writes.send).not.toHaveBeenCalledWith("447400123456");
   });
 });

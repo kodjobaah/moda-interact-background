@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { RecoveryConsentAdmissionService } from "../../src/services/checkout-recovery/recovery-consent-admission.service.js";
+import { RecoveryStoredConsentService } from "../../src/services/recovery-conversation/recovery-stored-consent.service.js";
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
@@ -28,6 +30,46 @@ function service(db: PrismaClient, outcome: ShopifyWhatsAppConsentObservation | 
 }
 
 describeWithDatabase("ARCH-045 native Shopify consent PostgreSQL projection", () => {
+  it("admits a UK recovery recipient for a US shop across first, reentry and conversation checks, preserving STOP", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    const suffix = randomUUID().replaceAll("-", "");
+    const shopId = `consent-international-${suffix}`;
+    try {
+      await db.shop.create({ data: { id: shopId, domain: `${shopId}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "US" } });
+      const customer = await db.customer.create({ data: { shopId, shopifyCustomerId: "125678912345" } });
+      const phone = await db.customerPhone.create({ data: { customerId: customer.id, phone: "+447400123456" } });
+      const readCurrent = vi.fn(async () => native("SUBSCRIBED", t1));
+      const consent = service(db, { readCurrent });
+      const notices = { notify: vi.fn(async () => "created" as const) };
+      const admission = new RecoveryConsentAdmissionService(consent, notices);
+      const input = { shopId, checkoutToken: `checkout-${suffix}`, customerId: customer.id,
+        shopifyCustomerId: gid, recipient: "447400123456" };
+      expect(await admission.evaluateFirst(input)).toBe(true);
+      expect(await admission.evaluateReentry(input)).toBe(true);
+      const recovery = await db.checkoutRecovery.create({ data: {
+        shopId, customerId: customer.id, checkoutToken: input.checkoutToken, lastExternalActivityAt: new Date(t1),
+      } });
+      const stored = new RecoveryStoredConsentService(db, consent);
+      const proactive = { shopId, recoveryId: recovery.id, recipient: input.recipient };
+      await expect(stored.preflight(proactive)).resolves.toMatchObject({ kind: "allowed", snapshot: {
+        customerPhoneId: phone.id, canonicalRecipient: input.recipient, consentRevision: 1n,
+      } });
+      expect(readCurrent).toHaveBeenCalledTimes(1);
+      expect(notices.notify).not.toHaveBeenCalled();
+
+      await db.customerPhone.update({ where: { id: phone.id }, data: {
+        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactAt: new Date(t2),
+        whatsappNoContactRevision: { increment: 1 },
+      } });
+      expect(await admission.evaluateFirst(input)).toBe(false);
+      expect(await admission.evaluateReentry(input)).toBe(false);
+      await expect(stored.preflight(proactive)).resolves.toEqual({ kind: "denied", reason: "stored-consent-denied" });
+      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } })).whatsappNoContact).toBe(true);
+    } finally {
+      await db.shop.deleteMany({ where: { id: shopId } });
+      await db.$disconnect();
+    }
+  });
   it("persists only the exact active CustomerPhone, keeps no-contact revisions independent and rejects out-of-order reads", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");

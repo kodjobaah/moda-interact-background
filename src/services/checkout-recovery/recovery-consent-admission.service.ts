@@ -1,3 +1,4 @@
+import { canonicalWhatsAppSender } from "../whatsapp-contact-opt-out/phone.js";
 import {
   ShopifyWhatsAppConsentService,
   type ShopifyWhatsAppConsentServicePort,
@@ -43,7 +44,8 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
   ) {}
 
   async evaluateFirst(input: FirstInput): Promise<boolean> {
-    if (!input.customerId || !input.shopifyCustomerId || !input.recipient) {
+    const recipient = input.recipient ? canonicalWhatsAppSender(input.recipient) : null;
+    if (!input.customerId || !input.shopifyCustomerId || !recipient) {
       await this.notice(input, "RECIPIENT_UNVERIFIED", "CREATE_FIRST_RECOVERY");
       return false;
     }
@@ -51,18 +53,22 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
       shopId: input.shopId,
       customerId: input.customerId,
       shopifyCustomerId: input.shopifyCustomerId,
-      recipient: input.recipient,
+      // Recovery stores Meta international digits; Shopify consent expects E.164.
+      recipient: `+${recipient}`,
     });
     return this.decide(input, outcome, "CREATE_FIRST_RECOVERY");
   }
 
   async evaluateReentry(input: ReentryInput): Promise<boolean> {
-    if (!input.customerId || !input.recipient) {
+    const recipient = input.recipient ? canonicalWhatsAppSender(input.recipient) : null;
+    if (!input.customerId || !recipient) {
       await this.notice(input, "RECIPIENT_UNVERIFIED", "SEND_INITIAL_RECOVERY");
       return false;
     }
     const outcome = await this.consent.evaluateStoredRecipient({
-      shopId: input.shopId, customerId: input.customerId, recipient: input.recipient,
+      // Recovery stores Meta international digits; Shopify consent expects E.164.
+      shopId: input.shopId, customerId: input.customerId,
+      recipient: `+${recipient}`,
     });
     return this.decide(input, outcome, "SEND_INITIAL_RECOVERY");
   }

@@ -1,3 +1,5 @@
+import { RecoveryConsentAdmissionService } from "../../../src/services/checkout-recovery/recovery-consent-admission.service.js";
+import { RecoveryStoredConsentService } from "../../../src/services/recovery-conversation/recovery-stored-consent.service.js";
 import type { PrismaClient } from "@prisma/client";
 import { processShopifyWhatsAppConsentSyncJob } from "../../../src/services/shopify-whatsapp-consent-sync-job.service.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -516,4 +518,58 @@ describe("ShopifyWhatsAppConsentService", () => {
     expect(ctx.mocks.customer.update).not.toHaveBeenCalled();
   });
 
+});
+
+describe("recovery international recipient consent boundary", () => {
+  const input = { ...checkout, checkoutToken: "checkout-uk", recipient: "447400123456" };
+
+  function recoveryContext(observations: ShopifyWhatsAppConsentObservation[] = [SUBSCRIBED]) {
+    const ctx = fakeDatabase();
+    ctx.shops[0]!.defaultCountryCode = "US";
+    const { instance, readCurrent } = service(ctx.db, observations);
+    const notices = { notify: vi.fn(async () => "created" as const) };
+    const admission = new RecoveryConsentAdmissionService(instance, notices);
+    const stored = new RecoveryStoredConsentService({ checkoutRecovery: {
+      findUnique: vi.fn(async () => ({ shopId: "shop-a", customerId: "customer-a", shop: { platform: "SHOPIFY" } })),
+    } } as never, instance);
+    return { ...ctx, admission, stored, readCurrent, notices };
+  }
+
+  it("verifies UK WhatsApp digits for a US shop on first admission, reentry and conversation preflight", async () => {
+    const ctx = recoveryContext();
+    expect(await ctx.admission.evaluateFirst(input)).toBe(true);
+    expect(await ctx.admission.evaluateReentry(input)).toBe(true);
+    await expect(ctx.stored.preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: input.recipient }))
+      .resolves.toMatchObject({ kind: "allowed", snapshot: { canonicalRecipient: input.recipient, customerPhoneId: "phone-a" } });
+    expect(ctx.readCurrent).toHaveBeenCalledTimes(1);
+    expect(ctx.notices.notify).not.toHaveBeenCalled();
+    expect(ctx.phones[0]).toMatchObject({ whatsappCanonicalPhone: input.recipient, whatsappConsentDecision: "GRANTED" });
+  });
+
+  it("continues to deny local STOP on first admission, stored reentry and conversation preflight", async () => {
+    const ctx = recoveryContext();
+    ctx.phones[0]!.whatsappNoContact = true;
+    ctx.phones[0]!.whatsappNoContactReason = "CUSTOMER_STOP";
+    expect(await ctx.admission.evaluateFirst(input)).toBe(false);
+    expect(await ctx.admission.evaluateReentry(input)).toBe(false);
+    await expect(ctx.stored.preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: input.recipient }))
+      .resolves.toMatchObject({ kind: "denied", reason: "stored-consent-denied" });
+    expect(ctx.phones[0]!.whatsappNoContact).toBe(true);
+  });
+
+  it("continues to deny a different native Shopify default phone", async () => {
+    const ctx = recoveryContext([{ ...SUBSCRIBED, phoneNumber: "+447400123457" }]);
+    expect(await ctx.admission.evaluateFirst(input)).toBe(false);
+    expect(ctx.notices.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "RECIPIENT_UNVERIFIED" }));
+    expect(ctx.phones[0]!.whatsappConsentDecision).not.toBe("GRANTED");
+  });
+
+  it.each(["07400123456", "7400123456", "447400123456x1", "00447400123456"])("does not infer international identity from ambiguous or invalid input %s", async (recipient) => {
+    const ctx = recoveryContext();
+    expect(await ctx.admission.evaluateFirst({ ...input, recipient })).toBe(false);
+    expect(await ctx.admission.evaluateReentry({ ...input, recipient })).toBe(false);
+    await expect(ctx.stored.preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient }))
+      .resolves.toMatchObject({ kind: "denied" });
+    expect(ctx.readCurrent).not.toHaveBeenCalled();
+  });
 });
