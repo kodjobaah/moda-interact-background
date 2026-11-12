@@ -768,6 +768,16 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   const general=noticeHarness();await general.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
   expect(general.footerContext.loadContext).not.toHaveBeenCalled();
  });
+ it.each(["terminal", "audio", "oversize"])("prepares trusted identity before moderation/fence for %s notices",async kind=>{
+  const recoveryShopHeader={schemaVersion:1 as const,shopId:"shop-1",name:"Fixture Store",websiteUrl:"https://shop.example"};
+  const test=noticeHarness({...context,recoveryShopHeader});
+  const text=kind==="terminal"?TERMINAL_MESSAGE:"Please send a shorter question.";
+  const expected="Fixture Store\nhttps://shop.example\n──────────\n\n"+text+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl;
+  await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:kind==="terminal",prepareRecoveryFooter:true,to:"15551234567",text});
+  expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({effectiveText:expected}));
+  expect(test.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({expectedContent:expected,recoveryShopHeader}));
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:expected});
+ });
  it("does not send when prepared-content final permit is refused after a race",async()=>{
   const test=noticeHarness();test.recoveryFence.admitFinalSend.mockResolvedValue({kind:"suppressed",reason:"already-admitted-or-sent"} as any);
   expect(await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"})).toMatchObject({kind:"suppressed"});

@@ -1,3 +1,4 @@
+import { recoveryShopHeaderPrefix, verifiedRecoveryShopHeader } from "../../src/services/conversation-wrappers/recovery-shop-header.js";
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
@@ -22,7 +23,7 @@ suite("ARCH-072 persisted recovery footer identity", () => {
       const loaded = await f.commands.loadClaimedCommand(commandId, claim.leaseToken);
       if (loaded.kind !== "claimed") throw new Error("Missing claim");
       const frozen = await f.preparation.freeze(loaded.command, claim.leaseToken);
-      const expected = original + RECOVERY_CHECKOUT_SEPARATOR + url;
+      const expected = recoveryShopHeaderPrefix(verifiedRecoveryShopHeader(f.shopId, `${f.shopId}.example.test`, null)!) + original + RECOVERY_CHECKOUT_SEPARATOR + url;
       expect(frozen).toMatchObject({ kind: "frozen", body: expected });
       const replay = await f.commands.loadClaimedCommand(commandId, claim.leaseToken);
       if (replay.kind !== "claimed") throw new Error("Missing replay");

@@ -1,8 +1,10 @@
+import { wrapperApplicationKey } from "../../../../src/services/conversation-wrappers/application-key.js";
 import { exampleFinal } from "@modainteract/moda-interact-shared/commerce";
 import { describe, expect, it, vi } from "vitest";
 import { composeAiOutbound } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
 import type { AiConversationWrapper } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
 
+const applicationKey = wrapperApplicationKey({conversationId: "conversation-1", messageIdentity: "reserved-message-1", source: "AI", wrapperDefinitionId: "definition-1", localeId: "locale-fr", contentHash: "digest", editVersion: 2, responseDigest: "digest", body: "Welcome! Yes, we can help with this item. Goodbye!"});
 const input = {
   conversationId: "conversation-1",
   messageId: "reserved-message-1",
@@ -28,12 +30,12 @@ describe("ARCH-047-BG008 prepared AI outbound composition", () => {
       kind: "rendered", body: `Welcome! ${input.generatedResponse} Goodbye!`,
       wrapperDefinitionId: "definition-1", localeId: "locale-fr", audience: "AI",
       slotEditVersion: 2, languageTag: "fr", contentHash: "digest", source: "AI",
-      messageIdentity: input.messageId, applicationKey: "application-1", responseDigest: "digest",
+      messageIdentity: input.messageId, applicationKey, responseDigest: "digest",
       replayed: false,
     }) };
     expect(await composeAiOutbound(wrapper, input)).toEqual({ kind: "ready",
       text: `Welcome! ${input.generatedResponse} Goodbye!`,
-      wrapper: { applicationKey: "application-1", wrapperDefinitionId: "definition-1",
+      wrapper: { applicationKey, wrapperDefinitionId: "definition-1",
         localeId: "locale-fr", contentHash: "digest", slotEditVersion: 2, replayed: false },
     });
   });

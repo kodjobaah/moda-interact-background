@@ -1,3 +1,4 @@
+import { wrapperApplicationKey } from "../../../../src/services/conversation-wrappers/application-key.js";
 import { expect, it, vi } from "vitest";
 import type { ConversationTurnFacadeContext } from "../conversation-turn-processor.service.test.js";
 
@@ -9,7 +10,7 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
     source: "AI" as const, messageIdentity: "message-1",
     wrapperDefinitionId: "published-ai", localeId: "locale-en", audience: "AI" as const,
     slotEditVersion: 7, languageTag: "en", contentHash: "hash",
-    applicationKey: "application-key", responseDigest: "response-hash", replayed: false,
+    applicationKey: wrapperApplicationKey({conversationId:"conversation-1", messageIdentity:"message-1", source:"AI", wrapperDefinitionId:"published-ai", localeId:"locale-en",contentHash:"hash",editVersion:7,responseDigest:"response-hash",body}), responseDigest: "response-hash", replayed: false,
   });
 
   it('carries exact rendered pairs and body to final admission without an early cache write', async () => {
@@ -60,7 +61,7 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
       messageId: "message-1", text: "Shop: reply. Visit the checkout.",
     }));
     expect(test.logger.info).toHaveBeenCalledWith("whatsapp.turn.ai_wrapper_composed", expect.objectContaining({
-      applicationKey: "application-key", wrapperDefinitionId: "published-ai", slotEditVersion: 7,
+      applicationKey: rendered("Shop: reply. Visit the checkout.").applicationKey, wrapperDefinitionId: "published-ai", slotEditVersion: 7,
     }));
     expect(test.conversation.completeTurn).toHaveBeenCalledWith("conversation-1", 3);
   });

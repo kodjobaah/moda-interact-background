@@ -1,4 +1,6 @@
-import { appendRecoveryCheckoutFooter, validRecoveryCheckoutFooterUrl, hasPreparedRecoveryCheckoutFooter, recoveryReplyContentPreserved } from "./recovery-checkout-footer.js";
+import { prepareRecoveryReplyBody, hasPreparedRecoveryShopHeader, type RecoveryShopHeaderReceipt } from "./recovery-shop-header.js";
+import { wrapperApplicationKey } from "./application-key.js";
+import { validRecoveryCheckoutFooterUrl, hasPreparedRecoveryCheckoutFooter, recoveryReplyContentPreserved } from "./recovery-checkout-footer.js";
 import { prepareConversationDelivery } from "../conversation-product-media.js";
 import { ConversationDeliveryPlanSchema, composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
@@ -7,7 +9,7 @@ import {
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type {
   RenderConversationResponseInput, WrappedResult, WrapperReadPort,
-  WrapperRefusal, WrapperRenderResult,
+  WrapperRefusal, WrapperRenderResult, PreparedWrapper,
 } from "./contracts.js";
 import { digest, readPreparedWrapper, stableJson } from "./projection.js";
 import { PrismaConversationWrapperReadRepository } from "./repository.js";
@@ -74,17 +76,17 @@ export class ConversationWrapperService {
             prior.body.length > MAX_WHATSAPP_TEXT_LENGTH ||
             (prior.recoveryCheckoutUrl !== undefined && (!validRecoveryCheckoutFooterUrl(prior.recoveryCheckoutUrl) ||
               !hasPreparedRecoveryCheckoutFooter(prior.body, prior.recoveryCheckoutUrl))) ||
+            (prior.recoveryShopHeader !== undefined && !hasPreparedRecoveryShopHeader(prior.body, prior.recoveryShopHeader)) ||
             (!presentationDigest && (prior.recoveryCheckoutUrl
               ? !recoveryReplyContentPreserved(matchedBody, prior.body, prior.recoveryCheckoutUrl) : !prior.body.includes(matchedBody))) ||
-            prior.applicationKey !== digest(stableJson({
+            prior.applicationKey !== wrapperApplicationKey({
               conversationId: input.conversationId, messageIdentity: prior.messageIdentity,
-              source: prior.source, wrapperDefinitionId: prior.wrapperDefinitionId,
-              localeId: prior.localeId, contentHash: prior.contentHash,
-              editVersion: prior.slotEditVersion, responseDigest: prior.responseDigest,
-              bodyDigest: digest(prior.body),
-              ...(prior.recoveryCheckoutUrl ? {recoveryCheckoutUrlDigest: digest(prior.recoveryCheckoutUrl)} : {}),
-              ...(prior.deliveryPlan ? {deliveryPlanDigest: digest(stableJson(prior.deliveryPlan))} : {}),
-            }))) return this.refuse("rejected", "REPLAY_MISMATCH", input);
+              source: prior.source, wrapperDefinitionId: prior.wrapperDefinitionId, localeId: prior.localeId,
+              contentHash: prior.contentHash, editVersion: prior.slotEditVersion, responseDigest: prior.responseDigest,
+              body: prior.body, ...(prior.recoveryCheckoutUrl ? {recoveryCheckoutUrl: prior.recoveryCheckoutUrl} : {}),
+              ...(prior.recoveryShopHeader ? {recoveryShopHeader: prior.recoveryShopHeader} : {}),
+              ...(prior.deliveryPlan ? {deliveryPlan: prior.deliveryPlan} : {}),
+            })) return this.refuse("rejected", "REPLAY_MISMATCH", input);
         this.logger.info("conversation_wrapper.replay_reused", {
           conversationId: input.conversationId, source: input.source,
           definitionId: prior.wrapperDefinitionId, localeId: prior.localeId,
@@ -130,7 +132,16 @@ export class ConversationWrapperService {
           ...(composed.kind === 'refused' ? {failureCode: composed.reason === 'DEADLINE' ? 'DEADLINE' : composed.reason === 'BUDGET_EXHAUSTED' ? 'BUDGET_EXHAUSTED' : 'INVALID_FINAL', failureStage: 'response.compose', reasonCode: composed.reason} : {}),
         }); } catch { /* Diagnostics must never affect delivery. */ }
         if (composed.kind === "refused") return this.refuse("rejected", composed.reason as WrapperRefusal, input);
-        const footer = appendRecoveryCheckoutFooter({body: composed.body, source: input.source, context});
+        const selected = composed.wrapper ? chooseSlot(slots, "AI") : null;
+        let prepared: PreparedWrapper | undefined;
+        if (composed.wrapper) {
+          if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
+          const localeRow = selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)!;
+          const projection = readPreparedWrapper(localeRow.localeAst, localeRow.contentHash);
+          if (projection.kind !== "ok") return this.refuse("rejected", "PREPARED_INVALID", input);
+          prepared = projection.prepared;
+        }
+        const footer = prepareRecoveryReplyBody({body: composed.body, source: input.source, context, ...(prepared ? {prepared} : {})});
         if (footer.kind === "rejected") return this.refuse("rejected", footer.reason, input);
         const body = footer.body;
         const p = input.commercePresentation.verified;
@@ -142,32 +153,29 @@ export class ConversationWrapperService {
           deadlineAt: input.commercePresentation.deadlineAt ?? Date.now(), signal: input.commercePresentation.signal};
         if (!composed.wrapper) {
           const {plan} = await prepareConversationDelivery(planInput, this.dependencies.mediaDependencies);
-          return {kind: "no-wrapper", body, reason: "NOT_CONFIGURED", ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), presentedPairs, deliveryPlan: plan};
+          return {kind: "no-wrapper", body, reason: "NOT_CONFIGURED", ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), presentedPairs, deliveryPlan: plan};
         }
-        const selected = chooseSlot(slots, "AI");
         if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
-        const localeRow = selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)!;
-        const prepared = readPreparedWrapper(localeRow.localeAst, localeRow.contentHash);
-        if (prepared.kind !== "ok") return this.refuse("rejected", "PREPARED_INVALID", input);
-        const mediaResult = await prepareConversationDelivery({...planInput, binding: prepared.prepared.productImage}, this.dependencies.mediaDependencies);
+        const mediaResult = await prepareConversationDelivery({...planInput, binding: prepared?.productImage}, this.dependencies.mediaDependencies);
         const deliveryPlan = mediaResult.plan;
         const mediaLog = mediaResult.mediaOmission === "IMAGE_IDENTITY_MISMATCH" ? this.logger.error.bind(this.logger) : this.logger.info.bind(this.logger);
         mediaLog("conversation.product_media", {shopId:context.shopId,conversationId:input.conversationId,
           messageIdentity:input.messageIdentity,planKind:deliveryPlan.kind, omission:mediaResult.mediaOmission,
           stage:mediaResult.mediaStage, durationMs:mediaResult.durationMs, productId:presentedPairs[0]?.productId ?? null, variantId:presentedPairs[0]?.variantId ?? null});
         const responseDigest = digest(stableJson({presentationDigest, deliveryPlan}));
-        const applicationKey = digest(stableJson({
+        const applicationKey = wrapperApplicationKey({
           conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
           wrapperDefinitionId: composed.wrapper.definitionId, localeId: composed.wrapper.localeId,
           contentHash: composed.wrapper.contentHash, editVersion: composed.wrapper.slotEditVersion,
-          responseDigest, bodyDigest: digest(body),
-          ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrlDigest: digest(footer.recoveryCheckoutUrl)} : {}), deliveryPlanDigest: digest(stableJson(deliveryPlan)),
-        }));
+          responseDigest, body, deliveryPlan,
+          ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}),
+          ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}),
+        });
         return { kind: "rendered", body, wrapperDefinitionId: composed.wrapper.definitionId,
           localeId: composed.wrapper.localeId, contentHash: composed.wrapper.contentHash,
           slotEditVersion: composed.wrapper.slotEditVersion, audience: selected.audience as WrappedResult["audience"],
           languageTag: selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)?.languageTag ?? "en",
-          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, deliveryPlan, replayed: false, ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(presentedPairs ? { presentedPairs } : {}) };
+          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, deliveryPlan, replayed: false, ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), ...(presentedPairs ? { presentedPairs } : {}) };
       }
       const slot = chooseSlot(slots, input.source);
       if (slot === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
@@ -176,10 +184,10 @@ export class ConversationWrapperService {
           this.logger.info("conversation_wrapper.passthrough", {
             conversationId: input.conversationId, source: input.source, reason: "NOT_CONFIGURED",
           });
-          const footer = appendRecoveryCheckoutFooter({body: input.responseBody, source: input.source, context});
+          const footer = prepareRecoveryReplyBody({body: input.responseBody, source: input.source, context});
           if (footer.kind === "rejected") return this.refuse("rejected", footer.reason, input);
           return { kind: "no-wrapper", body: footer.body, reason: "NOT_CONFIGURED",
-            ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}) };
+            ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}) };
         }
         return this.refuse("unavailable", "NOT_CONFIGURED", input);
       }
@@ -224,6 +232,7 @@ export class ConversationWrapperService {
       let rendered: ReturnType<typeof renderPreparedWrapper> | undefined;
       let responseDigest = digest(input.responseBody);
       let recoveryCheckoutUrl: string | undefined;
+      let recoveryShopHeader: RecoveryShopHeaderReceipt | undefined;
       for (const body of responseBodies) {
         rendered = renderPreparedWrapper({ prepared: projection.prepared, context, responseBody: body });
         if (rendered.kind === "rejected" && rendered.reason === "ALREADY_WRAPPED" && checkoutUrl) {
@@ -232,10 +241,11 @@ export class ConversationWrapperService {
         }
         responseDigest = digest(body);
         if (rendered.kind === "rendered") {
-          const footer = appendRecoveryCheckoutFooter({body: rendered.body, source: input.source, context});
+          const footer = prepareRecoveryReplyBody({body: rendered.body, source: input.source, context, prepared: projection.prepared});
           if (footer.kind === "ready") {
             rendered = {kind: "rendered", body: footer.body};
             recoveryCheckoutUrl = footer.recoveryCheckoutUrl;
+            recoveryShopHeader = footer.recoveryShopHeader;
             break;
           }
           rendered = footer;
@@ -243,13 +253,12 @@ export class ConversationWrapperService {
         if (rendered.reason !== "OUTPUT_TOO_LONG") return this.refuse("rejected", rendered.reason, input);
       }
       if (!rendered || rendered.kind !== "rendered") return this.refuse("rejected", "OUTPUT_TOO_LONG", input);
-      const applicationKey = digest(stableJson({
-        conversationId: input.conversationId, messageIdentity: input.messageIdentity,
-        source: input.source, wrapperDefinitionId: slot.definitionId,
-        localeId: locale.id, contentHash: locale.contentHash,
-        editVersion: slot.editVersion, responseDigest, bodyDigest: digest(rendered.body),
-        ...(recoveryCheckoutUrl ? {recoveryCheckoutUrlDigest: digest(recoveryCheckoutUrl)} : {}),
-      }));
+      const applicationKey = wrapperApplicationKey({
+        conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
+        wrapperDefinitionId: slot.definitionId, localeId: locale.id, contentHash: locale.contentHash!,
+        editVersion: slot.editVersion, responseDigest, body: rendered.body,
+        ...(recoveryCheckoutUrl ? {recoveryCheckoutUrl} : {}), ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
+      });
       const value: WrappedResult = {
         kind: "rendered", body: rendered.body, wrapperDefinitionId: slot.definitionId,
         localeId: locale.id, audience: slot.audience as WrappedResult["audience"],
@@ -257,7 +266,7 @@ export class ConversationWrapperService {
         contentHash: locale.contentHash!, source: input.source,
         messageIdentity: input.messageIdentity, applicationKey, responseDigest,
         replayed: false,
-        ...(recoveryCheckoutUrl ? {recoveryCheckoutUrl} : {}),
+        ...(recoveryCheckoutUrl ? {recoveryCheckoutUrl} : {}), ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
       };
       this.logger.info("conversation_wrapper.rendered", {
         conversationId: input.conversationId, source: input.source,
