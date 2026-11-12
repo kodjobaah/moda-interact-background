@@ -1,4 +1,5 @@
 import { presentedProductContext } from "../commerce/product-context-write.js";
+import { CommerceHostError } from "../commerce/mcp-client.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import type { CommercePresentationInput } from "./conversation-wrappers/contracts.js";
 import type {
@@ -340,9 +341,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
     let admission: Admitted | null = null;
     let providerSendAttempted = false;
     let reservationFailed = false;
+    let reservationCleanupSucceeded = false;
     const failPrepared = async (messageId: string) => {
       reservationFailed = true;
       await this.dependencies.admission.failPrepared(messageId);
+      reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
       input: Admitted & { to: string; text: string; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
@@ -700,6 +703,23 @@ export class ConversationTurnProcessor<TContext, TResult> {
           await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
           throw new AggregateError([error, cleanupError], "AI_TURN_CLEANUP_FAILED", { cause: cleanupError });
         }
+      }
+      // A terminal host refusal cannot improve by replaying the same inbound.
+      // The agent admission helper may already have cleaned up its reservation;
+      // require confirmed cleanup, and never consume an uncertain provider send.
+      if (error instanceof CommerceHostError && !error.retryable &&
+          !providerSendAttempted && (!admission || reservationCleanupSucceeded)) {
+        try {
+          await completeOwnedTurn();
+        } catch (completionError) {
+          await this.dependencies.conversation.releaseTurn(conversationId, observedVersion);
+          throw new AggregateError([error, completionError], "AI_TURN_TERMINAL_COMPLETION_FAILED", { cause: completionError });
+        }
+        this.logger.warn("whatsapp.turn.terminal_failure", {
+          conversationId, observedVersion, errorCode: error.code,
+          outcome: "non-retryable-agent-failure",
+        });
+        return;
       }
       await this.dependencies.conversation.releaseTurn(
         conversationId,
