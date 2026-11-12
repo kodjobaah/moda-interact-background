@@ -62,6 +62,8 @@ void startReadyWorkerProcess({
     const stopShopBrandMediaReconciler = await startShopBrandMediaReconciler();
     const { startShopifyShopNameSync } = await import("../services/shopify-shop-name/runner.js");
     const stopShopifyShopNameSync = await startShopifyShopNameSync();
+    const { startShopifyBrandSourceSync } = await import("../services/shop-brand-media-shopify/runner.js");
+    const stopShopifyBrandSourceSync = await startShopifyBrandSourceSync();
 
     const stopRepairScheduler = await startDynamicLeasedScheduler({
       config: backgroundRuntimeConfigService,
@@ -148,6 +150,7 @@ void startReadyWorkerProcess({
           stopWooCouponDispatcher,
           stopShopBrandMediaReconciler,
           stopShopifyShopNameSync,
+          stopShopifyBrandSourceSync,
           closeWorkerObservability,
           () => backgroundRuntimeConfigService.close(),
           () => recoveryCapacityResumeService.close(),
