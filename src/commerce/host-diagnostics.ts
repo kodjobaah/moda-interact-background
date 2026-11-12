@@ -52,6 +52,7 @@ const explanations = {
   HOST_SHOP_ID_MISMATCH: { message: "The recovery's shop ID does not match the requesting shop.", action: "Check the canonical shop authorization context." },
   HOST_SHOP_DOMAIN_MISMATCH: { message: "The recovery's shop domain does not match the requesting shop.", action: "Check the resolved shop domain." },
   HOST_VERSION_STALE: { message: "The conversation inbound version changed since the turn was admitted.", action: "Inspect the latest conversation version before retrying." },
+  HOST_CURRENT_CUSTOMER_INPUT_INVALID: { message: "The authoritative current customer message batch is empty or invalid.", action: "Inspect the current-window customer input loader and its bounded message contract." },
   HOST_PROCESSING_LEASE_MISSING: { message: "The conversation has no active processing lease.", action: "Inspect the conversation processing lifecycle." },
   HOST_PROCESSING_LEASE_EXPIRED: { message: "The conversation's processing lease has expired.", action: "Inspect the processing lease duration and worker delay." },
   HOST_TURN_STALE: { message: "The conversation's inbound version or processing lease is no longer current.", action: "Inspect the latest conversation version and processing lease." },

@@ -37,6 +37,26 @@ function turn(version: number, message: string, prior?: CommerceConversationProd
 }
 export function registerProductContextAcceptanceTests() {
  describe("ARCH066 product-reference acceptance", () => {
+  it.each(["How about the Studio Camera?", "How about the Stduio Camra?"])("carries a new named subject after old focus: %s", async message => {
+   configure(); const old = { ...product(41), title: "Ski Wax" }, target = { ...product(42), title: "Studio Camera" };
+   const now = new Date().toISOString();
+   const prior: CommerceConversationProductContext = { schemaVersion: 1, shopId: f.context.shopId, conversationId: f.context.conversation.conversationId, platform: "SHOPIFY", updatedAt: now,
+    references: [old, target].map(p => ({ ...pair(Number(p.productId.split('/').at(-1))), title: p.title, observedAt: now })),
+    presentation: { references: [pair(41)], presentedAt: now } };
+   const current = turn(2, message, prior); current.conversation.history = [{ role: "user", content: "Tell me about Ski Wax" }, { role: "assistant", content: "Ski Wax has several options." }];
+   f.toolResults = { commerce_search_products: ok({ products: [target], cursor: null, truncated: false }), commerce_get_product: ok({ product: target }) };
+   let step = 0;
+   const result = await f.run(async request => {
+    expect(request.currentCustomerMessages).toEqual([{ role: "user", content: message }]);
+    expect((request.context as any).trustedRecovery).not.toHaveProperty("currentMessages");
+    expect((request.context as any).productReferences.presentation.references).toEqual([pair(41)]);
+    if (++step === 1) return { calls: [{ name: "commerce_search_products", arguments: { ...searchArgs, query: "studio camera" } }], outputTokens: 1 };
+    return answer({ productOptionSelections: [pair(42)] }, "Our Studio Camera has these options.");
+   }, current);
+   expect(result.commercePresentation!.verified.optionFacts).toMatchObject([{ productId: pair(42).productId, title: "Studio Camera" }]);
+   expect(f.observations.filter(call => call.method === "tools/call" && call.params.name === "commerce_get_product").map(call => call.params.arguments)).toEqual([pair(42)]);
+  });
+
   it("discovers three shirts, clarifies bare yes, then freshly verifies explicit sizes without guessing a variant", async () => {
    configure(); const products = [product(11), product(12), product(13)];
    f.toolResults = { commerce_search_products: ok({ products, cursor: null, truncated: false }), commerce_get_product: products.map(p => ok({ product: p })) };

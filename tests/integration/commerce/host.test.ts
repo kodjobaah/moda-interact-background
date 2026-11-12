@@ -34,3 +34,6 @@ registerProductContextAcceptanceTests();
 
 import { registerSelectionSemanticsTests } from "./host-suites/selection-semantics.js";
 registerSelectionSemanticsTests();
+
+import { registerCurrentCustomerHostTests } from "./host-suites/current-customer.js";
+registerCurrentCustomerHostTests();
