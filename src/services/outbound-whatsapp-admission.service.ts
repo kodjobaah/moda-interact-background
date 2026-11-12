@@ -171,7 +171,7 @@ export class OutboundWhatsAppAdmissionService {
 
   async sendPreparedConversation(
     input: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
-      deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan;
+      brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
       presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
       to: string;
       text: string;

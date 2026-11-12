@@ -1,8 +1,9 @@
+import { prepareRecoveryBrandPlan, type ConversationLogoResolver } from "../conversation-brand-media.js";
 import { prepareRecoveryReplyBody, hasPreparedRecoveryShopHeader, type RecoveryShopHeaderReceipt } from "./recovery-shop-header.js";
 import { wrapperApplicationKey } from "./application-key.js";
 import { validRecoveryCheckoutFooterUrl, hasPreparedRecoveryCheckoutFooter, recoveryReplyContentPreserved } from "./recovery-checkout-footer.js";
 import { prepareConversationDelivery } from "../conversation-product-media.js";
-import { ConversationDeliveryPlanSchema, composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { ConversationMediaDeliveryPlanSchema, composeCommerceWhatsAppPreview } from "@modainteract/moda-interact-shared/commerce/presentation";
 import {
   createLogger, type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
@@ -25,6 +26,7 @@ const defaultLogger = createLogger({
 
 export type ConversationWrapperDependencies = Readonly<{
   repository?: WrapperReadPort;
+  logoResolver?: ConversationLogoResolver;
   mediaDependencies?: Parameters<typeof prepareConversationDelivery>[1];
   logger?: StructuredLogger;
   /** No wrapper is returned as unavailable unless policy opts into safe passthrough. */
@@ -43,6 +45,8 @@ export class ConversationWrapperService {
   }
 
   async renderConversationResponse(input: RenderConversationResponseInput): Promise<WrapperRenderResult> {
+    let brandMediaPolicy: import("../conversation-brand-media.js").BrandMediaPolicyRef | undefined;
+    const onPolicy = (ref: import("../conversation-brand-media.js").BrandMediaPolicyRef) => {brandMediaPolicy=ref;};
     if (!input || !["AI", "HUMAN"].includes(input.source) ||
         !input.conversationId || typeof input.conversationId !== "string" || input.conversationId.length > 128 ||
         !input.messageIdentity || typeof input.messageIdentity !== "string" || input.messageIdentity.length > 128 ||
@@ -69,7 +73,7 @@ export class ConversationWrapperService {
       if (input.previousApplication) {
         const prior = input.previousApplication;
         const matchedBody = presentationDigest !== null
-          ? ((prior.deliveryPlan ? ConversationDeliveryPlanSchema.safeParse(prior.deliveryPlan).success && prior.deliveryPlan.body === prior.body && digest(stableJson({presentationDigest, deliveryPlan: prior.deliveryPlan})) === prior.responseDigest : presentationDigest === prior.responseDigest) ? input.responseBody : undefined)
+          ? ((prior.deliveryPlan ? ConversationMediaDeliveryPlanSchema.safeParse(prior.deliveryPlan).success && prior.deliveryPlan.body === prior.body && digest(stableJson({presentationDigest, deliveryPlan: prior.deliveryPlan})) === prior.responseDigest : presentationDigest === prior.responseDigest) ? input.responseBody : undefined)
           : responseBodies.find((body) => digest(body) === prior.responseDigest);
         if (prior.kind !== "rendered" || prior.source !== input.source ||
             prior.messageIdentity !== input.messageIdentity || !matchedBody ||
@@ -152,12 +156,13 @@ export class ConversationWrapperService {
           verifiedProducts: input.commercePresentation.verifiedProducts,
           deadlineAt: input.commercePresentation.deadlineAt ?? Date.now(), signal: input.commercePresentation.signal};
         if (!composed.wrapper) {
-          const {plan} = await prepareConversationDelivery(planInput, this.dependencies.mediaDependencies);
-          return {kind: "no-wrapper", body, reason: "NOT_CONFIGURED", ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), presentedPairs, deliveryPlan: plan};
+          const product = await prepareConversationDelivery(planInput, this.dependencies.mediaDependencies);
+          const plan = (await prepareRecoveryBrandPlan({onPolicy, shopId: context.shopId, body, header: footer.recoveryShopHeader, plan: product.plan}, this.dependencies.logoResolver))!;
+          return {kind: "no-wrapper", body, reason: "NOT_CONFIGURED", ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), presentedPairs, deliveryPlan: plan, ...(brandMediaPolicy ? {brandMediaPolicy} : {})};
         }
         if (!selected || selected === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
         const mediaResult = await prepareConversationDelivery({...planInput, binding: prepared?.productImage}, this.dependencies.mediaDependencies);
-        const deliveryPlan = mediaResult.plan;
+        const deliveryPlan = (await prepareRecoveryBrandPlan({onPolicy, shopId: context.shopId, body, header: footer.recoveryShopHeader, plan: mediaResult.plan}, this.dependencies.logoResolver))!;
         const mediaLog = mediaResult.mediaOmission === "IMAGE_IDENTITY_MISMATCH" ? this.logger.error.bind(this.logger) : this.logger.info.bind(this.logger);
         mediaLog("conversation.product_media", {shopId:context.shopId,conversationId:input.conversationId,
           messageIdentity:input.messageIdentity,planKind:deliveryPlan.kind, omission:mediaResult.mediaOmission,
@@ -175,7 +180,7 @@ export class ConversationWrapperService {
           localeId: composed.wrapper.localeId, contentHash: composed.wrapper.contentHash,
           slotEditVersion: composed.wrapper.slotEditVersion, audience: selected.audience as WrappedResult["audience"],
           languageTag: selected.definition.locales.find(row => row.id === composed.wrapper!.localeId)?.languageTag ?? "en",
-          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, deliveryPlan, replayed: false, ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), ...(presentedPairs ? { presentedPairs } : {}) };
+          messageIdentity: input.messageIdentity, source: input.source, applicationKey, responseDigest, deliveryPlan, ...(brandMediaPolicy ? {brandMediaPolicy} : {}), replayed: false, ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}), ...(presentedPairs ? { presentedPairs } : {}) };
       }
       const slot = chooseSlot(slots, input.source);
       if (slot === "invalid") return this.refuse("rejected", "DEFINITION_UNAVAILABLE", input);
@@ -186,7 +191,8 @@ export class ConversationWrapperService {
           });
           const footer = prepareRecoveryReplyBody({body: input.responseBody, source: input.source, context});
           if (footer.kind === "rejected") return this.refuse("rejected", footer.reason, input);
-          return { kind: "no-wrapper", body: footer.body, reason: "NOT_CONFIGURED",
+          const deliveryPlan = await prepareRecoveryBrandPlan({onPolicy, shopId: context.shopId, body: footer.body, header: input.source === "AI" || input.allowBrandImage ? footer.recoveryShopHeader : undefined}, this.dependencies.logoResolver);
+          return { kind: "no-wrapper", ...(deliveryPlan ? {deliveryPlan} : {}), ...(brandMediaPolicy ? {brandMediaPolicy} : {}), body: footer.body, reason: "NOT_CONFIGURED",
             ...(footer.recoveryCheckoutUrl ? {recoveryCheckoutUrl: footer.recoveryCheckoutUrl} : {}), ...(footer.recoveryShopHeader ? {recoveryShopHeader: footer.recoveryShopHeader} : {}) };
         }
         return this.refuse("unavailable", "NOT_CONFIGURED", input);
@@ -253,8 +259,10 @@ export class ConversationWrapperService {
         if (rendered.reason !== "OUTPUT_TOO_LONG") return this.refuse("rejected", rendered.reason, input);
       }
       if (!rendered || rendered.kind !== "rendered") return this.refuse("rejected", "OUTPUT_TOO_LONG", input);
+      const deliveryPlan = await prepareRecoveryBrandPlan({onPolicy, shopId: context.shopId, body: rendered.body, header: input.source === "AI" || input.allowBrandImage ? recoveryShopHeader : undefined}, this.dependencies.logoResolver);
       const applicationKey = wrapperApplicationKey({
         conversationId: input.conversationId, messageIdentity: input.messageIdentity, source: input.source,
+        ...(deliveryPlan ? {deliveryPlan} : {}), ...(brandMediaPolicy ? {brandMediaPolicy} : {}),
         wrapperDefinitionId: slot.definitionId, localeId: locale.id, contentHash: locale.contentHash!,
         editVersion: slot.editVersion, responseDigest, body: rendered.body,
         ...(recoveryCheckoutUrl ? {recoveryCheckoutUrl} : {}), ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
@@ -265,7 +273,7 @@ export class ConversationWrapperService {
         slotEditVersion: slot.editVersion, languageTag: locale.languageTag,
         contentHash: locale.contentHash!, source: input.source,
         messageIdentity: input.messageIdentity, applicationKey, responseDigest,
-        replayed: false,
+        replayed: false, ...(deliveryPlan ? {deliveryPlan} : {}), ...(brandMediaPolicy ? {brandMediaPolicy} : {}),
         ...(recoveryCheckoutUrl ? {recoveryCheckoutUrl} : {}), ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
       };
       this.logger.info("conversation_wrapper.rendered", {

@@ -114,16 +114,18 @@ describeWithDatabase("ARCH-043 PostgreSQL Background moderation configuration", 
           throw new Error("Disposable test requires an empty environment/key namespace");
         }
       }
+      const rowIds = new Map<string,string>();
       for (const [index, key] of keys.entries()) {
-        await db.platformConfiguration.create({ data: { environment: env, key, version: versions[index]!,
+        const inserted = await db.platformConfiguration.create({ data: { environment: env, key, version: versions[index]!,
           value: seal(key, versions[index]!, values[key]) } });
+        rowIds.set(key, inserted.id);
       }
       const service = createBackgroundPlatformConfigurationService({ environment: env,
         repository: createPrismaConfigurationRepository(db), unsealKeyring: () => root,
         logger: { info: vi.fn(), warn } });
       const bundle = await service.readBundle(keys);
       for (const [index, key] of keys.entries()) {
-        expect(bundle[key]).toEqual({ key, version: versions[index], value: values[key] });
+        expect(bundle[key]).toEqual({ key, version: versions[index], value: values[key], rowId: rowIds.get(key) });
       }
       await db.platformConfiguration.update({ where: { environment_key: { environment: env, key: keys[0] } },
         data: { version: 7, value: { kind: "disabled", schemaVersion: 1 } } });

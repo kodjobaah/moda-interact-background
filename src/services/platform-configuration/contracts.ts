@@ -84,7 +84,7 @@ export type KeyValues = {
   "omini.moderation": ModerationPolicy;
 };
 export type ConfigurationSnapshot<K extends BackgroundReadableKey> = Readonly<{
-  key: K; version: number; value: Readonly<KeyValues[K]>;
+  key: K; version: number; rowId?: string; value: Readonly<KeyValues[K]>;
 }>;
 
 const plain = (value: unknown): value is Record<string, unknown> =>

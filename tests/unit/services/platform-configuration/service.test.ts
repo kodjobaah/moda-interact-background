@@ -366,3 +366,14 @@ describe("unified deployment encryption configuration", () => {
     expect(() => createExternalUnsealKeyringProvider({})()).toThrow("unseal_failed");
   });
 });
+
+describe('ARCH073 same validated configuration row provenance',()=>{
+ it('returns row identity from the exact validated read and distinguishes recreated same-version rows',async()=>{
+  const value={publicOrigin:'https://brands.example.shop',bucketName:'brand-images'};
+  const context=setup([{...row('shopBrand.publicMedia',value,4),id:'original-row'}]);
+  expect(await context.service.read('shopBrand.publicMedia')).toEqual({key:'shopBrand.publicMedia',version:4,rowId:'original-row',value});
+  expect(context.readRows).toHaveBeenCalledOnce();
+  context.update([{...row('shopBrand.publicMedia',value,4),id:'recreated-row'}]);
+  expect((await context.service.read('shopBrand.publicMedia')).rowId).toBe('recreated-row');
+ });
+});

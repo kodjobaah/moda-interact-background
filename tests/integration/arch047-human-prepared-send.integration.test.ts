@@ -90,13 +90,14 @@ suite("ARCH-047 BG009 PostgreSQL prepared human send", () => {
       await dispatcher.processClaim(commandId, claim.leaseToken);
       const cmd = await f.db.merchantConversationSendCommand.findUniqueOrThrow({ where: { id: commandId } });
       expect(cmd.textBody).toBe(text);
-      expect(cmd.preparedTextBody).toBe(text);
+      expect(cmd.preparedTextBody).toContain(text);
+      const preparedText = cmd.preparedTextBody!;
       expect(cmd.preparedWrapperEvidence).toMatchObject({ outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED" });
       expect((await f.db.conversationModerationAssessment.findFirstOrThrow({
         where: { merchantSendCommandId: commandId },
-      })).contentSha256).toBe(sha256Text(text));
+      })).contentSha256).toBe(sha256Text(preparedText));
       const persisted = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: cmd.outboundMessageId! } });
-      expect(persisted.content).toBe(text);
+      expect(persisted.content).toBe(preparedText);
       expect(vi.mocked(f.provider.sendWhatsAppText).mock.calls[0]?.[0].text).toBe(persisted.content);
       await dispatcher.close();
     } finally { await f.close(); }

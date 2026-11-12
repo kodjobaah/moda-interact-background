@@ -1,3 +1,5 @@
+import type { BrandPreparationReceipt } from "../conversation-delivery-plan.js";
+import { ConversationMediaDeliveryPlanSchema, type ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { readRecoveryShopHeader, withRecoveryShopHeader } from "../conversation-wrappers/recovery-shop-header.js";
 import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/contracts.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -9,7 +11,7 @@ import { ConversationWrapperService } from "../conversation-wrappers/service.js"
 /** ARCH-047-BG009: deterministic rendering only; SQL freezing owns moderation identity. */
 export type HumanWrapperPreparation =
   | Readonly<{ kind: "not-applicable" }>
-  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt }>
+  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan }>
   | Readonly<{ kind: "prepared"; body: string; application: WrappedResult }>
   | Readonly<{ kind: "refused"; reason: WrapperRefusal | "CONTENT_MISMATCH" }>;
 
@@ -18,6 +20,7 @@ export type HumanWrapperCommand = Readonly<{
   conversationId: string;
   kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
   textBody: string | null;
+  mediaReceipt?: BrandPreparationReceipt;
 }>;
 
 type WrapperRenderer = Pick<ConversationWrapperService, "renderConversationResponse">;
@@ -50,7 +53,11 @@ export class HumanWrapperPreparationService {
         source: "HUMAN",
         messageIdentity: command.id,
         responseBody: command.textBody,
+        ...(command.mediaReceipt ? {allowBrandImage: true} : {}),
       });
+      if (rendered.kind === "no-wrapper" || rendered.kind === "rendered") {
+        if (rendered.deliveryPlan && (!command.mediaReceipt || !ConversationMediaDeliveryPlanSchema.safeParse(rendered.deliveryPlan).success || rendered.deliveryPlan.body !== rendered.body || rendered.deliveryPlan.kind === "IMAGE")) return {kind: "refused", reason: "CONTENT_MISMATCH"};
+      }
       if (rendered.kind === "no-wrapper") {
         const header = rendered.recoveryShopHeader === undefined ? null : readRecoveryShopHeader(rendered.recoveryShopHeader);
         if (rendered.recoveryShopHeader !== undefined && !header) return {kind: "refused", reason: "CONTENT_MISMATCH"};
@@ -59,7 +66,7 @@ export class HumanWrapperPreparationService {
         const expected = header ? withRecoveryShopHeader(footerBody, header) : footerBody;
         return rendered.body === expected ? {kind: "passthrough", body: rendered.body,
           ...(rendered.recoveryCheckoutUrl ? {recoveryCheckoutUrl: rendered.recoveryCheckoutUrl} : {}),
-          ...(header ? {recoveryShopHeader: header} : {})} : {kind: "refused", reason: "CONTENT_MISMATCH"};
+          ...(header ? {recoveryShopHeader: header} : {}), ...(rendered.brandMediaPolicy ? {brandMediaPolicy:rendered.brandMediaPolicy} : {}), ...(rendered.deliveryPlan ? {deliveryPlan: rendered.deliveryPlan} : {})} : {kind: "refused", reason: "CONTENT_MISMATCH"};
       }
       if (rendered.kind === "rendered") {
         if (rendered.source !== "HUMAN" || rendered.messageIdentity !== command.id ||

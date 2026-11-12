@@ -1,7 +1,10 @@
+import { readFrozenBrandMedia, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import { currentBrandPlanMatches } from "../conversation-brand-media.js";
 import { currentRecoveryShopHeaderMatches } from "./recovery-shop-header-verification.js";
 import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
-import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import type { ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { commitAdmittedProductContext, ProductContextAdmissionError } from "../../commerce/product-context-repository.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
@@ -23,7 +26,7 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
-export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string }
+export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string; deliveryPlan?: ConversationMediaDeliveryPlan }
   | { kind: "suppressed"; reason: string };
 export type RecoveryMarketingPermit = {
   consent: StoredRecoveryConsentSnapshot | null;
@@ -46,7 +49,7 @@ export type DispatchInput = {
   proactive?: RecoveryMarketingPermit;
   /** Explicitly distinguish approved Meta templates from automated free text. */
   deliveryKind?: "TEXT" | "IMAGE" | "TEMPLATE";
-  deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
+  deliveryPlan?: ConversationMediaDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
   initialOutreach?: {
     outreachAttemptId: string;
     idempotencyKey: string;
@@ -76,7 +79,8 @@ export class OutboundSendFenceService {
 
   async admitFinalSend(input: DispatchInput): Promise<DispatchPermit> {
     if ((input.deliveryKind === "IMAGE" && !input.deliveryPlan) ||
-        (input.deliveryPlan && (input.senderType !== "AGENT" || input.deliveryKind !== input.deliveryPlan.kind)))
+        (input.deliveryPlan && (input.deliveryKind !== (input.deliveryPlan.kind === "TEXT" ? "TEXT" : "IMAGE") ||
+          (input.deliveryPlan.kind !== "BRAND_IMAGE" && input.senderType !== "AGENT" && input.senderType !== "HUMAN"))))
       return {kind: "suppressed", reason: "invalid-presentation"};
     if (input.senderType === "HUMAN" && (!input.commandId || !input.leaseToken))
       return { kind: "suppressed", reason: "invalid-lease" };
@@ -295,6 +299,12 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
+      if (input.deliveryPlan?.kind === "BRAND_IMAGE") {
+        const storedMedia = input.senderType === "HUMAN"
+          ? parsePreparedEvidence(command!.preparedTextBody,command!.preparedWrapperEvidence,command!.preparedAt)?.mediaPreparation
+          : readFrozenBrandMedia((await first<{outboundPresentation:unknown}>(tx,`SELECT "outboundPresentation" FROM "whatsapp"."ConversationMessage" WHERE "id"=$1 AND "conversationId"=$2 FOR UPDATE`,input.messageId,context.id))?.outboundPresentation);
+        if(!storedMedia || !(await currentRecoveryShopHeaderMatches(tx,storedMedia.recoveryShopHeader,input.deliveryPlan.body,context.shopId)) || !(await currentBrandPlanMatches(tx,input.deliveryPlan,context.shopId,storedMedia.policyRef))) return {kind:"suppressed",reason:"brand-media-stale"} as const;
+      }
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
         : `arch040-auto-${createHash("sha256").update(input.messageId!).digest("hex")}`;
@@ -304,14 +314,19 @@ export class OutboundSendFenceService {
         // Provider HTTP MUST occur after commit and never inside this callback.
         const content = command!.kind === "HUMAN_TEXT"
           ? command!.preparedTextBody! : `[Recovery template: ${command!.templateName ?? "unknown"}]`;
-        const admittedMessage = await rows<{ content: string }>(tx, `
+        const evidence = command!.kind === "HUMAN_TEXT" ? parsePreparedEvidence(command!.preparedTextBody, command!.preparedWrapperEvidence, command!.preparedAt) : null;
+        if (evidence?.mediaPreparation && (evidence.mediaPreparation.receipt.sourceKind !== "HUMAN_COMMAND" ||
+            evidence.mediaPreparation.receipt.sourceId !== input.commandId || evidence.mediaPreparation.receipt.shopId !== context.shopId ||
+            evidence.mediaPreparation.receipt.conversationId !== context.id || evidence.mediaPreparation.receipt.controlRevision !== context.revision)) return {kind: "suppressed", reason: "invalid-presentation"} as const;
+        if (canonicalJson(evidence?.mediaPreparation?.plan ?? null) !== canonicalJson(input.deliveryPlan ?? null) || (input.expectedContent !== undefined && input.expectedContent !== content)) return {kind: "suppressed", reason: "invalid-presentation"} as const;
+        const admittedMessage = await rows<{ content: string; outboundPresentation: unknown }>(tx, `
           INSERT INTO "whatsapp"."ConversationMessage"
             ("id","conversationId","direction","senderType","status","content",
-              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision")
-          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5)
-          RETURNING "content"`,
-          messageId, context.id, content, dispatchKey, context.revision);
-        if (admittedMessage.length !== 1 || admittedMessage[0]?.content !== content) {
+              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision","outboundPresentation")
+          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5,$6::jsonb)
+          RETURNING "content","outboundPresentation"`,
+          messageId, context.id, content, dispatchKey, context.revision, JSON.stringify(evidence?.mediaPreparation ?? null));
+        if (admittedMessage.length !== 1 || admittedMessage[0]?.content !== content || canonicalJson(admittedMessage[0]?.outboundPresentation ?? null) !== canonicalJson(evidence?.mediaPreparation ?? null)) {
           throw new Error("ARCH047 admitted content mismatch");
         }
         const cmd = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
@@ -335,12 +350,15 @@ export class OutboundSendFenceService {
         return { kind: "admitted", messageId, dispatchKey,
           admittedAt: cmd[0]!.providerDispatchAdmittedAt,
           ...(command!.kind === "HUMAN_TEXT" ? { messageContent: admittedMessage[0]!.content } : {}),
+          ...(evidence?.mediaPreparation?.plan ? {deliveryPlan: readFrozenBrandMedia(admittedMessage[0]!.outboundPresentation)!.plan} : {}),
         } as const;
       }
       if (input.deliveryPlan) {
         const stored = await rows<{content: string; outboundPresentation: unknown}>(tx, `
           SELECT "content","outboundPresentation" FROM "whatsapp"."ConversationMessage"
-          WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"='AGENT' FOR UPDATE`, messageId, context.id);
+          WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"=$3::"whatsapp"."MessageSenderType" FOR UPDATE`, messageId, context.id, input.senderType);
+        const frozenBrand = stored[0] ? readFrozenBrandMedia(stored[0].outboundPresentation) : null;
+        if (input.deliveryPlan.kind === "BRAND_IMAGE" && (!frozenBrand || canonicalJson(asMessageDeliveryReceipt(frozenBrand.receipt)) !== canonicalJson(input.presentationReceipt))) return {kind: "suppressed", reason: "invalid-presentation"} as const;
         if (!matchesConversationReceipt(input.presentationReceipt, {...input, messageId}) || stored.length !== 1 || !sameConversationPlan(stored[0]!.outboundPresentation, input.deliveryPlan) ||
             !validConversationPlan(input.deliveryPlan, stored[0]!.content, context.shopId, input.presentationReceipt) ||
             input.expectedContent !== stored[0]!.content)

@@ -1,3 +1,4 @@
+import { ConversationPreparedBrandImageSchema, type ConversationPreparedBrandImage } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { readShopBrandPublicMediaConfiguration } from "../platform-configuration/consumers.js";
 import { normalizeShopBrandDomain } from "../shop-brand-media/contracts.js";
 import type {
@@ -74,6 +75,23 @@ export function verifiedReadyMedia(input: {
   return { shopId, role, status: "READY", kind: "R2_DERIVATIVE", httpsUrl: url.href };
 }
 
+/** Same current-generation proof as templates, carrying the public Shared conversation provenance. */
+export function verifiedReadyConversationBrandImage(input: Parameters<typeof verifiedReadyMedia>[0]): ConversationPreparedBrandImage | null {
+  if (input.role === "COVER_IMAGE" || !verifiedReadyMedia(input) || !isRecord(input.whatsAppMedia) || !isRecord(input.whatsAppMedia.roles)) return null;
+  const slot = input.whatsAppMedia.roles[input.role];
+  if (!isRecord(slot) || !isRecord(slot.source) || !isRecord(slot.ready)) return null;
+  const domain = normalizeShopBrandDomain(input.domain); if (!domain) return null;
+  const parsed = ConversationPreparedBrandImageSchema.safeParse({ schemaVersion: 1,
+    origin: {kind: "SHOP_BRAND", shopId: input.shopId, shopDomain: domain, role: input.role,
+      sourceGeneration: slot.source.generation, sourceFingerprint: slot.source.fingerprint},
+    status: "READY", kind: "R2_DERIVATIVE", publicOrigin: input.publicOrigin.origin,
+    publicUrl: new URL(String(slot.ready.objectKey), input.publicOrigin).href,
+    objectKey: slot.ready.objectKey, contentSha256: slot.ready.contentSha256, contentType: slot.ready.contentType,
+    width: slot.ready.width, height: slot.ready.height, sizeBytes: slot.ready.sizeBytes, verifiedAt: slot.ready.verifiedAt,
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 export class ShopBrandReadyMediaAdapter {
   // One policy snapshot for the lifetime of this preparation. Production
   // constructs a fresh adapter per prepare() so configuration is never stale.
@@ -99,6 +117,19 @@ export class ShopBrandReadyMediaAdapter {
     if (!brand || brand.shopId !== shopId || typeof brand.domain !== "string") return null;
     return verifiedReadyMedia({ shopId, domain: brand.domain, role,
       whatsAppMedia: brand.whatsAppMedia, publicOrigin: origin });
+  };
+
+  /** New preparation only: current logo first, square fallback; never cover art or raw source URLs. */
+  readonly resolveConversationLogo = async (shopId: string, selectedRole?: "LOGO" | "SQUARE_LOGO"): Promise<ConversationPreparedBrandImage | null> => {
+    if (!SHOP_ID.test(shopId)) return null;
+    const publicOrigin = await this.origin();
+    const brand = await this.repository.readForShop(shopId);
+    if (!brand || brand.shopId !== shopId) return null;
+    for (const role of selectedRole ? [selectedRole] : ["LOGO", "SQUARE_LOGO"] as const) {
+      const image = verifiedReadyConversationBrandImage({shopId, domain: brand.domain, role, whatsAppMedia: brand.whatsAppMedia, publicOrigin});
+      if (image) return image;
+    }
+    return null;
   };
 
   /** Hosts come exclusively from Admin's validated policy, never merchant input. */

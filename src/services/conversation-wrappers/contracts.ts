@@ -1,7 +1,8 @@
+import type { BrandMediaPolicyRef } from "../conversation-brand-media.js";
 import type { RecoveryShopHeaderReceipt } from "./recovery-shop-header.js";
 export type { RecoveryShopHeaderReceipt };
 /** ARCH-047-BG005: Background-only runtime seam. No Admin AST imports. */
-import type { ConversationDeliveryPlan, ConversationVerifiedProducts } from "@modainteract/moda-interact-shared/commerce/presentation";
+import type { ConversationMediaDeliveryPlan, ConversationVerifiedProducts } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type { CommerceFinalResponse } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceVerifiedPresentation, WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, VerifiedWrapperContext as SharedVerifiedWrapperContext, WrapperDefinition, WrapperSlot, WrapperRefusal } from "@modainteract/moda-interact-shared/commerce/presentation";
 export type { WrapperSource, WrapperAudience, WrapperVariable, PreparedToken, PreparedWrapper, WrapperDefinition, WrapperSlot, WrapperRefusal };
@@ -31,12 +32,12 @@ export type WrappedResult = Readonly<{
   /** Trusted runtime augmentation, bound into application provenance. */
   recoveryCheckoutUrl?: string;
   recoveryShopHeader?: RecoveryShopHeaderReceipt;
-  deliveryPlan?: ConversationDeliveryPlan;
+  brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
   presentedPairs?: readonly { productId: string; variantId: string | null }[];
 }>;
 
 export type WrapperRenderResult = WrappedResult
-  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; deliveryPlan?: ConversationDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
+  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
   | Readonly<{ kind: "unavailable" | "rejected"; reason: WrapperRefusal }>;
 
 export type RenderConversationResponseInput = Readonly<{
@@ -49,4 +50,6 @@ export type RenderConversationResponseInput = Readonly<{
   languageTag?: string | null;
   /** Previously prepared outcome owned by the outbound caller for the same message. */
   previousApplication?: WrappedResult;
+  /** Server-owned HUMAN freezer capability; never model/client supplied. */
+  allowBrandImage?: boolean;
 }>;

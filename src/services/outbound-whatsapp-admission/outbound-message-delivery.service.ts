@@ -1,9 +1,13 @@
+import { freezeBrandMedia, readPersistedConversationPlan, messageBrandReceipt, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
+import { createHash } from "node:crypto";
+import { prepareRecoveryBrandPlan, frozenBrandPlanCurrent, resolveConversationLogo, type ConversationLogoResolver } from "../conversation-brand-media.js";
 import { prepareRecoveryReplyBody, type RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
 import { PrismaConversationWrapperReadRepository } from "../conversation-wrappers/repository.js";
 import type { WrapperReadPort } from "../conversation-wrappers/contracts.js";
 import { Prisma } from "@prisma/client";
-import { ConversationDeliveryPlanSchema, type ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { ConversationMediaDeliveryPlanSchema, type ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { MessageStatus } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -80,6 +84,7 @@ export class OutboundMessageDeliveryService {
     private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
     private readonly wooInitialFence: Pick<WooInitialSendFenceService, "admitFinalSend"> = new WooInitialSendFenceService(database),
     private readonly recoveryFooterContext: Pick<WrapperReadPort, "loadContext"> = new PrismaConversationWrapperReadRepository(),
+    private readonly logoResolver: ConversationLogoResolver = resolveConversationLogo,
   ) {}
 
   /** Resolve outside moderation/admission transactions; never append after the permit. */
@@ -89,6 +94,38 @@ export class OutboundMessageDeliveryService {
     if (!context || context === "TENANT_MISMATCH" || context.shopId !== admission.shopId || context.conversationId !== admission.conversationId) return null;
     const prepared = prepareRecoveryReplyBody({body, source: "AI", context});
     return prepared.kind === "ready" ? prepared : null;
+  }
+
+  /** Capture once before new notice formatting/media; never recapture a revised owner for an image. */
+  private async noticeIdentity(shopId: string, conversationId: string, expectedRevision?: number): Promise<{revision: number; inboundVersion: number} | null> {
+    const owner = await this.ownership.readTurnOwnership(conversationId);
+    if (!owner || owner.shopId !== shopId || owner.mode !== "AI" || (expectedRevision !== undefined && owner.revision !== expectedRevision)) return null;
+    const conversation = await this.database.conversation.findUnique({where: {id: conversationId}, select: {inboundVersion: true}});
+    return conversation && Number.isSafeInteger(conversation.inboundVersion) ? {revision: owner.revision, inboundVersion: conversation.inboundVersion} : null;
+  }
+
+  /** A persisted plan or assessed complete body is frozen even before the provider permit. */
+  private async frozenPending(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "messageId">): Promise<{body: string; plan?: ConversationMediaDeliveryPlan; receipt?: ConversationDeliveryReceipt; header?: RecoveryShopHeaderReceipt; policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef} | "INVALID" | null> {
+    if (typeof this.database.$queryRawUnsafe !== "function") return null;
+    const rows = await this.database.$queryRawUnsafe<Array<{content: string; outboundPresentation: unknown; contentSha256: string | null}>>(`
+      SELECT m."content",m."outboundPresentation",a."contentSha256"
+      FROM "whatsapp"."ConversationMessage" m
+      LEFT JOIN "whatsapp"."ConversationModerationAssessment" a ON a."conversationMessageId"=m."id" AND a."inputKind"='TEXT'
+      JOIN "whatsapp"."Conversation" c ON c."id"=m."conversationId"
+      LEFT JOIN "commerce"."CheckoutRecovery" r ON r."id"=c."checkoutRecoveryId"
+      WHERE m."id"=$1 AND m."conversationId"=$2 AND m."direction"='OUTBOUND'
+        AND m."senderType" IN ('AGENT','AUTOMATION') AND COALESCE(r."shopId",c."shopId")=$3`,
+      admission.messageId, admission.conversationId, admission.shopId);
+    const row = rows?.[0]; if (!row) return null;
+    if (row.outboundPresentation != null) {
+      const parsed = readPersistedConversationPlan(row.outboundPresentation);
+      if (!parsed || parsed.plan.body !== row.content) return "INVALID";
+      const receipt = parsed.brand ? asMessageDeliveryReceipt(parsed.brand.receipt) : null;
+      if (parsed.brand && (!receipt || receipt.shopId !== admission.shopId || receipt.conversationId !== admission.conversationId || receipt.messageId !== admission.messageId)) return "INVALID";
+      return {body: row.content, plan: parsed.plan, ...(receipt ? {receipt} : {}), ...(parsed.brand ? {header: parsed.brand.recoveryShopHeader, policy:parsed.brand.policyRef} : {})};
+    }
+    const hash = createHash("sha256").update(row.content, "utf8").digest("hex");
+    return rows.some(value => value.contentSha256 === hash) ? {body: row.content} : null;
   }
 
   async getProviderAccountId(): Promise<string> {
@@ -103,6 +140,7 @@ export class OutboundMessageDeliveryService {
   }
 
   async sendPreparedConversation({
+    brandMediaPolicy,
     messageId,
     shopId,
     conversationId,
@@ -128,13 +166,14 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
     productContextUpdate?: CommerceConversationProductContext;
-    deliveryPlan?: ConversationDeliveryPlan;
+    brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
     let outboundText = terminal ? TERMINAL_MESSAGE : text;
-    const plan = deliveryPlan ? ConversationDeliveryPlanSchema.parse(deliveryPlan) : undefined;
+    let plan = deliveryPlan ? ConversationMediaDeliveryPlanSchema.parse(deliveryPlan) : undefined;
     if (plan && (prepareRecoveryFooter || expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt)))
       return {kind: "suppressed", reason: "conversation-invalid"};
+    if (plan?.kind === "BRAND_IMAGE" && executionScope !== "recovery") return {kind: "suppressed", reason: "conversation-invalid"};
     // Check the durable admission before any failure/usage side effects. An
     // already-admitted message must never be re-prepared or dispatched again.
     if (await this.hasCompletedPreparation(messageId))
@@ -148,22 +187,34 @@ export class OutboundMessageDeliveryService {
       executionScope,
     });
     if (suppression) return suppression;
-    if (terminal || prepareRecoveryFooter) {
+    const frozen = await this.frozenPending({shopId, conversationId, messageId});
+    if (frozen === "INVALID") { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
+    if (frozen) { outboundText = frozen.body; plan = frozen.plan; recoveryShopHeader = frozen.header; brandMediaPolicy=frozen.policy; if (frozen.receipt) { presentationReceipt = frozen.receipt; expectedControlRevision = frozen.receipt.controlRevision; expectedInboundVersion = frozen.receipt.inboundVersion; } }
+    const identity = !frozen && (terminal || prepareRecoveryFooter) && executionScope === "recovery"
+      ? await this.noticeIdentity(shopId, conversationId, expectedControlRevision) : null;
+    if (!frozen && (terminal || prepareRecoveryFooter)) {
       const preparedTerminal = await this.prepareRecoveryFreeformBody({shopId, conversationId, executionScope}, outboundText);
       if (preparedTerminal === null) { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
       outboundText = preparedTerminal.body;
       recoveryShopHeader = preparedTerminal.recoveryShopHeader;
+      if (identity) {
+        plan = await prepareRecoveryBrandPlan({shopId, body: outboundText, header: recoveryShopHeader, onPolicy: ref=>{brandMediaPolicy=ref;}}, this.logoResolver);
+        if (plan) { expectedControlRevision ??= identity.revision; expectedInboundVersion ??= identity.inboundVersion;
+          presentationReceipt = {shopId, conversationId, messageId, controlRevision: expectedControlRevision,
+            inboundVersion: expectedInboundVersion, firstPair: null}; }
+      }
     }
 
-    if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId})))
+    if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId}, presentationReceipt, recoveryShopHeader, brandMediaPolicy)))
       return { kind: "suppressed", reason: "duplicate" };
     if (!(await this.approvePreparedOutbound({ shopId, conversationId, messageId, outboundText }))) {
       await this.failPrepared(messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
+    if (plan && !(await frozenBrandPlanCurrent(plan, this.logoResolver))) { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
     const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to, expectedContent: outboundText,
-      executionScope, deliveryKind: plan?.kind ?? "TEXT",
+      executionScope, deliveryKind: plan && plan.kind !== "TEXT" ? "IMAGE" : "TEXT",
       ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
       ...(plan ? {deliveryPlan: plan, presentationReceipt} : {}),
       ...(productContextUpdate ? { productContextUpdate } : {}),
@@ -172,9 +223,9 @@ export class OutboundMessageDeliveryService {
     });
     if (fenced) return fenced;
 
-    let result: Awaited<ReturnType<typeof this.provider.sendWhatsAppText>>;
+    let result: {providerMessageId: string; providerStatus?: string};
     try {
-      result = plan?.kind === "IMAGE" ? await this.provider.sendWhatsAppImage({to, link: plan.image.publicUrl,
+      result = plan && plan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to, link: plan.image.publicUrl,
         caption: plan.body, ...(replyToProviderMessageId ? {replyToProviderMessageId} : {})}) : await this.provider.sendWhatsAppText({
         to,
         text: outboundText,
@@ -266,11 +317,24 @@ export class OutboundMessageDeliveryService {
     let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
     let outboundText = TERMINAL_MESSAGE;
     let recoveryShopHeader: RecoveryShopHeaderReceipt | undefined;
-    if (admission.terminal) {
+    let noticePlan: ConversationMediaDeliveryPlan | undefined;
+    let noticePolicy: import("../conversation-brand-media.js").BrandMediaPolicyRef | undefined;
+    let noticeReceipt: ConversationDeliveryReceipt | undefined;
+    let noticeIdentity: {revision: number; inboundVersion: number} | null = null;
+    const frozenNotice = admission.terminal ? await this.frozenPending(admission) : null;
+    if (frozenNotice === "INVALID") { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
+    if (frozenNotice) { outboundText = frozenNotice.body; noticePlan = frozenNotice.plan; noticeReceipt = frozenNotice.receipt; recoveryShopHeader = frozenNotice.header; noticePolicy=frozenNotice.policy; }
+    if (admission.terminal && !frozenNotice) {
+      noticeIdentity = admission.executionScope === "recovery" ? await this.noticeIdentity(admission.shopId, admission.conversationId, input.expectedControlRevision) : null;
       const preparedTerminal = await this.prepareRecoveryFreeformBody(admission, TERMINAL_MESSAGE);
       if (preparedTerminal === null) { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
       outboundText = preparedTerminal.body;
       recoveryShopHeader = preparedTerminal.recoveryShopHeader;
+      if (noticeIdentity) noticePlan = await prepareRecoveryBrandPlan({shopId: admission.shopId, body: outboundText, header: recoveryShopHeader, onPolicy:ref=>{noticePolicy=ref;}}, this.logoResolver);
+    }
+    if (noticePlan?.kind === "BRAND_IMAGE") {
+      if (!noticeReceipt && noticeIdentity) noticeReceipt = {shopId: admission.shopId, conversationId: admission.conversationId, messageId: admission.messageId, controlRevision: input.expectedControlRevision ?? noticeIdentity.revision, inboundVersion: noticeIdentity.inboundVersion, firstPair: null};
+      if (!noticeReceipt || !(await frozenBrandPlanCurrent(noticePlan, this.logoResolver))) { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
     }
     if (!admission.terminal) {
       try {
@@ -296,7 +360,7 @@ export class OutboundMessageDeliveryService {
         return { kind: "suppressed", reason: "conversation-invalid" };
       }
     }
-    if (!(await this.prepareUnadmittedContent(admission.messageId, outboundText)))
+    if (!(await this.prepareUnadmittedContent(admission.messageId, outboundText, noticePlan, {shopId: admission.shopId, conversationId: admission.conversationId}, noticeReceipt, recoveryShopHeader, noticePolicy)))
       return { kind: "suppressed", reason: "duplicate" };
     let moderationAllowed: boolean;
     try {
@@ -357,7 +421,8 @@ export class OutboundMessageDeliveryService {
         shopId: admission.shopId, conversationId: admission.conversationId,
         messageId: admission.messageId, to: input.to, expectedContent: outboundText,
         ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
-        deliveryKind: prepared ? "TEMPLATE" : "TEXT",
+        deliveryKind: prepared ? "TEMPLATE" : noticePlan && noticePlan.kind !== "TEXT" ? "IMAGE" : "TEXT",
+        ...(noticePlan && noticeReceipt ? {deliveryPlan: noticePlan, presentationReceipt: noticeReceipt, expectedControlRevision: noticeReceipt.controlRevision, expectedInboundVersion: noticeReceipt.inboundVersion} : {}),
         ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
         ...(input.initialOutreach ? { initialOutreach: {
           outreachAttemptId: input.initialOutreach.outreachAttemptId,
@@ -366,18 +431,18 @@ export class OutboundMessageDeliveryService {
           recoveryCreditSourceKey: input.recoveryCreditSourceKey!,
           expectedContent: outboundText,
         } } : {}),
-        ...(input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
+        ...(noticeReceipt || input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
         ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode,
           ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
       });
       if (fenced) return fenced;
     }
 
-    let result: Awaited<ReturnType<typeof this.provider.sendWhatsAppTemplate>>;
+    let result: {providerMessageId: string; providerStatus?: string};
     try {
       result = prepared
         ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
-        : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText });
+        : noticePlan && noticePlan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to: input.to, link: noticePlan.image.publicUrl, caption: outboundText}) : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText });
     } catch (error) {
       if (initial) deliveryLogger.error("outbound.initial.send.failed", {
         ...identity, stage: "provider_http", sourceError: initialOutreachDiagnostic(error),
@@ -430,7 +495,8 @@ export class OutboundMessageDeliveryService {
    * Nullable unique fields belong in a nested WhereInput, not at the top level
    * of Prisma's WhereUniqueInput (which rejects null for providerDispatchKey).
    */
-  private async prepareUnadmittedContent(messageId: string, content: string, plan?: ConversationDeliveryPlan, scope?: {shopId: string; conversationId: string}): Promise<boolean> {
+  private async prepareUnadmittedContent(messageId: string, content: string, plan?: ConversationMediaDeliveryPlan, scope?: {shopId: string; conversationId: string}, receipt?: ConversationDeliveryReceipt, recoveryShopHeader?: RecoveryShopHeaderReceipt, policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef): Promise<boolean> {
+    if (plan?.kind === "BRAND_IMAGE" && (!receipt || !policy || !recoveryShopHeader || !scope || !matchesConversationReceipt(receipt, {shopId: scope.shopId, conversationId: scope.conversationId, messageId, expectedInboundVersion: receipt.inboundVersion, expectedControlRevision: receipt.controlRevision}))) return false;
     if (plan) return this.database.$transaction(async tx => {
       const rows = await tx.$queryRawUnsafe<{content: string; outboundPresentation: unknown; senderType: string; status: string; providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null}[]>(`
         SELECT "content","outboundPresentation","senderType"::text,"status"::text,"providerDispatchKey","providerDispatchAdmittedAt"
@@ -441,9 +507,11 @@ export class OutboundMessageDeliveryService {
             WHERE c."id"=m."conversationId" AND COALESCE(r."shopId",c."shopId")=$3
               AND (c."shopId" IS NULL OR c."shopId"=$3)) FOR UPDATE`, messageId, scope?.conversationId, scope?.shopId);
       const row = rows[0];
-      if (!row || row.senderType !== "AGENT" || row.status !== "PENDING" || row.providerDispatchKey || row.providerDispatchAdmittedAt) return false;
+      if (!row || (row.senderType !== "AGENT" && !(plan.kind === "BRAND_IMAGE" && row.senderType === "AUTOMATION")) || row.status !== "PENDING" || row.providerDispatchKey || row.providerDispatchAdmittedAt) return false;
       if (row.outboundPresentation !== null && (!sameConversationPlan(row.outboundPresentation, plan) || row.content !== content)) return false;
-      await tx.conversationMessage.update({where: {id: messageId}, data: {content, outboundPresentation: plan as unknown as Prisma.InputJsonValue}});
+      const persisted = plan.kind === "BRAND_IMAGE" ? freezeBrandMedia(plan, messageBrandReceipt(receipt!), recoveryShopHeader!, policy!) : plan;
+      if (plan.kind === "BRAND_IMAGE" && row.outboundPresentation !== null && canonicalStoredReceipt(row.outboundPresentation) !== canonicalJson(receipt)) return false;
+      await tx.conversationMessage.update({where: {id: messageId}, data: {content, outboundPresentation: persisted as unknown as Prisma.InputJsonValue}});
       return true;
     });
     try {
@@ -512,13 +580,14 @@ export class OutboundMessageDeliveryService {
     template?: { name: string; languageCode: string;
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
     deliveryKind: "TEXT" | "IMAGE" | "TEMPLATE";
-    deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
+    brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
     initialOutreach?: NonNullable<DispatchInput["initialOutreach"]> & { recoveryId: string };
   }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (input.initialOutreach && ownership?.recoveryId !== input.initialOutreach.recoveryId)
       return { kind: "suppressed", reason: "conversation-invalid" };
     if (!ownership) {
+      if (input.deliveryPlan?.kind === "BRAND_IMAGE") { await this.failPrepared(input.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
       if (input.productContextUpdate) {
         await this.failPrepared(input.messageId);
         return { kind: "suppressed", reason: "conversation-invalid" };
@@ -655,4 +724,10 @@ export class OutboundMessageDeliveryService {
       });
     });
   }
+}
+
+function canonicalStoredReceipt(raw: unknown): string | undefined {
+ const parsed = readPersistedConversationPlan(raw);
+ const receipt = parsed?.brand ? asMessageDeliveryReceipt(parsed.brand.receipt) : null;
+ return receipt ? canonicalJson(receipt) : undefined;
 }
