@@ -1,6 +1,7 @@
 import { randomUUID, createCipheriv } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { register } from "tsx/esm/api";
+import { parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
 import {
   CommerceModelAvailabilitySchema,
   CommerceModelCatalogueEntrySchema,
@@ -351,7 +352,7 @@ try {
     "Shop B selecting Shop A model availability",
   );
 
-  const keyring = { "disposable-key": encryptionKey };
+  const keyring = parseCredentialKeyring(JSON.stringify({ "disposable-key": encryptionKeyBase64 }));
   process.env.MODA_ENCRYPTION_KEYS_JSON = JSON.stringify({
     "disposable-key": encryptionKeyBase64,
   });
