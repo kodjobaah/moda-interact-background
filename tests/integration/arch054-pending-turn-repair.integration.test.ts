@@ -5,6 +5,10 @@ import IORedis from "ioredis";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import prisma from "../../src/lib/db.js";
 import type { ConversationTurnJob } from "../../src/services/conversation-turn-processor.service.js";
+import { ConversationTurnProcessor } from "../../src/services/conversation-turn-processor.service.js";
+import { ConversationService } from "../../src/services/conversation.service.js";
+import { CommerceHostError } from "../../src/commerce/mcp-client.js";
+import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { PendingTurnRepairService } from "../../src/services/conversation-ai-delay/pending-turn-repair.js";
 
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -68,7 +72,7 @@ async function createFixture(count: number, clock: Date) {
     () => connection.quit(),
     () => queue.close(),
     async () => {
-      const jobs = await queue.getJobs(["waiting", "delayed", "failed"], 0, -1);
+      const jobs = await queue.getJobs(["waiting", "delayed", "failed", "completed"], 0, -1);
       await Promise.all(jobs.filter((job) => job.data.conversationId.startsWith(idPrefix))
         .map((job) => job.remove()));
     },
@@ -100,6 +104,90 @@ async function waitForJobState(queue: Queue<ConversationTurnJob>, jobId: string,
 }
 
 describe("ARCH-054 pending delayed AI turn repair", () => {
+  integrationIt("does not resurrect a terminal host failure across repair passes and accepts the next inbound", async () => {
+    const clock = new Date();
+    const { idPrefix, queue } = await createFixture(4, clock);
+    const conversationId = `${idPrefix}00003`;
+    const conversation = new ConversationService();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: vi.fn() };
+    logger.child.mockReturnValue(logger);
+    const failure = new CommerceHostError("INVALID_FINAL", false);
+    const runAgent = vi.fn(async () => { throw failure; });
+    const sendPreparedText = vi.fn();
+    const failPrepared = vi.fn(async (messageId: string) => {
+      await prisma.conversationMessage.update({ where: { id: messageId }, data: { status: "FAILED", failedAt: clock } });
+    });
+    const processor = new ConversationTurnProcessor({
+      queue,
+      conversation,
+      admission: {
+        reserve: async ({ shopId, conversationId: id }) => {
+          const message = await prisma.conversationMessage.create({ data: {
+            conversationId: id, direction: "OUTBOUND", senderType: "AGENT", status: "PENDING", content: "Pending test reply",
+          } });
+          return { kind: "admitted", messageId: message.id, conversationId: id, shopId, terminal: false };
+        },
+        sendPreparedText,
+        failPrepared,
+      },
+      abuseAdmission: { admitSettledTurn: async () => ({ kind: "allowed" }) },
+      loadTurn: async () => ({
+        shopId: (await prisma.conversation.findUniqueOrThrow({
+          where: { id: conversationId }, select: { checkoutRecovery: { select: { shopId: true } } },
+        })).checkoutRecovery!.shopId,
+        to: "+447700900000", customerPhone: "+447700900000", conversationType: "RECOVERY",
+        checkoutRecoveryId: `${idPrefix}r00003`, hasReplyContext: true, context: {}, languageMessage: "Show recommendations",
+      }),
+      runAgent,
+      aiWrapper: { renderConversationResponse: async () => { throw new Error("Unexpected wrapper call"); } },
+      getResult: () => { throw new Error("Unexpected result projection"); },
+      runtimeConfig,
+      now: () => clock,
+      logger: logger as StructuredLogger,
+    });
+    const jobId = `conversation-turn__${conversationId}__9`;
+    const workerConnection = new IORedis(redisUrl!, { maxRetriesPerRequest: null });
+    const worker = new Worker<ConversationTurnJob>("whatsapp-events", async (job) => {
+      if (job.data.conversationId === conversationId) await processor.process(job.data);
+    }, { connection: workerConnection });
+    resources.push(() => workerConnection.quit(), () => worker.close());
+    await worker.waitUntilReady();
+    await queue.add("process-conversation-turn", { conversationId, observedVersion: 9 }, { jobId, removeOnComplete: false });
+    await waitForJobState(queue, jobId, "completed");
+
+    expect(await conversation.getTurnState(conversationId)).toMatchObject({
+      inboundVersion: 9, lastProcessedVersion: 9, pendingTurnStartedAt: null, pendingAiNotBeforeAt: null,
+      pendingAiControlRevision: null, processingInboundVersion: null, processingStartedAt: null,
+    });
+    expect(await prisma.conversationMessage.findMany({
+      where: { conversationId }, select: { status: true, providerMessageId: true },
+    })).toEqual([{ status: "FAILED", providerMessageId: null }]);
+    expect(failPrepared).toHaveBeenCalledTimes(1); // Actual admission helper already performed cleanup.
+
+    for (const elapsed of [30_000, 60_000]) {
+      expect(await repairService(queue, () => new Date(clock.getTime() + elapsed)).runPass()).toMatchObject({
+        scanned: 0, requeued: 0, failed: 0,
+      });
+    }
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(sendPreparedText).not.toHaveBeenCalled();
+
+    // A genuine later inbound is a new durable version, not a replay of version 9.
+    await prisma.conversation.update({ where: { id: conversationId }, data: {
+      inboundVersion: 10, pendingTurnStartedAt: new Date(clock.getTime() - 60_000),
+      pendingAiNotBeforeAt: new Date(clock.getTime() - 30_000), pendingAiControlRevision: 4,
+      pendingAiDelayMinutes: 0, lastInboundAt: new Date(clock.getTime() - 30_000),
+    } });
+    const nextJobId = `conversation-turn__${conversationId}__10`;
+    expect(await repairService(queue, () => clock).runPass()).toMatchObject({ scanned: 1, requeued: 1 });
+    // removeOnComplete is true for repair-created jobs; durable completion is the assertion boundary.
+    await expect.poll(async () => (await conversation.getTurnState(conversationId)).lastProcessedVersion).toBe(10);
+    await expect.poll(async () => Boolean(await queue.getJob(nextJobId))).toBe(false);
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(sendPreparedText).not.toHaveBeenCalled();
+    expect(await repairService(queue, () => new Date(clock.getTime() + 90_000)).runPass()).toMatchObject({ scanned: 0, requeued: 0 });
+  }, 30_000);
+
   integrationIt("bounds a 10,000-row scan and excludes stale ownership and active leases", async () => {
     const clock = new Date();
     const { idPrefix } = await createFixture(10_000, clock);

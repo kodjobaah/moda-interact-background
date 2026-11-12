@@ -32,6 +32,7 @@ import { registerAbuseAdmissionCases } from "./conversation-turn-processor/facad
 import { registerOutboundCases } from "./conversation-turn-processor/facade-outbound.cases.js";
 import { registerAgentRaceCases } from "./conversation-turn-processor/facade-agent-races.cases.js";
 import { registerAiWrapperCases } from "./conversation-turn-processor/ai-wrapper.cases.js";
+import { registerTerminalFailureCases } from "./conversation-turn-processor/terminal-failure.cases.js";
 
 const first = new Date("2026-09-08T12:00:00.000Z");
 
@@ -153,6 +154,7 @@ describe("ConversationTurnProcessor", () => {
   registerOutboundCases(facadeContext);
   registerAgentRaceCases(facadeContext);
   registerAiWrapperCases(facadeContext);
+  registerTerminalFailureCases(facadeContext);
 });
 
 // Preserve the original standalone regression outside the describe block.
