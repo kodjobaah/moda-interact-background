@@ -27,7 +27,7 @@ export function withoutRecoveryCheckoutUrl(body: string, checkoutUrl: string): s
 }
 
 /** Preserve localized link labels and other prose by moving complete link lines to the footer. */
-export function withRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
+export function withLegacyRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
   const lines = body.split("\n");
   const linkLines = lines.filter(line => mapCheckoutUrlTokens(line, checkoutUrl, () => "") !== line);
   if (!linkLines.length) return `${body.trim()}\n\n${checkoutUrl}`;
@@ -49,6 +49,31 @@ export function withRecoveryCheckoutFooter(body: string, checkoutUrl: string): s
   return [content, footerLines.join("\n")].filter(Boolean).join("\n\n");
 }
 
+export const RECOVERY_CHECKOUT_DIVIDER = "──────────";
+export const RECOVERY_CHECKOUT_SEPARATOR = `\n\n${RECOVERY_CHECKOUT_DIVIDER}\n`;
+
+/** New AI/service preparation; old immutable bodies use the legacy validator only. */
+export function withRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
+  const legacy = withLegacyRecoveryCheckoutFooter(body, checkoutUrl);
+  const split = legacy.lastIndexOf("\n\n");
+  let content = split < 0 ? "" : legacy.slice(0, split);
+  const footer = split < 0 ? legacy : legacy.slice(split + 2);
+  if (content.endsWith(RECOVERY_CHECKOUT_DIVIDER)) content = content.slice(0, -RECOVERY_CHECKOUT_DIVIDER.length).trimEnd();
+  return content ? `${content}${RECOVERY_CHECKOUT_SEPARATOR}${footer}` : `${RECOVERY_CHECKOUT_DIVIDER}\n${footer}`;
+}
+
+/** Staff-authored content is immutable: add a suffix without moving or rewriting it. */
+export function withHumanRecoveryCheckoutFooter(body: string, checkoutUrl: string): string {
+  return body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl) ? body : body + RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl;
+}
+
+/** Replay validation accepts both generations without rewriting either body's bytes. */
+export function hasPreparedRecoveryCheckoutFooter(body: string, checkoutUrl: string): boolean {
+  return validRecoveryCheckoutFooterUrl(checkoutUrl) &&
+    (body.endsWith(RECOVERY_CHECKOUT_SEPARATOR + checkoutUrl) || withRecoveryCheckoutFooter(body, checkoutUrl) === body ||
+      withLegacyRecoveryCheckoutFooter(body, checkoutUrl) === body);
+}
+
 export function recoveryReplyContentPreserved(original: string, rendered: string, checkoutUrl: string): boolean {
   const content = withoutRecoveryCheckoutUrl(rendered, checkoutUrl);
   return withoutRecoveryCheckoutUrl(original, checkoutUrl).split("\n")
@@ -58,12 +83,12 @@ export function recoveryReplyContentPreserved(original: string, rendered: string
 export function appendRecoveryCheckoutFooter(input: {
   body: string; source: WrapperSource; context: VerifiedWrapperContext;
 }): {kind: "ready"; body: string; recoveryCheckoutUrl?: string} | {kind: "rejected"; reason: WrapperRefusal} {
-  if (input.source !== "AI" || !input.context.checkoutAvailable) return {kind: "ready", body: input.body};
+  if (!input.context.checkoutAvailable) return {kind: "ready", body: input.body};
   const url = input.context.variables["checkout.url"];
   if (!validRecoveryCheckoutFooterUrl(url)) return {kind: "rejected", reason: "VARIABLE_UNAVAILABLE"};
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.body)) return {kind: "rejected", reason: "INVALID_INPUT"};
-  const body = withRecoveryCheckoutFooter(input.body, url);
+  const body = input.source === "HUMAN" ? withHumanRecoveryCheckoutFooter(input.body, url) : withRecoveryCheckoutFooter(input.body, url);
   if (body.length > MAX_WHATSAPP_TEXT_LENGTH) return {kind: "rejected", reason: "OUTPUT_TOO_LONG"};
   return {kind: "ready", body, recoveryCheckoutUrl: url};
 }

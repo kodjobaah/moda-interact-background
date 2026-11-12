@@ -1,3 +1,6 @@
+import { appendRecoveryCheckoutFooter } from "../conversation-wrappers/recovery-checkout-footer.js";
+import { PrismaConversationWrapperReadRepository } from "../conversation-wrappers/repository.js";
+import type { WrapperReadPort } from "../conversation-wrappers/contracts.js";
 import { Prisma } from "@prisma/client";
 import { ConversationDeliveryPlanSchema, type ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
@@ -76,14 +79,24 @@ export class OutboundMessageDeliveryService {
     private readonly generalFence = new GeneralOutboundSendFenceService(database),
     private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
     private readonly wooInitialFence: Pick<WooInitialSendFenceService, "admitFinalSend"> = new WooInitialSendFenceService(database),
+    private readonly recoveryFooterContext: Pick<WrapperReadPort, "loadContext"> = new PrismaConversationWrapperReadRepository(),
   ) {}
+
+  /** Resolve outside moderation/admission transactions; never append after the permit. */
+  private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<string | null> {
+    if (admission.executionScope !== "recovery") return body;
+    const context = await this.recoveryFooterContext.loadContext(admission.conversationId);
+    if (!context || context === "TENANT_MISMATCH" || context.shopId !== admission.shopId || context.conversationId !== admission.conversationId) return null;
+    const prepared = appendRecoveryCheckoutFooter({body, source: "AI", context});
+    return prepared.kind === "ready" ? prepared.body : null;
+  }
 
   async getProviderAccountId(): Promise<string> {
     return this.provider.getProviderAccountId();
   }
 
   async sendPreparedText(input: AdmittedOutbound & {
-    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string;
+    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string; prepareRecoveryFooter?: true;
     expectedControlRevision?: number; expectedInboundVersion?: number; productContextUpdate?: CommerceConversationProductContext;
   }): Promise<OutboundAdmissionResult> {
     return this.sendPreparedConversation({...input});
@@ -104,9 +117,11 @@ export class OutboundMessageDeliveryService {
     productContextUpdate,
     deliveryPlan,
     presentationReceipt,
+    prepareRecoveryFooter,
   }: AdmittedOutbound & {
     to: string;
     text: string;
+    prepareRecoveryFooter?: true;
     previewUrl?: boolean;
     replyToProviderMessageId?: string;
     expectedControlRevision?: number;
@@ -115,9 +130,9 @@ export class OutboundMessageDeliveryService {
     deliveryPlan?: ConversationDeliveryPlan;
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
-    const outboundText = terminal ? TERMINAL_MESSAGE : text;
+    let outboundText = terminal ? TERMINAL_MESSAGE : text;
     const plan = deliveryPlan ? ConversationDeliveryPlanSchema.parse(deliveryPlan) : undefined;
-    if (plan && (expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt)))
+    if (plan && (prepareRecoveryFooter || expectedControlRevision === undefined || expectedInboundVersion === undefined || terminal || !matchesConversationReceipt(presentationReceipt, {shopId, conversationId, messageId, expectedInboundVersion, expectedControlRevision}) || !validConversationPlan(plan, outboundText, shopId, presentationReceipt)))
       return {kind: "suppressed", reason: "conversation-invalid"};
     // Check the durable admission before any failure/usage side effects. An
     // already-admitted message must never be re-prepared or dispatched again.
@@ -132,6 +147,11 @@ export class OutboundMessageDeliveryService {
       executionScope,
     });
     if (suppression) return suppression;
+    if (terminal || prepareRecoveryFooter) {
+      const preparedTerminal = await this.prepareRecoveryFreeformBody({shopId, conversationId, executionScope}, outboundText);
+      if (preparedTerminal === null) { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
+      outboundText = preparedTerminal;
+    }
 
     if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId})))
       return { kind: "suppressed", reason: "duplicate" };
@@ -242,6 +262,11 @@ export class OutboundMessageDeliveryService {
     // Terminal sends continue to moderate and send their fixed text instead.
     let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
     let outboundText = TERMINAL_MESSAGE;
+    if (admission.terminal) {
+      const preparedTerminal = await this.prepareRecoveryFreeformBody(admission, TERMINAL_MESSAGE);
+      if (preparedTerminal === null) { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
+      outboundText = preparedTerminal;
+    }
     if (!admission.terminal) {
       try {
         prepared = prepareAutomatedTemplateInput(input);
@@ -346,7 +371,7 @@ export class OutboundMessageDeliveryService {
     try {
       result = prepared
         ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
-        : await this.provider.sendWhatsAppText({ to: input.to, text: TERMINAL_MESSAGE });
+        : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText });
     } catch (error) {
       if (initial) deliveryLogger.error("outbound.initial.send.failed", {
         ...identity, stage: "provider_http", sourceError: initialOutreachDiagnostic(error),
@@ -548,7 +573,7 @@ export class OutboundMessageDeliveryService {
       recoveryId: ownership.recoveryId,
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,
       ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
-      messageId: input.messageId, recipient: input.to, now: new Date(),
+      messageId: input.messageId, recipient: input.to, now: new Date(), expectedContent: input.expectedContent,
       ...(input.productContextUpdate ? { productContextUpdate: input.productContextUpdate, expectedContent: input.expectedContent } : {}),
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
