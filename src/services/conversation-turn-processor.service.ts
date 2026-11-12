@@ -672,7 +672,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         ? (composed.presentedPairs ? presentedProductContext(agentResult.productContextUpdate, composed.presentedPairs, this.now()) : agentResult.productContextUpdate)
         : undefined;
 
-      await sendPreparedText({
+      const deliveryResult = await sendPreparedText({
         ...reserved,
         to: loaded.to,
         text: composed.text,
@@ -685,7 +685,8 @@ export class ConversationTurnProcessor<TContext, TResult> {
       this.logger.debug("whatsapp.turn.completed", {
         conversationId,
         observedVersion,
-        outcome: "agent-response-sent",
+        outcome: deliveryResult.kind === "suppressed" ? "agent-response-suppressed" : "agent-response-sent",
+        ...(deliveryResult.kind === "suppressed" ? {reason: deliveryResult.reason} : {}),
       });
     } catch (error) {
       if (error instanceof DelayedError) throw error;

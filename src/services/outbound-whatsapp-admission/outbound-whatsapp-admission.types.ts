@@ -62,3 +62,7 @@ export type InitialOutreachAdmissionLookup =
   | { kind: "failed"; message: InitialOutreachMessageEvidence;
       disposition: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable" }
   | { kind: "held"; reason: "provider-outcome-unknown" | "lineage-conflict" };
+
+/** Server-owned empty reservation identity, private to Background cleanup. */
+export const PENDING_AUTOMATED_WHATSAPP_CONTENT = "[Pending automated WhatsApp message]";
+export type UntouchedReservationIdentity = Readonly<{shopId: string; conversationId: string; unpreparedOnly: true}>;

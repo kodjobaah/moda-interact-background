@@ -83,7 +83,7 @@ function harness({
     ),
     conversationMessage: { update: conversationMessageUpdate, findUnique: conversationMessageFindUnique },
     usageEvent: { deleteMany: usageDeleteMany },
-    conversation: { update: conversationUpdate },
+    conversation: { update: conversationUpdate, findUnique: vi.fn(async()=>({inboundVersion:3})) },
   };
   const providerMock = {
     getProviderAccountId: vi.fn().mockReturnValue("phone-number-id"),
@@ -731,8 +731,8 @@ describe("unified known-recovery service and limit notice bodies",()=>{
  function noticeHarness(value:unknown=context) {
   const footerContext={loadContext:vi.fn(async()=>value)};
   const recoveryFence={admitFinalSend:vi.fn(async()=>({kind:"admitted"}))};
-  const ownership={readTurnOwnership:vi.fn(async()=>({recoveryId:"recovery-1",revision:7}))};
-  return {...harness({footerContext,recoveryFence,ownership}),footerContext,recoveryFence};
+  const ownership={readTurnOwnership:vi.fn(async()=>({conversationId:"conversation-1",shopId:"shop-1",mode:"AI",recoveryId:"recovery-1",revision:7}))};
+  return {...harness({footerContext,recoveryFence,ownership}),footerContext,recoveryFence,ownership};
  }
  it.each(["text","template"])("uses exact prepared/moderated/fenced terminal %s body at the provider",async mode=>{
   const test=noticeHarness();const input={...admission,executionScope:"recovery" as const,terminal:true};
@@ -765,7 +765,7 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   const expired=noticeHarness({...context,checkoutAvailable:false,variables:{}});
   await expired.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"});
   expect(expired.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:TERMINAL_MESSAGE});
-  const general=noticeHarness();await general.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
+  const general=noticeHarness();general.ownership.readTurnOwnership.mockResolvedValue(null as never);await general.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
   expect(general.footerContext.loadContext).not.toHaveBeenCalled();
  });
  it.each(["terminal", "audio", "oversize"])("prepares trusted identity before moderation/fence for %s notices",async kind=>{
@@ -778,9 +778,40 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   expect(test.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({expectedContent:expected,recoveryShopHeader}));
   expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:expected});
  });
+ it("decorates a durably recovery-linked normal-contract notice even with general billing scope",async()=>{
+  const test=noticeHarness();await test.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
+  expect(test.footerContext.loadContext).toHaveBeenCalledWith("conversation-1");
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:TERMINAL_MESSAGE+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
+ });
  it("does not send when prepared-content final permit is refused after a race",async()=>{
   const test=noticeHarness();test.recoveryFence.admitFinalSend.mockResolvedValue({kind:"suppressed",reason:"already-admitted-or-sent"} as any);
   expect(await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"})).toMatchObject({kind:"suppressed"});
   expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+ });
+});
+
+describe("ARCH074 deterministic pre-provider presentation refusal",()=>{
+ it.each(["receipt","body","schema"] as const)("cleans only the exact untouched reservation on invalid %s",async kind=>{
+  const test=harness();const fail=vi.spyOn(test.service,"failPrepared").mockResolvedValue(undefined);
+  const plan=kind==="schema"?{schemaVersion:1,kind:"INVALID",body:"Hello"}:{schemaVersion:1,kind:"TEXT",body:kind==="body"?"Different":"Hello"};
+  expect(await test.service.sendPreparedConversation({...admission,to:"15551234567",text:"Hello",deliveryPlan:plan as never,expectedControlRevision:2,expectedInboundVersion:3,
+    ...(kind==="receipt"?{}:{presentationReceipt:{shopId:"shop-1",conversationId:"conversation-1",messageId:"message-1",controlRevision:2,inboundVersion:3,firstPair:null}})})).toMatchObject({kind:"suppressed",reason:"conversation-invalid"});
+  expect(fail).toHaveBeenCalledExactlyOnceWith("message-1",{shopId:"shop-1",conversationId:"conversation-1",unpreparedOnly:true});
+  expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();expect(test.moderationMock.assessText).not.toHaveBeenCalled();
+ });
+ it("preserves an existing provider permit even when a replay carries a malformed plan",async()=>{
+  const test=harness();const fail=vi.spyOn(test.service,"failPrepared").mockResolvedValue(undefined);
+  test.database.conversationMessage.findUnique.mockResolvedValue({status:"PENDING",providerDispatchKey:"existing",providerDispatchAdmittedAt:new Date()} as never);
+  expect(await test.service.sendPreparedConversation({...admission,to:"15551234567",text:"Hello",deliveryPlan:{kind:"INVALID"} as never})).toMatchObject({kind:"suppressed",reason:"duplicate"});
+  expect(fail).not.toHaveBeenCalled();expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
+ });
+});
+
+describe("ARCH074 concurrent preparation preservation",()=>{
+ it("does not clean up a failed preparation CAS that can represent another frozen winner",async()=>{
+  const test=harness();const port=test.service as unknown as {prepareUnadmittedContent:()=>Promise<boolean>};
+  vi.spyOn(port,"prepareUnadmittedContent").mockResolvedValue(false);const fail=vi.spyOn(test.service,"failPrepared").mockResolvedValue(undefined);
+  expect(await test.service.sendPreparedText({...admission,to:"15551234567",text:"Hello"})).toMatchObject({kind:"suppressed",reason:"duplicate"});
+  expect(fail).not.toHaveBeenCalled();expect(test.providerMock.sendWhatsAppText).not.toHaveBeenCalled();
  });
 });

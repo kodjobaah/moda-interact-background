@@ -1,4 +1,5 @@
-import { MessageStatus, UsageMetric, type Prisma, type PrismaClient } from "@prisma/client";
+import { PENDING_AUTOMATED_WHATSAPP_CONTENT, type UntouchedReservationIdentity } from "./outbound-whatsapp-admission.types.js";
+import { MessageStatus, UsageMetric, Prisma, type PrismaClient } from "@prisma/client";
 import prisma from "../../lib/db.js";
 import { isDefinitiveWhatsAppError, isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { synchronousRecipientFailureService } from "../synchronous-recipient-failure.service.js";
@@ -11,10 +12,13 @@ export class OutboundProviderFailureService {
       synchronousRecipientFailureService,
   ) {}
 
-  async failPrepared(messageId: string): Promise<void> {
+  async failPrepared(messageId: string, expectedReservation?: UntouchedReservationIdentity): Promise<void> {
     await this.database.$transaction(async (tx) => {
       const owned = await this.readOwnedUsage(tx, messageId);
       if (!owned) return;
+      if (expectedReservation && (owned.shopId !== expectedReservation.shopId ||
+          owned.message.conversationId !== expectedReservation.conversationId ||
+          owned.message.content !== PENDING_AUTOMATED_WHATSAPP_CONTENT || owned.message.outboundPresentation !== null)) return;
       if (!owned.usage && owned.message.senderType === "AUTOMATION" && owned.message.conversation.checkoutRecoveryId) return;
       let initial: string | undefined;
       if (owned.usage?.idempotencyKey.startsWith("recovery-outreach:")) {
@@ -39,6 +43,14 @@ export class OutboundProviderFailureService {
       }
       const where: Prisma.ConversationMessageWhereInput = {
         id: messageId, conversationId: owned.message.conversationId, direction: "OUTBOUND",
+        ...(expectedReservation ? {content: PENDING_AUTOMATED_WHATSAPP_CONTENT,
+          outboundPresentation: {equals: Prisma.DbNull},
+          moderationAssessments: {none: {}},
+          conversation: {is: {id: expectedReservation.conversationId, OR: [
+            {shopId: expectedReservation.shopId, checkoutRecovery: null},
+            {checkoutRecovery: {is: {shopId: expectedReservation.shopId}}, OR: [{shopId: null}, {shopId: expectedReservation.shopId}]},
+          ]}},
+        } : {}),
         senderType: initial ? "AUTOMATION" : { in: ["AUTOMATION", "AGENT"] },
         providerDispatchKey: null, providerDispatchAdmittedAt: null,
         providerDispatchControlRevision: null, providerMessageId: null,
