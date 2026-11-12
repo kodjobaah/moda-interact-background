@@ -23,7 +23,8 @@ const { AbandonedCheckoutLookupService } = await import(
   "../../../src/services/abandoned-checkout-lookup.service.js"
 );
 
-const service = new AbandonedCheckoutLookupService();
+const evaluationTime = Date.parse("2026-08-28T12:30:00Z");
+const service = new AbandonedCheckoutLookupService(undefined, () => evaluationTime);
 
 const candidate = {
   shopId: "shop_1",
@@ -58,6 +59,7 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
       timeZone: "America/New_York",
     },
     lineItems: {
+      pageInfo: { hasNextPage: false },
       nodes: [
         {
           id: "gid://shopify/AbandonedCheckoutLineItem/1",
@@ -125,6 +127,24 @@ describe("abandoned checkout lookup service", () => {
       expect(result.checkout.lineItems[0].sku).toBe("SKU-1");
       expect(result.checkout.completedAt).toBeNull();
     }
+  });
+
+  it("finds a checkout whose abandonment is recorded more than ten minutes after checkout creation", async () => {
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl, { createdAt: "2026-08-28T12:21:24Z" })]);
+    expect((await service.lookup(candidate)).kind).toBe("found");
+    const count = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const list = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(count.variables.query).toBe(list.variables.query);
+    expect(list.variables.first).toBe(20);
+  });
+
+  it("refuses a truncated basket instead of silently omitting line items", async () => {
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl, {
+      lineItems: { ...makeNode(candidateUrl).lineItems, pageInfo: { hasNextPage: true } },
+    })]);
+    await expect(service.lookup(candidate)).rejects.toThrow(/100 line-item lookup bound/);
   });
 
   it("returns not-found when no abandonedCheckoutUrl matches", async () => {
@@ -221,7 +241,7 @@ describe("abandoned checkout lookup service", () => {
     await expect(service.lookup(candidate)).rejects.toThrow(/GraphQL error/);
   });
 
-  it("derives a narrow created_at filter from checkoutCreatedAt", async () => {
+  it("includes abandonment recorded after checkout creation while retaining bounded count", async () => {
     prismaMock.shop.findUnique.mockResolvedValue({
       domain: candidate.shopDomain,
     });
@@ -235,7 +255,7 @@ describe("abandoned checkout lookup service", () => {
 
     expect(query).toMatch(/created_at:>="/);
     expect(query).toMatch(/created_at:<="/);
-    expect(query).toMatch(/AND/);
+    expect(query).toBe('created_at:>="2026-08-28T11:50:00.000Z" AND created_at:<="2026-08-28T12:40:00.000Z"');
     // Only one Shopify call: the bounded count pre-check (no list query).
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -293,6 +313,8 @@ describe("abandoned checkout lookup service", () => {
     const body = JSON.parse(listCall[1].body as string);
     const query = body.query as string;
 
+    expect(query).toContain("lineItems(first: 100)");
+    expect(query).toContain("pageInfo { hasNextPage }");
     expect(query).toContain("totalPriceSet");
     expect(query).toContain("presentmentMoney");
     expect(query).toContain("billingAddress");

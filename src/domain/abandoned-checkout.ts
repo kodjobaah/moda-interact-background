@@ -16,10 +16,9 @@ export const ABANDONED_CHECKOUT_API_VERSION = "2026-07";
 // any unbounded pagination is possible.
 export const ABANDONED_CHECKOUT_MAX_CANDIDATES = 20;
 
-// Narrow server-side time window (milliseconds) applied around
-// candidate.checkoutCreatedAt when building the Shopify `created_at` filter.
-// This keeps the query cheap and bounded while tolerating small clock skew
-// between the webhook timestamp and Shopify's stored createdAt.
+// Clock-skew padding (milliseconds) around the checkout creation-to-evaluation
+// interval used by the Shopify `created_at` filter. Shopify records abandonment
+// after checkout creation; the count pre-check bounds the number inspected.
 export const ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS = 10 * 60 * 1000;
 
 export interface AbandonedCheckoutLookupInput {
