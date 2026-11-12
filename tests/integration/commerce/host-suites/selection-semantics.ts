@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hostFixture as f } from "../host.fixture.js";
+import { ConversationWrapperService } from "../../../../src/services/conversation-wrappers/service.js";
+import { composeAiOutbound } from "../../../../src/services/conversation-wrappers/compose-ai-outbound.js";
 
 const pair = { productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" };
 const generic = { productId: null, variantId: null };
@@ -63,6 +65,77 @@ const answer = (details: Record<string, unknown>) => f.final({ answerKind: "ANSW
   replyText: "Our current catalogue has the blue linen shirt.", details });
 export function registerSelectionSemanticsTests() {
   describe("published runner to host selection semantics", () => {
+    it("forces one typed JSON-null correction then verifies two products and the trusted recovery footer", async () => {
+      configure();
+      const otherPair = { productId: "gid://shopify/Product/102", variantId: "gid://shopify/ProductVariant/102" };
+      const otherProduct = { ...product, ...otherPair, title: "Green linen shirt", url: null };
+      f.toolResults = { ...f.toolResults, commerce_get_product: [ok({ product }), ok({ product: otherProduct }), ok({ product }), ok({ product: otherProduct })] };
+      let calls = 0;
+      const result = await f.run(async request => {
+        calls++;
+        if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }, { name: "commerce_get_product", arguments: otherPair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "We offer blue and green linen shirts.", outputTokens: 1 };
+        expect(calls).toBe(3); expect(request.requiredToolName).toBe("finalResponse");
+        expect(request.tools.map(tool => tool.name)).toEqual(["finalResponse"]);
+        expect(request.tools[0]!.inputSchema).toMatchObject({ properties: { referralReason: { type: ["string", "null"] } } });
+        expect(request.instructions.join("\n")).toContain("JSON null");
+        const correction = answer({ productRecommendationVersion: "1", productRecommendations: [recommendation, { ...recommendation, ...otherPair }] });
+        correction.calls[0]!.arguments.replyText = "We offer Blue linen shirt and Green linen shirt.";
+        expect(correction.calls[0]!.arguments.referralReason).toBeNull();
+        return correction;
+      });
+      expect(calls).toBe(3); expect(result.referralReason).toBeNull();
+      expect(result.commercePresentation!.verified.products).toHaveLength(2);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(4);
+      const checkoutUrl = "https://fixture.myshopify.com/checkouts/recover?key=synthetic";
+      const wrapper = new ConversationWrapperService({ repository: {
+        loadContext: async () => ({ conversationId: f.state.id, shopId: "shop-fixture", conversationLanguageTag: "en", merchantLanguageTag: "en",
+          variables: { "checkout.url": checkoutUrl }, checkoutAvailable: true }), loadSlots: async () => [],
+      }, logger: f.createLogger({ serviceName: "moda-messaging-worker", environment: f.environment, sink: () => {} }), onMissingSlot: "passthrough" });
+      const composed = await composeAiOutbound(wrapper, { conversationId: f.state.id, messageId: "synthetic-message",
+        generatedResponse: result.replyText!, commercePresentation: result.commercePresentation! });
+      expect(composed.kind).toBe("ready");
+      if (composed.kind !== "ready") throw new Error("Expected verified eligible recovery composition");
+      expect(composed.text).toContain("Blue linen shirt"); expect(composed.text).toContain("Green linen shirt");
+      expect(composed.text.endsWith(checkoutUrl)).toBe(true); expect(composed.text.split(checkoutUrl)).toHaveLength(2);
+    });
+    it.each(["literal-null", "missing", "answer-with-referral"])("fails closed on %s after exactly one correction", async reason => {
+      configure(); let calls = 0;
+      await expect(f.run(async request => {
+        calls++;
+        if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "We offer a linen shirt.", outputTokens: 1 };
+        expect(calls).toBe(3); expect(request.requiredToolName).toBe("finalResponse");
+        const correction = answer({ productRecommendationVersion: "1", productRecommendations: [recommendation] });
+        if (reason === "missing") delete correction.calls[0]!.arguments.referralReason;
+        else correction.calls[0]!.arguments.referralReason = reason === "literal-null" ? "null" : "UNVERIFIABLE_FACTS";
+        return correction;
+      })).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
+      expect(calls).toBe(3); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+    });
+    it("preserves a valid typed referral through the actual host", async () => {
+      configure();
+      const result = await f.run(async () => f.final({ answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", details: {} }));
+      expect(result).toMatchObject({ answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS" });
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(0);
+    });
+    it("preserves mandatory referral when a model attempts a JSON-null ANSWER", async () => {
+      configure(); let calls = 0;
+      f.toolResults = { commerce_get_product: { contractVersion: "commerce.v1", status: "ERROR", code: "DENIED", retryable: false } };
+      await expect(f.run(async () => ++calls === 1 ? { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 } :
+        answer({ productRecommendationVersion: "1", productRecommendations: [recommendation] }))).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
+      expect(calls).toBe(2);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+    });
+
+    it("accepts a correctly typed mandatory referral after a denied current-shop read", async () => {
+      configure(); let calls = 0;
+      f.toolResults = { commerce_get_product: { contractVersion: "commerce.v1", status: "ERROR", code: "DENIED", retryable: false } };
+      const result = await f.run(async () => ++calls === 1 ? { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 } :
+        f.final({ answerKind: "REFER_TO_STORE", referralReason: "TOOL_REVOKED", details: {} }));
+      expect(result).toMatchObject({ answerKind: "REFER_TO_STORE", referralReason: "TOOL_REVOKED" });
+      expect(calls).toBe(2); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+    });
     it.each(["missing version", "unobserved shipping", "unobserved shipping disposition"])("corrects %s once using observed product IDs", async mode => {
       configure(); let calls = 0;
       const result = await f.run(async request => {
