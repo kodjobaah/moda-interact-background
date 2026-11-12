@@ -1,4 +1,4 @@
-import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { createLogger, sanitizeLogFields, REDACTED, TRUNCATED, MAX_DEPTH_REACHED, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import type {
@@ -46,7 +46,7 @@ export class WhatsAppServiceError extends Error {
 export class WhatsAppService {
   constructor(
     private readonly fetchImplementation: FetchImplementation = fetch,
-    private readonly logger: Pick<StructuredLogger, "error"> = defaultLogger,
+    private readonly logger: Pick<StructuredLogger, "error"> & Partial<Pick<StructuredLogger, "info">> = defaultLogger,
   ) {}
 
   /** Validate encrypted sender credentials before a HUMAN dispatch permit is committed.
@@ -125,16 +125,16 @@ export class WhatsAppService {
         },
       );
     } catch (error) {
-      this.logSdkFailure("sendWhatsAppText", error);
+      this.logSdkFailure("sendWhatsAppText", error, [accessToken, to, text]);
       throw error;
     }
 
     // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
     // A successful response with invalid JSON remains an uncertain send result.
-    const body = response.ok ? await response.json() : await rejectedResponseBody(response);
+    const body = await this.readProviderResponse("sendWhatsAppText", response, [accessToken, to, text]);
 
     if (!response.ok) {
-      this.logProviderFailure("sendWhatsAppText", response, body);
+      this.logProviderFailure("sendWhatsAppText", response, body, [accessToken, to, text]);
       throw new WhatsAppServiceError(
         "provider-rejected",
         "WhatsApp provider rejected the message",
@@ -142,7 +142,7 @@ export class WhatsAppService {
       );
     }
 
-    const providerMessageId = body.messages?.[0]?.id;
+    const providerMessageId = readProviderMessageId(body);
 
     if (!providerMessageId) {
       throw new WhatsAppServiceError(
@@ -206,16 +206,16 @@ export class WhatsAppService {
         },
       );
     } catch (error) {
-      this.logSdkFailure("sendWhatsAppImage", error);
+      this.logSdkFailure("sendWhatsAppImage", error, [accessToken, to, link, caption ?? ""]);
       throw error;
     }
 
     // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
     // A successful response with invalid JSON remains an uncertain send result.
-    const body = response.ok ? await response.json() : await rejectedResponseBody(response);
+    const body = await this.readProviderResponse("sendWhatsAppImage", response, [accessToken, to, link, caption ?? ""]);
 
     if (!response.ok) {
-      this.logProviderFailure("sendWhatsAppImage", response, body);
+      this.logProviderFailure("sendWhatsAppImage", response, body, [accessToken, to, link, caption ?? ""]);
       throw new WhatsAppServiceError(
         "provider-rejected",
         "WhatsApp provider rejected the message",
@@ -223,7 +223,7 @@ export class WhatsAppService {
       );
     }
 
-    const providerMessageId = body.messages?.[0]?.id;
+    const providerMessageId = readProviderMessageId(body);
 
     if (!providerMessageId) {
       throw new WhatsAppServiceError(
@@ -318,15 +318,15 @@ export class WhatsAppService {
         },
       );
     } catch (error) {
-      this.logSdkFailure("sendWhatsAppTemplate", error);
+      this.logSdkFailure("sendWhatsAppTemplate", error, [accessToken, to, ...bodyParameters, textHeader ?? "", imageHeader?.link ?? "", ...urlButtons.map(({ text }) => text)]);
       throw error;
     }
 
     // A definitive HTTP rejection remains definitive even if Meta's body is not JSON.
     // A successful response with invalid JSON remains an uncertain send result.
-    const body = response.ok ? await response.json() : await rejectedResponseBody(response);
+    const body = await this.readProviderResponse("sendWhatsAppTemplate", response, [accessToken, to, ...bodyParameters, textHeader ?? "", imageHeader?.link ?? "", ...urlButtons.map(({ text }) => text)]);
     if (!response.ok) {
-      this.logProviderFailure("sendWhatsAppTemplate", response, body);
+      this.logProviderFailure("sendWhatsAppTemplate", response, body, [accessToken, to, ...bodyParameters, textHeader ?? "", imageHeader?.link ?? "", ...urlButtons.map(({ text }) => text)]);
       throw new WhatsAppServiceError(
         "provider-rejected",
         "WhatsApp provider rejected the template",
@@ -334,7 +334,7 @@ export class WhatsAppService {
       );
     }
 
-    const providerMessageId = body.messages?.[0]?.id;
+    const providerMessageId = readProviderMessageId(body);
     if (!providerMessageId) {
       throw new WhatsAppServiceError(
         "invalid-provider-response",
@@ -345,55 +345,121 @@ export class WhatsAppService {
     return { providerMessageId };
   }
 
-  private logProviderFailure(operation: string, response: Response, body: unknown): void {
-    const providerError = readProviderError(body);
-    const fields: Record<string, unknown> = {
-      origin: "provider_response",
-      provider: "meta",
-      operation,
-      reasonCode: "META_SEND_FAILED",
-      httpStatus: response.status,
-    };
-    const requestId = safeProviderIdentifier(
-      response.headers.get("x-fb-request-id") ?? response.headers.get("x-fb-trace-id") ??
-      providerError?.traceId,
-    );
-    if (requestId) fields.providerRequestId = requestId;
-    if (providerError) {
-      const error: Record<string, unknown> = {};
-      if (providerError.message !== undefined) {
-        const safe = safeProviderText(providerError.message);
-        error.message = safe.value;
-        fields.redactionApplied = safe.redactionApplied;
-        fields.truncated = safe.truncated;
+  private async readProviderResponse(operation: string, response: Response, privateValues: string[]): Promise<unknown> {
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      this.logProviderResponse(operation, response, null, "UNREADABLE", privateValues);
+      if (response.ok) throw error;
+      return null;
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch (error) {
+      this.logProviderResponse(operation, response, text, "TEXT", privateValues);
+      // A 2xx response with invalid JSON remains uncertain; do not make it a
+      // definitive provider rejection that could trigger a duplicate send.
+      if (response.ok) throw error;
+      return text || null;
+    }
+    this.logProviderResponse(operation, response, body, "JSON", privateValues);
+    return body;
+  }
+
+  private logProviderResponse(
+    operation: string, response: Response, body: unknown,
+    responseFormat: "JSON" | "TEXT" | "UNREADABLE", privateValues: string[],
+  ): void {
+    try {
+      // Shared owns generic bounds/redaction. Meta-specific filtering additionally
+      // removes contact identifiers and any request values echoed by the provider.
+      const filtered = safeMetaResponse(body, privateValues);
+      const bounded = sanitizeLogFields({ responseBody: filtered.value }).responseBody;
+      const safe = safeMetaResponse(bounded, []);
+      safe.redactionApplied ||= filtered.redactionApplied;
+      safe.truncated ||= filtered.truncated;
+      const fields: Record<string, unknown> = {
+        origin: "provider_response", provider: "meta", operation,
+        httpStatus: response.status,
+        outcome: response.ok ? "HTTP_ACCEPTED" : "HTTP_REJECTED",
+        deliveryConfirmed: false,
+        responseFormat, responseBody: safe.value,
+        redactionApplied: safe.redactionApplied,
+        truncated: safe.truncated,
+      };
+      const messageId = readProviderMessageId(safe.value);
+      if (messageId) fields.providerMessageId = messageId;
+      const requestId = safeProviderIdentifier(response.headers.get("x-fb-request-id") ??
+        response.headers.get("x-fb-trace-id") ?? readProviderError(body)?.traceId);
+      if (requestId) {
+        const safeRequestId = safeMetaResponse(requestId, privateValues);
+        if (!safeRequestId.redactionApplied) fields.providerRequestId = safeRequestId.value;
+        else fields.redactionApplied = true;
       }
-      if (providerError.code !== undefined) error.code = providerError.code;
-      if (providerError.subcode !== undefined) error.error_subcode = providerError.subcode;
-      if (providerError.errorData !== undefined) {
-        const safe = safeProviderDetails(providerError.errorData);
-        error.error_data = safe.value;
+      this.logger.info?.("whatsapp.meta.send.response", fields);
+    } catch { /* Observability must never alter sending or retry semantics. */ }
+  }
+
+  private logProviderFailure(operation: string, response: Response, body: unknown, privateValues: string[]): void {
+    try {
+      const filtered = safeMetaResponse(body, privateValues);
+      body = filtered.value;
+      const providerError = readProviderError(body);
+      const fields: Record<string, unknown> = {
+        origin: "provider_response",
+        provider: "meta",
+        operation,
+        reasonCode: "META_SEND_FAILED",
+        httpStatus: response.status,
+        redactionApplied: filtered.redactionApplied, truncated: filtered.truncated,
+      };
+      const requestId = safeProviderIdentifier(
+        response.headers.get("x-fb-request-id") ?? response.headers.get("x-fb-trace-id") ??
+        providerError?.traceId,
+      );
+      if (requestId) {
+          const safeRequestId = safeMetaResponse(requestId, privateValues);
+          if (!safeRequestId.redactionApplied) fields.providerRequestId = safeRequestId.value;
+          else fields.redactionApplied = true;
+        }
+      if (providerError) {
+        const error: Record<string, unknown> = {};
+        if (providerError.message !== undefined) {
+          const safe = safeProviderText(providerError.message);
+          error.message = safe.value;
+          fields.redactionApplied = fields.redactionApplied === true || safe.redactionApplied;
+          fields.truncated = fields.truncated === true || safe.truncated;
+        }
+        if (providerError.code !== undefined) error.code = providerError.code;
+        if (providerError.subcode !== undefined) error.error_subcode = providerError.subcode;
+        if (providerError.errorData !== undefined) {
+          const safe = safeProviderDetails(providerError.errorData);
+          error.error_data = safe.value;
+          fields.redactionApplied = fields.redactionApplied === true || safe.redactionApplied;
+          fields.truncated = fields.truncated === true || safe.truncated;
+        }
+        if (providerError.traceId) error.fbtrace_id = providerError.traceId;
+        if (Object.keys(error).length) fields.providerError = error;
+      } else if (typeof body === "string" && body.length > 0) {
+        const safe = safeProviderText(body);
+        fields.providerErrorBody = safe.value;
         fields.redactionApplied = fields.redactionApplied === true || safe.redactionApplied;
         fields.truncated = fields.truncated === true || safe.truncated;
       }
-      if (providerError.traceId) error.fbtrace_id = providerError.traceId;
-      if (Object.keys(error).length) fields.providerError = error;
-    } else if (typeof body === "string" && body.length > 0) {
-      const safe = safeProviderText(body);
-      fields.providerErrorBody = safe.value;
-      fields.redactionApplied = safe.redactionApplied;
-      fields.truncated = safe.truncated;
-    }
-    this.emitFailure(fields);
+      this.emitFailure(fields);
+    } catch { /* Logging must not alter provider rejection semantics. */ }
   }
 
-  private logSdkFailure(operation: string, error: unknown): void {
+  private logSdkFailure(operation: string, error: unknown, privateValues: string[]): void {
     const chain: Array<{ name: string; message: string }> = [];
     let current: unknown = error;
     for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth++) {
       const source = current instanceof Error ? current : null;
       const message = source?.message ?? (typeof current === "string" ? current : "[REDACTED]");
       const safeName = safeProviderText(source?.name ?? "NonErrorThrown", 96);
-      const safeMessage = safeProviderText(message);
+      const safeMessage = safeProviderText(String(safeMetaResponse(message, privateValues).value));
       chain.push({ name: safeName.value, message: safeMessage.value });
       current = source?.cause;
     }
@@ -422,10 +488,63 @@ type MetaProviderError = Readonly<{
   traceId?: string;
 }>;
 
-async function rejectedResponseBody(response: Response): Promise<unknown> {
-  const text = await response.text().catch(() => "");
-  if (!text) return null;
-  try { return JSON.parse(text) as unknown; } catch { return text; }
+function readProviderMessageId(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || !("messages" in body) || !Array.isArray(body.messages)) return undefined;
+  const first = body.messages[0] as unknown;
+  if (typeof first !== "object" || first === null || !("id" in first)) return undefined;
+  return typeof first.id === "string" && first.id.length > 0 ? first.id : undefined;
+}
+
+/** Semantic Meta response projection; generic recursion limits are Shared-owned. */
+function safeMetaResponse(value: unknown, privateValues: string[]): {
+  value: unknown; redactionApplied: boolean; truncated: boolean;
+} {
+  let redactionApplied = value === REDACTED;
+  let truncated = value === TRUNCATED || value === MAX_DEPTH_REACHED;
+  if (typeof value === "string") {
+    let redacted = value;
+    for (const privateValue of privateValues.filter(Boolean)) {
+      if (redacted.includes(privateValue)) {
+        redacted = redacted.replaceAll(privateValue, REDACTED);
+        redactionApplied = true;
+      }
+    }
+    const safe = safeProviderText(redacted, 4096);
+    return { value: safe.value, redactionApplied: redactionApplied || safe.redactionApplied,
+      truncated: truncated || safe.truncated };
+  }
+  if (Array.isArray(value)) {
+    const result = value.map((item) => {
+      const safe = safeMetaResponse(item, privateValues);
+      redactionApplied ||= safe.redactionApplied;
+      truncated ||= safe.truncated;
+      return safe.value;
+    });
+    return { value: result, redactionApplied, truncated };
+  }
+  if (typeof value !== "object" || value === null) return { value, redactionApplied, truncated };
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const safeKey = safeMetaResponse(key, privateValues);
+    redactionApplied ||= safeKey.redactionApplied;
+    truncated ||= safeKey.truncated;
+    if (/token|secret|password|authorization|cookie|email|phone|address|customer|recipient|url|header|prompt|coupon/i.test(key) ||
+        /^(input|wa_id|to|from|name|first_name|last_name|text|body|caption|parameters)$/i.test(key)) {
+      result[String(safeKey.value)] = REDACTED;
+      redactionApplied = true;
+      continue;
+    }
+    if (key === "fbtrace_id" && safeProviderIdentifier(typeof item === "string" ? item : undefined) === undefined) {
+      result[String(safeKey.value)] = REDACTED;
+      redactionApplied = true;
+      continue;
+    }
+    const safe = safeMetaResponse(item, privateValues);
+    result[String(safeKey.value)] = safe.value;
+    redactionApplied ||= safe.redactionApplied;
+    truncated ||= safe.truncated;
+  }
+  return { value: result, redactionApplied, truncated };
 }
 
 function readProviderError(body: unknown): MetaProviderError | null {

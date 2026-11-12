@@ -399,4 +399,103 @@ describe("WhatsAppService API base URL", () => {
     },
   );
 
+  const methods = ["sendWhatsAppText", "sendWhatsAppImage", "sendWhatsAppTemplate"] as const;
+  const send = (service: WhatsAppService, method: typeof methods[number]) => method === "sendWhatsAppText"
+    ? service.sendWhatsAppText(input)
+    : method === "sendWhatsAppImage"
+      ? service.sendWhatsAppImage({ to: input.to, link: "https://media.test/private-image", caption: input.text })
+      : service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en", bodyParameters: [input.text] });
+
+  it.each(methods)("logs the complete safe Meta acceptance structure for %s without calling it delivered", async (method) => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const body = {
+      messaging_product: "whatsapp", contacts: [{ input: input.to, wa_id: input.to }],
+      messages: [{ id: "wamid.provider-receipt==", message_status: "accepted" }],
+      additional_meta_field: { original: "preserved provider value", token: accessToken },
+    };
+    const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), {
+      status: 200, headers: { "x-fb-request-id": "meta-request-original" },
+    }));
+    await expect(send(new WhatsAppService(transport, logger), method))
+      .resolves.toEqual({ providerMessageId: "wamid.provider-receipt==" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({
+      operation: method, httpStatus: 200, outcome: "HTTP_ACCEPTED", deliveryConfirmed: false,
+      providerMessageId: "wamid.provider-receipt==", providerRequestId: "meta-request-original",
+      responseFormat: "JSON", redactionApplied: true, truncated: false,
+      responseBody: {
+        messaging_product: "whatsapp", contacts: [{ input: "[REDACTED]", wa_id: "[REDACTED]" }],
+        messages: body.messages,
+        additional_meta_field: { original: "preserved provider value", token: "[REDACTED]" },
+      },
+    }));
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain(accessToken);
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain(input.to);
+  });
+
+  it.each(methods)("logs original Meta rejection fields and unknown safe fields for %s", async (method) => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: {
+      message: `Original Meta rejection ${accessToken} ${input.text}`, type: "OAuthException",
+      code: 131026, error_subcode: 42, fbtrace_id: "original-meta-trace",
+      error_data: { details: "Original delivery-window detail", future_meta_property: true },
+    } }), { status: 400 }));
+    await expect(send(new WhatsAppService(transport, logger), method))
+      .rejects.toMatchObject({ code: "provider-rejected", providerCode: "131026" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({
+      outcome: "HTTP_REJECTED", httpStatus: 400, responseFormat: "JSON", redactionApplied: true,
+      responseBody: { error: {
+        message: "Original Meta rejection [REDACTED] [REDACTED]", type: "OAuthException",
+        code: 131026, error_subcode: 42, fbtrace_id: "original-meta-trace",
+        error_data: { details: "Original delivery-window detail", future_meta_property: true },
+      } },
+    }));
+    expect(JSON.stringify([...logger.info.mock.calls, ...logger.error.mock.calls]))
+      .not.toMatch(/test-access-token|Hello from Moda/);
+  });
+
+  it("logs malformed 2xx bodies before preserving an uncertain JSON parse failure", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(`not-json ${accessToken}`, { status: 200 })), logger);
+    await expect(service.sendWhatsAppText(input)).rejects.toBeInstanceOf(SyntaxError);
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({
+      httpStatus: 200, outcome: "HTTP_ACCEPTED", responseFormat: "TEXT",
+      responseBody: "not-json [REDACTED]", redactionApplied: true,
+    }));
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it("preserves bounded non-JSON rejection text and redacts actual echoed credentials in every log", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const responseText = `Original Meta gateway failure ${accessToken} ${input.to} ${input.text}`;
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(responseText, {
+      status: 502, headers: { "x-fb-request-id": accessToken },
+    })), logger);
+    await expect(service.sendWhatsAppText(input)).rejects.toMatchObject({ code: "provider-rejected" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({
+      httpStatus: 502, responseBody: "Original Meta gateway failure [REDACTED] [REDACTED] [REDACTED]",
+      redactionApplied: true,
+    }));
+    expect(JSON.stringify([...logger.info.mock.calls, ...logger.error.mock.calls]))
+      .not.toMatch(/test-access-token|15551234567|Hello from Moda/);
+  });
+
+  it("uses Shared response bounds with an explicit truncation flag", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      messages: [{ id: "bounded-receipt" }], original_meta_detail: "x".repeat(5000),
+      extra_items: Array.from({ length: 100 }, (_, index) => `item-${index}`),
+    }), { status: 200 })), logger);
+    await expect(service.sendWhatsAppText(input)).resolves.toEqual({ providerMessageId: "bounded-receipt" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({ truncated: true }));
+    expect(JSON.stringify(logger.info.mock.calls).length).toBeLessThan(6500);
+  });
+
+  it("isolates response logging failures from successful sends", async () => {
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      messages: [{ id: "receipt-with-broken-logger" }],
+    }), { status: 200 })), { info: () => { throw new Error("sink failed"); }, error: vi.fn() });
+    await expect(service.sendWhatsAppText(input)).resolves.toEqual({ providerMessageId: "receipt-with-broken-logger" });
+  });
+
 });
