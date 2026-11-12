@@ -34,8 +34,24 @@ function parseTextBindings(value: unknown, max: number): TextBinding[] {
   return result;
 }
 
-function parseFrozenBindings(raw: unknown): FrozenBindings {
-  if (!obj(raw)) return invalid();
+function parseFrozenBindings(value: unknown, submittedContentHash: string): FrozenBindings {
+  if (!obj(value)) return invalid();
+  let raw: JsonObject = value;
+  // TEXT authoring adds audit metadata after computing the immutable digest.
+  // Validate the exact legacy envelope, then recover only its hashed semantics.
+  if (raw.sourceHash !== undefined || raw.localeContentHash !== undefined) {
+    if (raw.schemaVersion !== 1 || typeof raw.sourceHash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(raw.sourceHash) || typeof raw.localeContentHash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(raw.localeContentHash)) return invalid();
+    if (raw.localeContentHash !== submittedContentHash) {
+      throw new BindingUnavailable("BINDING_FINGERPRINT_MISMATCH");
+    }
+    const semantic = { ...raw };
+    delete semantic.sourceHash;
+    delete semantic.localeContentHash;
+    if (semantic.headerMediaRole === undefined) delete semantic.schemaVersion;
+    raw = semantic;
+  }
   // Admin owns the immutable projection. Keep optional schemaVersion in the
   // digest only when it was actually stored: older TEXT snapshots omit it.
   if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1) return invalid();
@@ -121,7 +137,7 @@ export async function prepareFrozenComponents(input: {
 }): Promise<{ components: readonly PreparedMetaComponent[]; bindingFingerprint: string }> {
   const { registration, variables } = input;
   const approved = strictComponents(registration.componentsSnapshot);
-  const frozen = parseFrozenBindings(registration.parameterBindingsSnapshot);
+  const frozen = parseFrozenBindings(registration.parameterBindingsSnapshot, registration.submittedContentHash);
   const header = approved.find((component) => component.type === "HEADER");
   // Structural mismatches (including legacy headerImage with no frozen role)
   // fail before hashing, without inferring a role from text or image URLs.

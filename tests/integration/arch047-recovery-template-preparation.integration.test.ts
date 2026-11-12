@@ -1,3 +1,4 @@
+import { readyEvaluation } from "../unit/fixtures/initial-outreach-evaluation.js";
 import "dotenv/config";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
@@ -80,22 +81,28 @@ integration("ARCH-047-BACKGROUND-001 PostgreSQL authoring/provenance/tenant look
       const logger = { warn: vi.fn(), error: vi.fn() };
       const service = new RecoveryTemplatePreparer(repo, async () => waba, async () => null,
         [], () => now, logger);
+      const lineItems = [
+        { title: "Shoes", quantity: 2 },
+        { title: "Water bottle", quantity: 1 },
+      ];
       const request = { shopId, senderWabaId: waba, stage: "INITIAL" as const,
         offerPresentation: "NO_OFFER" as const, promotionTarget: "CHECKOUT" as const,
         conversationLanguageTag: "en-GB",
         merchantLanguageTag: null, customerFirstName: "Alex",
           shopName: { shopId, value: `${suffix}.arch047.example.test` },
-        checkoutItems: { shopId, lineItems: [
-          { title: "Shoes", variantTitle: "Blue / 9", quantity: 2 },
-          { title: "Water bottle", quantity: 1 },
-        ] } };
+        checkout: { shopId, url: `https://${suffix}.arch047.example.test/checkout/saved`,
+          approvedHosts: [`${suffix}.arch047.example.test`],
+          lastExternalActivityAt: new Date(now.getTime() - 15_000),
+          expiresAt: new Date(now.getTime() + 60_000), checkoutRecoveryLifetimeDays: 21 },
+        outreachEvaluation: readyEvaluation(shopId, "attempt-1", lineItems),
+        checkoutItems: { shopId, lineItems } };
       expect(await service.prepare(request)).toMatchObject({
         outcome: "prepared", shopId, definitionId, registrationId,
         initialCheckoutItemsBodyPosition: 4,
         canonicalLanguageTag: "en", template: { components: [{
           type: "body", parameters: [{ text: "Alex" },
             { text: "Tenant Brand" }, { text: "Tenant Brand" },
-            { text: "2 × Shoes (Blue / 9) and 1 × Water bottle" }],
+            { text: "2 × Shoes and 1 × Water bottle" }],
         }] },
       });
       expect(await service.prepare({ ...request, checkoutItems: {

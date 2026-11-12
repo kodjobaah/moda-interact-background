@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../src/services/meta-template-management/contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import type { FinalTemplateIdentity } from
@@ -62,7 +63,7 @@ export async function seedApprovedInitialWooTemplateRegistration(
     category: "MARKETING", componentsSnapshot: components,
     parameterBindingsSnapshot: bindings, submittedContentHash: contentHash,
     providerTemplateId: providerId, submissionState: "SUBMITTED", providerStatus: "APPROVED",
-    lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
+    lastObservedContentHash: observedContentHash(components as Parameters<typeof observedContentHash>[0]), lastObservedCategory: "MARKETING",
     lastReconciledAt: new Date(Date.now() - 30_000),
   } });
   const variant = await db.whatsAppTemplateVariant.create({ data: {
