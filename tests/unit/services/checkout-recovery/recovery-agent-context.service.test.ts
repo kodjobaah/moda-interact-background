@@ -212,3 +212,16 @@ describe("RecoveryAgentContextService", () => {
     })).rejects.toThrow("Conversation has no shop ownership");
   });
 });
+
+it("keeps recovery agent metadata on the current recipient pinned to the sent initial outreach", async () => {
+  const durable = { ...recovery, conversation, customer: { ...recovery.customer, phone: null,
+    shopId: recovery.shopId, _count: { phones: 1 }, phones: [{
+      phone: "+447400123456", whatsappCanonicalPhone: "447400123456", whatsappNoContact: false,
+    }],
+  }, outreachAttempts: [{ recipient: "447400123456", sentAt: new Date(), outboundMessage: {
+    conversationId: conversation.id, providerMessageId: "outbound-1", sentAt: new Date(), direction: "OUTBOUND",
+  } }] };
+  const harness = createHarness({ durableRecovery: durable as never });
+  const context = await harness.service.getAgentContext({ checkoutRecoveryId: recovery.id, conversationId: conversation.id });
+  expect(context.customer?.phone).toBe("+447400123456");
+});

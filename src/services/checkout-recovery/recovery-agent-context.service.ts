@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { RecoveryAgentContext } from "../../agents/types.js";
 import type { conversationService } from "../conversation.service.js";
 import { loadCommerceHistory } from "../../commerce/history.js";
+import { recoveryRecipientAttemptsSelect, recoveryRecipientCustomerSelect, resolveRecoveryRecipient } from "../recovery-recipient-ownership.js";
 
 export interface RecoveryAgentContextInput {
   checkoutRecoveryId: string;
@@ -30,12 +31,13 @@ export class RecoveryAgentContextService {
       select: {
         id: true,
         shopId: true,
-        shop: { select: { domain: true } },
+        shop: { select: { domain: true, defaultCountryCode: true } },
         status: true,
         checkoutToken: true,
         completedAt: true,
         totalPrice: true,
-        customer: { select: { id: true, phone: true, firstName: true } },
+        customer: { select: recoveryRecipientCustomerSelect },
+        outreachAttempts: recoveryRecipientAttemptsSelect,
         conversation: {
           select: {
             id: true,
@@ -78,7 +80,7 @@ export class RecoveryAgentContextService {
       customer: recovery.customer
         ? {
             id: recovery.customer.id,
-            phone: recovery.customer.phone,
+            phone: resolveRecoveryRecipient(recovery, conversationId),
             firstName: recovery.customer.firstName,
           }
         : null,
@@ -115,12 +117,13 @@ export class RecoveryAgentContextService {
       select: {
         id: true,
         shopId: true,
-        shop: { select: { domain: true } },
+        shop: { select: { domain: true, defaultCountryCode: true } },
         status: true,
         checkoutToken: true,
         completedAt: true,
         totalPrice: true,
-        customer: { select: { id: true, phone: true, firstName: true } },
+        customer: { select: recoveryRecipientCustomerSelect },
+        outreachAttempts: recoveryRecipientAttemptsSelect,
       },
     });
 
@@ -146,7 +149,7 @@ export class RecoveryAgentContextService {
       customer: recovery.customer
         ? {
             id: recovery.customer.id,
-            phone: recovery.customer.phone,
+            phone: resolveRecoveryRecipient(recovery, conversationId),
             firstName: recovery.customer.firstName,
           }
         : null,

@@ -35,6 +35,7 @@ import {
 import { backgroundRuntimeConfigService } from "../runtime/background-runtime-config.js";
 import { bindWorkerConcurrency } from "../runtime/queue-concurrency-controller.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+import { recoveryRecipientAttemptsSelect, recoveryRecipientCustomerSelect, resolveRecoveryRecipient } from "../services/recovery-recipient-ownership.js";
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -229,6 +230,7 @@ export async function loadConversationTurn(
       id: true,
       type: true,
       shopId: true,
+      customerId: true,
       customer: { select: { phone: true, id: true, firstName: true } },
       shop: { select: { domain: true, status: true } },
       checkoutRecoveryId: true,
@@ -237,8 +239,9 @@ export async function loadConversationTurn(
           id: true,
           shopId: true,
           status: true,
-          shop: { select: { domain: true, status: true } },
-          customer: { select: { phone: true, id: true, firstName: true } },
+          shop: { select: { domain: true, status: true, defaultCountryCode: true } },
+          customer: { select: recoveryRecipientCustomerSelect },
+          outreachAttempts: recoveryRecipientAttemptsSelect,
         },
       },
       messages: {
@@ -255,8 +258,10 @@ export async function loadConversationTurn(
     },
   });
   const shopId = conversation.checkoutRecovery?.shopId;
-  const to =
-    conversation.checkoutRecovery?.customer?.phone;
+  const owner = conversation.checkoutRecovery;
+  const to = owner && (!conversation.shopId || conversation.shopId === owner.shopId) &&
+    (!conversation.customerId || conversation.customerId === owner.customer?.id)
+    ? resolveRecoveryRecipient(owner, conversationId) : null;
   const shopStatus =
     conversation.checkoutRecovery?.shop?.status;
   const recoveryStatus = conversation.checkoutRecovery?.status;

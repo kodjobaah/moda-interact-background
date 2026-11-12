@@ -29,7 +29,7 @@ const mocks = vi.hoisted(() => ({
     getTurnState: vi.fn(),
   },
   routing: { resolveInboundMessage: vi.fn(), isCurrentActiveRoute: vi.fn() },
-  recovery: { recordExternalActivity: vi.fn() },
+  recovery: { recordExternalActivity: vi.fn(), getAgentContext: vi.fn() },
   processor: { enqueue: vi.fn() },
   database: { conversation: { findUniqueOrThrow: vi.fn() } },
   eligibility: { isShopExecutionActive: vi.fn() },
@@ -624,4 +624,30 @@ describe("ARCH-047 BG003 strict Shared-v2 template-status dispatch", () => {
       formatMetaTemplateStatusJobId(uuid))).rejects.toBe(error);
     expect(mocks.logger.error).toHaveBeenCalledWith("whatsapp.template_status.failed", expect.anything());
   });
+});
+
+
+it("loads a recovery turn with its current, outreach-pinned CustomerPhone when the legacy phone is null", async () => {
+  mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
+  mocks.recovery.getAgentContext.mockResolvedValue({ conversation: { messages: [] } });
+  const owned = {
+    id: "recovery-1", shopId: "shop-1", status: "ENGAGED",
+    shop: { domain: "example.myshopify.com", status: "ACTIVE", defaultCountryCode: "US" },
+    customer: { id: "customer-1", shopId: "shop-1", phone: null, firstName: null, _count: { phones: 1 }, phones: [{
+      phone: "+447400123456", whatsappCanonicalPhone: "447400123456", whatsappNoContact: false,
+    }] },
+    outreachAttempts: [{ recipient: "447400123456", sentAt: new Date(), outboundMessage: {
+      providerMessageId: "outbound-1", sentAt: new Date(), direction: "OUTBOUND", conversationId: "conversation-1",
+    } }],
+  };
+  mocks.database.conversation.findUniqueOrThrow.mockResolvedValue({
+    id: "conversation-1", type: "RECOVERY", shopId: null, checkoutRecoveryId: owned.id,
+    checkoutRecovery: owned, messages: [],
+  });
+  await expect(loadConversationTurn("conversation-1", new Date())).resolves.toMatchObject({
+    to: "+447400123456", customerPhone: "+447400123456", shopId: "shop-1",
+  });
+  owned.customer.phones[0]!.phone = "+447400123457";
+  owned.customer.phones[0]!.whatsappCanonicalPhone = "447400123457";
+  await expect(loadConversationTurn("conversation-1", new Date())).rejects.toThrow("no outbound ownership");
 });
