@@ -22,6 +22,10 @@ const compiled: PreparedWrapper = {
 
 /** Every fixture is created through actual Prisma models and schema foreign keys. */
 async function seed(db: PrismaClient) {
+  // The wrapper uses the persisted recovery lifetime; fixtures explicitly bound
+  // it so active/stale URL assertions do not depend on a missing runtime row.
+  await db.backgroundRuntimeConfig.upsert({where: {id: "default"},
+    update: {checkoutRecoveryLifetimeDays: 7}, create: {id: "default", checkoutRecoveryLifetimeDays: 7}});
   const suffix = randomUUID();
   const shopId = randomUUID();
   const adminId = randomUUID();
@@ -77,6 +81,8 @@ enabled("ARCH-047 BG005 PostgreSQL wrapper/tenant integration", () => {
         localeId: fixture.localeId, audience: "SHARED", slotEditVersion: 1 });
       if (first.kind !== "rendered") throw new Error("Expected published wrapper");
       expect(first.body).toContain(fixture.expectedUrl);
+      expect(first.body.endsWith("\n\nYour checkout: " + fixture.expectedUrl)).toBe(true);
+      expect(first.body.split(fixture.expectedUrl)).toHaveLength(2);
       expect(first.body).toContain("Trusted Shop");
       const secondDefinitionId = `wtdef_${digest(`${fixture.definitionId}:second`)}`;
       await db.whatsAppTemplateDefinition.create({ data: {

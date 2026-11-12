@@ -25,12 +25,14 @@ export type WrappedResult = Readonly<{
   applicationKey: string;
   responseDigest: string;
   replayed: boolean;
+  /** Trusted runtime augmentation, bound into application provenance. */
+  recoveryCheckoutUrl?: string;
   deliveryPlan?: ConversationDeliveryPlan;
   presentedPairs?: readonly { productId: string; variantId: string | null }[];
 }>;
 
 export type WrapperRenderResult = WrappedResult
-  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; deliveryPlan?: ConversationDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
+  | Readonly<{ kind: "no-wrapper"; body: string; reason: "NOT_CONFIGURED"; recoveryCheckoutUrl?: string; deliveryPlan?: ConversationDeliveryPlan; presentedPairs?: readonly { productId: string; variantId: string | null }[] }>
   | Readonly<{ kind: "unavailable" | "rejected"; reason: WrapperRefusal }>;
 
 export type RenderConversationResponseInput = Readonly<{
