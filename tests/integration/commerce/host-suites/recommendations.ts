@@ -16,7 +16,24 @@ export function registerRecommendationHostTests() {
       expect(f.observations.filter((call) => call.method === "tools/call")).toHaveLength(0);
     });
 
-    it("preserves agent prose with exact freshly verified product presentation", async () => {
+    it.each([
+      { label: "storefront link", refresh: {}, accepted: true },
+      { label: "catalogue without storefront link", refresh: { url: null }, accepted: true },
+      { label: "null URL cannot add to basket", refresh: { url: null }, scopes: ["ADD_TO_BASKET"], accepted: false },
+      { label: "catalogue cache cannot authorize basket mutation", refresh: { url: null }, scopes: ["PRODUCT_ONLY", "ADD_TO_BASKET"], accepted: true },
+      { label: "null URL cannot replace basket line", refresh: { url: null }, scopes: ["REPLACE_BASKET_LINE"], accepted: false },
+      { label: "missing product", refresh: {}, missing: true, accepted: false },
+      { label: "unsafe title", refresh: { title: "Shirt\u0000injected" }, accepted: false },
+      { label: "unavailable", refresh: { available: false }, accepted: false },
+      { label: "cross-store URL", refresh: { url: "https://other.myshopify.com/products/shirt" }, accepted: false },
+      { label: "unsafe URL", refresh: { url: "javascript:alert(1)" }, accepted: false },
+      { label: "stale product identity", refresh: { productId: "gid://shopify/Product/999" }, accepted: false },
+      { label: "stale variant identity", refresh: { variantId: "gid://shopify/ProductVariant/999" }, accepted: false },
+      { label: "malformed price", refresh: { unitPrice: "invalid" }, accepted: false },
+    ])("preserves agent prose with exact freshly verified product presentation ($label)", async ({ refresh, accepted, missing = false, scopes = ["PRODUCT_ONLY"] }) => {
+      if (scopes.includes("REPLACE_BASKET_LINE")) {
+        f.state.checkoutRecovery.lineItems = [{ productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", title: "Shirt", quantity: 1, price: "24.00" }];
+      }
       const descriptor = f.active.capabilities[0]!.toolDescriptor;
       descriptor.name = "commerce_get_product";
       descriptor.description = "Read a current product and variant.";
@@ -49,21 +66,40 @@ export function registerRecommendationHostTests() {
         unitPrice: "24.00", currency: "GBP", productType: "Shirt", vendor: "Fixture",
         categories: [], categoryIds: [], collectionIds: [], saleEvidence: null, observedAt: "2026-11-05T12:00:00Z",
       } } } };
+      const initial = structuredClone(f.toolResults.commerce_get_product) as any;
+      const fresh = structuredClone(initial);
+      Object.assign(fresh.data.product, refresh);
+      if (missing) fresh.data.product = null;
+      f.toolResults = { commerce_get_product: [initial, fresh] };
       let step = 0;
-      const result = await f.run(async (request) => {
+      const execution = f.run(async (request) => {
         step += 1;
         if (step === 1) {
           expect(request.tools.map((tool) => tool.name)).toContain("commerce_get_product");
           return { calls: [{ name: "commerce_get_product", arguments: { productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101" } }], outputTokens: 10 };
         }
         return f.final({ answerKind: "ANSWER", referralReason: null, replyText: "The blue linen shirt is available for you.",
-          details: { productRecommendationVersion: "1", productRecommendations: [{ scope: "PRODUCT_ONLY",
-            basketLineId: null, productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", quantity: 1,
-            promotionKind: "NONE", offerIds: [] }] } });
+          details: { productRecommendationVersion: "1", productRecommendations: scopes.map(scope => ({ scope,
+            basketLineId: scope === "REPLACE_BASKET_LINE" ? "line-0001" : null, productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", quantity: 1,
+            promotionKind: "NONE", offerIds: [] })) } });
       });
+      if (!accepted) {
+        await expect(execution).rejects.toMatchObject({ retryable: false });
+        expect(f.observations.filter(call => call.method === "tools/call" && call.params.name === "commerce_get_product")).toHaveLength(2);
+        return;
+      }
+      const result = await execution;
+      const url = fresh.data.product.url;
       expect(result.replyText).toBe("The blue linen shirt is available for you.");
       expect(result.commercePresentation?.verified.products).toMatchObject([{title:"Blue linen shirt"}]);
       expect(result.commercePresentation?.verifiedProducts?.products).toMatchObject([{productId:"gid://shopify/Product/101",variantId:"gid://shopify/ProductVariant/101"}]);
+      const composed = composeCommerceWhatsAppPreview({ envelope: result.commercePresentation!.envelope, presentation: result.commercePresentation!.verified });
+      expect(composed.kind).toBe("ready");
+      if (composed.kind !== "ready") throw new Error("Expected verified catalogue presentation");
+      expect(composed.body).toContain("Blue linen shirt");
+      expect(result.commercePresentation!.verified.products).toHaveLength(1);
+      expect(result.commercePresentation!.verified.products[0]).toMatchObject({ scope: "PRODUCT_ONLY", url });
+      if (url === null) expect(composed.body).not.toContain("/products/");
       expect(result).not.toHaveProperty("hostComposedReplyCandidates");
       expect(f.observations.filter((call) => call.method === "tools/call" && call.params.name === "commerce_get_product")).toHaveLength(2);
       expect(f.observations.filter((call) => call.method === "tools/call" && String(call.params.name).includes("discount"))).toHaveLength(0);

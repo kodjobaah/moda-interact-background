@@ -27,6 +27,7 @@ import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { Prisma } from "@prisma/client";
 const db = vi.hoisted(() => ({
   conversation: { findUnique: vi.fn() },
+  checkoutRecovery: { findFirst: vi.fn() },
   $transaction: vi.fn(),
   $queryRaw: vi.fn(),
   commerceConversationProductContext: { findFirst: vi.fn() },
@@ -287,6 +288,7 @@ beforeEach(() => {
     },
   };
   db.conversation.findUnique.mockImplementation(async () => state);
+  db.checkoutRecovery.findFirst.mockImplementation(async () => state.checkoutRecovery);
   db.commerceConversationProductContext.findFirst.mockResolvedValue(null);
   db.$queryRaw.mockResolvedValue([{ bytes: 1024 }]);
   db.commerceConversationGrant.findUnique.mockImplementation(

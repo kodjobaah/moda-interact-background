@@ -756,11 +756,7 @@ async function execute(
           ? selection?.productRecommendations ?? [] : [];
         type ProductProposal = NonNullable<typeof proposed>[number];
         type Product = NonNullable<ReturnType<typeof CommerceToolOutputs.commerce_get_product.parse>["product"]>;
-        const retained: Array<{ proposal: ProductProposal; product: Product; renderFacts: {
-          title: string; url: string; quantity: number; scope: ProductProposal["scope"];
-          currentPrice: string | null; currency: string | null; regularPrice?: string | null;
-          offerTerms?: NonNullable<RenderRecommendationProduct["offerTerms"]>;
-        } }> = [];
+        const retained: Array<{ proposal: ProductProposal; product: Product; renderFacts: RenderRecommendationProduct }> = [];
         const initialProductObservations = [
           ...recommendationObservations.all("commerce_get_product"),
           ...recommendationObservations.all("commerce_search_products"),
@@ -885,7 +881,7 @@ async function execute(
           recommendationObservations.record({ toolName: "commerce_get_product", descriptorIdentity: canonicalJson(
             descriptors.find((descriptor) => descriptor.name === "commerce_get_product")), arguments: args, output: parsed.data });
           const product = parsed.data.product;
-          const safe = product?.available === true && product.url !== null && productBelongsToDomain(product, recovery.shop.domain)
+          const safe = product?.available === true && productBelongsToDomain(product, recovery.shop.domain)
             // Product titles are untrusted catalogue text; control characters are not rendered.
             // eslint-disable-next-line no-control-regex
             && !/[\u0000-\u001f\u007f]/.test(product.title) ? product : null;
@@ -895,11 +891,21 @@ async function execute(
         for (const proposal of budgeted) {
           const product = await refreshProduct(proposal.productId, proposal.variantId, true);
           if (!product) { compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'REJECTED', reason: 'PRODUCT_REFRESH_NOT_VERIFIED' }); continue; }
+          // Missing storefront links permit catalogue discovery only, never basket actions.
+          const facts = { title: product.title, quantity: proposal.quantity,
+            currentPrice: product.unitPrice, currency: product.currency };
+          let renderFacts: RenderRecommendationProduct;
+          if (proposal.scope === "PRODUCT_ONLY") {
+            renderFacts = { ...facts, scope: proposal.scope, url: product.url };
+          } else {
+            if (product.url === null) {
+              compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'REJECTED', reason: 'PRODUCT_REFRESH_NOT_VERIFIED' });
+              continue;
+            }
+            renderFacts = { ...facts, scope: proposal.scope, url: product.url };
+          }
           compositionDiagnostic({ stage: 'PRODUCT_REFRESH', productId: proposal.productId, variantId: proposal.variantId, outcome: 'ACCEPTED' });
-          retained.push({ proposal, product, renderFacts: {
-            title: product.title, url: product.url!, quantity: proposal.quantity, scope: proposal.scope,
-            currentPrice: product.unitPrice, currency: product.currency,
-          } });
+          retained.push({ proposal, product, renderFacts });
         }
         if (currentBasket && retained.some(({ proposal }) => proposal.scope !== "PRODUCT_ONLY")) {
           const basketLines = [...currentBasket.lines].sort((a, b) => a.lineKey.localeCompare(b.lineKey));
