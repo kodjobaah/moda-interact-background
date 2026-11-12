@@ -257,11 +257,12 @@ export function createPendingRecoveryCandidateWorker(
   return worker;
 }
 
-function isSuppressionResumeEnqueueFailure(failedReason: string): boolean {
+function isSuppressionResumeEnqueueFailure(failedReason: string | undefined): boolean {
   return isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_RESUME_ENQUEUE_FAILED) ||
     isRetryMarker(failedReason, RECIPIENT_SUPPRESSION_ADMISSION_RETRY_REQUIRED);
 }
 
-function isRetryMarker(failedReason: string, marker: string): boolean {
-  return failedReason === marker || failedReason.startsWith(`${marker}:`);
+function isRetryMarker(failedReason: string | undefined, marker: string): boolean {
+  return typeof failedReason === "string" &&
+    (failedReason === marker || failedReason.startsWith(`${marker}:`));
 }
