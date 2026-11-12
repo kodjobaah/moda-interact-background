@@ -1,4 +1,4 @@
-import { createLogger, sanitizeLogFields, REDACTED, TRUNCATED, MAX_DEPTH_REACHED, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { createLogger, sanitizeLogFields, LOG_VALUE_LIMITS, REDACTED, TRUNCATED, MAX_DEPTH_REACHED, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import type {
@@ -496,36 +496,46 @@ function readProviderMessageId(body: unknown): string | undefined {
 }
 
 /** Semantic Meta response projection; generic recursion limits are Shared-owned. */
-function safeMetaResponse(value: unknown, privateValues: string[]): {
+function safeMetaResponse(value: unknown, privateValues: string[], depth = 0): {
   value: unknown; redactionApplied: boolean; truncated: boolean;
 } {
+  if (depth > LOG_VALUE_LIMITS.maxDepth) return { value: MAX_DEPTH_REACHED, redactionApplied: false, truncated: true };
   let redactionApplied = value === REDACTED;
   let truncated = value === TRUNCATED || value === MAX_DEPTH_REACHED;
   if (typeof value === "string") {
     let redacted = value;
-    for (const privateValue of privateValues.filter(Boolean)) {
-      if (redacted.includes(privateValue)) {
+    const [credential, ...requestValues] = privateValues;
+    if (credential && redacted.includes(credential)) {
+      redacted = redacted.replaceAll(credential, REDACTED);
+      redactionApplied = true;
+    }
+    for (const privateValue of requestValues.filter(Boolean)) {
+      // Short template values (for example quantity "1") are not unique private
+      // spans. Replacing them inside opaque Meta IDs would destroy correlation.
+      if (redacted === privateValue || (privateValue.length >= 8 && redacted.includes(privateValue))) {
         redacted = redacted.replaceAll(privateValue, REDACTED);
         redactionApplied = true;
       }
     }
-    const safe = safeProviderText(redacted, 4096);
+    const safe = safeProviderText(redacted, LOG_VALUE_LIMITS.maxStringLength);
     return { value: safe.value, redactionApplied: redactionApplied || safe.redactionApplied,
       truncated: truncated || safe.truncated };
   }
   if (Array.isArray(value)) {
-    const result = value.map((item) => {
-      const safe = safeMetaResponse(item, privateValues);
+    const result = value.slice(0, LOG_VALUE_LIMITS.maxArrayItems).map((item) => {
+      const safe = safeMetaResponse(item, privateValues, depth + 1);
       redactionApplied ||= safe.redactionApplied;
       truncated ||= safe.truncated;
       return safe.value;
     });
+    if (value.length > result.length) truncated = true;
     return { value: result, redactionApplied, truncated };
   }
   if (typeof value !== "object" || value === null) return { value, redactionApplied, truncated };
   const result: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) {
-    const safeKey = safeMetaResponse(key, privateValues);
+  const entries = Object.entries(value);
+  for (const [key, item] of entries.slice(0, LOG_VALUE_LIMITS.maxObjectKeys)) {
+    const safeKey = safeMetaResponse(key, privateValues.slice(0, 1), depth + 1);
     redactionApplied ||= safeKey.redactionApplied;
     truncated ||= safeKey.truncated;
     if (/token|secret|password|authorization|cookie|email|phone|address|customer|recipient|url|header|prompt|coupon/i.test(key) ||
@@ -539,11 +549,12 @@ function safeMetaResponse(value: unknown, privateValues: string[]): {
       redactionApplied = true;
       continue;
     }
-    const safe = safeMetaResponse(item, privateValues);
+    const safe = safeMetaResponse(item, privateValues, depth + 1);
     result[String(safeKey.value)] = safe.value;
     redactionApplied ||= safe.redactionApplied;
     truncated ||= safe.truncated;
   }
+  if (entries.length > LOG_VALUE_LIMITS.maxObjectKeys) truncated = true;
   return { value: result, redactionApplied, truncated };
 }
 

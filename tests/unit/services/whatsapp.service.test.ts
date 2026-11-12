@@ -498,4 +498,30 @@ describe("WhatsAppService API base URL", () => {
     await expect(service.sendWhatsAppText(input)).resolves.toEqual({ providerMessageId: "receipt-with-broken-logger" });
   });
 
+  it("preserves Meta message and trace IDs when a template parameter is a short value", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const body = { messages: [{ id: "wamid.A1B1C1==" }], fbtrace_id: "trace-1-original", quantity: "1" };
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), {
+      status: 200, headers: { "x-fb-request-id": "request-1-original" },
+    })), logger);
+    await expect(service.sendWhatsAppTemplate({ to: input.to, templateName: "recovery", languageCode: "en", bodyParameters: ["1"] }))
+      .resolves.toEqual({ providerMessageId: "wamid.A1B1C1==" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({
+      providerMessageId: body.messages[0]!.id, providerRequestId: "request-1-original",
+      responseBody: { ...body, quantity: "[REDACTED]" },
+    }));
+  });
+
+  it("bounds very deep Meta bodies before semantic filtering without losing the event", async () => {
+    const logger = { info: vi.fn(), error: vi.fn() };
+    let nested: unknown = { access_token: accessToken };
+    for (let depth = 0; depth < 1000; depth++) nested = { nested };
+    const service = new WhatsAppService(vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      messages: [{ id: "deep-receipt" }], original_meta_detail: nested,
+    }), { status: 200 })), logger);
+    await expect(service.sendWhatsAppText(input)).resolves.toEqual({ providerMessageId: "deep-receipt" });
+    expect(logger.info).toHaveBeenCalledWith("whatsapp.meta.send.response", expect.objectContaining({ truncated: true }));
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain(accessToken);
+  });
+
 });
