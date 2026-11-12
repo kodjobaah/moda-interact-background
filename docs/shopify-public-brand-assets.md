@@ -1,0 +1,9 @@
+# Stable public Shopify brand assets
+
+The recovery worker reads public Storefront API2026-07 brand logo/squareLogo/coverImage metadata from the exact installed shop's stored myshopify domain. No Admin query, token, cookie, read_brand grant, Storefront credential or channel change is used. Redirects refuse; successful responses must declare the pinned API version and satisfy strict bounded image metadata validation. Provenance references are explicitly shopify-storefront hashes of actual provider MediaImage identity.
+
+The asset scheduler is independent from basic shop-name refresh. It owns shopifySourceSync in existing ShopBrand JSON; shopifyNameSync and brandName remain unchanged. Five-minute keyset sweeps inspect at most500 shops and claim at most20 reads, concurrency2, with a durable two-minute lease and24-hour successful cadence. Transient retries back off1m/5m/30m/2h/24h, respecting bounded Retry-After. Active Shopify tenant/domain/installation is locked and revalidated at claim and completion; network work stays outside transactions.
+
+CHANNEL_LOCKED (including password-protected development shops), provider failures, partial payloads and unsupported versions are unavailability, never proof assets are absent. Existing valid assets remain intact. Explicit null roles are applied only from a complete validated successful same-domain response. Source observations feed the existing generation/fingerprint, safe-fetch/transform/R2 and verified READY pipeline; this reader never writes READY directly and does not send messages.
+
+Official stable schema and the documented Hydrogen reference shop prove tokenless public acquisition works. The selected development store returned CHANNEL_LOCKED; that operational limitation remains real until an authorized supported source observation becomes available. Text fallback is not evidence that a logo was acquired or delivered. Production bootstrap, message logo selection and delivery are outside this task.
