@@ -115,7 +115,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     ) => Promise<OutboundAdmissionResult>;
     sendPreparedConversation?: (
       input: Admitted & {
-        deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan;
+        brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
@@ -351,7 +351,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
@@ -677,7 +677,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         to: loaded.to,
         text: composed.text,
         ...(composed.recoveryShopHeader ? {recoveryShopHeader: composed.recoveryShopHeader} : {}),
-        ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
+        ...(composed.brandMediaPolicy ? {brandMediaPolicy:composed.brandMediaPolicy} : {}), ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
       });

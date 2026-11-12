@@ -1,8 +1,9 @@
+import type { BrandMediaPolicyRef } from "../conversation-brand-media.js";
 import { wrapperApplicationKey } from "./application-key.js";
 import { readRecoveryShopHeader, withRecoveryShopHeader, hasPreparedRecoveryShopHeader } from "./recovery-shop-header.js";
 import type { RecoveryShopHeaderReceipt } from "./contracts.js";
 import { validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter, withLegacyRecoveryCheckoutFooter, hasPreparedRecoveryCheckoutFooter } from "./recovery-checkout-footer.js";
-import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import type { ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type {
   RenderConversationResponseInput,
   CommercePresentationInput,
@@ -22,7 +23,7 @@ export type AiOutboundComposition =
       kind: "ready";
       text: string;
       recoveryShopHeader?: RecoveryShopHeaderReceipt;
-      deliveryPlan?: ConversationDeliveryPlan;
+      brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];
       wrapper: null | Readonly<{
         applicationKey: string;
@@ -71,7 +72,7 @@ export async function composeAiOutbound(
       kind: "ready",
       text: result.body,
       ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}),
-      ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
+      ...(result.brandMediaPolicy ? {brandMediaPolicy:result.brandMediaPolicy} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
       ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),
       wrapper: {
         applicationKey: result.applicationKey,
@@ -99,7 +100,7 @@ export async function composeAiOutbound(
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
     return { kind: "ready", text: result.body,
-      ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
+      ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}), ...(result.brandMediaPolicy ? {brandMediaPolicy:result.brandMediaPolicy} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
   }
   return { kind: "refused", reason: result.reason };
 }

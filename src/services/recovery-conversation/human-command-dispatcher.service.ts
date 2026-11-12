@@ -1,3 +1,6 @@
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import type { ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import { frozenBrandPlanCurrent } from "../conversation-brand-media.js";
 import { merchantFollowUpOfferService } from "../recovery-offers/merchant-follow-up-offer.service.js";
 import type { CurrentOutreachOfferAdmissionToken } from "../recovery-offers/current-outreach-offer-revalidation.service.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -46,11 +49,12 @@ export type HumanDispatcherDependencies = {
   reconciliation: HumanSendReconciliationService;
   billing: RecoveryFollowUpBillingService;
   followUpCancellations: FollowUpClaimCancellation;
-  provider: Pick<typeof whatsAppService, "sendWhatsAppText" | "sendWhatsAppTemplate">;
+  provider: Pick<typeof whatsAppService, "sendWhatsAppText" | "sendWhatsAppTemplate"> & Partial<Pick<typeof whatsAppService, "sendWhatsAppImage">>;
   execution: Pick<typeof shopExecutionEligibilityService, "evaluate">;
   now: () => Date;
   moderation: ModerationAssessmentService;
   preparation: Pick<HumanPreparedCommandService, "freeze">;
+  mediaCurrent?: typeof frozenBrandPlanCurrent;
   /** Optional for existing injected tests; production validates sender before any permit. */
   senderPreflight?: () => Promise<void>;
   /** Optional injected incident reporter; production always supplies it. */
@@ -243,6 +247,7 @@ export class HumanCommandDispatcherService {
     // R0: freeze full customer-visible HUMAN_TEXT under the current SQL lease.
     // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
     let frozenBody: string | undefined;
+    let frozenPlan: ConversationMediaDeliveryPlan | undefined;
     if (command.kind === "HUMAN_TEXT") {
       const frozen = await this.deps.preparation.freeze(command, leaseToken);
       if (frozen.kind !== "frozen") {
@@ -253,6 +258,7 @@ export class HumanCommandDispatcherService {
         return;
       }
       frozenBody = frozen.body;
+      frozenPlan = frozen.evidence?.mediaPreparation?.plan;
     }
 
     // The command's persisted content, NOT UI text, is moderated before any
@@ -388,11 +394,16 @@ export class HumanCommandDispatcherService {
     }
     // Final provider admission commits before Meta request. No HTTP call or
     // Redis admission is made inside its transaction.
+    if (frozenPlan?.kind === "BRAND_IMAGE" && !this.deps.provider.sendWhatsAppImage) { await this.rejectTerminal(commandId, leaseToken, "brand_media_unavailable"); return; }
+    if (frozenPlan && !(await (this.deps.mediaCurrent ?? frozenBrandPlanCurrent)(frozenPlan))) {
+      await this.rejectTerminal(commandId, leaseToken, "brand_media_stale"); return;
+    }
     const permit = await this.deps.fence.admitFinalSend({
       senderType: "HUMAN", conversationId: command.conversationId,
       shopId: command.shopId, recoveryId: context.recoveryId,
       expectedControlRevision: command.expectedControlRevision,
       commandId, leaseToken, recipient: command.recipientSnapshot, now: this.deps.now(),
+      ...(frozenPlan ? {deliveryPlan: frozenPlan, deliveryKind: frozenPlan.kind === "TEXT" ? "TEXT" as const : "IMAGE" as const, expectedContent: frozenBody!} : {}),
       ...(proactive ? { proactive } : {}),
     });
     if (permit.kind !== "admitted") {
@@ -407,6 +418,7 @@ export class HumanCommandDispatcherService {
     // If the permit is corrupt, record UNKNOWN without attempting Meta.
     if (command.kind === "HUMAN_TEXT" && (!permit.messageContent ||
         permit.messageContent !== frozenBody ||
+        canonicalJson(permit.deliveryPlan ?? null) !== canonicalJson(frozenPlan ?? null) ||
         createHash("sha256").update(permit.messageContent, "utf8").digest("hex") !==
           createHash("sha256").update(effectiveText, "utf8").digest("hex"))) {
       logger.error("arch047.human_dispatcher.admitted_content_mismatch", { commandId });
@@ -417,7 +429,7 @@ export class HumanCommandDispatcherService {
     // crashes before receiving an HTTP reply. Reconciliation owns UNKNOWN.
     try {
       const response = command.kind === "HUMAN_TEXT"
-        ? await this.deps.provider.sendWhatsAppText({
+        ? permit.deliveryPlan?.kind === "BRAND_IMAGE" ? await this.deps.provider.sendWhatsAppImage!({to: command.recipientSnapshot, link: permit.deliveryPlan.image.publicUrl, caption: permit.messageContent!}) : await this.deps.provider.sendWhatsAppText({
             to: command.recipientSnapshot, text: permit.messageContent!,
           })
         : await this.deps.provider.sendWhatsAppTemplate({

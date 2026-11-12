@@ -114,7 +114,7 @@ export function createBackgroundPlatformConfigurationService(input: {
         if (value.commandHmacKey !== undefined) parseCommerceConnectionCommandHmacKey(value.commandHmacKey, ring);
       } catch { throw new PlatformConfigurationFailure("INVALID", key); }
     }
-    return Object.freeze({ key, version: row.version, value: Object.freeze(result) });
+    return Object.freeze({ key, version: row.version, ...(row.id ? {rowId: row.id} : {}), value: Object.freeze(result) });
   };
   const readBundle = async <const K extends BackgroundReadableKey>(keys: readonly K[]): Promise<Readonly<{ [P in K]: ConfigurationSnapshot<P> }>> => {
     // Untrusted runtime casts may contain arbitrary strings; never place them in logs.

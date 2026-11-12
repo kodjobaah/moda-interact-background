@@ -136,3 +136,16 @@ describe("ARCH-049-BACKGROUND-004 tenant-scoped READY derivation", () => {
     expect(repo.readForShop).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ARCH073 conversation role policy',()=>{
+ it('chooses LOGO before SQUARE_LOGO, falls back only for new preparation, and never chooses COVER_IMAGE',async()=>{
+  let whatsAppMedia={schemaVersion:1,roles:{...readyDocument('shop-1','LOGO').roles,...readyDocument('shop-1','SQUARE_LOGO').roles,...readyDocument('shop-1','COVER_IMAGE').roles}};
+  const adapter=new ShopBrandReadyMediaAdapter({readForShop:async()=>({shopId:'shop-1',domain:'shop.example',whatsAppMedia})},async()=>({publicOrigin}));
+  expect((await adapter.resolveConversationLogo('shop-1'))?.origin.role).toBe('LOGO');
+  whatsAppMedia={schemaVersion:1,roles:{...readyDocument('shop-1','SQUARE_LOGO').roles,...readyDocument('shop-1','COVER_IMAGE').roles}};
+  expect((await adapter.resolveConversationLogo('shop-1'))?.origin.role).toBe('SQUARE_LOGO');
+  expect(await adapter.resolveConversationLogo('shop-1','LOGO')).toBeNull();
+  whatsAppMedia={schemaVersion:1,roles:{...readyDocument('shop-1','COVER_IMAGE').roles}};
+  expect(await adapter.resolveConversationLogo('shop-1')).toBeNull();
+ });
+});
