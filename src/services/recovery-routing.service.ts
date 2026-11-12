@@ -9,6 +9,10 @@ import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
+import {
+  recoveryRecipientAttemptsSelect, recoveryRecipientCandidateSql,
+  recoveryRecipientCustomerSelect, resolveRecoveryRecipient,
+} from "./recovery-recipient-ownership.js";
 
 export type RoutingGuidanceReason =
   | "MULTIPLE_RECOVERIES"
@@ -99,22 +103,17 @@ export class RecoveryRoutingService {
             direction: true,
             sentAt: true,
             conversationId: true,
-            conversation: {
-              select: {
-                checkoutRecovery: {
-                  select: { customer: { select: { phone: true } } },
-                },
-              },
-            },
+            recoveryOutreachAttempt: { select: { recipient: true } },
+            merchantSendCommand: { select: { recipientSnapshot: true } },
           },
         });
         if (
           !original ||
           original.direction !== "OUTBOUND" ||
           !original.sentAt ||
-          canonicalPhone(
-            original.conversation.checkoutRecovery?.customer?.phone ?? "",
-          ) !== phone
+          !original.conversationId ||
+          (original.recoveryOutreachAttempt && canonicalPhone(original.recoveryOutreachAttempt.recipient) !== phone) ||
+          (original.merchantSendCommand && canonicalPhone(original.merchantSendCommand.recipientSnapshot) !== phone)
         ) {
           logGuidance(log, messageDigest, "explicit-context", "INVALID_REFERENCE");
           return { kind: "guidance", reason: "INVALID_REFERENCE" };
@@ -129,7 +128,7 @@ export class RecoveryRoutingService {
           JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId" = r.id
           JOIN commerce."Customer" customer ON customer.id = r."customerId"
           JOIN commerce."Shop" shop ON shop.id = r."shopId"
-          WHERE regexp_replace(regexp_replace(customer.phone, '^[[:space:]]+|[[:space:]]+$', '', 'g'), '^\\+', '') = ${phone}
+          WHERE ${recoveryRecipientCandidateSql(phone)}
             AND (
               shop.platform <> 'WOOCOMMERCE'
               OR (
@@ -164,6 +163,7 @@ export class RecoveryRoutingService {
       const conversation = await this.database.conversation.findUnique({
         where: { id: conversationId },
         select: {
+          shopId: true, customerId: true,
           checkoutRecovery: {
             select: {
               id: true,
@@ -171,14 +171,18 @@ export class RecoveryRoutingService {
               checkoutToken: true,
               generation: true,
               status: true,
-              shop: { select: { platform: true } },
-              customer: { select: { phone: true } },
+              shop: { select: { platform: true, defaultCountryCode: true } },
+              customer: { select: recoveryRecipientCustomerSelect },
+              outreachAttempts: recoveryRecipientAttemptsSelect,
             },
           },
         },
       });
       const recovery = conversation?.checkoutRecovery;
-      if (!recovery || canonicalPhone(recovery.customer?.phone ?? "") !== phone) {
+      const recipient = recovery ? resolveRecoveryRecipient(recovery, conversationId) : null;
+      if (!recovery || canonicalPhone(recipient ?? "") !== phone ||
+          (conversation.shopId && conversation.shopId !== recovery.shopId) ||
+          (conversation.customerId && conversation.customerId !== recovery.customer?.id)) {
         logGuidance(log, messageDigest, "conversation-owner", "INVALID_REFERENCE", { conversationId });
         return { kind: "guidance", reason: "INVALID_REFERENCE" };
       }
