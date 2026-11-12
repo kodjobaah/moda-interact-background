@@ -18,7 +18,7 @@ function context() {
   const service = new RecoveryConsentAdmissionService(consent, notices);
   const first = {
     shopId: "shop-1", checkoutToken: "secret-checkout-token", customerId: "customer-1",
-    shopifyCustomerId: "gid://shopify/Customer/1", recipient: "447700900001",
+    shopifyCustomerId: "gid://shopify/Customer/1", recipient: "447400123456",
     noticeContext: { customerName: "Merchant-visible customer" },
   };
   const firstNotice = {
@@ -29,7 +29,7 @@ function context() {
 }
 
 const allowed = {
-  status: "ALLOWED", customerPhoneId: "phone-1", canonicalRecipient: "447700900001",
+  status: "ALLOWED", customerPhoneId: "phone-1", canonicalRecipient: "447400123456",
   consentRevision: 4n, noContactRevision: 2n,
 } as const;
 

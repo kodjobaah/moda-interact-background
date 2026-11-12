@@ -46,7 +46,8 @@ export class RecoveryStoredConsentService {
       const canonical = canonicalWhatsAppSender(input.recipient);
       if (!canonical) return { kind: "denied", reason: "recipient-unverified" };
       const decision = await this.shopify.evaluateStoredRecipient({
-        shopId: input.shopId, customerId: recovery.customerId, recipient: input.recipient,
+        // Preserve the explicit international identity across the consent boundary.
+        shopId: input.shopId, customerId: recovery.customerId, recipient: `+${canonical}`,
       });
       if (decision.status !== "ALLOWED") return {
         kind: "denied", reason: decision.status === "UNAVAILABLE" ? "stored-consent-unavailable" : "stored-consent-denied",
