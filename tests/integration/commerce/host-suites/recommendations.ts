@@ -22,13 +22,15 @@ export function registerRecommendationHostTests() {
       { label: "null URL cannot add to basket", refresh: { url: null }, scopes: ["ADD_TO_BASKET"], accepted: false },
       { label: "catalogue cache cannot authorize basket mutation", refresh: { url: null }, scopes: ["PRODUCT_ONLY", "ADD_TO_BASKET"], accepted: true },
       { label: "null URL cannot replace basket line", refresh: { url: null }, scopes: ["REPLACE_BASKET_LINE"], accepted: false },
+      { label: "missing product", refresh: {}, missing: true, accepted: false },
+      { label: "unsafe title", refresh: { title: "Shirt\u0000injected" }, accepted: false },
       { label: "unavailable", refresh: { available: false }, accepted: false },
       { label: "cross-store URL", refresh: { url: "https://other.myshopify.com/products/shirt" }, accepted: false },
       { label: "unsafe URL", refresh: { url: "javascript:alert(1)" }, accepted: false },
       { label: "stale product identity", refresh: { productId: "gid://shopify/Product/999" }, accepted: false },
       { label: "stale variant identity", refresh: { variantId: "gid://shopify/ProductVariant/999" }, accepted: false },
       { label: "malformed price", refresh: { unitPrice: "invalid" }, accepted: false },
-    ])("preserves agent prose with exact freshly verified product presentation ($label)", async ({ refresh, accepted, scopes = ["PRODUCT_ONLY"] }) => {
+    ])("preserves agent prose with exact freshly verified product presentation ($label)", async ({ refresh, accepted, missing = false, scopes = ["PRODUCT_ONLY"] }) => {
       if (scopes.includes("REPLACE_BASKET_LINE")) {
         f.state.checkoutRecovery.lineItems = [{ productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/101", title: "Shirt", quantity: 1, price: "24.00" }];
       }
@@ -67,6 +69,7 @@ export function registerRecommendationHostTests() {
       const initial = structuredClone(f.toolResults.commerce_get_product) as any;
       const fresh = structuredClone(initial);
       Object.assign(fresh.data.product, refresh);
+      if (missing) fresh.data.product = null;
       f.toolResults = { commerce_get_product: [initial, fresh] };
       let step = 0;
       const execution = f.run(async (request) => {
