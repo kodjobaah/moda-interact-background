@@ -110,7 +110,7 @@ describe("C2 strict recovery routing", () => {
     {
       direction: "OUTBOUND",
       sentAt: new Date(),
-      conversation: { checkoutRecovery: { customer: { phone: "999" } } },
+      recoveryOutreachAttempt: { recipient: "999" },
     },
     { direction: "OUTBOUND", sentAt: new Date(), conversation: { checkoutRecovery: null } },
   ])("never falls back from invalid explicit reference", async (original) => {
@@ -346,4 +346,53 @@ it("terminal candidates in different shops remain ambiguous before eligibility",
   ).toEqual({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
   expect(active).not.toHaveBeenCalled();
   expect(db.conversation.findUnique).not.toHaveBeenCalled();
+});
+
+
+describe("current recovery recipient ownership", () => {
+  const phone = "447400123456";
+  const currentRecovery = () => ({ ...recovery, shop: { platform: "SHOPIFY", defaultCountryCode: "US" },
+    customer: { id: "customer-1", shopId: "shop1", phone: null, _count: { phones: 2 }, phones: [{
+      phone: `+${phone}`, whatsappCanonicalPhone: phone, whatsappNoContact: false,
+    }] },
+    outreachAttempts: [{ recipient: phone, sentAt: new Date(), outboundMessage: {
+      providerMessageId: "outbound-1", sentAt: new Date(), direction: "OUTBOUND", conversationId: "c1",
+    } }],
+  });
+  it.each([null, "outbound-1"])("routes a reply with context %s using active CustomerPhone when Customer.phone is null", async (contextMessageId) => {
+    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+    db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: currentRecovery() });
+    db.conversationMessage.findUnique.mockImplementation(async ({ where }) => where.providerMessageId === "outbound-1"
+      ? { direction: "OUTBOUND", sentAt: new Date(), conversationId: "c1", recoveryOutreachAttempt: { recipient: phone } }
+      : null);
+    await expect(new RecoveryRoutingService().resolveInboundMessage({ ...event, customerPhone: phone, contextMessageId }))
+      .resolves.toMatchObject({ kind: "resolved", conversationId: "c1", shopId: "shop1" });
+  });
+  it.each(["old-recipient", "new-recipient", "stop", "ended", "cross-tenant"])("does not transfer old outreach ownership across %s", async (change) => {
+    const owned = currentRecovery();
+    let incoming = phone;
+    if (change === "old-recipient") {
+      owned.customer.phones[0]!.phone = "+447400123457";
+      owned.customer.phones[0]!.whatsappCanonicalPhone = "447400123457";
+    }
+    if (change === "new-recipient") {
+      owned.customer.phones[0]!.phone = "+447400123457";
+      owned.customer.phones[0]!.whatsappCanonicalPhone = "447400123457";
+      incoming = "447400123457";
+    }
+    if (change === "stop") owned.customer.phones[0]!.whatsappNoContact = true;
+    if (change === "ended") owned.customer.phones = [];
+    if (change === "cross-tenant") owned.customer.shopId = "another-shop";
+    db.$queryRaw.mockResolvedValue([{ conversationId: "c1" }]);
+    db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: owned });
+    await expect(new RecoveryRoutingService().resolveInboundMessage({ ...event, customerPhone: incoming }))
+      .resolves.toMatchObject({ kind: "guidance", reason: "INVALID_REFERENCE" });
+  });
+  it("keeps a duplicate inbound pinned instead of following a changed quote", async () => {
+    db.conversationMessage.findUnique.mockResolvedValue({ direction: "INBOUND", conversationId: "c1" });
+    db.conversation.findUnique.mockResolvedValue({ checkoutRecovery: currentRecovery() });
+    await expect(new RecoveryRoutingService().resolveInboundMessage({ ...event, customerPhone: phone, contextMessageId: "other-store-quote" }))
+      .resolves.toMatchObject({ kind: "resolved", conversationId: "c1" });
+    expect(db.conversationMessage.findUnique).toHaveBeenCalledTimes(1);
+  });
 });
