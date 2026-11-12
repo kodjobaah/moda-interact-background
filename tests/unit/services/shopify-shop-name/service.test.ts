@@ -32,9 +32,13 @@ describe("bounded shop name sync", () => {
   });
   it("retains durable name metadata through existing source observation and media claim", () => {
     const sync = { leaseOwner: "synthetic", attempts: 1 };
-    const document = parseBrandDocument({ schemaVersion: 1, roles: {}, shopifySourceSync: sync });
+    const assetSync = { leaseOwner: "independent-asset-owner", attempts: 4, nextDueAt: "2026-11-13T00:00:00Z" };
+    const document = parseBrandDocument({ schemaVersion: 1, roles: {}, shopifyNameSync: sync, shopifySourceSync: assetSync });
     const observed = updateObservedSource(document, { shopId: "s", role: "LOGO", sourceUrl: "https://cdn.example.test/logo.jpg", sourceReference: null, sourceFingerprint: `sha256:${"a".repeat(64)}`, observedAt: now.toISOString() }).document;
-    expect(observed).toHaveProperty("shopifySourceSync", sync);
-    expect(claimRole(observed, "s", "s.myshopify.com", "LOGO", "b".repeat(36), now).document).toHaveProperty("shopifySourceSync", sync);
+    expect(observed).toHaveProperty("shopifyNameSync", sync);
+    expect(observed).toHaveProperty("shopifySourceSync", assetSync);
+    const claimed = claimRole(observed, "s", "s.myshopify.com", "LOGO", "b".repeat(36), now).document;
+    expect(claimed).toHaveProperty("shopifyNameSync", sync);
+    expect(claimed).toHaveProperty("shopifySourceSync", assetSync);
   });
 });

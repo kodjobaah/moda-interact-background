@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 import { ShopNameRepository } from "../../src/services/shopify-shop-name/repository.js";
 import { NAME_LEASE_MS, NAME_REFRESH_MS } from "../../src/services/shopify-shop-name/contracts.js";
@@ -58,17 +58,23 @@ suite("ARCH073 basic Shopify name durable acquisition", () => {
   const f = await fixture(); const media = new ShopBrandMediaRepository(f.db, { warn: vi.fn(), error: vi.fn() });
   try {
    const claim = (await f.repository.claim(f.shop, f.now))!;
+   const claimedBrand = await f.db.shopBrand.findUniqueOrThrow({ where: { shopId: f.shop.id } });
+   const assetSync = { leaseOwner: "independent-asset-owner", attempts: 4, nextDueAt: "2026-11-13T00:00:00Z" };
+   await f.db.shopBrand.update({ where: { shopId: f.shop.id }, data: {
+    whatsAppMedia: { ...(claimedBrand.whatsAppMedia as Prisma.JsonObject), shopifySourceSync: assetSync },
+   } });
    await Promise.all([
     media.observeSource({ shopId: f.shop.id, role: "LOGO", sourceUrl: "https://cdn.example.test/logo.jpg", sourceReference: "provider-logo", sourceFingerprint: `sha256:${"a".repeat(64)}`, observedAt: f.now.toISOString() }),
     f.repository.complete(claim, "Synthetic Concurrent Shop", new Date(f.now.getTime() + 1)),
    ]);
    const row = await f.db.shopBrand.findUniqueOrThrow({ where: { shopId: f.shop.id } });
    expect(row.brandName).toBe("Synthetic Concurrent Shop");
-   expect(row.whatsAppMedia).toMatchObject({ roles: { LOGO: { source: { reference: "provider-logo", generation: 1 } } }, shopifySourceSync: { attempts: 0, leaseOwner: null } });
+   expect(row.whatsAppMedia).toMatchObject({ roles: { LOGO: { source: { reference: "provider-logo", generation: 1 } } }, shopifyNameSync: { attempts: 0, leaseOwner: null } });
    const mediaClaim = await media.claim(f.shop.id, "LOGO", new Date(f.now.getTime() + 2));
    expect(mediaClaim).not.toBeNull();
    const after = await f.db.shopBrand.findUniqueOrThrow({ where: { shopId: f.shop.id } });
-   expect(after.whatsAppMedia).toHaveProperty("shopifySourceSync.nextDueAt");
+   expect(after.whatsAppMedia).toHaveProperty("shopifyNameSync.nextDueAt");
+   expect(after.whatsAppMedia).toHaveProperty("shopifySourceSync", assetSync);
   } finally { await f.close(); }
  }, 120000);
 });

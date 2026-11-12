@@ -78,12 +78,12 @@ export class ShopNameRepository {
           const brands = await tx.$queryRaw<Array<{ whatsAppMedia: Prisma.JsonValue }>>(Prisma.sql`
             SELECT "whatsAppMedia" FROM "commerce"."ShopBrand" WHERE "shopId"=${shopId} FOR UPDATE`);
           const document = parseBrandDocument(brands[0]!.whatsAppMedia);
-          const state = syncState((document as typeof document & { shopifySourceSync?: unknown }).shopifySourceSync);
+          const state = syncState((document as typeof document & { shopifyNameSync?: unknown }).shopifyNameSync);
           const result = update(state);
           if (!result) return null;
           await tx.shopBrand.update({ where: { shopId }, data: {
             ...(result.name === undefined ? {} : { brandName: result.name, fetchedAt: now }),
-            whatsAppMedia: { ...document, shopifySourceSync: result.state } as unknown as Prisma.InputJsonValue,
+            whatsAppMedia: { ...document, shopifyNameSync: result.state } as unknown as Prisma.InputJsonValue,
           } });
           return result.value;
         }, { timeout: 10_000, maxWait: 5_000 });
