@@ -1,3 +1,6 @@
+import { wrapperApplicationKey } from "./application-key.js";
+import { readRecoveryShopHeader, withRecoveryShopHeader, hasPreparedRecoveryShopHeader } from "./recovery-shop-header.js";
+import type { RecoveryShopHeaderReceipt } from "./contracts.js";
 import { validRecoveryCheckoutFooterUrl, withRecoveryCheckoutFooter, withLegacyRecoveryCheckoutFooter, hasPreparedRecoveryCheckoutFooter } from "./recovery-checkout-footer.js";
 import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import type {
@@ -18,6 +21,7 @@ export type AiOutboundComposition =
   | Readonly<{
       kind: "ready";
       text: string;
+      recoveryShopHeader?: RecoveryShopHeaderReceipt;
       deliveryPlan?: ConversationDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];
       wrapper: null | Readonly<{
@@ -58,12 +62,15 @@ export async function composeAiOutbound(
     // model's low-confidence guess here could contradict that durable choice.
   });
   if (result.kind === "rendered") {
-    if (result.messageIdentity !== input.messageId || result.source !== "AI") {
+    if (result.messageIdentity !== input.messageId || result.source !== "AI" ||
+        (result.recoveryShopHeader !== undefined && !hasPreparedRecoveryShopHeader(result.body, result.recoveryShopHeader)) ||
+        result.applicationKey !== wrapperApplicationKey({conversationId: input.conversationId, messageIdentity: result.messageIdentity, source: result.source, wrapperDefinitionId: result.wrapperDefinitionId, localeId: result.localeId, contentHash: result.contentHash, editVersion: result.slotEditVersion, responseDigest: result.responseDigest, body: result.body, recoveryCheckoutUrl: result.recoveryCheckoutUrl, recoveryShopHeader: result.recoveryShopHeader, deliveryPlan: result.deliveryPlan})) {
       throw new Error("AI_WRAPPER_PROVENANCE_MISMATCH");
     }
     return {
       kind: "ready",
       text: result.body,
+      ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}),
       ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
       ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),
       wrapper: {
@@ -82,13 +89,17 @@ export async function composeAiOutbound(
         !hasPreparedRecoveryCheckoutFooter(result.body, result.recoveryCheckoutUrl))) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
-    const expectedBody = result.recoveryCheckoutUrl
-      ? withRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse;
-    const legacyBody = result.recoveryCheckoutUrl ? withLegacyRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse;
+    const header = result.recoveryShopHeader === undefined ? null : readRecoveryShopHeader(result.recoveryShopHeader);
+    if (result.recoveryShopHeader !== undefined && (!header || !hasPreparedRecoveryShopHeader(result.body, header))) throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
+    const decorate = (body: string) => header ? withRecoveryShopHeader(body, header) : body;
+    const expectedBody = decorate( result.recoveryCheckoutUrl
+      ? withRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse);
+    const legacyBody = decorate(result.recoveryCheckoutUrl ? withLegacyRecoveryCheckoutFooter(input.generatedResponse, result.recoveryCheckoutUrl) : input.generatedResponse);
     if (!input.commercePresentation && result.body !== expectedBody && result.body !== legacyBody) {
       throw new Error("AI_WRAPPER_PASSTHROUGH_MISMATCH");
     }
-    return { kind: "ready", text: result.body, ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
+    return { kind: "ready", text: result.body,
+      ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}), ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}), wrapper: null };
   }
   return { kind: "refused", reason: result.reason };
 }

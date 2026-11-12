@@ -1,3 +1,5 @@
+import { currentRecoveryShopHeaderMatches } from "./recovery-shop-header-verification.js";
+import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
 import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { commitAdmittedProductContext, ProductContextAdmissionError } from "../../commerce/product-context-repository.js";
@@ -31,6 +33,7 @@ export type RecoveryMarketingPermit = {
   templateRegistration?: FinalTemplateIdentity;
 };
 export type DispatchInput = {
+  recoveryShopHeader?: RecoveryShopHeaderReceipt;
   senderType: DispatchActor;
   conversationId: string; shopId: string; recoveryId: string;
   expectedControlRevision: number;
@@ -263,6 +266,10 @@ export class OutboundSendFenceService {
         }
       }
 
+      if (input.recoveryShopHeader && (input.deliveryKind === "TEMPLATE" || !context.shopId ||
+          !(await currentRecoveryShopHeaderMatches(tx, input.recoveryShopHeader, input.expectedContent ?? null, context.shopId)))) {
+        return {kind: "suppressed", reason: "recovery-shop-header-stale"} as const;
+      }
       // BG009: the immutable complete body is the sole moderation/send identity.
       // Read the current wrapper slot and ALLOW record while inside this same
       // permit transaction; a stale/retired wrapper must never reach Meta.
@@ -270,7 +277,7 @@ export class OutboundSendFenceService {
         if (!parsePreparedEvidence(command.preparedTextBody, command.preparedWrapperEvidence,
             command.preparedAt) || !(await currentHumanWrapperMatches(tx, command.preparedTextBody,
               command.preparedWrapperEvidence, command.preparedAt, {
-                conversationId: context.id, commandId: input.commandId!, textBody: command.textBody,
+                conversationId: context.id, commandId: input.commandId!, textBody: command.textBody, shopId: context.shopId,
               }))) {
           return { kind: "suppressed", reason: "human_wrapper_stale" } as const;
         }

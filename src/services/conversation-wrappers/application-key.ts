@@ -1,0 +1,16 @@
+import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
+import type { RecoveryShopHeaderReceipt, WrapperSource } from "./contracts.js";
+import { digest, stableJson } from "./projection.js";
+
+/** One local preparation/replay/final-permit algorithm; absent additions keep legacy keys unchanged. */
+export function wrapperApplicationKey(input: {conversationId: string; messageIdentity: string; source: WrapperSource;
+ wrapperDefinitionId: string; localeId: string; contentHash: string; editVersion: number; responseDigest: string;
+ body: string; recoveryCheckoutUrl?: string | undefined; recoveryShopHeader?: RecoveryShopHeaderReceipt | undefined; deliveryPlan?: ConversationDeliveryPlan | undefined}): string {
+ return digest(stableJson({conversationId: input.conversationId, messageIdentity: input.messageIdentity,
+  source: input.source, wrapperDefinitionId: input.wrapperDefinitionId, localeId: input.localeId,
+  contentHash: input.contentHash, editVersion: input.editVersion, responseDigest: input.responseDigest,
+  bodyDigest: digest(input.body),
+  ...(input.recoveryCheckoutUrl ? {recoveryCheckoutUrlDigest: digest(input.recoveryCheckoutUrl)} : {}),
+  ...(input.recoveryShopHeader ? {recoveryShopHeaderDigest: digest(stableJson(input.recoveryShopHeader))} : {}),
+  ...(input.deliveryPlan ? {deliveryPlanDigest: digest(stableJson(input.deliveryPlan))} : {})}));
+}

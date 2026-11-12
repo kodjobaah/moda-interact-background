@@ -1,3 +1,4 @@
+import type { RecoveryShopHeaderReceipt } from "./conversation-wrappers/recovery-shop-header.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -161,7 +162,7 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
-      prepareRecoveryFooter?: true;
+      prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {
@@ -178,7 +179,7 @@ export class OutboundWhatsAppAdmissionService {
       replyToProviderMessageId?: string;
       expectedControlRevision?: number;
       expectedInboundVersion?: number;
-      prepareRecoveryFooter?: true;
+      prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
       productContextUpdate?: CommerceConversationProductContext;
     },
   ): Promise<OutboundAdmissionResult> {

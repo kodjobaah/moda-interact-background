@@ -1,3 +1,5 @@
+import { readRecoveryShopHeader, withRecoveryShopHeader } from "../conversation-wrappers/recovery-shop-header.js";
+import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/contracts.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import type { WrapperRefusal, WrappedResult } from "../conversation-wrappers/contracts.js";
@@ -7,7 +9,7 @@ import { ConversationWrapperService } from "../conversation-wrappers/service.js"
 /** ARCH-047-BG009: deterministic rendering only; SQL freezing owns moderation identity. */
 export type HumanWrapperPreparation =
   | Readonly<{ kind: "not-applicable" }>
-  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string }>
+  | Readonly<{ kind: "passthrough"; body: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt }>
   | Readonly<{ kind: "prepared"; body: string; application: WrappedResult }>
   | Readonly<{ kind: "refused"; reason: WrapperRefusal | "CONTENT_MISMATCH" }>;
 
@@ -50,14 +52,14 @@ export class HumanWrapperPreparationService {
         responseBody: command.textBody,
       });
       if (rendered.kind === "no-wrapper") {
-        if (rendered.recoveryCheckoutUrl !== undefined) {
-          return validRecoveryCheckoutFooterUrl(rendered.recoveryCheckoutUrl) &&
-            rendered.body === withHumanRecoveryCheckoutFooter(command.textBody, rendered.recoveryCheckoutUrl)
-            ? { kind: "passthrough", body: rendered.body, recoveryCheckoutUrl: rendered.recoveryCheckoutUrl }
-            : { kind: "refused", reason: "CONTENT_MISMATCH" };
-        }
-        return rendered.body === command.textBody ? { kind: "passthrough", body: command.textBody }
-          : { kind: "refused", reason: "CONTENT_MISMATCH" };
+        const header = rendered.recoveryShopHeader === undefined ? null : readRecoveryShopHeader(rendered.recoveryShopHeader);
+        if (rendered.recoveryShopHeader !== undefined && !header) return {kind: "refused", reason: "CONTENT_MISMATCH"};
+        if (rendered.recoveryCheckoutUrl !== undefined && !validRecoveryCheckoutFooterUrl(rendered.recoveryCheckoutUrl)) return {kind: "refused", reason: "CONTENT_MISMATCH"};
+        const footerBody = rendered.recoveryCheckoutUrl ? withHumanRecoveryCheckoutFooter(command.textBody, rendered.recoveryCheckoutUrl) : command.textBody;
+        const expected = header ? withRecoveryShopHeader(footerBody, header) : footerBody;
+        return rendered.body === expected ? {kind: "passthrough", body: rendered.body,
+          ...(rendered.recoveryCheckoutUrl ? {recoveryCheckoutUrl: rendered.recoveryCheckoutUrl} : {}),
+          ...(header ? {recoveryShopHeader: header} : {})} : {kind: "refused", reason: "CONTENT_MISMATCH"};
       }
       if (rendered.kind === "rendered") {
         if (rendered.source !== "HUMAN" || rendered.messageIdentity !== command.id ||

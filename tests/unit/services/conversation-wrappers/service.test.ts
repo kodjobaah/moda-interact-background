@@ -243,15 +243,22 @@ describe('ARCH068 complete wrapper product image plans',()=>{
   const image={schemaVersion:1,shopId:'shop',...pairs[0]!,publicUrl:'https://media.example/tree.jpg',objectKey:`conversation-products/v1/${'a'.repeat(64)}/${'b'.repeat(64)}/${'c'.repeat(64)}.jpg`,contentSha256:'c'.repeat(64),contentType:'image/jpeg',byteLength:100,width:1125,height:600} as const;
   const prepareConversationProductImage=vi.fn(async()=>({kind:'READY',image,stage:'READY',durationMs:1} as const));
   const mediaDependencies={readShopBrandPublicMediaConfiguration:vi.fn(async()=>({publicOrigin:'https://media.example',bucketName:'media-bucket'})),readR2Configuration:vi.fn(async()=>({endpoint:'https://fixture.r2.cloudflarestorage.com',accessKeyId:'fixture',secretAccessKey:'fixture'})),prepareConversationProductImage};
-  const service=new ConversationWrapperService({repository:{loadContext:async()=>({...context,conversationLanguageTag:'en'}),loadSlots:async()=>[active]},mediaDependencies:mediaDependencies as never});
+  const recoveryShopHeader={schemaVersion:1 as const,shopId:'shop',name:'Fixture Store',websiteUrl:'https://shop.example'};
+  const headerPrefix='Fixture Store\nhttps://shop.example\n──────────\n\n';
+  const service=new ConversationWrapperService({repository:{loadContext:async()=>({...context,conversationLanguageTag:'en',recoveryShopHeader}),loadSlots:async()=>[active]},mediaDependencies:mediaDependencies as never});
   const request={...input,responseBody:'My grounded, natural answer.',commercePresentation:{envelope:{...exampleFinal,answerKind:'ANSWER' as const,referralReason:null,replyText:'My grounded, natural answer.',details:{productDetailSelections:pairs}},verified:{...presentation('').verified,locale:'en' as const,disposition:'PRODUCT_DETAILS' as const,productFacts:facts.productFacts},verifiedProducts:{shopId:'shop',platform,products},deadlineAt:Date.now()+10000}};
   const result=await service.renderConversationResponse(request);expect(result.kind).toBe('rendered');if(result.kind!=='rendered')return;
-  expect(result.body).toBe('Header\nMy grounded, natural answer.\nFooter');expect(result.presentedPairs).toEqual(pairs);
+  expect(result.body).toBe(headerPrefix+'Header\nMy grounded, natural answer.\nFooter');expect(result.presentedPairs).toEqual(pairs);
   expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);expect(prepareConversationProductImage.mock.calls[0]?.[0]).toMatchObject({source:{shopId:'shop',...pairs[0]}});
   expect(result.deliveryPlan).toEqual(buildConversationDeliveryPlan({body:result.body,binding:projection.productImage as never,image,shopId:'shop',displayedPairs:pairs}).plan);
   await service.renderConversationResponse({...request,previousApplication:result});expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
   const missing={...request,commercePresentation:{...request.commercePresentation,verifiedProducts:{...request.commercePresentation.verifiedProducts,products:products.map((product,index)=>index===0?{...product,imageUrl:null}:product)}}};
   expect((await service.renderConversationResponse(missing))).toMatchObject({deliveryPlan:{kind:'TEXT',body:result.body}});expect(prepareConversationProductImage).toHaveBeenCalledTimes(1);
+  const longReply='Grounded description. '.repeat(55);
+  const longResult=await service.renderConversationResponse({...request,responseBody:longReply,commercePresentation:{...request.commercePresentation,envelope:{...request.commercePresentation.envelope,replyText:longReply}}});
+  expect(longResult).toMatchObject({kind:'rendered',recoveryShopHeader,deliveryPlan:{kind:'TEXT'}});
+  if(longResult.kind==='rendered')expect(longResult.deliveryPlan?.body).toBe(longResult.body);
+
  });
 });
 
@@ -260,4 +267,37 @@ it('retains the exact shared composition refusal with a non-null failure code',a
  const rejected=presentation('Hello');rejected.envelope.answerKind='ANSWER';rejected.envelope.referralReason=null;rejected.envelope.details={productDetailSelections:[{productId:'unverified',variantId:null}]};
  expect(await service.renderConversationResponse({...input,commercePresentation:rejected})).toMatchObject({kind:'rejected',reason:'UNOBSERVED_SELECTION'});
  expect(logger.info).toHaveBeenCalledWith('commerce.response.composition',expect.objectContaining({failureCode:'INVALID_FINAL',failureStage:'response.compose',reasonCode:'UNOBSERVED_SELECTION'}));
+});
+
+describe("ARCH-073 configured recovery identity",()=>{
+ const receipt={schemaVersion:1 as const,shopId:"shop",name:"Eugene Fixture",websiteUrl:"https://shop.example"};
+ const current={...context,conversationLanguageTag:"en",variables:{"shop.name":receipt.name},recoveryShopHeader:receipt};
+ const prefix="Eugene Fixture\nhttps://shop.example\n──────────\n\n";
+ function identitySlot(custom:boolean) {
+  const chosen=slot("SHARED");
+  const projection={...prepared,header:custom?[{kind:"text" as const,value:"Welcome to "},{kind:"variable" as const,name:"shop.name" as const}]:[{kind:"variable" as const,name:"shop.name" as const}]};
+  const hash=digest(stableJson(projection));
+  return {...chosen,definition:{...chosen.definition,locales:chosen.definition.locales.map(locale=>({...locale,localeAst:{schemaVersion:1,prepared:projection},contentHash:hash}))}};
+ }
+ it.each(["AI","HUMAN"] as const)("deduplicates only a proven pure-identity configured header for %s",async source=>{
+  const service=harness([identitySlot(false)],current).service;
+  const rendered=await service.renderConversationResponse({...input,source});
+  expect(rendered).toMatchObject({kind:"rendered",recoveryShopHeader:receipt});
+  if(rendered.kind!=="rendered")throw new Error("render failed");
+  expect(rendered.body).toBe(prefix+response+"\nFooter");
+  const replay=await service.renderConversationResponse({...input,source,previousApplication:rendered});
+  expect(replay).toMatchObject({kind:"rendered",body:rendered.body,replayed:true,recoveryShopHeader:receipt});
+  const {recoveryShopHeader:_receipt,...lost}=rendered;
+  expect(await service.renderConversationResponse({...input,source,previousApplication:lost})).toEqual({kind:"rejected",reason:"REPLAY_MISMATCH"});
+ });
+ it("preserves custom merchant header prose and authored body identity",async()=>{
+  const service=harness([identitySlot(true)],current).service;
+  const rendered=await service.renderConversationResponse({...input,source:"HUMAN",responseBody:"Eugene Fixture\nStaff words"});
+  expect(rendered).toMatchObject({kind:"rendered",body:prefix+"Welcome to Eugene Fixture\nEugene Fixture\nStaff words\nFooter"});
+ });
+ it("renders safe domain-only identity for a second tenant without copying another name",async()=>{
+  const second={...current,shopId:"other",recoveryShopHeader:{...receipt,shopId:"other",name:null,websiteUrl:"https://other.example"},variables:{}};
+  const rendered=await harness([slot("SHARED")],second).service.renderConversationResponse(input);
+  expect(rendered).toMatchObject({kind:"rendered",body:"https://other.example\n──────────\n\nHeader\n"+response+"\nFooter"});
+ });
 });

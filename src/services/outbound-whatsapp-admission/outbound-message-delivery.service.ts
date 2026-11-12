@@ -1,4 +1,4 @@
-import { appendRecoveryCheckoutFooter } from "../conversation-wrappers/recovery-checkout-footer.js";
+import { prepareRecoveryReplyBody, type RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
 import { PrismaConversationWrapperReadRepository } from "../conversation-wrappers/repository.js";
 import type { WrapperReadPort } from "../conversation-wrappers/contracts.js";
 import { Prisma } from "@prisma/client";
@@ -83,12 +83,12 @@ export class OutboundMessageDeliveryService {
   ) {}
 
   /** Resolve outside moderation/admission transactions; never append after the permit. */
-  private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<string | null> {
-    if (admission.executionScope !== "recovery") return body;
+  private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<{body: string; recoveryShopHeader?: RecoveryShopHeaderReceipt} | null> {
+    if (admission.executionScope !== "recovery") return {body};
     const context = await this.recoveryFooterContext.loadContext(admission.conversationId);
     if (!context || context === "TENANT_MISMATCH" || context.shopId !== admission.shopId || context.conversationId !== admission.conversationId) return null;
-    const prepared = appendRecoveryCheckoutFooter({body, source: "AI", context});
-    return prepared.kind === "ready" ? prepared.body : null;
+    const prepared = prepareRecoveryReplyBody({body, source: "AI", context});
+    return prepared.kind === "ready" ? prepared : null;
   }
 
   async getProviderAccountId(): Promise<string> {
@@ -96,7 +96,7 @@ export class OutboundMessageDeliveryService {
   }
 
   async sendPreparedText(input: AdmittedOutbound & {
-    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string; prepareRecoveryFooter?: true;
+    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
     expectedControlRevision?: number; expectedInboundVersion?: number; productContextUpdate?: CommerceConversationProductContext;
   }): Promise<OutboundAdmissionResult> {
     return this.sendPreparedConversation({...input});
@@ -118,10 +118,11 @@ export class OutboundMessageDeliveryService {
     deliveryPlan,
     presentationReceipt,
     prepareRecoveryFooter,
+    recoveryShopHeader,
   }: AdmittedOutbound & {
     to: string;
     text: string;
-    prepareRecoveryFooter?: true;
+    prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
     previewUrl?: boolean;
     replyToProviderMessageId?: string;
     expectedControlRevision?: number;
@@ -150,7 +151,8 @@ export class OutboundMessageDeliveryService {
     if (terminal || prepareRecoveryFooter) {
       const preparedTerminal = await this.prepareRecoveryFreeformBody({shopId, conversationId, executionScope}, outboundText);
       if (preparedTerminal === null) { await this.failPrepared(messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
-      outboundText = preparedTerminal;
+      outboundText = preparedTerminal.body;
+      recoveryShopHeader = preparedTerminal.recoveryShopHeader;
     }
 
     if (!(await this.prepareUnadmittedContent(messageId, outboundText, plan, {shopId, conversationId})))
@@ -162,6 +164,7 @@ export class OutboundMessageDeliveryService {
     const fenced = await this.fenceProviderSend({
       shopId, conversationId, messageId, to, expectedContent: outboundText,
       executionScope, deliveryKind: plan?.kind ?? "TEXT",
+      ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
       ...(plan ? {deliveryPlan: plan, presentationReceipt} : {}),
       ...(productContextUpdate ? { productContextUpdate } : {}),
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
@@ -262,10 +265,12 @@ export class OutboundMessageDeliveryService {
     // Terminal sends continue to moderate and send their fixed text instead.
     let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
     let outboundText = TERMINAL_MESSAGE;
+    let recoveryShopHeader: RecoveryShopHeaderReceipt | undefined;
     if (admission.terminal) {
       const preparedTerminal = await this.prepareRecoveryFreeformBody(admission, TERMINAL_MESSAGE);
       if (preparedTerminal === null) { await this.failPrepared(admission.messageId); return {kind: "suppressed", reason: "conversation-invalid"}; }
-      outboundText = preparedTerminal;
+      outboundText = preparedTerminal.body;
+      recoveryShopHeader = preparedTerminal.recoveryShopHeader;
     }
     if (!admission.terminal) {
       try {
@@ -353,6 +358,7 @@ export class OutboundMessageDeliveryService {
         messageId: admission.messageId, to: input.to, expectedContent: outboundText,
         ...(admission.executionScope === undefined ? {} : { executionScope: admission.executionScope }),
         deliveryKind: prepared ? "TEMPLATE" : "TEXT",
+        ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
         ...(input.initialOutreach ? { initialOutreach: {
           outreachAttemptId: input.initialOutreach.outreachAttemptId,
           recoveryId: input.initialOutreach.recoveryId,
@@ -500,7 +506,7 @@ export class OutboundMessageDeliveryService {
    */
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
-    expectedContent: string; expectedControlRevision?: number; expectedInboundVersion?: number;
+    expectedContent: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; expectedControlRevision?: number; expectedInboundVersion?: number;
     executionScope?: "general" | "recovery";
     productContextUpdate?: CommerceConversationProductContext;
     template?: { name: string; languageCode: string;
@@ -569,6 +575,7 @@ export class OutboundMessageDeliveryService {
     }
     const permit = await this.recoveryFence.admitFinalSend({
       senderType: message.senderType,
+      ...(input.recoveryShopHeader ? {recoveryShopHeader: input.recoveryShopHeader} : {}),
       conversationId: input.conversationId, shopId: input.shopId,
       recoveryId: ownership.recoveryId,
       expectedControlRevision: input.expectedControlRevision ?? ownership.revision,

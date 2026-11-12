@@ -1,3 +1,4 @@
+import { verifiedRecoveryShopHeader } from "./recovery-shop-header.js";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
@@ -131,7 +132,10 @@ export class PrismaConversationWrapperReadRepository implements WrapperReadPort 
         now: current, checkoutRecoveryLifetimeDays }));
     const checkoutUrl = checkoutActive ? trustedHttpsUrl(recovery?.checkoutUrl, shop.domain) : null;
     if (checkoutUrl) variables["checkout.url"] = checkoutUrl;
+    const recoveryShopHeader = recovery ? verifiedRecoveryShopHeader(shop.id, shop.domain, brand?.brandName) : null;
+    if (recovery && !recoveryShopHeader) this.logger.warn("conversation_wrapper.recovery_shop_header_unavailable", {conversationId, shopId: shop.id, reason: "INVALID_STORED_DOMAIN"});
     return {
+      ...(recoveryShopHeader ? {recoveryShopHeader} : {}),
       conversationId, shopId: shop.id,
       conversationLanguageTag: conversation.languageTag,
       merchantLanguageTag: shop.defaultLanguageTag,

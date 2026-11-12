@@ -1,3 +1,4 @@
+import type { RecoveryShopHeaderReceipt } from "./conversation-wrappers/recovery-shop-header.js";
 import { presentedProductContext } from "../commerce/product-context-write.js";
 import { CommerceHostError } from "../commerce/mcp-client.js";
 import type { CommerceConversationProductContext } from "@modainteract/moda-interact-shared/commerce";
@@ -106,7 +107,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       input: Admitted & {
         to: string;
         text: string;
-        prepareRecoveryFooter?: true;
+        prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
         expectedControlRevision?: number;
         expectedInboundVersion?: number;
         productContextUpdate?: CommerceConversationProductContext;
@@ -118,7 +119,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
-        prepareRecoveryFooter?: true;
+        prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
         expectedControlRevision?: number;
         expectedInboundVersion?: number;
         productContextUpdate?: CommerceConversationProductContext;
@@ -350,7 +351,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
@@ -675,6 +676,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         ...reserved,
         to: loaded.to,
         text: composed.text,
+        ...(composed.recoveryShopHeader ? {recoveryShopHeader: composed.recoveryShopHeader} : {}),
         ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
