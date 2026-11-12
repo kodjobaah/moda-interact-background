@@ -150,7 +150,7 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
   });
 
   it("emits safe source and cause evidence through the Shared logger and rethrows the original error", async () => {
-    expect(sharedPackageJson.version).toBe("5.13.0");
+    expect(sharedPackageJson.version).toBe("5.13.1");
     expect(sharedLoggerResolution).toContain("@modainteract/moda-interact-shared");
     const cause = Object.assign(new Error("database unreachable for phone +447000111222"), {
       code: "P1001", clientVersion: "6.19.3",

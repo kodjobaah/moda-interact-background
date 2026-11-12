@@ -3,7 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import { expect, vi } from "vitest";
 import { formatMetaTemplateStatusEventIdentity } from
   "@modainteract/moda-interact-shared/whatsapp-template-events";
-import { MetaManagementError } from
+import { MetaManagementError, observedContentHash } from
   "../../../src/services/meta-template-management/contracts.js";
 import type { FinalTemplateIdentity } from
   "../../../src/services/recovery-template-integration/final-template-registration.service.js";
@@ -42,7 +42,7 @@ export async function seedApprovedWooTemplate(db: PrismaClient) {
     parameterBindingsSnapshot: { header: [], body: [], buttons: [] },
     submittedContentHash: BG006_HASH, providerTemplateId: providerId,
     submissionState: "SUBMITTED", providerStatus: "APPROVED",
-    lastObservedContentHash: BG006_HASH, lastObservedCategory: "MARKETING",
+    lastObservedContentHash: observedContentHash([{ type: "BODY", text: "Welcome" }]), lastObservedCategory: "MARKETING",
     lastReconciledAt: new Date(Date.now() - 60_000),
   } });
   const variant = await db.whatsAppTemplateVariant.create({ data: {

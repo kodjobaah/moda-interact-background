@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
@@ -41,7 +42,7 @@ function productionFixture(platform: "SHOPIFY" | "WOOCOMMERCE") {
  const bindings = { promotionTarget: "CHECKOUT", header: [], body: [ { position: 1, variable: "shop.name" }, { position: 2, variable: "checkout.itemsSummary" }, { position: 3, variable: "customer.firstName" }, { position: 4, variable: "checkout.url" } ], buttons: [] };
  const digest = createHash("sha256").update(canonicalJson({ schemaVersion: 1, family: "META_RECOVERY", category: "MARKETING", components, parameterBindings: bindings })).digest("hex");
  const registration = { id: "registration-1", wabaId: "waba-1", providerTemplateName: "approved_initial", providerTemplateId: "provider-1", providerLanguageCode: "en", category: "MARKETING", providerStatus: "APPROVED", submissionState: "SUBMITTED", failureCode: null,
-  lastObservedContentHash: digest, lastObservedCategory: "MARKETING", driftDetectedAt: null, submittedContentHash: digest, componentsSnapshot: components, parameterBindingsSnapshot: bindings,
+  lastObservedContentHash: observedContentHash(components as Parameters<typeof observedContentHash>[0]), lastObservedCategory: "MARKETING", driftDetectedAt: null, submittedContentHash: digest, componentsSnapshot: components, parameterBindingsSnapshot: bindings,
   locale: { id: "locale-1", languageTag: "en", providerLanguageCode: "en", status: "REVIEWED", contentHash: digest,
    definition: { id: "definition-1", kind: "META_RECOVERY", purpose: "INITIAL", offerType: "NO_OFFER", status: "PUBLISHED", category: "MARKETING", providerTemplateName: "approved_initial", publishedAt: now, retiredAt: null } } };
  const variant = { id: "variant-1", shopId: "shop-1", providerAccountId: "waba-1", purpose: "INITIAL_NO_OFFER", languageTag: "en", providerLanguageCode: "en", providerTemplateName: "approved_initial", providerTemplateId: "provider-1", status: "APPROVED", enabled: true, metaRegistrationId: registration.id, metaRegistration: registration };

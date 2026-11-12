@@ -1,3 +1,4 @@
+import { observedContentHash, validatedComponents } from "../meta-template-management/contracts.js";
 import type { PreparedRecoveryTemplate } from "../recovery-template-preparation/recovery-template.types.js";
 import type { SqlTransaction } from "../recovery-conversation/recovery-conversation.sql.js";
 import { first } from "../recovery-conversation/recovery-conversation.sql.js";
@@ -29,7 +30,7 @@ type LockedRegistration = {
   variantStatus: string; enabled: boolean; category: string;
   providerStatus: string | null; submissionState: string; failureCode: string | null;
   lastReconciledAt: Date | null; lastObservedContentHash: string | null;
-  lastObservedCategory: string | null; driftDetectedAt: Date | null;
+  lastObservedCategory: string | null; driftDetectedAt: Date | null; componentsSnapshot: unknown;
   definitionId: string; definitionStatus: string; definitionKind: string;
   definitionPurpose: string | null; definitionOfferType: string | null;
   definitionName: string | null; definitionCategory: string | null;
@@ -52,7 +53,7 @@ export const checkFinalTemplateRegistration: FinalTemplateEligibility = async (t
   const current = await first<LockedRegistration>(tx, `
     SELECT v."id" AS "variantId", r."id" AS "registrationId", v."shopId",
       v."purpose", r."wabaId", r."providerTemplateName", r."providerLanguageCode",
-      r."providerTemplateId", r."submittedContentHash",
+      r."providerTemplateId", r."submittedContentHash", r."componentsSnapshot",
       v."status"::text AS "variantStatus", v."enabled", r."category",
       r."providerStatus", r."submissionState", r."failureCode",
       r."lastReconciledAt", r."lastObservedContentHash", r."lastObservedCategory",
@@ -98,11 +99,14 @@ export const checkFinalTemplateRegistration: FinalTemplateEligibility = async (t
       !/^[a-f0-9]{64}$/.test(template.bindingFingerprint)) {
     return "TEMPLATE_REGISTRATION_UNAVAILABLE";
   }
+  let expectedObservedHash: string;
+  try { expectedObservedHash = observedContentHash(validatedComponents(current.componentsSnapshot)); }
+  catch { return "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"; }
   if (current.providerStatus !== "APPROVED" ||
       !["SUBMITTED", "CONFIRMED", "APPROVED"].includes(current.submissionState) ||
       current.failureCode !== null || current.driftDetectedAt !== null ||
       current.lastObservedCategory !== "MARKETING" ||
-      current.lastObservedContentHash !== current.submittedContentHash ||
+      current.lastObservedContentHash !== expectedObservedHash ||
       current.unresolvedObservation) {
     return "TEMPLATE_PROVIDER_STATUS_UNRESOLVED";
   }

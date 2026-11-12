@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../src/services/meta-template-management/contracts.js";
 import { randomUUID } from "node:crypto";
 import type { FinalTemplateIdentity } from
   "../../../src/services/recovery-template-integration/final-template-registration.service.js";
@@ -34,11 +35,11 @@ export async function approvedMerchantFollowUpFixture(label: string) {
   } });
   const registration = await f.db.whatsAppTemplateMetaRegistration.create({ data: {
     localeId: locale.id, wabaId: senderWabaId, providerTemplateName: templateName,
-    providerLanguageCode: "en_US", category: "MARKETING", componentsSnapshot: [],
+    providerLanguageCode: "en_US", category: "MARKETING", componentsSnapshot: [{ type: "BODY", text: "Your checkout is waiting" }],
     parameterBindingsSnapshot: { header: [], body: [], buttons: [] },
     submittedContentHash: hash, providerTemplateId,
     submissionState: "SUBMITTED", providerStatus: "APPROVED",
-    lastObservedContentHash: hash, lastObservedCategory: "MARKETING",
+    lastObservedContentHash: observedContentHash([{ type: "BODY", text: "Your checkout is waiting" }]), lastObservedCategory: "MARKETING",
     lastReconciledAt: new Date(Date.now() - 60_000),
   } });
   const variant = await f.db.whatsAppTemplateVariant.create({ data: {

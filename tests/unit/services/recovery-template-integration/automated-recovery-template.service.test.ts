@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { InitialOutreachEvaluationResultSchema } from "@modainteract/moda-interact-shared/commerce/outreach";
 import { createHash } from "node:crypto";
@@ -170,7 +171,7 @@ function approvedCodeVariant(binding: "offer.code" | "offer.codes"): AssignedVar
   const registration = { id: `registration-${suffix}`, wabaId: "waba-1", providerTemplateName,
     providerLanguageCode: "en_GB", providerTemplateId: `provider-${suffix}`, category: "MARKETING",
     providerStatus: "APPROVED", submissionState: "APPROVED", failureCode: null,
-    driftDetectedAt: null, lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
+    driftDetectedAt: null, lastObservedContentHash: observedContentHash(components as Parameters<typeof observedContentHash>[0]), lastObservedCategory: "MARKETING",
     submittedContentHash: contentHash, componentsSnapshot: components,
     parameterBindingsSnapshot: parameterBindings, locale };
   return {

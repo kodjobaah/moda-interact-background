@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { describe, expect, it, vi } from "vitest";
 import { checkFinalTemplateRegistration, type FinalTemplateIdentity } from
   "../../../../src/services/recovery-template-integration/final-template-registration.service.js";
@@ -10,14 +11,16 @@ const identity: FinalTemplateIdentity = {
   providerTemplateId: "meta-1", providerTemplateName: "moda_initial", providerLanguageCode: "en_US",
   submittedContentHash: hash, bindingFingerprint: hash,
 };
+const components = [{ type: "BODY" as const, text: "Your checkout is waiting" }];
 const approved = {
+  componentsSnapshot: components,
   variantId: "variant-1", registrationId: "registration-1", definitionId: "definition-1",
   shopId: "shop-1", purpose: "INITIAL_NO_OFFER", wabaId: "waba-1",
   providerTemplateId: "meta-1", providerTemplateName: "moda_initial", providerLanguageCode: "en_US",
   submittedContentHash: hash, variantStatus: "APPROVED", enabled: true,
   category: "MARKETING", providerStatus: "APPROVED", submissionState: "SUBMITTED",
   failureCode: null, lastReconciledAt: new Date("2026-10-26T08:40:00.000Z"),
-  lastObservedContentHash: hash, lastObservedCategory: "MARKETING", driftDetectedAt: null,
+  lastObservedContentHash: observedContentHash(components), lastObservedCategory: "MARKETING", driftDetectedAt: null,
   definitionStatus: "PUBLISHED", definitionKind: "META_RECOVERY", definitionPurpose: "INITIAL",
   definitionOfferType: "NO_OFFER", definitionName: "moda_initial", definitionCategory: "MARKETING",
   publishedAt: new Date("2026-10-25T00:00:00Z"), retiredAt: null,
@@ -51,6 +54,7 @@ describe("ARCH-047 final SQL template registration permit", () => {
     ["disabled Meta status", { ...approved, providerStatus: "DISABLED" }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
     ["pending webhook", { ...approved, unresolvedObservation: true }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
     ["provider drift", { ...approved, driftDetectedAt: now }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
+    ["invalid frozen components", { ...approved, componentsSnapshot: [] }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
     ["hash drift", { ...approved, lastObservedContentHash: "b".repeat(64) }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
     ["pending recheck", { ...approved, failureCode: "STATUS_RECONCILIATION_PENDING" }, "TEMPLATE_PROVIDER_STATUS_UNRESOLVED"],
     ["no Meta reconciliation", { ...approved, lastReconciledAt: null }, "TEMPLATE_PROVIDER_STATUS_STALE"],

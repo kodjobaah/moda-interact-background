@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
@@ -85,7 +86,7 @@ function fixture(overrides: {
     id: "registration-1", wabaId: "waba-1", providerTemplateName: "moda_initial_no_offer",
     providerLanguageCode: languageCode, providerTemplateId: "provider-tpl-1", category: "MARKETING",
     providerStatus: "APPROVED", submissionState: "SUBMITTED", failureCode: null,
-    driftDetectedAt: null, lastObservedContentHash: digest, lastObservedCategory: "MARKETING",
+    driftDetectedAt: null, lastObservedContentHash: observedContentHash(components as Parameters<typeof observedContentHash>[0]), lastObservedCategory: "MARKETING",
     submittedContentHash: digest, componentsSnapshot: components,
     parameterBindingsSnapshot: bindings,
     locale: { id: "locale-1", languageTag: language, providerLanguageCode: languageCode,
@@ -382,6 +383,33 @@ describe("ARCH-047 BACKGROUND-001: reusable, read-only recovery template prepara
     expect(success.readShopBrand).toHaveBeenCalledTimes(1);
     expect(success.readShopBrand).toHaveBeenCalledWith("shop-1");
     await unavailable(setup([row]).service, "BINDING_VALUE_UNAVAILABLE");
+  });
+
+  it("prepares a frozen TEXT follow-up with Admin audit metadata and its original digest", async () => {
+    const row = fixture({ stage: "FOLLOW_UP" });
+    const registration = row.metaRegistration!;
+    const originalHash = registration.submittedContentHash;
+    Object.assign(registration, { parameterBindingsSnapshot: {
+      ...registration.parameterBindingsSnapshot as Record<string, unknown>,
+      schemaVersion: 1, sourceHash: "c".repeat(64), localeContentHash: originalHash,
+    } });
+    expect(await setup([row]).service.prepare(input({ stage: "FOLLOW_UP" })))
+      .toMatchObject({ outcome: "prepared", bindingFingerprint: originalHash });
+    expect(registration.submittedContentHash).toBe(originalHash);
+  });
+
+  it.each([
+    [{ sourceHash: "invalid", localeContentHash: "a".repeat(64) }, "BINDINGS_INVALID"],
+    [{ sourceHash: "c".repeat(64) }, "BINDINGS_INVALID"],
+    [{ sourceHash: "c".repeat(64), localeContentHash: "b".repeat(64) }, "BINDING_FINGERPRINT_MISMATCH"],
+  ])("rejects malformed or conflicting follow-up audit metadata", async (metadata, reason) => {
+    const row = fixture({ stage: "FOLLOW_UP" });
+    const registration = row.metaRegistration!;
+    Object.assign(registration, { parameterBindingsSnapshot: {
+      ...registration.parameterBindingsSnapshot as Record<string, unknown>,
+      schemaVersion: 1, ...metadata,
+    } });
+    await unavailable(setup([row]).service, reason, input({ stage: "FOLLOW_UP" }));
   });
 
   it("rejects legacy unbound IMAGE headers and binds only a frozen canonical READY role", async () => {

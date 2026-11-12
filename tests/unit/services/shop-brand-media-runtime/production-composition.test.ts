@@ -1,3 +1,4 @@
+import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
@@ -42,7 +43,7 @@ function instance(components: unknown = vector.componentsSnapshot,
     id: "reg-1", wabaId: "waba-1", providerTemplateName: "moda_media_header",
     providerLanguageCode: "en_US", providerTemplateId: "meta-1", category: "MARKETING",
     providerStatus: "APPROVED", submissionState: "SUBMITTED", failureCode: null,
-    driftDetectedAt: null, lastObservedContentHash: contentHash, lastObservedCategory: "MARKETING",
+    driftDetectedAt: null, lastObservedContentHash: observedContentHash(components as Parameters<typeof observedContentHash>[0]), lastObservedCategory: "MARKETING",
     submittedContentHash: contentHash, componentsSnapshot: components, parameterBindingsSnapshot: bindings,
     locale: { id: "loc-1", languageTag: "en", providerLanguageCode: "en_US", status: "REVIEWED",
       contentHash, definition: { id: "def-1", kind: "META_RECOVERY", purpose: "FOLLOW_UP",
