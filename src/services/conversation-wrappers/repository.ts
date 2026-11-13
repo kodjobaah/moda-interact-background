@@ -33,7 +33,7 @@ function hasUrlControl(value: string): boolean {
   return false;
 }
 
-function trustedHttpsUrl(value: string | null | undefined, shopDomain?: string): string | null {
+export function trustedHttpsUrl(value: string | null | undefined, shopDomain?: string): string | null {
   if (!value || value.length > 2048 || hasUrlControl(value)) return null;
   if (!URL.canParse(value)) return null;
   const uri = new URL(value);

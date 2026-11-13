@@ -6,6 +6,7 @@ import type {
   SendTemplateInput,
   SendTextInput,
   SendImageInput,
+  WhatsAppSenderIdentity,
 } from "../integration/whatsapp/types.js";
 
 export const DEFAULT_WHATSAPP_API_BASE_URL =
@@ -23,6 +24,7 @@ type FetchImplementation = typeof fetch;
 
 export type WhatsAppServiceErrorCode =
   | "configuration-missing"
+  | "sender-mismatch"
   | "provider-rejected"
   | "invalid-provider-response"
   | "invalid-template-input";
@@ -40,6 +42,16 @@ export class WhatsAppServiceError extends Error {
   ) {
     super(message);
     this.name = "WhatsAppServiceError";
+  }
+}
+
+function assertExpectedSender(expected: WhatsAppSenderIdentity | undefined,
+  actual: {providerAccountId: unknown; providerPhoneNumberId: unknown}): void {
+  if (expected === undefined) return;
+  if (typeof expected.providerAccountId !== "string" || !expected.providerAccountId.trim() ||
+      typeof expected.providerPhoneNumberId !== "string" || !expected.providerPhoneNumberId.trim() ||
+      expected.providerAccountId !== actual.providerAccountId || expected.providerPhoneNumberId !== actual.providerPhoneNumberId) {
+    throw new WhatsAppServiceError("sender-mismatch", "WhatsApp sender changed before dispatch");
   }
 }
 
@@ -77,6 +89,7 @@ export class WhatsAppService {
     text,
     previewUrl,
     replyToProviderMessageId,
+    expectedSender,
   }: SendTextInput, signal?: AbortSignal): Promise<SendMessageResult> {
     const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
     const accessToken = senderConfig.accessToken;
@@ -88,6 +101,7 @@ export class WhatsAppService {
       );
     }
 
+    assertExpectedSender(expectedSender, sender);
     const apiBaseUrl = (
       process.env.WHATSAPP_API_BASE_URL?.trim() ||
       DEFAULT_WHATSAPP_API_BASE_URL
@@ -161,6 +175,7 @@ export class WhatsAppService {
     link,
     caption,
     replyToProviderMessageId,
+    expectedSender,
   }: SendImageInput, signal?: AbortSignal): Promise<SendMessageResult> {
     const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
     const accessToken = senderConfig.accessToken;
@@ -172,6 +187,7 @@ export class WhatsAppService {
       );
     }
 
+    assertExpectedSender(expectedSender, sender);
     const apiBaseUrl = (
       process.env.WHATSAPP_API_BASE_URL?.trim() ||
       DEFAULT_WHATSAPP_API_BASE_URL

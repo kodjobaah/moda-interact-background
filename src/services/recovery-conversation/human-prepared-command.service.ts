@@ -1,7 +1,8 @@
+import { readRecoveryLayoutReceipt,commonLayoutBody,humanCommonLayoutApplicationKey,currentCommonLayoutMatches,type RecoveryLayoutReceipt } from "../recovery-multipart/common-layout.js";
 import { freezeBrandMedia, readFrozenBrandMedia, type FrozenBrandMediaEnvelope, type BrandPreparationReceipt } from "../conversation-delivery-plan.js";
 import { currentRecoveryShopHeaderMatches } from "./recovery-shop-header-verification.js";
 import { wrapperApplicationKey } from "../conversation-wrappers/application-key.js";
-import { readRecoveryShopHeader, hasPreparedRecoveryShopHeader, withRecoveryShopHeader, type RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
+import { hasPreparedRecoveryShopHeader, withRecoveryShopHeader } from "../conversation-wrappers/recovery-shop-header.js";
 import { createHash } from "node:crypto";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
@@ -16,10 +17,10 @@ const logger = createLogger({
 const digest = (body: string) => createHash("sha256").update(body, "utf8").digest("hex");
 
 export type PreparedEvidence =
-  | { schemaVersion: 1; outcome: "PASSTHROUGH"; reason: "NOT_CONFIGURED"; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; mediaPreparation?: FrozenBrandMediaEnvelope }
+  | { schemaVersion: 1; outcome: "PASSTHROUGH"; reason: "NOT_CONFIGURED"; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; mediaPreparation?: FrozenBrandMediaEnvelope }
   | { schemaVersion: 1; outcome: "RENDERED"; wrapperDefinitionId: string; localeId: string;
       audience: "HUMAN" | "SHARED"; slotEditVersion: number; applicationKey: string;
-      contentHash: string; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; mediaPreparation?: FrozenBrandMediaEnvelope };
+      contentHash: string; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; mediaPreparation?: FrozenBrandMediaEnvelope };
 
 export type FrozenHumanBody = { kind: "frozen"; body: string; evidence: PreparedEvidence }
   | { kind: "refused"; reason: string };
@@ -37,16 +38,18 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
   const evidence = raw as Record<string, unknown>;
   if (evidence.schemaVersion !== 1 || evidence.bodySha256 !== digest(body)) return null;
   if (evidence.recoveryCheckoutUrl !== undefined &&
-      (!validRecoveryCheckoutFooterUrl(evidence.recoveryCheckoutUrl) || !hasPreparedRecoveryCheckoutFooter(body, evidence.recoveryCheckoutUrl))) return null;
-  const header = evidence.recoveryShopHeader === undefined ? null : readRecoveryShopHeader(evidence.recoveryShopHeader);
-  if (evidence.recoveryShopHeader !== undefined && (!header || !hasPreparedRecoveryShopHeader(body, header))) return null;
+      !validRecoveryCheckoutFooterUrl(evidence.recoveryCheckoutUrl)) return null;
+  const header = evidence.recoveryShopHeader === undefined ? null : readRecoveryLayoutReceipt(evidence.recoveryShopHeader);
+  if (evidence.recoveryShopHeader !== undefined && (!header || !(header.schemaVersion===2 ? commonLayoutBody(header)===body : hasPreparedRecoveryShopHeader(body, header)))) return null;
+  if(evidence.recoveryCheckoutUrl!==undefined && !(header?.schemaVersion===2 ? header.variables['checkout.url']===evidence.recoveryCheckoutUrl : hasPreparedRecoveryCheckoutFooter(body,evidence.recoveryCheckoutUrl as string)))return null;
   let media: {mediaPreparation?: FrozenBrandMediaEnvelope} = {};
   if (evidence.mediaPreparation !== undefined) {
     const parsed = readFrozenBrandMedia(evidence.mediaPreparation);
-    if (!parsed || !header || JSON.stringify(parsed.recoveryShopHeader) !== JSON.stringify(header) || parsed.plan.body !== body || parsed.receipt.sourceKind !== "HUMAN_COMMAND") return null;
+    if (!parsed || !header || header.schemaVersion===2 || JSON.stringify(parsed.recoveryShopHeader) !== JSON.stringify(header) || parsed.plan.body !== body || parsed.receipt.sourceKind !== "HUMAN_COMMAND") return null;
     media = {mediaPreparation: parsed};
   }
   const footer = typeof evidence.recoveryCheckoutUrl === "string" ? { recoveryCheckoutUrl: evidence.recoveryCheckoutUrl } : {};
+  if (header?.schemaVersion===2 && evidence.outcome!=="RENDERED")return null;
   if (evidence.outcome === "PASSTHROUGH" && evidence.reason === "NOT_CONFIGURED") {
     return { schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: digest(body), ...footer, ...media, ...(header ? {recoveryShopHeader: header} : {}) };
   }
@@ -57,6 +60,7 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
       evidence.slotEditVersion < 1 || typeof evidence.applicationKey !== "string" ||
       !/^[a-f0-9]{64}$/.test(evidence.applicationKey) ||
       typeof evidence.contentHash !== "string" || !/^[a-f0-9]{64}$/.test(evidence.contentHash)) return null;
+  if(header?.schemaVersion===2 && (evidence.audience!=="SHARED" || evidence.wrapperDefinitionId!==header.commonRef.definitionId || evidence.localeId!==header.commonRef.localeId || evidence.contentHash!==header.commonRef.contentHash))return null;
   return {
     schemaVersion: 1, outcome: "RENDERED", wrapperDefinitionId: evidence.wrapperDefinitionId,
     localeId: evidence.localeId, audience: evidence.audience as "HUMAN" | "SHARED",
@@ -65,8 +69,8 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
   };
 }
 
-function preparedHumanPassthroughMatches(original: string | null, body: string | null, checkoutUrl?: string, header?: RecoveryShopHeaderReceipt): boolean {
-  if (typeof original !== "string") return false;
+function preparedHumanPassthroughMatches(original: string | null, body: string | null, checkoutUrl?: string, header?: RecoveryLayoutReceipt): boolean {
+  if (typeof original !== "string" || header?.schemaVersion===2) return false;
   const footerBody = checkoutUrl === undefined ? original : withHumanRecoveryCheckoutFooter(original, checkoutUrl);
   return body === (header ? withRecoveryShopHeader(footerBody, header) : footerBody);
 }
@@ -147,6 +151,7 @@ export class HumanPreparedCommandService {
         (evidence.outcome === "PASSTHROUGH" && !preparedHumanPassthroughMatches(original, row.preparedTextBody, evidence.recoveryCheckoutUrl, evidence.recoveryShopHeader))) {
       return { kind: "refused", reason: "prepared_invalid" };
     }
+    if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader})))return {kind:"refused",reason:"prepared_invalid"};
     return { kind: "frozen", body: row.preparedTextBody!, evidence };
   }
 
@@ -169,6 +174,10 @@ export async function currentHumanWrapperMatches(
 ): Promise<boolean> {
   const evidence = parsePreparedEvidence(body, raw, at);
   if (!evidence) return false;
+  if(evidence.recoveryShopHeader?.schemaVersion===2){
+    const common=evidence.recoveryShopHeader;
+    return Boolean(command?.shopId && typeof command.textBody==="string" && common.boundaries.body===command.textBody && evidence.outcome==="RENDERED" && evidence.audience==="SHARED" && evidence.applicationKey===humanCommonLayoutApplicationKey({commandId:command.commandId,conversationId:command.conversationId,shopId:command.shopId,slotEditVersion:evidence.slotEditVersion,textBody:command.textBody,body:body!,receipt:common}) && await currentCommonLayoutMatches(tx,common,body!,{shopId:command.shopId,conversationId:command.conversationId,slotEditVersion:evidence.slotEditVersion}));
+  }
   if (evidence.recoveryShopHeader && (!command?.shopId || !(await currentRecoveryShopHeaderMatches(tx, evidence.recoveryShopHeader, body, command.shopId)))) return false;
   // Share-lock the active slot and definition until the provider permit commits.
   const slots = await rows<{

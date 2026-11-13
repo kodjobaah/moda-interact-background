@@ -1,3 +1,4 @@
+import { bindMultipartQueue, recoveryMultipartEngine, processMultipartStatus, MULTIPART_CONTINUATION_JOB } from "../services/recovery-multipart/runtime.js";
 import { Queue, Worker } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
@@ -49,7 +50,7 @@ const bullMQTelemetry = createBullMQTelemetry({
 const workerMetricDefinition = {
   workerName: "whatsapp",
   queueName: "whatsapp-events",
-  jobNames: ["message-received", "message-status", "process-conversation-turn", META_TEMPLATE_STATUS_JOB],
+  jobNames: ["message-received", "message-status", "process-conversation-turn", META_TEMPLATE_STATUS_JOB, MULTIPART_CONTINUATION_JOB],
 } as const;
 const conversationTurnObservation = {
   mapException: () => ({
@@ -61,6 +62,8 @@ const conversationTurnObservation = {
 export const whatsappQueue = new Queue("whatsapp-events", {
   connection: connectionRedis,
 });
+
+bindMultipartQueue(whatsappQueue);
 
 const conversationTurnProcessor = new ConversationTurnProcessor<
   RecoveryAgentContext,
@@ -81,7 +84,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
 
 export function createWhatsappWorker() {
   const worker = new Worker<
-  WhatsAppInboundEvent | ConversationTurnJob | MetaTemplateStatusObservationV2
+  WhatsAppInboundEvent | ConversationTurnJob | MetaTemplateStatusObservationV2 | {messageId:string}
 >(
   "whatsapp-events",
 
@@ -106,8 +109,15 @@ export function createWhatsappWorker() {
           return;
 
         case "message-status":
-          await whatsappProviderStatusService.process(job.data);
+          if (!(await processMultipartStatus(job.data))) await whatsappProviderStatusService.process(job.data);
           return;
+
+        case MULTIPART_CONTINUATION_JOB: {
+          const data=job.data as {messageId?:unknown};
+          if(typeof data.messageId!=="string" || !data.messageId || data.messageId.length>128) throw new Error("Invalid multipart continuation identity");
+          await recoveryMultipartEngine.continue(data.messageId);
+          return;
+        }
 
         case META_TEMPLATE_STATUS_JOB:
           await processTemplateStatusJob(job.name, job.data, job.id);

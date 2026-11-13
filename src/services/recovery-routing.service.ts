@@ -1,3 +1,4 @@
+import { resolveMultipartQuote } from "./recovery-multipart/quote.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
@@ -71,6 +72,7 @@ export class RecoveryRoutingService {
     const messageDigest = providerMessageDigest(event.providerMessageId);
     let identifiers: { conversationId: string; checkoutRecoveryId: string; shopId: string } | undefined;
     try {
+      const quotedPart=event.contextMessageId ? await resolveMultipartQuote(this.database,{providerMessageId:event.contextMessageId,providerAccountId:event.providerAccountId,providerPhoneNumberId:event.providerPhoneNumberId}) : null;
       const sender = await this.senderService.resolveSender();
       if (
         event.providerAccountId !== sender.providerAccountId ||
@@ -81,6 +83,7 @@ export class RecoveryRoutingService {
         });
         return { kind: "ignored" };
       }
+      if(quotedPart?.kind==="invalid") return {kind:"guidance",reason:"INVALID_REFERENCE"};
       const phone = canonicalPhone(event.customerPhone);
       const stored = await this.database.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
@@ -97,7 +100,8 @@ export class RecoveryRoutingService {
         // even if a later payload carries different context or newer outreach.
         conversationId = stored.conversationId;
       } else if (event.contextMessageId) {
-        const original = await this.database.conversationMessage.findUnique({
+        const original = quotedPart?.kind==="matched" ? {direction:"OUTBOUND",sentAt:quotedPart.acknowledgedAt,conversationId:quotedPart.conversationId,
+          recoveryOutreachAttempt:{recipient:quotedPart.recipient},merchantSendCommand:null} : await this.database.conversationMessage.findUnique({
           where: { providerMessageId: event.contextMessageId },
           select: {
             direction: true,
