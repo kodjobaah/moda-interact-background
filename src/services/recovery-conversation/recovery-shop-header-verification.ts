@@ -1,9 +1,12 @@
+import { readCommonLayoutReceipt,currentCommonLayoutMatches } from "../recovery-multipart/common-layout.js";
 import { first, type SqlTransaction } from "./recovery-conversation.sql.js";
 import { readRecoveryShopHeader, verifiedRecoveryShopHeader, hasPreparedRecoveryShopHeader } from "../conversation-wrappers/recovery-shop-header.js";
 import { stableJson } from "../conversation-wrappers/projection.js";
 
 /** Called only inside the existing Shop-locked final permit transaction. */
-export async function currentRecoveryShopHeaderMatches(tx: SqlTransaction, raw: unknown, body: string | null, shopId: string): Promise<boolean> {
+export async function currentRecoveryShopHeaderMatches(tx: SqlTransaction, raw: unknown, body: string | null, shopId: string, conversationId?:string): Promise<boolean> {
+  const common=readCommonLayoutReceipt(raw,conversationId);
+  if(common)return !!conversationId && !!body && await currentCommonLayoutMatches(tx,common,body,{shopId,conversationId});
   const receipt = readRecoveryShopHeader(raw);
   if (!receipt || receipt.shopId !== shopId || !body || !hasPreparedRecoveryShopHeader(body, receipt)) return false;
   const shop = await first<{domain: string; status: string}>(tx, `SELECT "domain","status"::text FROM "commerce"."Shop" WHERE "id"=$1 FOR SHARE`, shopId);

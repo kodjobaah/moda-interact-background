@@ -33,6 +33,7 @@ export type WooInitialFinalPermitInput = Readonly<{
   languageCode: string;
   verifiedCategory: "MARKETING";
   templateRegistration: FinalTemplateIdentity;
+  templateParameters?:{header:readonly string[];body:readonly string[]};
   expectedContent: string;
 }>;
 
@@ -244,7 +245,7 @@ export class WooInitialSendFenceService {
           registration.providerLanguageCode !== input.languageCode) {
         return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" };
       }
-      const denied = await this.checkTemplate(tx, registration, new Date());
+      const denied = await this.checkTemplate(tx, registration, new Date(),...(registration.commonLayout?[{conversationId:input.conversationId,recoveryId:input.recoveryId,...(input.templateParameters?{parameters:input.templateParameters}:{})}]:[]));
       if (denied) return { kind: "suppressed", reason: denied };
 
       const key = `arch046-woo-initial-${createHash("sha256")

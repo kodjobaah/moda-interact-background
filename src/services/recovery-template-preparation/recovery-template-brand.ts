@@ -1,3 +1,4 @@
+import { verifiedRecoveryShopHeader, verifiedShopWebsite } from "../conversation-wrappers/recovery-shop-header.js";
 import type { PreparedOutreachBrand, PreparedOutreachBrandMediaItem } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type {
   BrandMediaResolver, BrandMediaRole, MediaApprovedHosts, RecoveryTemplatePreparationInput,
@@ -26,14 +27,14 @@ export const BRAND_KEYS = [...BRAND_TEXT_KEYS, ...BRAND_URL_KEYS] as const;
 
 export type SemanticKey =
   | (typeof BRAND_KEYS)[number]
-  | "customer.firstName" | "shop.name" | "shop.categoryName" | "checkout.url" | "checkout.itemsSummary"
+  | "customer.firstName" | "shop.name" | "shop.websiteUrl" | "shop.categoryName" | "checkout.url" | "checkout.itemsSummary"
   | "offer.code" | "offer.description" | "offer.codes"
   | "promotion.productName" | "promotion.productUrl" | "promotion.offerDescription" | "promotion.code";
 
 export function isSemanticKey(value: unknown): value is SemanticKey {
   return typeof value === "string" && (
     BRAND_KEYS.some((key) => key === value) ||
-    ["customer.firstName", "shop.name", "shop.categoryName", "checkout.url", "checkout.itemsSummary",
+    ["customer.firstName", "shop.name", "shop.websiteUrl", "shop.categoryName", "checkout.url", "checkout.itemsSummary",
       "offer.code", "offer.codes", "offer.description", "promotion.productName", "promotion.productUrl",
       "promotion.offerDescription", "promotion.code"].includes(value)
   );
@@ -87,6 +88,8 @@ function validHttps(value: string, hosts: readonly string[]): URL | null {
  * shopId, cached per preparation, and never shared between shops.
  */
 export class RecoveryVariableResolver {
+  private commonMode=false;
+  useCommonLayout():void{this.commonMode=true;}
   private brandRead: Promise<ShopBrandRow | null> | undefined;
   private categoryRead: Promise<string | null> | undefined;
   private readonly mediaReads = new Map<BrandMediaRole, Promise<string>>();
@@ -101,6 +104,7 @@ export class RecoveryVariableResolver {
     private readonly languageTag: string,
     private readonly readyProductImageUrl?: string,
     private readonly validateProductImageBeforeBinding?: () => Promise<boolean>,
+    private readonly shopDomain?: string,
   ) {}
 
   private brand(): Promise<ShopBrandRow | null> {
@@ -193,6 +197,7 @@ export class RecoveryVariableResolver {
       case "customer.firstName":
         return boundedText(this.input.customerFirstName, 200);
       case "shop.name":
+        if(this.commonMode){const identity=this.shopDomain?verifiedRecoveryShopHeader(this.input.shopId,this.shopDomain,(await this.brand())?.brandName):null;if(!identity)throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");return identity.name??new URL(identity.websiteUrl).hostname;}
         if (this.input.shopName?.shopId !== this.input.shopId) {
           throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         }
@@ -205,6 +210,9 @@ export class RecoveryVariableResolver {
           if (!(error instanceof BindingUnavailable)) throw error;
         }
         return boundedText(this.input.shopName.value, 200);
+      case "shop.websiteUrl": {
+        const url=this.shopDomain?verifiedShopWebsite(this.shopDomain):null;if(!url)throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");return url;
+      }
       case "shop.categoryName":
         // Only the active category for this shop, resolved for the selected
         // provider-template language, is eligible. Missing data fails closed.

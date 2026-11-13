@@ -1,3 +1,4 @@
+import { prepareFrozenCommonReply } from "../recovery-multipart/preparation.js";
 import { humanMultipartMessageId } from "../recovery-multipart/frozen.js";
 import type { RecoveryMultipartDeliveryEngine } from "../recovery-multipart/engine.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
@@ -43,7 +44,8 @@ const MAX_IN_FLIGHT = 4;
 
 export type HumanDispatcherDependencies = {
   database: RecoveryDatabase;
-  multipart?: Pick<RecoveryMultipartDeliveryEngine,"continue">;
+  multipart?: Pick<RecoveryMultipartDeliveryEngine,"continue"> & Partial<Pick<RecoveryMultipartDeliveryEngine,"freeze">>;
+  senderIdentity?: ()=>Promise<{providerAccountId:string;providerPhoneNumberId:string}>;
   outreach: Pick<RecoveryOutreachAttemptService, "markWaitingAfterConfirmedSend">;
   commands: MerchantSendCommandService;
   evaluator: HumanCommandEvaluationService;
@@ -138,7 +140,7 @@ export class HumanCommandDispatcherService {
     await this.reconcileConfirmedFollowUps();
     await this.deps.followUpCancellations.repairCancelledClaims();
     const commands = await this.deps.commands.claimDueHumanCommands({
-      limit: Math.min(MAX_PER_POLL, available), now: this.deps.now(),
+      limit: Math.min(MAX_PER_POLL, available), now: this.deps.now(), leaseMs:180_000,
     });
     for (const claim of commands) {
       const active: Promise<void> = this.processClaim(claim.id, claim.leaseToken).catch((error: unknown) => {
@@ -253,6 +255,8 @@ export class HumanCommandDispatcherService {
     // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
     let frozenBody: string | undefined;
     let multipartPrepared=false;
+    let commonPreparation: import("../recovery-multipart/preparation.js").CommonMultipartPreparation|undefined;
+    let commonReceipt: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt|undefined;
     let frozenPlan: ConversationMediaDeliveryPlan | undefined;
     if (command.kind === "HUMAN_TEXT") {
       const frozen = await this.deps.preparation.freeze(command, leaseToken);
@@ -264,6 +268,7 @@ export class HumanCommandDispatcherService {
         return;
       }
       multipartPrepared=frozen.evidence.recoveryShopHeader?.schemaVersion===2;
+      if(frozen.evidence.recoveryShopHeader?.schemaVersion===2){commonReceipt=frozen.evidence.recoveryShopHeader;commonPreparation=frozen.evidence.multipartPreparation;}
       frozenBody = frozen.body;
       frozenPlan = frozen.evidence?.mediaPreparation?.plan;
     }
@@ -313,7 +318,11 @@ export class HumanCommandDispatcherService {
 
     if(multipartPrepared){
       const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
-      const outcome=await engine.continue(humanMultipartMessageId(commandId));
+      let outcome=await engine.continue(humanMultipartMessageId(commandId));
+      if(outcome==="absent" && commonPreparation && commonReceipt && engine.freeze){
+        const source=prepareFrozenCommonReply({preparation:commonPreparation,common:commonReceipt,messageId:humanMultipartMessageId(commandId),recoveryId:context.recoveryId,recipient:command.recipientSnapshot,sender:await (this.deps.senderIdentity??(()=>whatsAppService.resolveSender()))(),command:{id:commandId,leaseToken},now:this.deps.now()});
+        await engine.freeze(source);outcome=await engine.continue(source.messageId);
+      }
       if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
       else if(outcome==="cancelled"||outcome==="failed")await this.rejectTerminal(commandId,leaseToken,"multipart_preparation_refused");
       return; // Reader delegation only: never synthesize/flatten v2 content.
@@ -373,6 +382,7 @@ export class HumanCommandDispatcherService {
         templateName: selected.send.templateName,
         languageCode: selected.send.languageCode,
         templateRegistration: registration,
+        ...(registration.commonLayout?{templateParameters:{header:selected.send.textHeader?[selected.send.textHeader]:[],body:selected.send.bodyParameters??[]}}:{}),
       };
     }
 

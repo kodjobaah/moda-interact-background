@@ -123,6 +123,7 @@ export type PreparedRecoveryTemplate = Readonly<{
   providerTemplateId: string;
   providerTemplateName: string;
   providerLanguageCode: string;
+  commonLayout?: import("./recovery-template-common.js").MetaCommonIdentity;
   /** Original, immutable provider-facing registration digest. */
   submittedContentHash: string;
   /** Verification digest for the frozen compiled projection. */
@@ -161,6 +162,7 @@ export type RegistrationRow = Readonly<{
     providerLanguageCode: string | null;
     status: string;
     contentHash: string | null;
+    localeAst?: unknown;
     definition: Readonly<{
       id: string;
       kind: string;
@@ -191,6 +193,7 @@ export type AssignedVariantRow = Readonly<{
 }>;
 
 export type ShopSelectionRow = Readonly<{
+  domain?: string;
   id: string;
   status: string;
   defaultLanguageTag: string | null;

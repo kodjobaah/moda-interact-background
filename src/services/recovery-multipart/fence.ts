@@ -1,3 +1,4 @@
+import { commitAdmittedProductContext } from "../../commerce/product-context-repository.js";
 import { currentCommonLayoutMatches } from './common-layout.js';
 import { parsePreparedEvidence } from '../recovery-conversation/human-prepared-command.service.js';
 import { checkFinalStoredRecoveryConsent } from "../recovery-conversation/recovery-stored-consent.service.js";
@@ -33,6 +34,7 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
   if(source.actor==='HUMAN' && source.recoveryShopHeader.schemaVersion===2){
     const command=await first<{preparedTextBody:string|null;preparedWrapperEvidence:unknown;preparedAt:Date|null;textBody:string|null}>(tx,`SELECT "preparedTextBody","preparedWrapperEvidence","preparedAt","textBody" FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`,source.command!.id);
     const evidence=command?parsePreparedEvidence(command.preparedTextBody,command.preparedWrapperEvidence,command.preparedAt):null;
+    if(evidence?.multipartPreparation && canonicalJson(evidence.multipartPreparation)!==canonicalJson({plan:source.plan,policyRef:source.policyRef,receipt:source.receipt}))return {kind:'suppressed',reason:'multipart-command-preparation-mismatch'};
     if(!evidence || evidence.outcome!=='RENDERED' || command!.textBody!==source.recoveryShopHeader.boundaries.body || canonicalJson(evidence.recoveryShopHeader)!==canonicalJson(source.recoveryShopHeader))return {kind:'suppressed',reason:'multipart-command-frame-invalid'};
   }
   const parts = await rows<{id:string;ordinal:number;role:string;payload:unknown;payloadDigest:string;sourceIdentity:unknown;state:string;deadlineAt:Date;providerAccountId:string;providerPhoneNumberId:string}>(tx,`
@@ -81,5 +83,6 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
   const admitted = await changed(tx,`UPDATE "whatsapp"."ConversationDeliveryPart" SET "state"='ADMITTED',"providerDispatchKey"=$2,
     "providerDispatchAdmittedAt"=$3,"updatedAt"=$3 WHERE "id"=$1 AND "state"='PREPARED' AND "providerDispatchKey" IS NULL`,part.id,key,now);
   if (admitted !== 1) throw new Error('MULTIPART_PART_CAS_LOST');
+  if(index===0&&source.productContextUpdate)await commitAdmittedProductContext(tx,{shopId:context.shopId,conversationId:context.id,now,expectedInboundVersion:source.receipt.inboundVersion,context:source.productContextUpdate,messageId:row.id,body:source.body,dispatchKey:rootKey});
   return {kind:'admitted',messageId:row.id,dispatchKey:key,admittedAt:now,messageContent:plan.body,deliveryPlan:plan};
 }

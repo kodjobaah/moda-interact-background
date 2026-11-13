@@ -1,7 +1,12 @@
+import { freezeCommonText } from "../conversation-delivery-plan.js";
+import { selectedCommonLayout } from "../recovery-multipart/composition.js";
+import { commonLayoutVariables,renderCommonLayoutBoundaries,commonLayoutBody,type RecoveryLayoutReceipt } from "../recovery-multipart/common-layout.js";
+import { prepareFrozenCommonReply } from "../recovery-multipart/preparation.js";
+import { readCommonLayoutReceipt } from "../recovery-multipart/common-layout.js";
 import { freezeBrandMedia, readPersistedConversationPlan, messageBrandReceipt, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
 import { createHash } from "node:crypto";
 import { prepareRecoveryBrandPlan, frozenBrandPlanCurrent, resolveConversationLogo, type ConversationLogoResolver } from "../conversation-brand-media.js";
-import { prepareRecoveryReplyBody, type RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
+import { prepareRecoveryReplyBody } from "../conversation-wrappers/recovery-shop-header.js";
 import { PrismaConversationWrapperReadRepository } from "../conversation-wrappers/repository.js";
 import type { WrapperReadPort } from "../conversation-wrappers/contracts.js";
 import { Prisma } from "@prisma/client";
@@ -83,17 +88,27 @@ export class OutboundMessageDeliveryService {
     private readonly generalFence = new GeneralOutboundSendFenceService(database),
     private readonly recoveryConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
     private readonly wooInitialFence: Pick<WooInitialSendFenceService, "admitFinalSend"> = new WooInitialSendFenceService(database),
-    private readonly recoveryFooterContext: Pick<WrapperReadPort, "loadContext"> = new PrismaConversationWrapperReadRepository(),
+    private readonly recoveryFooterContext: Pick<WrapperReadPort, "loadContext"> & Partial<Pick<WrapperReadPort,"loadSlots">> = new PrismaConversationWrapperReadRepository(),
     private readonly logoResolver: ConversationLogoResolver = resolveConversationLogo,
+    private readonly multipart?: Pick<import("../recovery-multipart/engine.js").RecoveryMultipartDeliveryEngine,"freeze"|"continue">,
   ) {}
 
   /** Resolve outside moderation/admission transactions; never append after the permit. */
-  private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<{body: string; recoveryShopHeader?: RecoveryShopHeaderReceipt} | null> {
+  private async prepareRecoveryFreeformBody(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "executionScope">, body: string): Promise<{body: string; recoveryShopHeader?: RecoveryLayoutReceipt} | null> {
     const owner = await this.ownership.readTurnOwnership(admission.conversationId);
     if (!owner) return admission.executionScope === "recovery" ? null : {body};
     if (owner.shopId !== admission.shopId || owner.mode !== "AI") return null;
     const context = await this.recoveryFooterContext.loadContext(admission.conversationId);
     if (!context || context === "TENANT_MISMATCH" || context.shopId !== admission.shopId || context.conversationId !== admission.conversationId) return null;
+    const slots=await this.recoveryFooterContext.loadSlots?.();
+    const selected=slots&&context.checkoutAvailable&&context.recoveryShopHeader?selectedCommonLayout(slots,context):null;
+    if(context.checkoutAvailable&&context.recoveryShopHeader&&slots?.some(slot=>slot.audience==="SHARED")&&!selected)return null;
+    if(selected){
+      const variables=commonLayoutVariables(context.shopId,context.recoveryShopHeader!.websiteUrl,context.recoveryShopHeader!.name,context.variables['checkout.url']??'');
+      const boundaries=variables?renderCommonLayoutBoundaries(selected.reference,variables,body,context.shopId,admission.conversationId):null;
+      if(!variables||!boundaries)return null;
+      const common={schemaVersion:2 as const,kind:'RECOVERY_COMMON_LAYOUT' as const,shopId:context.shopId,commonRef:selected.reference,variables,boundaries};return {body:commonLayoutBody(common),recoveryShopHeader:common};
+    }
     const prepared = prepareRecoveryReplyBody({body, source: "AI", context});
     return prepared.kind === "ready" ? prepared : null;
   }
@@ -107,7 +122,7 @@ export class OutboundMessageDeliveryService {
   }
 
   /** A persisted plan or assessed complete body is frozen even before the provider permit. */
-  private async frozenPending(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "messageId">): Promise<{body: string; plan?: ConversationMediaDeliveryPlan; receipt?: ConversationDeliveryReceipt; header?: RecoveryShopHeaderReceipt; policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef} | "INVALID" | null> {
+  private async frozenPending(admission: Pick<AdmittedOutbound, "shopId" | "conversationId" | "messageId">): Promise<{body: string; plan?: ConversationMediaDeliveryPlan; receipt?: ConversationDeliveryReceipt; header?: RecoveryLayoutReceipt; policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef} | "INVALID" | null> {
     if (typeof this.database.$queryRawUnsafe !== "function") return null;
     const rows = await this.database.$queryRawUnsafe<Array<{content: string; outboundPresentation: unknown; contentSha256: string | null}>>(`
       SELECT m."content",m."outboundPresentation",a."contentSha256"
@@ -122,9 +137,10 @@ export class OutboundMessageDeliveryService {
     if (row.outboundPresentation != null) {
       const parsed = readPersistedConversationPlan(row.outboundPresentation);
       if (!parsed || parsed.plan.body !== row.content) return "INVALID";
-      const receipt = parsed.brand ? asMessageDeliveryReceipt(parsed.brand.receipt) : null;
-      if (parsed.brand && (!receipt || receipt.shopId !== admission.shopId || receipt.conversationId !== admission.conversationId || receipt.messageId !== admission.messageId)) return "INVALID";
-      return {body: row.content, plan: parsed.plan, ...(receipt ? {receipt} : {}), ...(parsed.brand ? {header: parsed.brand.recoveryShopHeader, policy:parsed.brand.policyRef} : {})};
+      const persisted=parsed.brand??parsed.common;
+      const receipt = persisted ? asMessageDeliveryReceipt(persisted.receipt) : null;
+      if (persisted && (!receipt || receipt.shopId !== admission.shopId || receipt.conversationId !== admission.conversationId || receipt.messageId !== admission.messageId)) return "INVALID";
+      return {body: row.content, plan: parsed.plan, ...(receipt ? {receipt} : {}), ...(persisted ? {header:persisted.recoveryShopHeader,...(parsed.brand?{policy:parsed.brand.policyRef}:{})} : {})};
     }
     const hash = createHash("sha256").update(row.content, "utf8").digest("hex");
     return rows.some(value => value.contentSha256 === hash) ? {body: row.content} : null;
@@ -135,13 +151,14 @@ export class OutboundMessageDeliveryService {
   }
 
   async sendPreparedText(input: AdmittedOutbound & {
-    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
+    to: string; text: string; previewUrl?: boolean; replyToProviderMessageId?: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryLayoutReceipt;
     expectedControlRevision?: number; expectedInboundVersion?: number; productContextUpdate?: CommerceConversationProductContext;
   }): Promise<OutboundAdmissionResult> {
     return this.sendPreparedConversation({...input});
   }
 
   async sendPreparedConversation({
+    commonLayout, multipartPlan,
     brandMediaPolicy,
     messageId,
     shopId,
@@ -162,16 +179,35 @@ export class OutboundMessageDeliveryService {
   }: AdmittedOutbound & {
     to: string;
     text: string;
-    prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt;
+    prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryLayoutReceipt;
     previewUrl?: boolean;
     replyToProviderMessageId?: string;
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
     productContextUpdate?: CommerceConversationProductContext;
+    commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan;
     brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
     let outboundText = terminal ? TERMINAL_MESSAGE : text;
+    if(commonLayout || multipartPlan){
+      const common=readCommonLayoutReceipt(commonLayout,conversationId);
+      const owner=await this.ownership.readTurnOwnership(conversationId);
+      if(!common||!multipartPlan||terminal||prepareRecoveryFooter||!owner||owner.mode!=="AI"||owner.shopId!==shopId||owner.revision!==expectedControlRevision||!matchesConversationReceipt(presentationReceipt,{shopId,conversationId,messageId,...(expectedInboundVersion===undefined?{}:{expectedInboundVersion}),...(expectedControlRevision===undefined?{}:{expectedControlRevision})})||common.shopId!==shopId||common.boundaries.header+common.boundaries.body+common.boundaries.footer!==text){
+        await this.failPrepared(messageId,{shopId,conversationId,unpreparedOnly:true});return {kind:"suppressed",reason:"conversation-invalid"};
+      }
+      const engine=this.multipart??(await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
+      // Replays are resumed by the engine/repair from immutable stored source;
+      // never recompose a prepared group or acquire a newer ownership snapshot.
+      if(await this.hasCompletedPreparation(messageId))return {kind:"admitted",shopId,messageId,conversationId,terminal,executionScope,deliveryState:"pending"};
+      const suppression=await this.revalidateBeforeProvider({kind:"admitted",shopId,messageId,conversationId,terminal,executionScope});if(suppression)return suppression;
+      const source=prepareFrozenCommonReply({preparation:{plan:multipartPlan,policyRef:brandMediaPolicy??null,receipt:messageBrandReceipt(presentationReceipt!)},common,messageId,recoveryId:owner.recoveryId,recipient:to,sender:await this.provider.resolveSender(),command:null,now:new Date(),...(productContextUpdate?{productContextUpdate}:{})});
+      if(!(await this.prepareUnadmittedContent(messageId,text,undefined,{shopId,conversationId})))return {kind:"suppressed",reason:"duplicate"};
+      await engine.freeze(source);
+      if(!(await this.approvePreparedOutbound({shopId,conversationId,messageId,outboundText:text})))return {kind:"suppressed",reason:"conversation-invalid"};
+      const outcome=await engine.continue(messageId);
+      return outcome==="failed"||outcome==="cancelled"?{kind:"suppressed",reason:"conversation-invalid"}:{kind:"admitted",shopId,messageId,conversationId,terminal,executionScope,deliveryState:"pending"};
+    }
     // A replay/uncertain permit is immutable even if a newly supplied plan is invalid.
     if (await this.hasCompletedPreparation(messageId))
       return { kind: "suppressed", reason: "duplicate" };
@@ -216,6 +252,7 @@ export class OutboundMessageDeliveryService {
       recoveryShopHeader = preparedTerminal.recoveryShopHeader;
       if (identity) {
         plan = await prepareRecoveryBrandPlan({shopId, body: outboundText, header: recoveryShopHeader, onPolicy: ref=>{brandMediaPolicy=ref;}}, this.logoResolver);
+        if (!plan&&recoveryShopHeader?.schemaVersion===2)plan={schemaVersion:1,kind:"TEXT",body:outboundText};
         if (plan) { expectedControlRevision ??= identity.revision; expectedInboundVersion ??= identity.inboundVersion;
           presentationReceipt = {shopId, conversationId, messageId, controlRevision: expectedControlRevision,
             inboundVersion: expectedInboundVersion, firstPair: null}; }
@@ -340,7 +377,7 @@ export class OutboundMessageDeliveryService {
     // Terminal sends continue to moderate and send their fixed text instead.
     let prepared: ReturnType<typeof prepareAutomatedTemplateInput> | null = null;
     let outboundText = TERMINAL_MESSAGE;
-    let recoveryShopHeader: RecoveryShopHeaderReceipt | undefined;
+    let recoveryShopHeader: RecoveryLayoutReceipt | undefined;
     let noticePlan: ConversationMediaDeliveryPlan | undefined;
     let noticePolicy: import("../conversation-brand-media.js").BrandMediaPolicyRef | undefined;
     let noticeReceipt: ConversationDeliveryReceipt | undefined;
@@ -355,6 +392,10 @@ export class OutboundMessageDeliveryService {
       outboundText = preparedTerminal.body;
       recoveryShopHeader = preparedTerminal.recoveryShopHeader;
       if (noticeIdentity) noticePlan = await prepareRecoveryBrandPlan({shopId: admission.shopId, body: outboundText, header: recoveryShopHeader, onPolicy:ref=>{noticePolicy=ref;}}, this.logoResolver);
+    }
+    if(!frozenNotice&&noticeIdentity&&recoveryShopHeader?.schemaVersion===2){
+      noticePlan??={schemaVersion:1,kind:"TEXT",body:outboundText};
+      noticeReceipt={shopId:admission.shopId,conversationId:admission.conversationId,messageId:admission.messageId,controlRevision:input.expectedControlRevision??noticeIdentity.revision,inboundVersion:noticeIdentity.inboundVersion,firstPair:null};
     }
     if (noticePlan?.kind === "BRAND_IMAGE") {
       if (!noticeReceipt && noticeIdentity) noticeReceipt = {shopId: admission.shopId, conversationId: admission.conversationId, messageId: admission.messageId, controlRevision: input.expectedControlRevision ?? noticeIdentity.revision, inboundVersion: noticeIdentity.inboundVersion, firstPair: null};
@@ -429,6 +470,7 @@ export class OutboundMessageDeliveryService {
         expectedContent: outboundText, templateName: input.templateName,
         languageCode: input.languageCode, verifiedCategory: "MARKETING",
         templateRegistration: input.templateRegistration!,
+        ...(input.templateRegistration?.commonLayout?{templateParameters:{header:input.textHeader?[input.textHeader]:[],body:input.bodyParameters??[]}}:{}),
       });
       if (permit.kind === "suppressed") {
         // A previously committed permit can already have reached Meta. Never
@@ -457,6 +499,7 @@ export class OutboundMessageDeliveryService {
         } } : {}),
         ...(noticeReceipt || input.expectedControlRevision === undefined ? {} : { expectedControlRevision: input.expectedControlRevision }),
         ...(!admission.terminal ? { template: { name: input.templateName, languageCode: input.languageCode,
+          ...(input.templateRegistration?.commonLayout?{parameters:{header:input.textHeader?[input.textHeader]:[],body:input.bodyParameters??[]}}:{}),
           ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
       });
       if (fenced) return fenced;
@@ -519,7 +562,7 @@ export class OutboundMessageDeliveryService {
    * Nullable unique fields belong in a nested WhereInput, not at the top level
    * of Prisma's WhereUniqueInput (which rejects null for providerDispatchKey).
    */
-  private async prepareUnadmittedContent(messageId: string, content: string, plan?: ConversationMediaDeliveryPlan, scope?: {shopId: string; conversationId: string}, receipt?: ConversationDeliveryReceipt, recoveryShopHeader?: RecoveryShopHeaderReceipt, policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef): Promise<boolean> {
+  private async prepareUnadmittedContent(messageId: string, content: string, plan?: ConversationMediaDeliveryPlan, scope?: {shopId: string; conversationId: string}, receipt?: ConversationDeliveryReceipt, recoveryShopHeader?: RecoveryLayoutReceipt, policy?: import("../conversation-brand-media.js").BrandMediaPolicyRef): Promise<boolean> {
     if (plan?.kind === "BRAND_IMAGE" && (!receipt || !policy || !recoveryShopHeader || !scope || !matchesConversationReceipt(receipt, {shopId: scope.shopId, conversationId: scope.conversationId, messageId, expectedInboundVersion: receipt.inboundVersion, expectedControlRevision: receipt.controlRevision}))) return false;
     if (plan) return this.database.$transaction(async tx => {
       const rows = await tx.$queryRawUnsafe<{content: string; outboundPresentation: unknown; senderType: string; status: string; providerDispatchKey: string | null; providerDispatchAdmittedAt: Date | null}[]>(`
@@ -531,10 +574,10 @@ export class OutboundMessageDeliveryService {
             WHERE c."id"=m."conversationId" AND COALESCE(r."shopId",c."shopId")=$3
               AND (c."shopId" IS NULL OR c."shopId"=$3)) FOR UPDATE`, messageId, scope?.conversationId, scope?.shopId);
       const row = rows[0];
-      if (!row || (row.senderType !== "AGENT" && !(plan.kind === "BRAND_IMAGE" && row.senderType === "AUTOMATION")) || row.status !== "PENDING" || row.providerDispatchKey || row.providerDispatchAdmittedAt) return false;
+      if (!row || (row.senderType !== "AGENT" && !((plan.kind === "BRAND_IMAGE"||recoveryShopHeader?.schemaVersion===2) && row.senderType === "AUTOMATION")) || row.status !== "PENDING" || row.providerDispatchKey || row.providerDispatchAdmittedAt) return false;
       if (row.outboundPresentation !== null && (!sameConversationPlan(row.outboundPresentation, plan) || row.content !== content)) return false;
-      const persisted = plan.kind === "BRAND_IMAGE" ? freezeBrandMedia(plan, messageBrandReceipt(receipt!), recoveryShopHeader!, policy!) : plan;
-      if (plan.kind === "BRAND_IMAGE" && row.outboundPresentation !== null && canonicalStoredReceipt(row.outboundPresentation) !== canonicalJson(receipt)) return false;
+      const persisted = plan.kind === "BRAND_IMAGE" ? freezeBrandMedia(plan, messageBrandReceipt(receipt!), recoveryShopHeader!, policy!) : plan.kind==="TEXT"&&recoveryShopHeader?.schemaVersion===2?freezeCommonText(plan,messageBrandReceipt(receipt!),recoveryShopHeader):plan;
+      if ((plan.kind === "BRAND_IMAGE"||recoveryShopHeader?.schemaVersion===2) && row.outboundPresentation !== null && canonicalStoredReceipt(row.outboundPresentation) !== canonicalJson(receipt)) return false;
       await tx.conversationMessage.update({where: {id: messageId}, data: {content, outboundPresentation: persisted as unknown as Prisma.InputJsonValue}});
       return true;
     });
@@ -598,10 +641,10 @@ export class OutboundMessageDeliveryService {
    */
   private async fenceProviderSend(input: {
     shopId: string; conversationId: string; messageId: string; to: string;
-    expectedContent: string; recoveryShopHeader?: RecoveryShopHeaderReceipt; expectedControlRevision?: number; expectedInboundVersion?: number;
+    expectedContent: string; recoveryShopHeader?: RecoveryLayoutReceipt; expectedControlRevision?: number; expectedInboundVersion?: number;
     executionScope?: "general" | "recovery";
     productContextUpdate?: CommerceConversationProductContext;
-    template?: { name: string; languageCode: string;
+    template?: { name: string; languageCode: string; parameters?:{header:readonly string[];body:readonly string[]};
       registration?: import("../recovery-template-integration/final-template-registration.service.js").FinalTemplateIdentity };
     deliveryKind: "TEXT" | "IMAGE" | "TEMPLATE";
     brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
@@ -664,6 +707,7 @@ export class OutboundMessageDeliveryService {
         verifiedCategory: "MARKETING", templateName: input.template.name,
         languageCode: input.template.languageCode, consent: permission.snapshot,
         templateRegistration: input.template.registration,
+        ...(input.template.parameters?{templateParameters:input.template.parameters}:{}),
       };
     }
     const permit = await this.recoveryFence.admitFinalSend({
@@ -753,6 +797,7 @@ export class OutboundMessageDeliveryService {
 
 function canonicalStoredReceipt(raw: unknown): string | undefined {
  const parsed = readPersistedConversationPlan(raw);
- const receipt = parsed?.brand ? asMessageDeliveryReceipt(parsed.brand.receipt) : null;
+ const persisted=parsed?.brand??parsed?.common;
+ const receipt = persisted ? asMessageDeliveryReceipt(persisted.receipt) : null;
  return receipt ? canonicalJson(receipt) : undefined;
 }

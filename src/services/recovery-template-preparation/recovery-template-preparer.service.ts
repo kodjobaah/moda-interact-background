@@ -1,3 +1,4 @@
+import { readMetaCommonReference,currentMetaCommonReference } from "./recovery-template-common.js";
 import { renderInitialOutreachPreview, InitialOutreachRenderInputSchema, type InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
@@ -52,6 +53,7 @@ export class RecoveryTemplatePreparer {
     private readonly logger: Pick<StructuredLogger, "warn" | "error"> = defaultLogger,
     private readonly createProductImageResolver: () => Pick<RecoveryProductImageResolver, "prepareForBinding"> =
       createProductionRecoveryProductImageResolver,
+    private readonly commonReferenceCurrent:typeof currentMetaCommonReference=currentMetaCommonReference,
   ) {}
 
   async prepare(input: RecoveryTemplatePreparationInput): Promise<PreparationResult> {
@@ -86,6 +88,7 @@ export class RecoveryTemplatePreparer {
       });
       if (!catalogue.shop || catalogue.shop.status !== "ACTIVE") return unavailable("SHOP_UNAVAILABLE");
 
+      const shopDomain=catalogue.shop.domain;
       const selectionInput = {
         shop: catalogue.shop, shopId: input.shopId, senderWabaId: configuredSender,
         purpose, variants: catalogue.variants,
@@ -140,12 +143,21 @@ export class RecoveryTemplatePreparer {
         selectedAssignment.canonicalLanguageTag,
         readyProduct?.result.kind === "READY" ? readyProduct.result.publicImageUrl : undefined,
         readyProduct?.result.kind === "READY" ? readyProduct.validateBeforeBinding : undefined,
+        shopDomain,
       );
+      let commonLayout: import("./recovery-template-common.js").MetaCommonIdentity|undefined;
       let renderedText: string | undefined;
       let headerAvailabilityFailure = false;
       const prepareSelected = async (readyProduct?: PreparedOutreachProductMedia) => {
         const variables = variablesFor(readyProduct);
-        if (input.stage !== "INITIAL") return prepareFrozenComponents({ registration, variables });
+        const common=readMetaCommonReference(registration.locale.localeAst);
+        if(common.kind==='invalid'||common.kind==='present'&&!(await this.commonReferenceCurrent(common.reference)))throw new BindingUnavailable("BINDINGS_INVALID");
+        commonLayout=undefined;
+        if(common.kind==='present')variables.useCommonLayout();
+        const captureCommon=async(components:readonly import("./recovery-template.types.js").PreparedMetaComponent[])=>{
+          if(common.kind==='present')commonLayout={reference:common.reference,variables:{'shop.name':await variables.resolve('shop.name'),'shop.websiteUrl':await variables.resolve('shop.websiteUrl'),'checkout.url':variables.checkout()},parameters:{header:components.filter(c=>c.type==='header').flatMap(c=>c.parameters.filter(p=>p.type==='text').map(p=>(p as {text:string}).text)),body:components.filter(c=>c.type==='body').flatMap(c=>c.parameters.map(p=>p.text))}};
+        };
+        if (input.stage !== "INITIAL") {const prepared=await prepareFrozenComponents({registration,variables});await captureCommon(prepared.components);return prepared;}
         if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== input.shopId) throw new BindingUnavailable("INVALID_REQUEST");
         if (!input.checkoutItems || input.checkoutItems.shopId !== input.shopId || !Array.isArray(input.checkoutItems.lineItems) || input.checkoutItems.lineItems.length === 0) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         if (input.checkoutItems.lineItems.length !== input.outreachEvaluation.lines.length || input.checkoutItems.lineItems.some((raw, index) => {
@@ -180,16 +192,20 @@ export class RecoveryTemplatePreparer {
           throw error;
         }
         const projection = JSON.parse(JSON.stringify(selectedAssignment));
+        // Local authoring provenance is validated separately; the published
+        // provider projection remains its exact existing strict contract.
+        delete projection.variant.metaRegistration.locale.localeAst;
         const renderInput = { schemaVersion: 1, evaluation: input.outreachEvaluation,
           preparedProjection: projection as InitialOutreachRenderInput["preparedProjection"],
           preparedBrand, preparedBrandMedia,
-          variables: { shopName: await variables.resolve("shop.name"), customerFirstName: input.customerFirstName ?? null,
+          variables: { shopName: await variables.resolve("shop.name"), ...(textKeys.has("shop.websiteUrl")?{shopWebsiteUrl:await variables.resolve("shop.websiteUrl")}:{}), customerFirstName: input.customerFirstName ?? null,
             checkoutUrl, shopCategory: JSON.stringify(registration.parameterBindingsSnapshot).includes("shop.categoryName")
               ? await variables.resolve("shop.categoryName") : null }, headerMedia } as const;
         const checkedInput = InitialOutreachRenderInputSchema.safeParse(renderInput);
         if (!checkedInput.success) throw new BindingUnavailable(checkedInput.error.issues.some(issue => issue.path.includes("componentsSnapshot") || issue.path.includes("parameterBindingsSnapshot")) ? "BINDINGS_INVALID" : "INVALID_REQUEST");
         const rendered = renderInitialOutreachPreview(checkedInput.data);
         if (rendered.kind !== "ready") throw new BindingUnavailable(rendered.reasonCode);
+        await captureCommon(rendered.parameters);
         renderedText = rendered.renderedText;
         return { components: rendered.parameters, bindingFingerprint: rendered.templateProvenance.bindingFingerprint };
       };
@@ -223,6 +239,7 @@ export class RecoveryTemplatePreparer {
         selectionSource: selectedAssignment.selectionSource,
         submittedContentHash: registration.submittedContentHash,
         bindingFingerprint: preparedBindings.bindingFingerprint,
+        ...(commonLayout?{commonLayout}:{}),
         initialCheckoutItemsBodyPosition: checkoutItemsDecision.bodyPosition,
         template: {
           name: registration.providerTemplateName,

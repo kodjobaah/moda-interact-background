@@ -1,3 +1,5 @@
+import { readCommonLayoutReceipt,commonLayoutBody } from "../recovery-multipart/common-layout.js";
+import { selectedCommonLayout,composeCommonReply } from "../recovery-multipart/composition.js";
 import { prepareRecoveryBrandPlan, type ConversationLogoResolver } from "../conversation-brand-media.js";
 import { prepareRecoveryReplyBody, hasPreparedRecoveryShopHeader, type RecoveryShopHeaderReceipt } from "./recovery-shop-header.js";
 import { wrapperApplicationKey } from "./application-key.js";
@@ -72,6 +74,11 @@ export class ConversationWrapperService {
       // original response, even when an Admin later switches the active slot.
       if (input.previousApplication) {
         const prior = input.previousApplication;
+        if(prior.commonLayout){
+          const common=readCommonLayoutReceipt(prior.commonLayout,input.conversationId);
+          if(!common||!prior.multipartPlan||commonLayoutBody(common)!==prior.body||prior.source!==input.source||prior.messageIdentity!==input.messageIdentity||prior.responseDigest!==(presentationDigest??digest(input.responseBody))||prior.applicationKey!==wrapperApplicationKey({conversationId:input.conversationId,messageIdentity:prior.messageIdentity,source:prior.source,wrapperDefinitionId:prior.wrapperDefinitionId,localeId:prior.localeId,contentHash:prior.contentHash,editVersion:prior.slotEditVersion,responseDigest:prior.responseDigest,body:prior.body,...(prior.recoveryCheckoutUrl?{recoveryCheckoutUrl:prior.recoveryCheckoutUrl}:{}),commonLayout:common,multipartPlan:prior.multipartPlan}))return this.refuse("rejected","REPLAY_MISMATCH",input);
+          return {...prior,replayed:true};
+        }
         const matchedBody = presentationDigest !== null
           ? ((prior.deliveryPlan ? ConversationMediaDeliveryPlanSchema.safeParse(prior.deliveryPlan).success && prior.deliveryPlan.body === prior.body && digest(stableJson({presentationDigest, deliveryPlan: prior.deliveryPlan})) === prior.responseDigest : presentationDigest === prior.responseDigest) ? input.responseBody : undefined)
           : responseBodies.find((body) => digest(body) === prior.responseDigest);
@@ -108,6 +115,9 @@ export class ConversationWrapperService {
         return this.refuse("rejected", "VARIABLE_UNAVAILABLE", input);
       }
       const slots = await this.repository.loadSlots();
+      const common = context.checkoutAvailable && context.recoveryShopHeader ? selectedCommonLayout(slots,context,input.languageTag) : null;
+      if(context.checkoutAvailable&&context.recoveryShopHeader&&slots.some(slot=>slot.audience==="SHARED")&&!common)return this.refuse("rejected","PREPARED_INVALID",input);
+      if(common) return await composeCommonReply(input,context,common,this.dependencies) ?? this.refuse("rejected","PREPARED_INVALID",input);
       if (input.commercePresentation) {
         const compositionInput = {
           responseStyle: "AGENT" as const,

@@ -17,6 +17,7 @@ export type OutboundAdmissionResult =
       messageId: string;
       conversationId: string;
       terminal: boolean;
+      deliveryState?: "pending";
       executionScope?: "general" | "recovery";
     }
   | { kind: "suppressed"; reason: OutboundSuppressionReason };

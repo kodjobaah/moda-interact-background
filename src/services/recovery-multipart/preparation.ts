@@ -1,0 +1,24 @@
+import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
+import { parseRecoveryMultipartDeliveryPlan,digestRecoveryMultipartDeliveryPlan,type RecoveryMultipartDeliveryPlan } from '@modainteract/moda-interact-shared/commerce/presentation';
+import { readBrandPreparationReceipt,type BrandPreparationReceipt,validConversationPlan } from '../conversation-delivery-plan.js';
+import { readBrandMediaPolicyRef,type BrandMediaPolicyRef } from '../conversation-brand-media.js';
+import { canonicalWhatsAppSender } from '../whatsapp-contact-opt-out/phone.js';
+import { commonLayoutBody,type CommonLayoutReceipt } from './common-layout.js';
+import { requireFrozenMultipart,deliveryDeadline,sha256,type FrozenMultipart } from './frozen.js';
+/** Persisted on HUMAN before transport/root creation, so crash recovery never
+ * resolves a replacement logo, source, control or customer-inbound snapshot. */
+export type CommonMultipartPreparation={plan:RecoveryMultipartDeliveryPlan;policyRef:BrandMediaPolicyRef|null;receipt:BrandPreparationReceipt};
+export function readCommonMultipartPreparation(raw:unknown,common:CommonLayoutReceipt):CommonMultipartPreparation|null{
+ if(!raw||typeof raw!=='object'||Array.isArray(raw))return null;const r=raw as Record<string,unknown>;
+ if(Object.keys(r).length!==3||!['plan','policyRef','receipt'].every(k=>Object.hasOwn(r,k)))return null;
+ const receipt=readBrandPreparationReceipt(r.receipt),policyRef=r.policyRef===null?null:readBrandMediaPolicyRef(r.policyRef);if(!receipt||receipt.shopId!==common.shopId||r.policyRef!==null&&!policyRef)return null;
+ let plan:RecoveryMultipartDeliveryPlan;try{plan=parseRecoveryMultipartDeliveryPlan(r.plan,common.variables['checkout.url']);}catch{return null;}
+ if(plan.parts.length===1?plan.parts[0]!.plan.body!==commonLayoutBody(common):plan.parts[0]!.plan.body!==common.boundaries.header+common.boundaries.footer||plan.parts.at(-1)!.plan.body!==common.boundaries.body+common.boundaries.footer||plan.parts.length===3&&plan.parts[1]!.plan.body!==common.boundaries.footer)return null;
+ for(const p of plan.parts){if(!validConversationPlan(p.plan,p.plan.body,receipt.shopId,{...receipt,messageId:receipt.sourceId}))return null;if(p.plan.kind==='BRAND_IMAGE'&&(!policyRef||policyRef.publicOrigin!==p.plan.image.publicOrigin))return null;}
+ return {plan,policyRef,receipt};
+}
+export function prepareFrozenCommonReply(input:{preparation:CommonMultipartPreparation;common:CommonLayoutReceipt;messageId:string;recoveryId:string;recipient:string;sender:FrozenMultipart['sender'];command:FrozenMultipart['command'];now:Date;productContextUpdate?:FrozenMultipart['productContextUpdate']}):FrozenMultipart{
+ const prepared=readCommonMultipartPreparation(input.preparation,input.common);const recipient=canonicalWhatsAppSender(input.recipient);if(!prepared||!recipient)throw new Error('INVALID_COMMON_MULTIPART_PREPARATION');
+ return requireFrozenMultipart({schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId:input.messageId,body:commonLayoutBody(input.common),checkoutUrl:input.common.variables['checkout.url'],recipient,recoveryId:input.recoveryId,actor:prepared.receipt.sourceKind==='HUMAN_COMMAND'?'HUMAN':'AGENT',receipt:prepared.receipt,recoveryShopHeader:input.common,policyRef:prepared.policyRef,command:input.command,sender:input.sender,plan:prepared.plan,planDigest:digestRecoveryMultipartDeliveryPlan(prepared.plan,sha256),frozenAt:input.now.toISOString(),deadlineAt:deliveryDeadline(input.now).toISOString(),...(input.productContextUpdate?{productContextUpdate:input.productContextUpdate}:{})});
+}
+export const sameCommonPreparation=(a:CommonMultipartPreparation,b:CommonMultipartPreparation)=>canonicalJson(a)===canonicalJson(b);
