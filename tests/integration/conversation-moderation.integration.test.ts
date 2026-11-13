@@ -87,6 +87,22 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
     } finally { await close(); }
   }, 120_000);
 
+  it('backfills completed historical audio and blocks unsafe history without authorizing a blocked current turn',async()=>{
+    const {f,aimock,close}=await moderatedFixture('handback-audio');try{
+      const boundary=new Date(Date.now()-1000),past=new Date(boundary.getTime()-1000);
+      const audio=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',contentType:'AUDIO',transcriptionStatus:'COMPLETED',transcriptionCompletedAt:past,content:'Completed human-mode transcript',createdAt:past}});
+      const blocked=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'moderation-fixture-block',createdAt:past}});
+      const incomplete=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',contentType:'AUDIO',transcriptionStatus:'PENDING',content:'Not an approved transcript',createdAt:past}});
+      await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'Allowed new current question',createdAt:boundary}});
+      await f.changeOwner('HUMAN','AI',1);const service=new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation),gate=new ModerationTurnGate(service);
+      expect(await gate.moderatePending(f.conversationId,boundary)).toBe('allowed');
+      const safe=await allowedHistoryCandidates([audio,blocked,incomplete],aimock.readOperation);expect(safe.map(m=>m.id)).toEqual([audio.id]);expect(await f.db.conversationModerationAssessment.count({where:{conversationMessageId:incomplete.id}})).toBe(0);
+      await expect(service.assessText({subject:{kind:'CUSTOMER_MESSAGE',messageId:audio.id},shopId:'foreign',conversationId:f.conversationId,effectiveText:audio.content,inputKind:'TRANSCRIPT',policyVersion:moderationConfig().policyVersion})).rejects.toThrow();await expect(service.assessText({subject:{kind:'CUSTOMER_MESSAGE',messageId:audio.id},shopId:f.shopId,conversationId:f.conversationId,effectiveText:'tampered',inputKind:'TRANSCRIPT',policyVersion:moderationConfig().policyVersion})).rejects.toThrow();
+      const count=aimock.journal().length;expect(await Promise.all([gate.moderatePending(f.conversationId,boundary),gate.moderatePending(f.conversationId,boundary)])).toEqual(['allowed','allowed']);expect(aimock.journal()).toHaveLength(count);
+      const next=new Date();await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'moderation-fixture-block',createdAt:next}});expect(await gate.moderatePending(f.conversationId,next)).toBe('suppressed');expect(f.providerHttpRequests).toHaveLength(0);
+    }finally{await close();}
+  },120000);
+
   it("BLOCK on a HUMAN command terminates it before billing and WhatsApp emulator", async () => {
     const { f, aimock, close } = await moderatedFixture("moderation-human-block");
     try {
