@@ -27,7 +27,7 @@ const sender = async () => ({ providerAccountId: "waba-1", providerPhoneNumberId
 const optOut = (db: PrismaClient) => new WhatsAppContactOptOutService(db, sender, undefined, () => now);
 
 describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
-  it("updates Shopify and Woo registered phones, never another number; duplicate, later Shopify grant and merchant re-enable cannot clear STOP", async () => {
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("updates Shopify and Woo registered phones, never another number; duplicate, later Shopify grant and merchant re-enable cannot clear %s", async (command) => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
     const { phone, canonical } = recipientFor(11);
@@ -54,7 +54,7 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       // The legacy same-shop matching number is registered after the native
       // grant; positive consent never transfers to another Customer by phone.
       const ap2 = await db.customerPhone.create({ data: { customerId: a2.id, phone: `0${phone.slice(3, 7)} ${phone.slice(7)}` } });
-      const stop = incoming(canonical, { providerMessageId: `wamid-${suffix}` });
+      const stop = incoming(canonical, { providerMessageId: `wamid-${suffix}`, content: { type: "text", text: command } });
       expect(await optOut(db).handleInbound(stop)).toBe(true);
       const all = await db.customerPhone.findMany({ where: { id: { in: [ap.id, ap2.id, bp.id, different.id] } } });
       expect(all.filter((r) => r.whatsappNoContact)).toHaveLength(3);

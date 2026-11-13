@@ -102,10 +102,23 @@ describe("ARCH-045 WhatsApp STOP", () => {
     expect(isExplicitWhatsAppStop({ type: "audio" })).toBe(false);
   });
 
-  it("scopes a reliably quoted STOP to its original merchant and all same-shop customers", async () => {
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("recognizes exact %s variants only", (command) => {
+    for (const text of [command, ` ${command.toLowerCase()} `, `${command}!`, `${command}.`]) {
+      expect(isExplicitWhatsAppStop({ type: "text", text })).toBe(true);
+    }
+    for (const text of [`please ${command}`, `${command} please`, `x${command}`, `${command}x`,
+      `${command}!!`, `${command}..`, `${command}?!`, `${command} !`, `${command}\nplease`]) {
+      expect(isExplicitWhatsAppStop({ type: "text", text })).toBe(false);
+    }
+    for (const type of ["audio", "image", "button", "interactive"]) {
+      expect(isExplicitWhatsAppStop({ type, text: command })).toBe(false);
+    }
+  });
+
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("scopes a reliably quoted STOP to its original merchant and all same-shop customers (%s)", async (command) => {
     const phones = [row("a-1", "shop-a"), row("a-2", "shop-a"), row("b-1", "shop-b")];
     const f = setup(phones, { shopId: "shop-a" });
-    expect(await f.service.handleInbound(event({ contextMessageId: "outbound-a" }))).toBe(true);
+    expect(await f.service.handleInbound(event({ contextMessageId: "outbound-a", content: { type: "text", text: command } }))).toBe(true);
     expect(phones.map((p) => p.whatsappNoContact)).toEqual([true, true, false]);
     expect([...f.notices.values()]).toHaveLength(1);
     expect([...f.notices.values()][0]!.body).toMatch(/replied STOP to this shop/);
@@ -113,15 +126,15 @@ describe("ARCH-045 WhatsApp STOP", () => {
     expect(f.logger.info.mock.calls.flat().join(" ")).not.toContain(number.slice(1));
   });
 
-  it("standalone STOP blocks all currently registered shops, not a guessed recent shop", async () => {
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("standalone STOP blocks all currently registered shops, not a guessed recent shop (%s)", async (command) => {
     const phones = [row("a-1", "shop-a"), row("a-2", "shop-a", "07400 123456", null),
       row("b-1", "woo-b"), row("different", "woo-b", other)];
     const f = setup(phones);
-    expect(await f.service.handleInbound(event())).toBe(true);
+    expect(await f.service.handleInbound(event({ content: { type: "text", text: command } }))).toBe(true);
     expect(phones.map((p) => p.whatsappNoContact)).toEqual([true, true, true, false]);
     expect([...f.notices.values()].map((n) => n.shopId).sort()).toEqual(["shop-a", "woo-b"]);
     expect([...f.notices.values()].every((n) => n.body.includes("standalone"))).toBe(true);
-    await f.service.handleInbound(event());
+    await f.service.handleInbound(event({ content: { type: "text", text: command } }));
     expect(phones.map((p) => p.whatsappNoContactRevision)).toEqual([1n, 1n, 1n, 0n]);
     expect(f.notices.size).toBe(2);
     expect(f.tx.merchantSupportThread.update).toHaveBeenCalledTimes(2);
@@ -135,16 +148,16 @@ describe("ARCH-045 WhatsApp STOP", () => {
     expect(f.logger.info).toHaveBeenCalledWith("whatsapp.stop.recorded", expect.objectContaining({ scope: "ALL_REGISTERED_SHOPS" }));
   });
 
-  it("persists STOP before notice publication; retry repairs partial notice without revising STOP", async () => {
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("persists STOP before notice publication; retry repairs partial notice without revising STOP (%s)", async (command) => {
     const phones = [row("a-1", "shop-a"), row("b-1", "shop-b")];
     const f = setup(phones);
     f.failNoticeFor("shop-b");
-    await expect(f.service.handleInbound(event())).rejects.toThrow("support unavailable");
+    await expect(f.service.handleInbound(event({ content: { type: "text", text: command } }))).rejects.toThrow("support unavailable");
     expect(phones.every((p) => p.whatsappNoContact)).toBe(true);
     expect(f.notices.size).toBe(1);
     const dates = phones.map((p) => p.whatsappNoContactAt);
     f.failNoticeFor(null);
-    await expect(f.service.handleInbound(event())).resolves.toBe(true);
+    await expect(f.service.handleInbound(event({ content: { type: "text", text: command } }))).resolves.toBe(true);
     expect(f.notices.size).toBe(2);
     expect(phones.map((p) => p.whatsappNoContactRevision)).toEqual([1n, 1n]);
     expect(phones.map((p) => p.whatsappNoContactAt)).toEqual(dates);
