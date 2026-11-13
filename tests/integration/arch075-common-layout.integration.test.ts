@@ -27,10 +27,12 @@ import { OutboundSendFenceService } from '../../src/services/recovery-conversati
 import { recoveryRuntimeEligibility } from '../../src/services/recovery-conversation/recovery-runtime-eligibility.service.js';
 import { OutboundAdmissionReservationService } from '../../src/services/outbound-whatsapp-admission/outbound-admission-reservation.service.js';
 import { moderationConfig } from '../../src/services/conversation-moderation/moderation-policy.js';
+import { createHumanDispatcherDependencies } from '../../src/services/recovery-conversation/human-command-dispatcher.service.js';
+import { MerchantSendCommandService } from '../../src/services/recovery-conversation/merchant-send-command.service.js';
 const suite=process.env.TEST_DATABASE_URL&&process.env.REDIS_URL&&process.env.MODA_DISPOSABLE_INTEGRATION==='1'?describe:describe.skip;
 const answer='  Original authored body\nhttps://other.example/product\nUnchanged trailing spaces.  ';
 const prepared:PreparedWrapper={schemaVersion:1,family:'MODA_CONVERSATION_WRAPPER',responseSlot:'response.body',header:[{kind:'text',value:'Our custom welcome: '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\nVisit the store: '},{kind:'variable',name:'shop.websiteUrl'}],body:[{kind:'responseSlot',name:'response.body'}],footer:[],conditionals:[{when:'checkout.available',tokens:[{kind:'text',value:'\nCustom checkout footer\n'},{kind:'variable',name:'checkout.url'}]}]};
-async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=true,assess=true,producer=false){
+async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=true,assess=true,producer=false,leaseMs=180000){
  const f=await humanDispatchFixture(`arch075v2-${label}`,{checkoutLifetimeDays:7,recipient:'447400123456'});
  let billingPlanId:string|undefined;let adminId:string|undefined;const definitionIds:string[]=[];
  const cleanup=async()=>{await f.db.whatsAppConversationWrapperActiveSlot.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateLocale.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateDefinition.deleteMany({where:{id:{in:definitionIds}}});if(adminId)await f.db.platformAdmin.delete({where:{id:adminId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});if(billingPlanId)await f.db.billingPlan.delete({where:{id:billingPlanId}});await f.close();};
@@ -38,7 +40,7 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=tr
   await f.db.conversation.update({where:{id:f.conversationId},data:{languageTag:"en"}});
   const domain=`${f.shopId}.example.test`.toLowerCase(),url=`https://${domain}/checkouts/trusted`;
   await f.db.shop.update({where:{id:f.shopId},data:{onboardingCompleted:true,defaultLanguageTag:"en"}});await f.db.shopBrand.create({data:{shopId:f.shopId,brandName:'  Common Shop Name  '}});
-  const customer=await f.db.customer.create({data:{shopId:f.shopId,phone:`+${f.recipient}`}});const observed=new Date();
+  const customer=await f.db.customer.create({data:{shopId:f.shopId,shopifyCustomerId:'gid://shopify/Customer/123456789',phone:`+${f.recipient}`}});const observed=new Date();
   const phone=await f.db.customerPhone.create({data:{customerId:customer.id,phone:`+${f.recipient}`,whatsappCanonicalPhone:f.recipient,whatsappPhoneVerifiedAt:observed,whatsappConsentDecision:'GRANTED',whatsappConsentSource:'SHOPIFY_NATIVE',whatsappConsentVerifiedAt:observed,whatsappConsentProviderObservedAt:observed,whatsappConsentRevision:1n,whatsappConsentDecisionSequence:1n}});
   await f.db.checkoutRecovery.update({where:{id:f.recoveryId},data:{checkoutUrl:url,customerId:customer.id}});
   const billingPlan=await f.db.billingPlan.create({data:{shopifyPlanHandle:`free-${randomUUID()}`,name:'Free common plan',kind:'FREE'}});billingPlanId=billingPlan.id;
@@ -58,7 +60,7 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=tr
   const commandId=await f.addCommand({textBody:answer});const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:`initial-${randomUUID()}`}});
   let command:FrozenMultipart['command']=null,messageId:string,revision:number;
   if(actor==='HUMAN'){
-   const claim=(await f.commands.claimDueHumanCommands({limit:100,now:new Date(),leaseMs:180000})).find(x=>x.id===commandId)!;command={id:commandId,leaseToken:claim.leaseToken};messageId=humanMultipartMessageId(commandId);revision=1;
+   const claim=(await f.commands.claimDueHumanCommands({limit:100,now:new Date(),leaseMs})).find(x=>x.id===commandId)!;command={id:commandId,leaseToken:claim.leaseToken};messageId=humanMultipartMessageId(commandId);revision=1;
    const evidence={schemaVersion:1,outcome:'RENDERED',audience:'SHARED',wrapperDefinitionId:commonRef.definitionId,localeId:commonRef.localeId,contentHash:commonRef.contentHash,slotEditVersion:1,applicationKey:humanCommonLayoutApplicationKey({commandId,conversationId:f.conversationId,shopId:f.shopId,slotEditVersion:1,textBody:answer,body,receipt:common}),bodySha256:digest(body),recoveryCheckoutUrl:url,recoveryShopHeader:common};
    if(!producer)await f.db.merchantConversationSendCommand.update({where:{id:commandId},data:{preparedTextBody:body,preparedWrapperEvidence:evidence,preparedAt:new Date()}});
   }else{
@@ -95,7 +97,63 @@ async function registeredCommon(f:Awaited<ReturnType<typeof fixture>>){
  const identity:FinalTemplateIdentity={shopId:f.shopId,senderWabaId:'account',purpose:'INITIAL_NO_OFFER',variantId:variant.id,registrationId:registration.id,definitionId:definition.id,providerTemplateId:providerId,providerTemplateName:name,providerLanguageCode:'en_GB',submittedContentHash:hash,bindingFingerprint:hash,commonLayout:{reference:f.common.commonRef,variables:f.common.variables,parameters}};
  return {identity,parameters,close:async()=>{await f.db.whatsAppTemplateVariant.delete({where:{id:variant.id}});await f.db.whatsAppTemplateMetaRegistration.delete({where:{id:registration.id}});await f.db.whatsAppTemplateLocale.delete({where:{id:locale.id}});await f.db.whatsAppTemplateDefinition.delete({where:{id:definition.id}});}};
 }
+
+async function defaultHumanRuntime(f:Awaited<ReturnType<typeof fixture>>){
+ // Keep the actual production dependency factory and canonical singleton engine.
+ // The disposable runner supplies its real PostgreSQL/Redis; the existing fixture
+ // supplies only a loopback Meta sender configuration and local moderation model.
+ const runtime=await import('../../src/services/recovery-multipart/runtime.js');
+ const {recoveryStoredConsentService}=await import('../../src/services/recovery-conversation/recovery-stored-consent.service.js');
+ expect((await recoveryStoredConsentService.preflight({shopId:f.shopId,recoveryId:f.recoveryId,recipient:f.recipient})).kind).toBe('allowed');
+ const queued=vi.fn(async()=>{});runtime.bindMultipartQueue({add:queued});
+ const preparer=new HumanPreparedCommandService(f.db,new HumanWrapperPreparationService(new ConversationWrapperService({repository:new PrismaConversationWrapperReadRepository(f.db,undefined,{read:async()=>7}),logoResolver:async()=>null})));
+ const defaults=createHumanDispatcherDependencies();
+ const moderation=f.persistedAllowModeration();
+ const dispatcher=f.dispatcher(undefined,moderation,undefined,undefined,{preparation:preparer,multipart:defaults.multipart});
+ const deliver=async(messageId=f.source.messageId)=>{const part=await f.db.conversationDeliveryPart.findFirstOrThrow({where:{messageId,ordinal:0}});await runtime.recoveryMultipartEngine.observe({schemaVersion:2,providerAccountId:part.providerAccountId,providerPhoneNumberId:part.providerPhoneNumberId,providerMessageId:part.providerMessageId!,status:'DELIVERED',occurredAt:new Date().toISOString()});};
+ return {runtime,queued,preparer,moderation,dispatcher,deliver};
+}
 suite('ARCH075 real v2 common source reader and HUMAN frozen compatibility',()=>{
+ it('DEFAULT HUMAN runtime freezes one absent root and preserves ordered delivery across duplicate claims and replay',async()=>{const f=await fixture('default-human-runtime','HUMAN',false,false,true);let service:Awaited<ReturnType<typeof defaultHumanRuntime>>|undefined;try{
+  service=await defaultHumanRuntime(f);const id=await f.addCommand({textBody:answer});const replicas=[f.commands,new MerchantSendCommandService(f.db)];
+  const claims=(await Promise.all(replicas.map(commands=>commands.claimDueHumanCommands({limit:100,now:new Date(),leaseMs:180000})))).flat().filter(claim=>claim.id===id);expect(claims).toHaveLength(1);
+  const lease=claims[0]!.leaseToken,messageId=humanMultipartMessageId(id);const list=()=>f.db.conversationDeliveryPart.findMany({where:{messageId},orderBy:{ordinal:'asc'}});
+  await service.dispatcher.processClaim(id,lease);
+  const original=await list();expect(original.map(p=>p.role)).toEqual(['HEADER','ANSWER']);expect(original.map(p=>p.state)).toEqual(['ACKNOWLEDGED','PREPARED']);
+  await f.whatsapp.waitForMessageCount(1);expect(f.whatsapp.messages).toHaveLength(1);
+  expect((await f.commandState(id))!.state).toBe('DISPATCH_ADMITTED');
+  expect(await f.db.conversationMessage.count({where:{id:messageId}})).toBe(1);
+  const manifest=original.map(p=>({id:p.id,ordinal:p.ordinal,payload:p.payload,payloadDigest:p.payloadDigest,sourceIdentity:p.sourceIdentity}));
+  await Promise.all([service.dispatcher.processClaim(id,lease),service.dispatcher.processClaim(id,lease),service.runtime.recoveryMultipartEngine.continue(messageId)]);
+  expect(f.whatsapp.messages).toHaveLength(1);expect(await f.commands.claimDueHumanCommands({limit:100,now:new Date(Date.now()+6000)})).toEqual([]);
+  await service.deliver(messageId);await service.runtime.recoveryMultipartEngine.continue(messageId);await f.whatsapp.waitForMessageCount(2);
+  expect((await f.commandState(id))!.state).toBe('SENT');expect((await f.db.conversationMessage.findUniqueOrThrow({where:{id:messageId}})).content).toBe(f.source.body);
+  const after=await list();expect(after.map(p=>({id:p.id,ordinal:p.ordinal,payload:p.payload,payloadDigest:p.payloadDigest,sourceIdentity:p.sourceIdentity}))).toEqual(manifest);
+  const bodies=f.whatsapp.messages.map(message=>(message.body as {text:{body:string}}).text.body);expect(bodies).toEqual([f.common.boundaries.header+f.common.boundaries.footer,answer+f.common.boundaries.footer]);
+  expect(bodies.every(body=>body.endsWith(f.common.variables['checkout.url']))).toBe(true);
+  await service.dispatcher.processClaim(id,lease);await service.runtime.recoveryMultipartEngine.continue(messageId);expect(f.whatsapp.messages).toHaveLength(2);
+  expect(await f.db.usageEvent.count({where:{shopId:f.shopId,metric:'OUTBOUND_AUTOMATED_MESSAGE'}})).toBe(0);
+ }finally{await service?.dispatcher.close();await f.close();}},120000);
+
+ it.each(['human-inactive','stale-revision','expired-lease','moderation-blocked','tampered-preparation','stale-common'] as const)('DEFAULT HUMAN runtime keeps %s fail closed before any provider call',async guard=>{const f=await fixture(`default-human-${guard}`,'HUMAN',false,false,true,guard==='expired-lease'?5000:180000);let service:Awaited<ReturnType<typeof defaultHumanRuntime>>|undefined;try{
+  service=await defaultHumanRuntime(f);const id=f.source.command!.id,lease=f.source.command!.leaseToken;
+  if(guard==='human-inactive')await f.changeOwner('HUMAN','AI',1);
+  if(guard==='stale-revision'){await f.changeOwner('HUMAN','AI',1);await f.changeOwner('AI','HUMAN',2);}
+  if(guard==='expired-lease')await new Promise(resolve=>setTimeout(resolve,5100));
+  if(guard==='moderation-blocked')vi.spyOn(service.moderation,'assessText').mockResolvedValue({kind:'block',assessmentId:'fixture-block',reasonCode:'policy_block'});
+  if(guard==='tampered-preparation'||guard==='stale-common'){
+   const claimed=await f.commands.loadClaimedCommand(id,lease);if(claimed.kind!=='claimed')throw Error('fixture claim');const frozen=await service.preparer.freeze(claimed.command,lease);if(frozen.kind!=='frozen')throw Error('fixture preparation');
+   if(guard==='tampered-preparation'){const tampered=structuredClone(frozen);tampered.evidence.multipartPreparation!.plan.parts[0]!.plan.body='Unattested replacement';vi.spyOn(service.preparer,'freeze').mockResolvedValue(tampered);}
+   else{const next=await f.publish();await f.db.whatsAppConversationWrapperActiveSlot.update({where:{audience:'SHARED'},data:{definitionId:next.definition.id,editVersion:{increment:1}}});}
+  }
+  const outcome=await Promise.allSettled([service.dispatcher.processClaim(id,lease)]);
+  if(guard==='tampered-preparation')expect(outcome[0]).toMatchObject({status:'rejected',reason:expect.objectContaining({message:'INVALID_COMMON_MULTIPART_PREPARATION'})});
+  else expect(outcome[0]!.status).toBe('fulfilled');
+  expect(f.whatsapp.messages).toHaveLength(0);expect((await f.commandState(id))!.providerDispatchKey).toBeNull();
+  if(guard!=='stale-common')expect(await f.db.conversationMessage.count({where:{id:f.source.messageId}})).toBe(0);
+  else{const parts=await f.list();expect(parts.map(p=>p.state)).toEqual(['CANCELLED','CANCELLED']);expect(parts.every(p=>p.providerMessageId===null)).toBe(true);}
+ }finally{await service?.dispatcher.close();await f.close();}},120000);
+
  it.each(['short','long','takeover'] as const)('actual verified logo plus separate product producer %s preserves first-permit product context and one logical usage',async kind=>{const f=await fixture(`media-${kind}`,'AGENT',false,false);const logo=await readyLogo(f);try{
   const reply=kind==='long'?'Complete grounded answer. '.repeat(70):'Complete grounded answer.';const pair={productId:'gid://shopify/Product/1',variantId:null};const now=new Date().toISOString();const product=CommerceProductSchema.parse({...pair,title:'Verified Product',observedAt:now,imageUrl:'https://merchant.example/product.jpg',url:null,available:true,unitPrice:null,currency:null,productType:null,vendor:null});const facts=verifyCommerceProductFacts([pair],[product]);if(facts.kind!=='verified')throw Error('facts');
   const image={schemaVersion:1 as const,shopId:f.shopId,...pair,publicUrl:'https://media.example/product.jpg',objectKey:`conversation-products/v1/${'a'.repeat(64)}/${'b'.repeat(64)}/${'c'.repeat(64)}.jpg`,contentSha256:'c'.repeat(64),contentType:'image/jpeg' as const,byteLength:100,width:1125 as const,height:600 as const};

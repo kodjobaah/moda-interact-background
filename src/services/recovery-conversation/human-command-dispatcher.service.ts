@@ -77,7 +77,10 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
   const followUps = new RecoveryFollowUpPolicyService();
   const policy = new HumanSendPolicyService(recoveryDatabase, connectionRedis);
   return {
-    multipart: {continue: async messageId => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.continue(messageId)},
+    multipart: {
+      freeze: async source => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.freeze(source),
+      continue: async messageId => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.continue(messageId),
+    },
     database: recoveryDatabase, outreach: recoveryOutreachAttemptService,
     commands, followUps,
     evaluator: new HumanCommandEvaluationService(commands, followUps, policy),
