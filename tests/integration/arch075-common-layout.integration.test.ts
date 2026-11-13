@@ -80,6 +80,12 @@ suite('ARCH075 real v2 common source reader and HUMAN frozen compatibility',()=>
   expect(await f.engine.continue(f.source.messageId)).toBe('waiting');expect((await f.list()).map(p=>p.state)).toEqual(['PREPARED','PREPARED']);expect(f.provider.sendWhatsAppText).not.toHaveBeenCalled();
   expect((await f.approve()).kind).toBe('allow');expect(await f.engine.continue(f.source.messageId)).toBe('acknowledged');expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(1);expect((await f.list()).map(p=>({sourceIdentity:p.sourceIdentity,deadlineAt:p.deadlineAt,payload:p.payload}))).toEqual(original);
  }finally{await f.close();}},120000);
+ it('the v2 HUMAN reader resumes a frozen root before assessment through existing moderation before ordered dispatch',async()=>{const f=await fixture('human-moderation-gap','HUMAN',true,false);try{
+  expect(await f.db.conversationModerationAssessment.count({where:{merchantSendCommandId:f.source.command!.id}})).toBe(0);
+  await f.dispatcher(undefined,undefined,undefined,undefined,{multipart:f.engine}).processClaim(f.source.command!.id,f.source.command!.leaseToken);
+  const assessment=await f.db.conversationModerationAssessment.findFirstOrThrow({where:{merchantSendCommandId:f.source.command!.id}});expect(assessment.decision).toBe('ALLOW');expect(assessment.contentSha256).toBe(digest(f.source.body));
+  expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(1);expect(f.provider.sendWhatsAppText.mock.calls[0]?.[0]).toMatchObject({text:f.common.boundaries.header+f.common.boundaries.footer});expect(f.providerHttpRequests).toHaveLength(0);expect((await f.commandState(f.source.command!.id))!.state).toBe('DISPATCH_ADMITTED');expect((await f.list()).map(p=>p.state)).toEqual(['ACKNOWLEDGED','PREPARED']);
+ }finally{await f.close();}},120000);
  it('an old reader preserves a v2 HUMAN producer crash gap, then a valid prepermit reclaim can complete the frozen group',async()=>{const f=await fixture('human-crash-gap','HUMAN',false);try{
   const id=f.source.command!.id;const before=await f.db.merchantConversationSendCommand.findUniqueOrThrow({where:{id}});
   await f.dispatcher(undefined,undefined,undefined,undefined,{multipart:f.engine}).processClaim(id,f.source.command!.leaseToken);

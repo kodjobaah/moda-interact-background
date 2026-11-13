@@ -252,6 +252,7 @@ export class HumanCommandDispatcherService {
     // R0: freeze full customer-visible HUMAN_TEXT under the current SQL lease.
     // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
     let frozenBody: string | undefined;
+    let multipartPrepared=false;
     let frozenPlan: ConversationMediaDeliveryPlan | undefined;
     if (command.kind === "HUMAN_TEXT") {
       const frozen = await this.deps.preparation.freeze(command, leaseToken);
@@ -262,13 +263,7 @@ export class HumanCommandDispatcherService {
         await this.rejectTerminal(commandId, leaseToken, frozen.reason);
         return;
       }
-      if(frozen.evidence.recoveryShopHeader?.schemaVersion===2){
-        const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
-        const outcome=await engine.continue(humanMultipartMessageId(commandId));
-        if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
-        else if(outcome==="cancelled"||outcome==="failed")await this.rejectTerminal(commandId,leaseToken,"multipart_preparation_refused");
-        return; // Reader delegation only: never synthesize/flatten v2 content.
-      }
+      multipartPrepared=frozen.evidence.recoveryShopHeader?.schemaVersion===2;
       frozenBody = frozen.body;
       frozenPlan = frozen.evidence?.mediaPreparation?.plan;
     }
@@ -314,6 +309,14 @@ export class HumanCommandDispatcherService {
       });
       await this.rejectTerminal(commandId, leaseToken, decision.failureCode.toLowerCase());
       return;
+    }
+
+    if(multipartPrepared){
+      const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
+      const outcome=await engine.continue(humanMultipartMessageId(commandId));
+      if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
+      else if(outcome==="cancelled"||outcome==="failed")await this.rejectTerminal(commandId,leaseToken,"multipart_preparation_refused");
+      return; // Reader delegation only: never synthesize/flatten v2 content.
     }
 
     // Missing sender credentials are a known pre-provider failure. Record them
