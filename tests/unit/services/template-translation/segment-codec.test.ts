@@ -1,8 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { TemplateTranslationRepository, type TemplateRunRecord, type TemplateTranslationDatabase } from "../../../../src/services/template-translation/repository.js";
+import { describe, it, expect, vi } from "vitest";
 import {
   parseTemplateTranslationSnapshot, prepareTemplateTranslation,
   templateTranslationContentHash, TemplateTranslationValidationError,
 } from "../../../../src/services/template-translation/segment-codec.js";
+
+// Snapshot validation performs no database operation; isolate the default client.
+vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 
 const HASH = "a".repeat(64);
 const input = () => ({
@@ -116,5 +120,82 @@ describe("Admin-owned WhatsApp source snapshot -> keyed segments", () => {
     doubleOccurrence.segments[1]!.text += " again <P1>";
     expect(() => parseTemplateTranslationSnapshot(doubleOccurrence, { definitionId: "template-v2", sourceHash: HASH }))
       .toThrow(TemplateTranslationValidationError);
+  });
+});
+
+// The worker receives Admin's protected occurrence transport, never the wrapper
+// AST or resolved merchant URLs. Semantic hints must survive unchanged.
+describe("common recovery website through the worker snapshot/translation codec", () => {
+  function commonSource() {
+    return {
+      schemaVersion: 1,
+      definitionId: "common-recovery-wrapper",
+      sourceHash: HASH,
+      sourceLanguageTag: "en",
+      segments: [
+        { key: "wrapper.header", text: "Shop <SHOP_NAME>\nWebsite <SHOP_WEBSITE>", protectedTokens: [
+          { marker: "<SHOP_NAME>", variable: "shop.name" },
+          { marker: "<SHOP_WEBSITE>", variable: "shop.websiteUrl" },
+        ] },
+        { key: "wrapper.checkoutConditional", text: "Return to your basket\n<CHECKOUT_URL>", protectedTokens: [
+          { marker: "<CHECKOUT_URL>", variable: "checkout.url" },
+        ] },
+      ],
+    };
+  }
+
+  function workerSnapshot() {
+    const db = { $queryRaw: vi.fn(), $executeRaw: vi.fn(), $transaction: vi.fn() };
+    const repository = new TemplateTranslationRepository(db as unknown as TemplateTranslationDatabase);
+    const run: TemplateRunRecord = {
+      id: "common-run", definitionId: "common-recovery-wrapper", status: "PENDING",
+      sourceHash: HASH, definitionSourceHash: HASH, sourceSchemaVersion: 1,
+      sourceLanguageTag: "en", sourceSnapshot: commonSource(),
+      provider: "OPENAI", providerModelId: "synthetic-model", environment: "test",
+    };
+    return { db, repository, run, snapshot: repository.assertRunSnapshot(run) };
+  }
+
+  it("preserves name/website/checkout occurrence identities through actual worker snapshot validation and keyed reconstruction", () => {
+    const { db, repository, run, snapshot } = workerSnapshot();
+    const original = structuredClone(snapshot);
+    const prepared = prepareTemplateTranslation(snapshot);
+    const request = JSON.parse(prepared.requestText) as { segments: Array<{ protectedTokens: Array<{sentinel: string; variable: string}> }> };
+    expect(request.segments.map(segment => segment.protectedTokens)).toEqual([
+      [{ sentinel: "__MODA_PROTECTED_0_0__", variable: "shop.name" },
+       { sentinel: "__MODA_PROTECTED_0_1__", variable: "shop.websiteUrl" }],
+      [{ sentinel: "__MODA_PROTECTED_1_0__", variable: "checkout.url" }],
+    ]);
+    const translated = toProvider(prepared.requestText);
+    translated.segments[0]!.text = "Site __MODA_PROTECTED_0_1__\nBoutique __MODA_PROTECTED_0_0__";
+    translated.segments[1]!.text = "Retour au panier\n__MODA_PROTECTED_1_0__";
+    translated.segments.reverse();
+    expect(prepared.restore(JSON.stringify(translated))).toEqual({ schemaVersion: 1, segments: [
+      { key: "wrapper.header", text: "Site <SHOP_WEBSITE>\nBoutique <SHOP_NAME>" },
+      { key: "wrapper.checkoutConditional", text: "Retour au panier\n<CHECKOUT_URL>" },
+    ] });
+    expect(snapshot).toEqual(original);
+    expect(() => repository.assertRunSnapshot({ ...run, definitionSourceHash: "b".repeat(64) }))
+      .toThrow("STALE_TEMPLATE_DEFINITION_HASH");
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    expect(db.$executeRaw).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects an omitted website occurrence even when name/checkout and segment membership remain valid", () => {
+    const prepared = prepareTemplateTranslation(workerSnapshot().snapshot);
+    const translated = toProvider(prepared.requestText);
+    translated.segments[0]!.text = translated.segments[0]!.text.replace("__MODA_PROTECTED_0_1__", "");
+    expect(() => prepared.restore(JSON.stringify(translated)))
+      .toThrow(new TemplateTranslationValidationError("PROTECTED_TOKEN_MISMATCH"));
+  });
+
+  it("rejects moving the website occurrence into the checkout segment despite preserving its global count", () => {
+    const prepared = prepareTemplateTranslation(workerSnapshot().snapshot);
+    const translated = toProvider(prepared.requestText);
+    translated.segments[0]!.text = translated.segments[0]!.text.replace("__MODA_PROTECTED_0_1__", "");
+    translated.segments[1]!.text += "\n__MODA_PROTECTED_0_1__";
+    expect(() => prepared.restore(JSON.stringify(translated)))
+      .toThrow(new TemplateTranslationValidationError("PROTECTED_TOKEN_MISMATCH"));
   });
 });
