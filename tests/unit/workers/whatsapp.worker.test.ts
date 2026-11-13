@@ -247,12 +247,12 @@ describe("WhatsApp worker inbound execution gate", () => {
     },
   );
 
-  it("handles authenticated STOP ahead of raw-abuse denial and ignored routing", async () => {
+  it.each(["STOP", "UNSUBSCRIBE", "STOPP", "DUR", "PARAR", "STOPPA"])("handles authenticated %s ahead of raw-abuse denial and ignored routing", async (command) => {
     mocks.optOut.mockResolvedValueOnce(true);
     // Use a persistent denial within this test: the STOP shortcut MUST NOT
     // consume it, and a queued mockResolvedValueOnce would leak into the next test.
     mocks.abuse.admitRaw.mockResolvedValue({ kind: "denied", reason: "RAW_SENDER" });
-    await processInboundMessage({ ...event, content: { type: "text", text: "STOP" } });
+    await processInboundMessage({ ...event, content: { type: "text", text: command } });
     expect(mocks.optOut).toHaveBeenCalledOnce();
     expect(mocks.abuse.admitRaw).not.toHaveBeenCalled();
     expect(mocks.routing.resolveInboundMessage).not.toHaveBeenCalled();

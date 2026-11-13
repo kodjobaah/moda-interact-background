@@ -28,5 +28,5 @@ export function matchesRegisteredPhone(
 /** Commands only, not an LLM interpretation or a substring in normal speech. */
 export function isExplicitWhatsAppStop(content: { type: string; text?: string }): boolean {
   return content.type === "text" && typeof content.text === "string" &&
-    /^(STOP|UNSUBSCRIBE)[.!]?$/i.test(content.text.trim());
+    /^(STOP|UNSUBSCRIBE|STOPP|DUR|PARAR|STOPPA)[.!]?$/i.test(content.text.trim());
 }
