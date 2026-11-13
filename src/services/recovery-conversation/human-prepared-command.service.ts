@@ -154,14 +154,7 @@ export class HumanPreparedCommandService {
   }
 
   private fromRow(row: FrozenRow, original: string | null, commandId: string, shopId: string): FrozenHumanBody {
-    const evidence = parsePreparedEvidence(row.preparedTextBody, row.preparedWrapperEvidence, row.preparedAt);
-    if (!evidence || (evidence.mediaPreparation && (evidence.mediaPreparation.receipt.sourceId !== commandId || evidence.mediaPreparation.receipt.shopId !== shopId || evidence.mediaPreparation.receipt.conversationId !== row.conversationId)) || row.kind !== "HUMAN_TEXT" ||
-        (evidence.outcome === "PASSTHROUGH" && !preparedHumanPassthroughMatches(original, row.preparedTextBody, evidence.recoveryCheckoutUrl, evidence.recoveryShopHeader))) {
-      return { kind: "refused", reason: "prepared_invalid" };
-    }
-    if(evidence.multipartPreparation && (evidence.multipartPreparation.receipt.sourceId!==commandId||evidence.multipartPreparation.receipt.shopId!==shopId||evidence.multipartPreparation.receipt.conversationId!==row.conversationId))return {kind:"refused",reason:"prepared_invalid"};
-    if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader})))return {kind:"refused",reason:"prepared_invalid"};
-    return { kind: "frozen", body: row.preparedTextBody!, evidence };
+    return readFrozenHumanBody(row,original,commandId,shopId);
   }
 
   private read(commandId: string, leaseToken: string) {
@@ -175,6 +168,20 @@ export class HumanPreparedCommandService {
         AND "leaseExpiresAt">statement_timestamp() AND "providerDispatchKey" IS NULL`, commandId, leaseToken);
   }
 }
+
+export function readFrozenHumanBody(row: FrozenRow, original: string | null, commandId: string, shopId: string): FrozenHumanBody {
+    const evidence = parsePreparedEvidence(row.preparedTextBody, row.preparedWrapperEvidence, row.preparedAt);
+    if (!evidence || (evidence.mediaPreparation && (evidence.mediaPreparation.receipt.sourceId !== commandId || evidence.mediaPreparation.receipt.shopId !== shopId || evidence.mediaPreparation.receipt.conversationId !== row.conversationId)) || row.kind !== "HUMAN_TEXT" ||
+        (evidence.outcome === "PASSTHROUGH" && !preparedHumanPassthroughMatches(original, row.preparedTextBody, evidence.recoveryCheckoutUrl, evidence.recoveryShopHeader))) {
+      return { kind: "refused", reason: "prepared_invalid" };
+    }
+    if(evidence.multipartPreparation && (evidence.multipartPreparation.receipt.sourceId!==commandId||evidence.multipartPreparation.receipt.shopId!==shopId||evidence.multipartPreparation.receipt.conversationId!==row.conversationId))return {kind:"refused",reason:"prepared_invalid"};
+    if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader})))return {kind:"refused",reason:"prepared_invalid"};
+    if(evidence.outcome==='RENDERED'&&evidence.recoveryShopHeader?.schemaVersion!==2&&
+      (typeof original!=='string'||!row.preparedTextBody!.includes(original)||evidence.applicationKey!==wrapperApplicationKey({conversationId:row.conversationId,messageIdentity:commandId,source:'HUMAN',wrapperDefinitionId:evidence.wrapperDefinitionId,localeId:evidence.localeId,contentHash:evidence.contentHash,editVersion:evidence.slotEditVersion,responseDigest:digest(original),body:row.preparedTextBody!,recoveryCheckoutUrl:evidence.recoveryCheckoutUrl,recoveryShopHeader:evidence.recoveryShopHeader,deliveryPlan:evidence.mediaPreparation?.plan})))return {kind:'refused',reason:'prepared_invalid'};
+    return { kind: "frozen", body: row.preparedTextBody!, evidence };
+  }
+
 
 /** Runs INSIDE the existing final-admission transaction, after the command row is locked. */
 export async function currentHumanWrapperMatches(
