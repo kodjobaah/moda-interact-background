@@ -251,3 +251,10 @@ it('does not dispatch or replace context when media composition outlives the hos
  await test.processor.process({conversationId:'conversation-1',observedVersion:3});
  expect(test.admission.sendPreparedText).not.toHaveBeenCalled();expect(test.admission.failPrepared).toHaveBeenCalledWith('message-1');
 });
+
+it('a HUMAN takeover while handback moderation awaits prevents model and provider work',async()=>{
+ const t=harness();t.conversation.getTurnState.mockResolvedValue(state({pendingAiControlRevision:3,controlRevision:3,controlMode:'AI'}));let mode='AI';
+ const ownership={readTurnOwnership:vi.fn(async()=>({conversationId:'conversation-1',shopId:'shop-1',recoveryId:null,mode,revision:3})),checkAutomatedTurn:vi.fn(async()=>mode==='AI'?{kind:'allowed',ownership:{mode:'AI',revision:3}}:{kind:'suppressed',reason:'human-controlled',phase:'before-agent'})};
+ const processor=new ConversationTurnProcessor({queue:t.queue,conversation:t.conversation,admission:t.admission,abuseAdmission:t.abuseAdmission,ownership:ownership as never,moderation:{moderatePending:async(_id,_pending,deadline)=>{expect(deadline).toEqual(new Date(first.getTime()+20000+PROCESSING_LEASE_MS));mode='HUMAN';return 'allowed';}},loadTurn:vi.fn().mockResolvedValue(t.loaded),runAgent:t.runAgent,aiWrapper:t.aiWrapper,getResult:(r:any)=>r,now:()=>new Date(first.getTime()+20000),runtimeConfig:t.runtimeConfig,logger:t.logger});
+ await processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.runAgent).not.toHaveBeenCalled();expect(t.admission.reserve).not.toHaveBeenCalled();expect(t.admission.sendPreparedText).not.toHaveBeenCalled();
+});

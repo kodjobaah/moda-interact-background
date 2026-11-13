@@ -1,6 +1,7 @@
+import {priorCommerceHistorySelection} from '../../commerce/history-selection.js';
 import prisma from "../../lib/db.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "./moderation-assessment.service.js";
-import { moderationConfig } from "./moderation-policy.js";
+import { MODERATION_TIMEOUT_MS,moderationConfig } from "./moderation-policy.js";
 
 export type PendingModerationOutcome = "allowed" | "suppressed" | "retry";
 
@@ -8,9 +9,9 @@ export type PendingModerationOutcome = "allowed" | "suppressed" | "retry";
  * HTTP/Meta ingress persists/enqueues without calling OpenAI.
  */
 export class ModerationTurnGate {
-  constructor(private readonly assessment: ModerationAssessmentService = moderationAssessmentService) {}
+  constructor(private readonly assessment: ModerationAssessmentService = moderationAssessmentService, private readonly now:()=>Date=()=>new Date()) {}
 
-  async moderatePending(conversationId: string, pendingTurnStartedAt: Date): Promise<PendingModerationOutcome> {
+  async moderatePending(conversationId: string, pendingTurnStartedAt: Date, processingLeaseExpiresAt?:Date): Promise<PendingModerationOutcome> {
     const conversation = await prisma.conversation.findUniqueOrThrow({
       where: { id: conversationId },
       select: { shopId: true, checkoutRecovery: { select: { shopId: true } } },
@@ -29,7 +30,9 @@ export class ModerationTurnGate {
     });
     let allowed = false;
     let retry = false;
+    const seen=new Set<string>();
     for (const message of candidates) {
+      if(seen.has(message.id))continue;seen.add(message.id);
       if (message.contentType !== "TEXT" && !(message.contentType === "AUDIO" && message.transcriptionStatus === "COMPLETED")) {
         // Unsupported images/media never become normal AI context.
         continue;
@@ -38,12 +41,34 @@ export class ModerationTurnGate {
         subject: { kind: "CUSTOMER_MESSAGE", messageId: message.id },
         shopId, conversationId, effectiveText: message.content,
         inputKind: message.contentType === "AUDIO" ? "TRANSCRIPT" : "TEXT",
-        policyVersion: moderationConfig().policyVersion, now: new Date(),
+        policyVersion: moderationConfig().policyVersion, now: this.now(),
       });
       if (result.kind === "allow") allowed = true;
       if (result.kind === "retry") retry = true;
     }
-    return retry ? "retry" : allowed ? "allowed" : "suppressed";
+    // Historical outcomes cannot authorize a blocked/unsupported current turn.
+    if(retry)return 'retry';
+    if(!allowed)return 'suppressed';
+    const historicalDeadline=this.now().getTime()+2*MODERATION_TIMEOUT_MS;
+    const leaseDeadline=processingLeaseExpiresAt?.getTime()??Infinity;
+    if(Number.isNaN(leaseDeadline))return 'retry';
+    const prior=await prisma.conversationMessage.findMany({
+      ...priorCommerceHistorySelection(conversationId,pendingTurnStartedAt),
+      select:{id:true,content:true,contentType:true,transcriptionStatus:true,direction:true,senderType:true},
+    });
+    for(const message of prior){
+      if(seen.has(message.id))continue;seen.add(message.id);
+      if(message.direction!=='INBOUND'||message.senderType!=='CUSTOMER'||
+        !(message.contentType==='TEXT'||message.contentType==='AUDIO'&&message.transcriptionStatus==='COMPLETED'))continue;
+      if(Math.min(historicalDeadline,leaseDeadline)-this.now().getTime()<MODERATION_TIMEOUT_MS+1000)return 'retry';
+      const result=await this.assessment.assessText({subject:{kind:'CUSTOMER_MESSAGE',messageId:message.id},
+        shopId,conversationId,effectiveText:message.content,inputKind:message.contentType==='AUDIO'?'TRANSCRIPT':'TEXT',
+        policyVersion:moderationConfig().policyVersion,now:this.now()});
+      if(result.kind==='retry')return 'retry';
+    }
+    // The existing turn retry path and bounded assessment backoff/attempt cap apply;
+    // BLOCK/review stay excluded from history without suppressing the allowed turn.
+    return 'allowed';
   }
 }
 export const moderationTurnGate = new ModerationTurnGate();

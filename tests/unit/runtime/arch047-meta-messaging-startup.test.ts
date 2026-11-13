@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   workerClose: vi.fn(),
   repairStart: vi.fn(),
   repairClose: vi.fn(async () => {}),
+  multipartStart: vi.fn(),
+  multipartClose: vi.fn(async () => {}),
   queue: { add: vi.fn() },
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -18,6 +20,9 @@ vi.mock("../../../src/runtime/deployment-environment.js", () => ({
 }));
 vi.mock("../../../src/services/meta-template-management/service.js", () => ({
   metaTemplateManagementService: { processDueRegistrations: mocks.due },
+}));
+vi.mock("../../../src/services/recovery-multipart/runtime.js", () => ({
+  startMultipartRepair: mocks.multipartStart,
 }));
 vi.mock("../../../src/services/conversation-ai-delay/start-pending-turn-repair.js", () => ({
   startProductionPendingTurnRepair: mocks.repairStart,
@@ -62,17 +67,20 @@ describe("ARCH-047 BG003 production messaging entrypoint", () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
     mocks.due.mockResolvedValue({ inspected: 1, processed: 1 });
     mocks.repairStart.mockReturnValue(mocks.repairClose);
+    mocks.multipartStart.mockReturnValue(mocks.multipartClose);
     await import("../../../src/entrypoints/messaging.js");
     const loading = mocks.loading as Promise<void> | null;
     expect(loading).not.toBeNull();
     await loading;
     expect(mocks.load).not.toBeNull();
     expect(mocks.repairStart).toHaveBeenCalledExactlyOnceWith(mocks.queue);
+    expect(mocks.multipartStart).toHaveBeenCalledExactlyOnceWith();
     await vi.advanceTimersByTimeAsync(0);
     expect(mocks.due).toHaveBeenCalledExactlyOnceWith(25);
     const closers = mocks.load?.closeResources ?? [];
     for (const close of closers) await close();
     expect(mocks.repairClose).toHaveBeenCalledOnce();
+    expect(mocks.multipartClose).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(mocks.due).toHaveBeenCalledTimes(1);
   });

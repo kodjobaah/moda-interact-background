@@ -1,16 +1,8 @@
-import type { Prisma } from "@prisma/client";
+import { commerceHistoryVisible as visible, priorCommerceHistorySelection } from "./history-selection.js";
 import prisma from "../lib/db.js";
 import { allowedHistoryCandidates } from "../services/conversation-moderation/moderation-history.js";
 import type { AgentMessage } from "../agents/types.js";
 
-const visible: Prisma.ConversationMessageWhereInput = {
-  contentType: { not: "UNSUPPORTED" },
-  transcriptionStatus: { in: ["NOT_REQUIRED", "COMPLETED"] },
-  OR: [
-    { direction: "INBOUND", senderType: "CUSTOMER" },
-    { direction: "OUTBOUND", sentAt: { not: null } },
-  ],
-};
 type HistoryRow = {
   id: string;
   direction: string;
@@ -53,17 +45,7 @@ export async function loadCommerceHistory(
 ) {
   const [prior, current] = await Promise.all([
     prisma.conversationMessage.findMany({
-      where: {
-        AND: [
-          visible,
-          { conversationId, OR: [
-            { contentType: { not: "AUDIO" }, createdAt: { lt: pendingTurnStartedAt } },
-            { contentType: "AUDIO", transcriptionCompletedAt: { lt: pendingTurnStartedAt } },
-          ] },
-        ],
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 20,
+      ...priorCommerceHistorySelection(conversationId,pendingTurnStartedAt),
       select,
     }),
     prisma.conversationMessage.findMany({
