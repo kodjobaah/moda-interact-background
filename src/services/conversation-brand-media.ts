@@ -2,7 +2,6 @@ import { canonicalJson, commerceStoreHostname } from "@modainteract/moda-interac
 import { buildConversationBrandImageDeliveryPlan, ConversationPreparedBrandImageSchema,
   type ConversationDeliveryPlan, type ConversationMediaDeliveryPlan, type ConversationPreparedBrandImage } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { verifiedReadyConversationBrandImage } from "./shop-brand-media-runtime/resolver.js";
-import type { RecoveryShopHeaderReceipt } from "./conversation-wrappers/recovery-shop-header.js";
 import { first, type SqlTransaction } from "./recovery-conversation/recovery-conversation.sql.js";
 import { platformConsumerConfiguration } from "./platform-configuration/consumers.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
@@ -26,14 +25,14 @@ export const resolveConversationLogo: ConversationLogoResolver = async (shopId, 
 };
 
 /** Only new known-recovery preparation; absent/invalid media preserves the full original plan/body. */
-export async function prepareRecoveryBrandPlan(input: {shopId: string; body: string; header?: RecoveryShopHeaderReceipt | undefined;
+export async function prepareRecoveryBrandPlan(input: {shopId: string; body: string; header?: import("./recovery-multipart/common-layout.js").RecoveryLayoutReceipt | undefined;
   plan?: ConversationDeliveryPlan | undefined; onPolicy?: (ref: BrandMediaPolicyRef)=>void}, resolve: ConversationLogoResolver = resolveConversationLogo): Promise<ConversationMediaDeliveryPlan | undefined> {
   if (!input.header || input.header.shopId !== input.shopId || input.plan?.kind === "IMAGE" || Array.from(input.body).length > 1024) return input.plan;
   try {
     const resolved = await resolve(input.shopId);
     const image=resolved?.image; const policy=readBrandMediaPolicyRef(resolved?.policyRef);
     if (!image || !policy || policy.publicOrigin!==image.publicOrigin || image.origin.shopId !== input.shopId || !["LOGO", "SQUARE_LOGO"].includes(image.origin.role) ||
-        commerceStoreHostname(input.header.websiteUrl) !== image.origin.shopDomain) return input.plan;
+        commerceStoreHostname(input.header.schemaVersion===2?input.header.variables['shop.websiteUrl']:input.header.websiteUrl) !== image.origin.shopDomain) return input.plan;
     const selected = buildConversationBrandImageDeliveryPlan({plan: input.plan ?? {schemaVersion: 1, kind: "TEXT", body: input.body},
       origin: image.origin, publicOrigin: image.publicOrigin, image});
     if(selected.plan.kind === "BRAND_IMAGE") input.onPolicy?.(policy);

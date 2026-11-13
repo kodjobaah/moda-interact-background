@@ -29,6 +29,8 @@ export type WrappedResult = Readonly<{
   applicationKey: string;
   responseDigest: string;
   replayed: boolean;
+  commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt;
+  multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan;
   /** Trusted runtime augmentation, bound into application provenance. */
   recoveryCheckoutUrl?: string;
   recoveryShopHeader?: RecoveryShopHeaderReceipt;

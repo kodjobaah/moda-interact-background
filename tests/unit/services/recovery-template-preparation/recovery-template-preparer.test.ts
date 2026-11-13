@@ -1,3 +1,4 @@
+import type { PreparedWrapper,CommonRecoveryLayoutReference } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { observedContentHash } from "../../../../src/services/meta-template-management/contracts.js";
 import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { createHash } from "node:crypto";
@@ -110,10 +111,12 @@ function setup(rows: AssignedVariantRow[] = [fixture()], options: {
   defaultLanguage?: string | null;
   categoryNames?: Record<string, string | null>;
   shopId?: string;
+  domain?:string;
+  commonCurrent?:()=>Promise<boolean>;
 } = {}) {
   const shopId = options.shopId ?? "shop-1";
   const readCatalogue = vi.fn(async () => ({
-    shop: { id: shopId, status: "ACTIVE", defaultLanguageTag: options.defaultLanguage ?? "en" },
+    shop: { id: shopId, status: "ACTIVE", ...(options.domain?{domain:options.domain}:{}), defaultLanguageTag: options.defaultLanguage ?? "en" },
     variants: rows,
   }));
   const readShopBrand = vi.fn(async () => options.brand ?? null);
@@ -123,7 +126,7 @@ function setup(rows: AssignedVariantRow[] = [fixture()], options: {
   const resolveConfiguredSender = vi.fn(async () => "waba-1");
   const resolveMedia = vi.fn(async () => options.media ?? null);
   const service = new RecoveryTemplatePreparer(repo, resolveConfiguredSender,
-    resolveMedia, options.mediaHosts ?? [], () => now, { warn, error });
+    resolveMedia, options.mediaHosts ?? [], () => now, { warn, error },undefined,options.commonCurrent);
   return { service, repo, readCatalogue, readShopBrand, readShopCategory, warn, error, resolveMedia, resolveConfiguredSender };
 }
 
@@ -750,4 +753,12 @@ it("does not mask a missing mandatory IMAGE BODY brand by falling back on unavai
   () => ({ prepareForBinding: async () => ({ result: { kind: "UNAVAILABLE", reason: "MEDIA_NOT_READY" } }) }) as never);
  const result = await service.prepare(input({ productImage: { shopId: "shop-1", checkoutRecoveryId: "recovery-1", outreachAttemptId: "attempt-1", generation: 1, productId: "gid://shopify/Product/1", variantId: null } }));
  expect(result).toMatchObject({ outcome: "unavailable", reason: "BINDING_VALUE_UNAVAILABLE" });
+});
+
+describe('published common Meta source parameters',()=>{
+ const projection:PreparedWrapper={schemaVersion:1,family:'MODA_CONVERSATION_WRAPPER',responseSlot:'response.body',header:[{kind:'text',value:'Custom shop '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\nSite '},{kind:'variable',name:'shop.websiteUrl'}],body:[{kind:'responseSlot',name:'response.body'}],footer:[],conditionals:[{when:'checkout.available',tokens:[{kind:'text',value:'\nCustom basket\n'},{kind:'variable',name:'checkout.url'}]}]};
+ const common:CommonRecoveryLayoutReference={schemaVersion:1,definitionId:'shared-common',sourceHash:'c'.repeat(64),localeId:'shared-en',languageTag:'en',contentHash:createHash('sha256').update(stableJson(projection)).digest('hex'),prepared:projection};
+ function commonFixture(bad=false){return fixture({components:[{type:'BODY',text:'Custom shop {{1}}\nSite {{2}}\nRecover {{3}}: {{4}}\nCustom basket\n{{5}}'}],bindings:{header:[],body:[{position:1,variable:'shop.name'},{position:2,variable:'shop.websiteUrl'},{position:3,variable:'shop.name'},{position:4,variable:'checkout.itemsSummary'},{position:5,variable:'checkout.url'}],buttons:[]},locale:{localeAst:{authoring:{commonLayout:bad?{...common,contentHash:'0'.repeat(64)}:common}}}});}
+ it('captures exact canonical saved values repeatedly used in approved provider parameters and retains snapshot bytes',async()=>{const row=commonFixture();const original=structuredClone(row.metaRegistration!.componentsSnapshot);const current=vi.fn(async()=>true);const {service}=setup([row],{domain:'shop.example',commonCurrent:current,brand:{shopId:'shop-1',brandName:'  Saved Merchant  '} as ShopBrandRow});const result=await service.prepare(input());expect(result.outcome).toBe('prepared');if(result.outcome!=='prepared')throw Error('fixture');expect(result.commonLayout).toMatchObject({reference:common,variables:{'shop.name':'Saved Merchant','shop.websiteUrl':'https://shop.example','checkout.url':sourceUrl},parameters:{header:[],body:['Saved Merchant','https://shop.example','Saved Merchant','1 × Saved item',sourceUrl]}});expect(row.metaRegistration!.componentsSnapshot).toEqual(original);expect(current).toHaveBeenCalledOnce();});
+ it.each(['stale','malformed','missing-website'] as const)('refuses %s common authority instead of compiling or guessing a website',async kind=>{const row=commonFixture(kind==='malformed');const {service}=setup([row],{...(kind==='missing-website'?{}:{domain:'shop.example'}),commonCurrent:async()=>kind!=='stale'});expect(await service.prepare(input())).toMatchObject({outcome:'unavailable',reason:kind==='missing-website'?'BINDING_VALUE_UNAVAILABLE':'BINDINGS_INVALID'});});
 });

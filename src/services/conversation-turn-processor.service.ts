@@ -115,7 +115,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     ) => Promise<OutboundAdmissionResult>;
     sendPreparedConversation?: (
       input: Admitted & {
-        brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
+        commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
@@ -351,18 +351,18 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
         return { kind: "suppressed", reason: "conversation-invalid" } as const;
       }
       providerSendAttempted = true;
-      if (input.deliveryPlan && !this.dependencies.admission.sendPreparedConversation) {
+      if ((input.deliveryPlan || input.multipartPlan) && !this.dependencies.admission.sendPreparedConversation) {
         await failPrepared(input.messageId);
         return {kind: "suppressed", reason: "conversation-invalid"} as const;
       }
-      const sender = input.deliveryPlan ? this.dependencies.admission.sendPreparedConversation!.bind(this.dependencies.admission)
+      const sender = input.deliveryPlan || input.multipartPlan ? this.dependencies.admission.sendPreparedConversation!.bind(this.dependencies.admission)
         : this.dependencies.admission.sendPreparedText.bind(this.dependencies.admission);
       return sender({
         ...input,
@@ -677,6 +677,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         to: loaded.to,
         text: composed.text,
         ...(composed.recoveryShopHeader ? {recoveryShopHeader: composed.recoveryShopHeader} : {}),
+        ...(composed.commonLayout ? {commonLayout:composed.commonLayout,multipartPlan:composed.multipartPlan,presentationReceipt:{shopId:loaded.shopId,conversationId,messageId:reserved.messageId,inboundVersion:observedVersion,controlRevision:controlRevision ?? -1,firstPair:composed.presentedPairs?.[0]??null}} : {}),
         ...(composed.brandMediaPolicy ? {brandMediaPolicy:composed.brandMediaPolicy} : {}), ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
@@ -685,7 +686,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       this.logger.debug("whatsapp.turn.completed", {
         conversationId,
         observedVersion,
-        outcome: deliveryResult.kind === "suppressed" ? "agent-response-suppressed" : "agent-response-sent",
+        outcome: deliveryResult.kind === "suppressed" ? "agent-response-suppressed" : deliveryResult.deliveryState === "pending" ? "agent-response-pending" : "agent-response-sent",
         ...(deliveryResult.kind === "suppressed" ? {reason: deliveryResult.reason} : {}),
       });
     } catch (error) {

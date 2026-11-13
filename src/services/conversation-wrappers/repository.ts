@@ -133,6 +133,7 @@ export class PrismaConversationWrapperReadRepository implements WrapperReadPort 
     const checkoutUrl = checkoutActive ? trustedHttpsUrl(recovery?.checkoutUrl, shop.domain) : null;
     if (checkoutUrl) variables["checkout.url"] = checkoutUrl;
     const recoveryShopHeader = recovery ? verifiedRecoveryShopHeader(shop.id, shop.domain, brand?.brandName) : null;
+    if (recoveryShopHeader) variables["shop.websiteUrl"] = recoveryShopHeader.websiteUrl;
     if (recovery && !recoveryShopHeader) this.logger.warn("conversation_wrapper.recovery_shop_header_unavailable", {conversationId, shopId: shop.id, reason: "INVALID_STORED_DOMAIN"});
     return {
       ...(recoveryShopHeader ? {recoveryShopHeader} : {}),

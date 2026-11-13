@@ -95,6 +95,7 @@ export class RecoveryMultipartDeliveryEngine {
     const permit = await this.fence.admitProviderDispatch({senderType:source.actor,shopId:source.receipt.shopId,conversationId:source.receipt.conversationId,
       recoveryId:source.recoveryId,expectedControlRevision:source.receipt.controlRevision,
       ...(source.actor==='AGENT'?{expectedInboundVersion:source.receipt.inboundVersion}:{}),
+      ...(part.ordinal===0&&source.productContextUpdate?{productContextUpdate:source.productContextUpdate}:{}),
       ...(source.command?{commandId:source.command.id,leaseToken:source.command.leaseToken}:{}),
       messageId,recipient:source.recipient,expectedContent:source.body,deliveryKind:'TEXT',now:this.clock(),multipartPartId:part.id,multipartConsent:consent.snapshot,...(source.recoveryShopHeader.schemaVersion===1?{recoveryShopHeader:source.recoveryShopHeader}:{})});
     if (permit.kind !== 'admitted') {

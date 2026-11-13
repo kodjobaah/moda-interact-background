@@ -93,6 +93,7 @@ export function templateSendFields(
     providerLanguageCode: prepared.providerLanguageCode,
     submittedContentHash: prepared.submittedContentHash,
     bindingFingerprint: prepared.bindingFingerprint,
+    ...(prepared.commonLayout?{commonLayout:prepared.commonLayout}:{}),
   };
   return {
     templateName: prepared.providerTemplateName,

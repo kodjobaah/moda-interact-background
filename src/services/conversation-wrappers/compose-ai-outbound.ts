@@ -1,3 +1,4 @@
+import { readCommonLayoutReceipt,commonLayoutBody } from "../recovery-multipart/common-layout.js";
 import type { BrandMediaPolicyRef } from "../conversation-brand-media.js";
 import { wrapperApplicationKey } from "./application-key.js";
 import { readRecoveryShopHeader, withRecoveryShopHeader, hasPreparedRecoveryShopHeader } from "./recovery-shop-header.js";
@@ -22,6 +23,8 @@ export type AiOutboundComposition =
   | Readonly<{
       kind: "ready";
       text: string;
+      commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt;
+      multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan;
       recoveryShopHeader?: RecoveryShopHeaderReceipt;
       brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];
@@ -63,14 +66,16 @@ export async function composeAiOutbound(
     // model's low-confidence guess here could contradict that durable choice.
   });
   if (result.kind === "rendered") {
+    if (result.commonLayout && (!readCommonLayoutReceipt(result.commonLayout,input.conversationId) || commonLayoutBody(result.commonLayout)!==result.body || !result.multipartPlan)) throw new Error("AI_WRAPPER_PROVENANCE_MISMATCH");
     if (result.messageIdentity !== input.messageId || result.source !== "AI" ||
         (result.recoveryShopHeader !== undefined && !hasPreparedRecoveryShopHeader(result.body, result.recoveryShopHeader)) ||
-        result.applicationKey !== wrapperApplicationKey({conversationId: input.conversationId, messageIdentity: result.messageIdentity, source: result.source, wrapperDefinitionId: result.wrapperDefinitionId, localeId: result.localeId, contentHash: result.contentHash, editVersion: result.slotEditVersion, responseDigest: result.responseDigest, body: result.body, recoveryCheckoutUrl: result.recoveryCheckoutUrl, recoveryShopHeader: result.recoveryShopHeader, deliveryPlan: result.deliveryPlan})) {
+        result.applicationKey !== wrapperApplicationKey({conversationId: input.conversationId, messageIdentity: result.messageIdentity, source: result.source, wrapperDefinitionId: result.wrapperDefinitionId, localeId: result.localeId, contentHash: result.contentHash, editVersion: result.slotEditVersion, responseDigest: result.responseDigest, body: result.body, ...(result.commonLayout?{commonLayout:result.commonLayout}:{}), ...(result.multipartPlan?{multipartPlan:result.multipartPlan}:{}), recoveryCheckoutUrl: result.recoveryCheckoutUrl, recoveryShopHeader: result.recoveryShopHeader, deliveryPlan: result.deliveryPlan})) {
       throw new Error("AI_WRAPPER_PROVENANCE_MISMATCH");
     }
     return {
       kind: "ready",
       text: result.body,
+      ...(result.commonLayout?{commonLayout:result.commonLayout,multipartPlan:result.multipartPlan}:{}),
       ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}),
       ...(result.brandMediaPolicy ? {brandMediaPolicy:result.brandMediaPolicy} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
       ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),

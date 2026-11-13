@@ -19,7 +19,7 @@ export class PrismaRecoveryTemplateRepository implements RecoveryTemplateReposit
   }) {
     const shop = await this.database.shop.findUnique({
       where: { id: input.shopId },
-      select: { id: true, status: true, defaultLanguageTag: true },
+      select: { id: true, domain: true, status: true, defaultLanguageTag: true },
     });
     if (!shop || shop.status !== "ACTIVE") return { shop, variants: [] };
     // Include legacy/unlinked active rows: an unproven row must not make an
@@ -47,7 +47,7 @@ export class PrismaRecoveryTemplateRepository implements RecoveryTemplateReposit
           parameterBindingsSnapshot: true,
           locale: { select: {
             id: true, languageTag: true, providerLanguageCode: true,
-            status: true, contentHash: true,
+            status: true, contentHash: true, localeAst:true,
             definition: { select: {
               id: true, kind: true, purpose: true, offerType: true,
               status: true, category: true, providerTemplateName: true,

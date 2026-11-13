@@ -1,5 +1,6 @@
 import { readRecoveryLayoutReceipt,commonLayoutBody,type RecoveryLayoutReceipt } from './common-layout.js';
 import { createHash } from 'node:crypto';
+import { CommerceConversationProductContextSchema,type CommerceConversationProductContext } from '@modainteract/moda-interact-shared/commerce';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import { parseRecoveryMultipartDeliveryPlan, digestRecoveryMultipartDeliveryPlan,
   type RecoveryMultipartDeliveryPlan } from '@modainteract/moda-interact-shared/commerce/presentation';
@@ -18,6 +19,7 @@ export function deliveryDeadline(now: Date, seconds = MULTIPART_DEADLINE_SECONDS
   return new Date(now.getTime() + seconds * 1000);
 }
 export type FrozenMultipart = Readonly<{
+  productContextUpdate?: CommerceConversationProductContext;
   schemaVersion: 1; kind: 'RECOVERY_MULTIPART_PREPARATION'; messageId: string; body: string;
   checkoutUrl: string; recipient: string; recoveryId: string; actor: 'AGENT'|'HUMAN';
   receipt: BrandPreparationReceipt; recoveryShopHeader: RecoveryLayoutReceipt;
@@ -30,9 +32,10 @@ const identifier = (v: unknown): v is string => typeof v === 'string' && v.lengt
 const exact = (v: Record<string,unknown>, keys: string[]) => Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v,k));
 /** Private immutable server receipt, never accepted from model/queue payload. */
 export function readFrozenMultipart(raw: unknown): FrozenMultipart|null {
-  if (!object(raw) || !exact(raw,['schemaVersion','kind','messageId','body','checkoutUrl','recipient','recoveryId','actor','receipt','recoveryShopHeader','policyRef','command','sender','plan','planDigest','frozenAt','deadlineAt']) || raw.schemaVersion !== 1 || raw.kind !== 'RECOVERY_MULTIPART_PREPARATION' ||
+  if (!object(raw) || !exact(raw,['schemaVersion','kind','messageId','body','checkoutUrl','recipient','recoveryId','actor','receipt','recoveryShopHeader','policyRef','command','sender','plan','planDigest','frozenAt','deadlineAt',...(raw.productContextUpdate===undefined?[]:['productContextUpdate'])]) || raw.schemaVersion !== 1 || raw.kind !== 'RECOVERY_MULTIPART_PREPARATION' ||
       !identifier(raw.messageId) || !identifier(raw.recoveryId) || typeof raw.body !== 'string' || !raw.body.trim() || Array.from(raw.body).length > 4096 ||
       !validRecoveryCheckoutFooterUrl(raw.checkoutUrl) || typeof raw.recipient !== 'string' || !/^[1-9][0-9]{6,14}$/.test(raw.recipient) || (raw.actor !== 'AGENT' && raw.actor !== 'HUMAN')) return null;
+  if(raw.productContextUpdate!==undefined && (raw.actor!=='AGENT'||!CommerceConversationProductContextSchema.safeParse(raw.productContextUpdate).success))return null;
   const receipt = readBrandPreparationReceipt(raw.receipt); const header = readRecoveryLayoutReceipt(raw.recoveryShopHeader,receipt?.conversationId ?? '');
   const policy = raw.policyRef === null ? null : readBrandMediaPolicyRef(raw.policyRef);
   if (!receipt || !header || header.shopId !== receipt.shopId || !(header.schemaVersion===2 ? commonLayoutBody(header)===raw.body && header.variables['checkout.url']===raw.checkoutUrl : hasPreparedRecoveryShopHeader(raw.body,header)) || !(header.schemaVersion===2 || hasPreparedRecoveryCheckoutFooter(raw.body,raw.checkoutUrl)) || (raw.policyRef !== null && !policy)) return null;

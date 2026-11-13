@@ -1,9 +1,9 @@
+import { readFrozenCommonText } from "../conversation-delivery-plan.js";
 import { admitMultipartPart } from "../recovery-multipart/fence.js";
 import { readFrozenBrandMedia, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { currentBrandPlanMatches } from "../conversation-brand-media.js";
 import { currentRecoveryShopHeaderMatches } from "./recovery-shop-header-verification.js";
-import type { RecoveryShopHeaderReceipt } from "../conversation-wrappers/recovery-shop-header.js";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
 import type { ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { commitAdmittedProductContext, ProductContextAdmissionError } from "../../commerce/product-context-repository.js";
@@ -35,12 +35,13 @@ export type RecoveryMarketingPermit = {
   templateName: string;
   languageCode: string;
   templateRegistration?: FinalTemplateIdentity;
+  templateParameters?: {header:readonly string[];body:readonly string[]};
 };
 export type DispatchInput = {
   /** Server-only persisted child identity; never a model payload. */
   multipartPartId?: string;
   multipartConsent?: StoredRecoveryConsentSnapshot | null;
-  recoveryShopHeader?: RecoveryShopHeaderReceipt;
+  recoveryShopHeader?: import("../recovery-multipart/common-layout.js").RecoveryLayoutReceipt;
   senderType: DispatchActor;
   conversationId: string; shopId: string; recoveryId: string;
   expectedControlRevision: number;
@@ -84,7 +85,7 @@ export class OutboundSendFenceService {
   async admitFinalSend(input: DispatchInput): Promise<DispatchPermit> {
     if ((input.deliveryKind === "IMAGE" && !input.deliveryPlan) ||
         (input.deliveryPlan && (input.deliveryKind !== (input.deliveryPlan.kind === "TEXT" ? "TEXT" : "IMAGE") ||
-          (input.deliveryPlan.kind !== "BRAND_IMAGE" && input.senderType !== "AGENT" && input.senderType !== "HUMAN"))))
+          (input.deliveryPlan.kind !== "BRAND_IMAGE" && !(input.deliveryPlan.kind==="TEXT"&&input.recoveryShopHeader?.schemaVersion===2) && input.senderType !== "AGENT" && input.senderType !== "HUMAN"))))
       return {kind: "suppressed", reason: "invalid-presentation"};
     if (input.senderType === "HUMAN" && (!input.commandId || !input.leaseToken))
       return { kind: "suppressed", reason: "invalid-lease" };
@@ -209,7 +210,7 @@ export class OutboundSendFenceService {
             reg.providerLanguageCode !== input.proactive.languageCode) {
           return { kind: "suppressed", reason: "TEMPLATE_REGISTRATION_UNAVAILABLE" } as const;
         }
-        const templateDenial = await this.checkTemplate(tx, reg, now);
+        const templateDenial = await this.checkTemplate(tx, reg, now,...(reg.commonLayout?[{conversationId:context.id,recoveryId:context.recoveryId,...(input.proactive.templateParameters?{parameters:input.proactive.templateParameters}:{})}]:[]));
         if (templateDenial) return { kind: "suppressed", reason: templateDenial } as const;
       }
       const furtherDenial = await durableEligibility(tx, input, context);
@@ -278,7 +279,7 @@ export class OutboundSendFenceService {
       }
 
       if (input.recoveryShopHeader && (input.deliveryKind === "TEMPLATE" || !context.shopId ||
-          !(await currentRecoveryShopHeaderMatches(tx, input.recoveryShopHeader, input.expectedContent ?? null, context.shopId)))) {
+          !(await currentRecoveryShopHeaderMatches(tx, input.recoveryShopHeader, input.expectedContent ?? null, context.shopId,input.conversationId)))) {
         return {kind: "suppressed", reason: "recovery-shop-header-stale"} as const;
       }
       // BG009: the immutable complete body is the sole moderation/send identity.
@@ -315,7 +316,7 @@ export class OutboundSendFenceService {
         const storedMedia = input.senderType === "HUMAN"
           ? parsePreparedEvidence(command!.preparedTextBody,command!.preparedWrapperEvidence,command!.preparedAt)?.mediaPreparation
           : readFrozenBrandMedia((await first<{outboundPresentation:unknown}>(tx,`SELECT "outboundPresentation" FROM "whatsapp"."ConversationMessage" WHERE "id"=$1 AND "conversationId"=$2 FOR UPDATE`,input.messageId,context.id))?.outboundPresentation);
-        if(!storedMedia || !(await currentRecoveryShopHeaderMatches(tx,storedMedia.recoveryShopHeader,input.deliveryPlan.body,context.shopId)) || !(await currentBrandPlanMatches(tx,input.deliveryPlan,context.shopId,storedMedia.policyRef))) return {kind:"suppressed",reason:"brand-media-stale"} as const;
+        if(!storedMedia || !(await currentRecoveryShopHeaderMatches(tx,storedMedia.recoveryShopHeader,input.deliveryPlan.body,context.shopId,input.conversationId)) || !(await currentBrandPlanMatches(tx,input.deliveryPlan,context.shopId,storedMedia.policyRef))) return {kind:"suppressed",reason:"brand-media-stale"} as const;
       }
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
@@ -364,6 +365,11 @@ export class OutboundSendFenceService {
           ...(command!.kind === "HUMAN_TEXT" ? { messageContent: admittedMessage[0]!.content } : {}),
           ...(evidence?.mediaPreparation?.plan ? {deliveryPlan: readFrozenBrandMedia(admittedMessage[0]!.outboundPresentation)!.plan} : {}),
         } as const;
+      }
+      if (input.deliveryPlan?.kind==='TEXT'&&input.recoveryShopHeader?.schemaVersion===2){
+        const stored=await first<{outboundPresentation:unknown}>(tx,`SELECT "outboundPresentation" FROM "whatsapp"."ConversationMessage" WHERE "id"=$1 AND "conversationId"=$2 FOR UPDATE`,messageId,context.id);
+        const common=readFrozenCommonText(stored?.outboundPresentation);
+        if(!common||canonicalJson(common.recoveryShopHeader)!==canonicalJson(input.recoveryShopHeader)||canonicalJson(asMessageDeliveryReceipt(common.receipt))!==canonicalJson(input.presentationReceipt))return {kind:'suppressed',reason:'invalid-presentation'} as const;
       }
       if (input.deliveryPlan) {
         const stored = await rows<{content: string; outboundPresentation: unknown}>(tx, `

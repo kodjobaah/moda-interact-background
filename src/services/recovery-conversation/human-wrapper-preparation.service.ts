@@ -69,6 +69,7 @@ export class HumanWrapperPreparationService {
           ...(header ? {recoveryShopHeader: header} : {}), ...(rendered.brandMediaPolicy ? {brandMediaPolicy:rendered.brandMediaPolicy} : {}), ...(rendered.deliveryPlan ? {deliveryPlan: rendered.deliveryPlan} : {})} : {kind: "refused", reason: "CONTENT_MISMATCH"};
       }
       if (rendered.kind === "rendered") {
+        if(rendered.commonLayout && (rendered.audience!=="SHARED"||rendered.commonLayout.boundaries.body!==command.textBody||!rendered.multipartPlan||!command.mediaReceipt))return {kind:"refused",reason:"CONTENT_MISMATCH"};
         if (rendered.source !== "HUMAN" || rendered.messageIdentity !== command.id ||
             !rendered.body.includes(command.textBody)) {
           return { kind: "refused", reason: "CONTENT_MISMATCH" };

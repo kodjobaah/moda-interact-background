@@ -1,3 +1,4 @@
+import { readCommonMultipartPreparation,type CommonMultipartPreparation } from "../recovery-multipart/preparation.js";
 import { readRecoveryLayoutReceipt,commonLayoutBody,humanCommonLayoutApplicationKey,currentCommonLayoutMatches,type RecoveryLayoutReceipt } from "../recovery-multipart/common-layout.js";
 import { freezeBrandMedia, readFrozenBrandMedia, type FrozenBrandMediaEnvelope, type BrandPreparationReceipt } from "../conversation-delivery-plan.js";
 import { currentRecoveryShopHeaderMatches } from "./recovery-shop-header-verification.js";
@@ -17,10 +18,10 @@ const logger = createLogger({
 const digest = (body: string) => createHash("sha256").update(body, "utf8").digest("hex");
 
 export type PreparedEvidence =
-  | { schemaVersion: 1; outcome: "PASSTHROUGH"; reason: "NOT_CONFIGURED"; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; mediaPreparation?: FrozenBrandMediaEnvelope }
+  | { schemaVersion: 1; outcome: "PASSTHROUGH"; reason: "NOT_CONFIGURED"; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; multipartPreparation?: CommonMultipartPreparation; mediaPreparation?: FrozenBrandMediaEnvelope }
   | { schemaVersion: 1; outcome: "RENDERED"; wrapperDefinitionId: string; localeId: string;
       audience: "HUMAN" | "SHARED"; slotEditVersion: number; applicationKey: string;
-      contentHash: string; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; mediaPreparation?: FrozenBrandMediaEnvelope };
+      contentHash: string; bodySha256: string; recoveryCheckoutUrl?: string; recoveryShopHeader?: RecoveryLayoutReceipt; multipartPreparation?: CommonMultipartPreparation; mediaPreparation?: FrozenBrandMediaEnvelope };
 
 export type FrozenHumanBody = { kind: "frozen"; body: string; evidence: PreparedEvidence }
   | { kind: "refused"; reason: string };
@@ -42,7 +43,10 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
   const header = evidence.recoveryShopHeader === undefined ? null : readRecoveryLayoutReceipt(evidence.recoveryShopHeader);
   if (evidence.recoveryShopHeader !== undefined && (!header || !(header.schemaVersion===2 ? commonLayoutBody(header)===body : hasPreparedRecoveryShopHeader(body, header)))) return null;
   if(evidence.recoveryCheckoutUrl!==undefined && !(header?.schemaVersion===2 ? header.variables['checkout.url']===evidence.recoveryCheckoutUrl : hasPreparedRecoveryCheckoutFooter(body,evidence.recoveryCheckoutUrl as string)))return null;
-  let media: {mediaPreparation?: FrozenBrandMediaEnvelope} = {};
+  const multipart=header?.schemaVersion===2 && evidence.multipartPreparation!==undefined ? readCommonMultipartPreparation(evidence.multipartPreparation,header) : null;
+  if(evidence.multipartPreparation!==undefined && (!multipart||multipart.receipt.sourceKind!=="HUMAN_COMMAND"))return null;
+  const preparedMultipart=multipart?{multipartPreparation:multipart}:{};
+  let media: {multipartPreparation?: CommonMultipartPreparation; mediaPreparation?: FrozenBrandMediaEnvelope} = {};
   if (evidence.mediaPreparation !== undefined) {
     const parsed = readFrozenBrandMedia(evidence.mediaPreparation);
     if (!parsed || !header || header.schemaVersion===2 || JSON.stringify(parsed.recoveryShopHeader) !== JSON.stringify(header) || parsed.plan.body !== body || parsed.receipt.sourceKind !== "HUMAN_COMMAND") return null;
@@ -51,7 +55,7 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
   const footer = typeof evidence.recoveryCheckoutUrl === "string" ? { recoveryCheckoutUrl: evidence.recoveryCheckoutUrl } : {};
   if (header?.schemaVersion===2 && evidence.outcome!=="RENDERED")return null;
   if (evidence.outcome === "PASSTHROUGH" && evidence.reason === "NOT_CONFIGURED") {
-    return { schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: digest(body), ...footer, ...media, ...(header ? {recoveryShopHeader: header} : {}) };
+    return { schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: digest(body), ...footer, ...media, ...preparedMultipart, ...(header ? {recoveryShopHeader: header} : {}) };
   }
   if (evidence.outcome !== "RENDERED" || typeof evidence.wrapperDefinitionId !== "string" ||
       !evidence.wrapperDefinitionId || typeof evidence.localeId !== "string" || !evidence.localeId ||
@@ -65,7 +69,7 @@ export function parsePreparedEvidence(body: string | null, raw: unknown, at: Dat
     schemaVersion: 1, outcome: "RENDERED", wrapperDefinitionId: evidence.wrapperDefinitionId,
     localeId: evidence.localeId, audience: evidence.audience as "HUMAN" | "SHARED",
     slotEditVersion: evidence.slotEditVersion, applicationKey: evidence.applicationKey,
-    contentHash: evidence.contentHash, bodySha256: digest(body), ...footer, ...media, ...(header ? {recoveryShopHeader: header} : {}),
+    contentHash: evidence.contentHash, bodySha256: digest(body), ...footer, ...media, ...preparedMultipart, ...(header ? {recoveryShopHeader: header} : {}),
   };
 }
 
@@ -103,17 +107,21 @@ export class HumanPreparedCommandService {
     if (plan && (plan.kind !== "BRAND_IMAGE" || !receipt)) return {kind: "refused", reason: "prepared_invalid"};
     const policy = result.kind === "passthrough" ? result.brandMediaPolicy : result.application.brandMediaPolicy;
     if(plan?.kind === "BRAND_IMAGE" && !policy) return {kind:"refused",reason:"prepared_invalid"};
+    const common=result.kind==="prepared"?result.application.commonLayout:undefined;
+    const multipartPreparation=common&&receipt&&result.kind==="prepared"&&result.application.multipartPlan?readCommonMultipartPreparation({plan:result.application.multipartPlan,policyRef:result.application.brandMediaPolicy??null,receipt},common):null;
+    if(common&&!multipartPreparation)return {kind:"refused",reason:"prepared_invalid"};
+    const multipart=multipartPreparation?{multipartPreparation}:{};
     const media = plan?.kind === "BRAND_IMAGE" && receipt ? {mediaPreparation: freezeBrandMedia(plan, receipt, (result.kind === "passthrough" ? result.recoveryShopHeader : result.application.recoveryShopHeader)!, policy!)} : {};
     const evidence: PreparedEvidence = result.kind === "passthrough"
-      ? { schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: digest(result.body), ...media,
+      ? { schemaVersion: 1, outcome: "PASSTHROUGH", reason: "NOT_CONFIGURED", bodySha256: digest(result.body), ...media, ...multipart,
           ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}),
           ...(result.recoveryCheckoutUrl ? {recoveryCheckoutUrl: result.recoveryCheckoutUrl} : {}) }
       : { schemaVersion: 1, outcome: "RENDERED", wrapperDefinitionId: result.application.wrapperDefinitionId,
           localeId: result.application.localeId,
           audience: result.application.audience as "HUMAN" | "SHARED",
           slotEditVersion: result.application.slotEditVersion, applicationKey: result.application.applicationKey,
-          contentHash: result.application.contentHash, bodySha256: digest(result.body), ...media,
-          ...(result.application.recoveryShopHeader ? {recoveryShopHeader: result.application.recoveryShopHeader} : {}),
+          contentHash: result.application.contentHash, bodySha256: digest(result.body), ...media, ...multipart,
+          ...(common ? {recoveryShopHeader:common} : result.application.recoveryShopHeader ? {recoveryShopHeader: result.application.recoveryShopHeader} : {}),
           ...(result.application.recoveryCheckoutUrl ? {recoveryCheckoutUrl: result.application.recoveryCheckoutUrl} : {}) };
     if (!command.textBody || !result.body.includes(command.textBody) || !result.body.trim() || (result.kind === "passthrough" && !preparedHumanPassthroughMatches(command.textBody, result.body, evidence.recoveryCheckoutUrl, evidence.recoveryShopHeader)) ||
         !parsePreparedEvidence(result.body, evidence, new Date())) {
@@ -151,6 +159,7 @@ export class HumanPreparedCommandService {
         (evidence.outcome === "PASSTHROUGH" && !preparedHumanPassthroughMatches(original, row.preparedTextBody, evidence.recoveryCheckoutUrl, evidence.recoveryShopHeader))) {
       return { kind: "refused", reason: "prepared_invalid" };
     }
+    if(evidence.multipartPreparation && (evidence.multipartPreparation.receipt.sourceId!==commandId||evidence.multipartPreparation.receipt.shopId!==shopId||evidence.multipartPreparation.receipt.conversationId!==row.conversationId))return {kind:"refused",reason:"prepared_invalid"};
     if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader})))return {kind:"refused",reason:"prepared_invalid"};
     return { kind: "frozen", body: row.preparedTextBody!, evidence };
   }
