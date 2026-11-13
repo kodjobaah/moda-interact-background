@@ -6,7 +6,7 @@ import { platformConsumerConfiguration } from "../platform-configuration/consume
 type Database = Pick<PrismaClient, "$transaction">;
 type Transaction = Prisma.TransactionClient;
 const include = { locale: { include: { definition: { include: { locales: { orderBy: { id: "asc" } } } } } } } as const;
-type Row = Prisma.WhatsAppTemplateMetaRegistrationGetPayload<{ include: typeof include }>;
+export type PreclaimRecoveryRow = Prisma.WhatsAppTemplateMetaRegistrationGetPayload<{ include: typeof include }>;
 const failure = "META_APP_ID_MISSING_OR_INVALID";
 const hash = /^[a-f0-9]{64}$/;
 const idPattern = /^[A-Za-z0-9_-]{1,191}$/;
@@ -30,7 +30,7 @@ export async function readPreclaimRecoveryConfiguration(): Promise<RecoveryConfi
 
 /** Binds immutable registration transport AND the current source/reviewer identities.
  * No template body or secret is emitted in operator diagnostics. */
-export function preclaimSnapshotDigest(row: Row): string {
+export function preclaimSnapshotDigest(row: PreclaimRecoveryRow): string {
   return fingerprint(JSON.parse(JSON.stringify({ localeId: row.localeId, wabaId: row.wabaId,
     providerTemplateName: row.providerTemplateName, providerLanguageCode: row.providerLanguageCode,
     category: row.category, components: row.componentsSnapshot, bindings: row.parameterBindingsSnapshot,
@@ -97,6 +97,32 @@ export function parsePreclaimRecoveryArguments(args: readonly string[]):
     ...(values.has("--digest") ? { digest: values.get("--digest") as string } : {}) };
 }
 
+export function assertUnclaimedPreclaimProjection(row: PreclaimRecoveryRow): void {
+  if (row.providerTemplateId !== null || row.lastSubmittedAt !== null || row.providerStatus !== null ||
+      row.lastReconciledAt !== null || row.lastObservedContentHash !== null || row.lastObservedCategory !== null ||
+      row.driftDetectedAt !== null) refuse("RECOVERY_NOT_PROVEN_PRECLAIM");
+}
+export function assertReviewedPreclaimSource(row: PreclaimRecoveryRow): void {
+    const d = row.locale.definition;
+    const source = d.locales.find((locale) => locale.languageTag === d.sourceLanguageTag);
+    if (d.kind !== "META_RECOVERY" || d.retiredAt || d.providerTemplateName !== row.providerTemplateName ||
+        d.category !== row.category || !hash.test(d.sourceHash) || !["MARKETING", "UTILITY", "AUTHENTICATION"].includes(row.category) ||
+        row.locale.providerLanguageCode !== row.providerLanguageCode || row.locale.contentHash !== row.submittedContentHash ||
+        !hash.test(row.submittedContentHash) || row.locale.status !== "REVIEWED" || !row.locale.reviewedAt ||
+        !row.locale.reviewedByAdminId || !source || source.status !== "REVIEWED" || !source.reviewedAt ||
+        !source.reviewedByAdminId || !source.contentHash || !hash.test(source.contentHash)) refuse("RECOVERY_SOURCE_NOT_REVIEWED");
+    validatedComponents(row.componentsSnapshot);
+    if (row.parameterBindingsSnapshot === null) refuse("RECOVERY_SOURCE_NOT_REVIEWED");
+}
+export async function lockPreclaimRecoveryRow(tx: Transaction, id: string): Promise<PreclaimRecoveryRow> {
+  await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateMetaRegistration" WHERE id = ${id} FOR UPDATE`;
+  const row = await tx.whatsAppTemplateMetaRegistration.findUnique({ where: { id }, include });
+  if (!row) refuse("RECOVERY_ROW_NOT_FOUND");
+  await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateDefinition" WHERE id = ${row.locale.definitionId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateLocale" WHERE "definitionId" = ${row.locale.definitionId} ORDER BY id FOR SHARE`;
+  return row;
+}
+
 /** Explicit operator capability; never wired into workers, pollers or HTTP ingress.
  * A batch is all-or-nothing. Serialization/CAS errors refuse; no automatic retry. */
 export class MetaPreclaimRecovery {
@@ -104,17 +130,11 @@ export class MetaPreclaimRecovery {
     private readonly configuration = readPreclaimRecoveryConfiguration,
     private readonly clock = () => new Date()) {}
 
-  private async lockedRow(tx: Transaction, id: string): Promise<Row> {
-    await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateMetaRegistration" WHERE id = ${id} FOR UPDATE`;
-    const row = await tx.whatsAppTemplateMetaRegistration.findUnique({ where: { id }, include });
-    if (!row) refuse("RECOVERY_ROW_NOT_FOUND");
-    // Lock all reviewed source rows and the definition against concurrent edits.
-    await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateDefinition" WHERE id = ${row.locale.definitionId} FOR SHARE`;
-    await tx.$queryRaw`SELECT id FROM whatsapp."WhatsAppTemplateLocale" WHERE "definitionId" = ${row.locale.definitionId} ORDER BY id FOR SHARE`;
-    return row;
+  private async lockedRow(tx: Transaction, id: string): Promise<PreclaimRecoveryRow> {
+    return lockPreclaimRecoveryRow(tx, id);
   }
 
-  private async eligible(tx: Transaction, row: Row, config: RecoveryConfiguration): Promise<void> {
+  private async eligible(tx: Transaction, row: PreclaimRecoveryRow, config: RecoveryConfiguration): Promise<void> {
     if (row.wabaId !== config.wabaId) refuse("RECOVERY_WABA_MISMATCH");
     if (row.submissionState !== "BLOCKED" || row.failureCode !== failure || row.providerTemplateId !== null ||
         row.lastSubmittedAt !== null || row.providerStatus !== null || row.lastReconciledAt !== null ||
@@ -128,16 +148,7 @@ export class MetaPreclaimRecovery {
         e.providerTemplateId !== null || e.providerRequestId !== null || e.httpStatus !== null ||
         e.attemptNumber !== null || e.requestDigest !== null || e.providerStatus !== null ||
         e.reasonCode !== null || e.evidence !== null || e.processedAt === null)) refuse("RECOVERY_SUBMISSION_EVIDENCE");
-    const d = row.locale.definition;
-    const source = d.locales.find((locale) => locale.languageTag === d.sourceLanguageTag);
-    if (d.kind !== "META_RECOVERY" || d.retiredAt || d.providerTemplateName !== row.providerTemplateName ||
-        d.category !== row.category || !hash.test(d.sourceHash) || !["MARKETING", "UTILITY", "AUTHENTICATION"].includes(row.category) ||
-        row.locale.providerLanguageCode !== row.providerLanguageCode || row.locale.contentHash !== row.submittedContentHash ||
-        !hash.test(row.submittedContentHash) || row.locale.status !== "REVIEWED" || !row.locale.reviewedAt ||
-        !row.locale.reviewedByAdminId || !source || source.status !== "REVIEWED" || !source.reviewedAt ||
-        !source.reviewedByAdminId || !source.contentHash || !hash.test(source.contentHash)) refuse("RECOVERY_SOURCE_NOT_REVIEWED");
-    validatedComponents(row.componentsSnapshot);
-    if (row.parameterBindingsSnapshot === null) refuse("RECOVERY_SOURCE_NOT_REVIEWED");
+    assertReviewedPreclaimSource(row);
   }
 
   /** Default CLI mode: prepare a reviewable manifest, with no writes or events. */

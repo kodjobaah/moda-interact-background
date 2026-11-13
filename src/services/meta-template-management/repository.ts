@@ -64,6 +64,48 @@ export class MetaTemplateRepository extends MetaTemplateStatusRepository {
     });
   }
 
+  /** Preclaim-only deferral; never touches an in-flight/uncertain/submitted create. */
+  async deferReadyRegistration(id: string, until: Date, error: MetaManagementError): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      const row = await tx.whatsAppTemplateMetaRegistration.findUnique({ where: { id } });
+      if (!row) return false;
+      let count = 0;
+      if (row.submissionState === "READY_TO_SUBMIT" && !row.lastSubmittedAt && !row.providerTemplateId &&
+          (!row.nextRetryAt || row.nextRetryAt < until)) {
+        count = (await tx.whatsAppTemplateMetaRegistration.updateMany({
+          where: { id, submissionState: "READY_TO_SUBMIT", lastSubmittedAt: null, providerTemplateId: null, updatedAt: row.updatedAt },
+          data: { nextRetryAt: until, failureCode: error.code, updatedAt: new Date(Math.max(this.clock().getTime(),row.updatedAt.getTime()+1)) },
+        })).count;
+      }
+      if (!count && error.code !== "META_SAMPLE_APP_THROTTLED") return false;
+      const evidence = { appId: String(error.diagnostics?.appId ?? ""), environment: String(error.diagnostics?.environment ?? ""),
+        operation: error.diagnostics?.operation === "sample_upload" ? "sample_upload" : error.diagnostics?.operation === "sample_session" ? "sample_session" : "sample_operation",
+        retryAt: until.toISOString(), ...(error.code === "META_SAMPLE_APP_THROTTLED" ? { providerErrorCode: 4 } : {}) };
+      await tx.whatsAppTemplateMetaEvent.createMany({ skipDuplicates: true, data: [{
+        eventIdentity: `bg075:app-defer:${fingerprint({ id, until: until.toISOString(), code: error.code })}`,
+        registrationId: id, source: "BACKGROUND", eventType: error.code === "META_SAMPLE_APP_THROTTLED" ? "SAMPLE_APP_THROTTLED" : "SAMPLE_APP_DEFERRED",
+        outcome: count ? "DEFERRED" : "STATE_UNCHANGED", failureCode: error.code, reasonCode: error.code, wabaId: row.wabaId,
+        providerTemplateName: row.providerTemplateName, providerLanguageCode: row.providerLanguageCode,
+        ...(error.code === "META_SAMPLE_APP_THROTTLED" ? { httpStatus: 403 } : {}), evidence, processedAt: this.clock(),
+      }] });
+      return count === 1;
+    });
+  }
+
+  async deferReadyCohort(ids: readonly string[], wabaId: string, until: Date): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      const rows = await tx.whatsAppTemplateMetaRegistration.findMany({
+        where: { id: { in: [...ids].slice(0,50) }, wabaId, submissionState: "READY_TO_SUBMIT", lastSubmittedAt: null, providerTemplateId: null,
+          OR: [{ nextRetryAt: null }, { nextRetryAt: { lt: until } }] },
+        orderBy: { id: "asc" }, select: { id: true, updatedAt: true },
+      });
+      for (const row of rows) await tx.whatsAppTemplateMetaRegistration.updateMany({
+        where: { id: row.id, wabaId, submissionState: "READY_TO_SUBMIT", lastSubmittedAt: null, providerTemplateId: null, updatedAt: row.updatedAt },
+        data: { nextRetryAt: until, updatedAt: new Date(Math.max(this.clock().getTime(),row.updatedAt.getTime()+1)) },
+      });
+    });
+  }
+
   /** Creates the durable submission intent before any provider I/O. */
   async claim(id: string, wabaId: string): Promise<PreparedRegistration | null> {
     return this.db.$transaction(async (tx) => {
