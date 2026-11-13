@@ -22,9 +22,15 @@ type MetaErrorDetails = Readonly<{
   error_user_msg?: string;
 }>;
 
-function bounded(value: unknown, limit = 512, token?: string): { value: string | null; truncated: boolean; redactionApplied: boolean } {
+function redactKnown(value: string, token?: string, sensitive: readonly string[] = []): string {
+  let safe = token ? value.replaceAll(token, "[REDACTED]") : value;
+  for (const identity of sensitive) if (identity) safe = safe.replaceAll(identity, "[REDACTED_UPLOAD_ID]");
+  return safe;
+}
+
+function bounded(value: unknown, limit = 512, token?: string, sensitive: readonly string[] = []): { value: string | null; truncated: boolean; redactionApplied: boolean } {
   if (typeof value !== "string") return { value: null, truncated: false, redactionApplied: false };
-  let result = (token ? value.replaceAll(token, "[REDACTED]") : value)
+  let result = redactKnown(value, token, sensitive)
     .replace(/(Bearer|OAuth)\s+[^\s,"']+/gi, "$1 [REDACTED]")
     .replace(/(access_token|token|secret|authorization)\s*[:=]\s*[^\s,"'&]+/gi, "$1=[REDACTED]")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_EMAIL]")
@@ -36,10 +42,10 @@ function bounded(value: unknown, limit = 512, token?: string): { value: string |
   return { value: result, truncated, redactionApplied };
 }
 
-function safeDetails(value: unknown, token: string): { details: unknown; redactionApplied: boolean; truncated: boolean } {
+function safeDetails(value: unknown, token: string, sensitive: readonly string[] = []): { details: unknown; redactionApplied: boolean; truncated: boolean } {
   if (value === undefined) return { details: undefined, redactionApplied: false, truncated: false };
   const raw = (() => { try { return JSON.stringify(value); } catch { return "[UNSERIALIZABLE]"; } })();
-  let sanitized = raw.replaceAll(token, "[REDACTED]");
+  let sanitized = redactKnown(raw, token, sensitive);
   sanitized = sanitized.replace(/https?:\/\/[^\s"']+/gi, "[REDACTED_URL]")
     .replace(/(access_token|token|secret|authorization)\s*[:=]\s*[^\s,"'&}]+/gi, "$1=[REDACTED]")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_EMAIL]")
@@ -55,7 +61,22 @@ function requestId(response: Response): string | null {
   return value ? value.slice(0, 128) : null;
 }
 
-async function failure(response: Response, operation: "sample_session" | "sample_upload", token: string, signal: AbortSignal): Promise<MetaManagementError> {
+/** Meta's Upload-ID is opaque, including its evidenced signed query suffix.
+ * Do not decode/rebuild it or accept arbitrary provider-returned URLs. */
+function uploadSessionUrl(base: string, id: unknown): URL | null {
+  if (typeof id !== "string" || !/^upload:[A-Za-z0-9_-]{8,256}(?:\?sig=[A-Za-z0-9_-]{1,256})?$/.test(id)) return null;
+  try {
+    const trusted = new URL(base);
+    const target = new URL(`${base}/${id}`);
+    const path = id.split("?", 1)[0];
+    if (!/^\/v\d+\.\d+$/.test(trusted.pathname) || trusted.search || trusted.hash || trusted.username || trusted.password ||
+        target.origin !== trusted.origin || target.username || target.password || target.hash ||
+        target.pathname !== `${trusted.pathname}/${path}` || target.href !== `${base}/${id}`) return null;
+    return target;
+  } catch { return null; }
+}
+
+async function failure(response: Response, operation: "sample_session" | "sample_upload", token: string, signal: AbortSignal, sensitive: readonly string[] = []): Promise<MetaManagementError> {
   let raw = "";
   const reader = response.body?.getReader();
   try {
@@ -78,10 +99,10 @@ async function failure(response: Response, operation: "sample_session" | "sample
   try { parsed = JSON.parse(raw) as { error?: MetaErrorDetails }; } catch { /* non-JSON retained only as bounded provider body */ }
   const source = parsed?.error;
   const sourceMessage = source?.message ?? (!source && raw ? raw : undefined);
-  const messageWithTokenRedacted = typeof sourceMessage === "string" ? sourceMessage.replaceAll(token, "[REDACTED]") : sourceMessage;
+  const messageWithTokenRedacted = typeof sourceMessage === "string" ? redactKnown(sourceMessage, token, sensitive) : sourceMessage;
   const tokenRedacted = messageWithTokenRedacted !== sourceMessage;
   const originalMessage = bounded(messageWithTokenRedacted);
-  const details = safeDetails(source?.error_data ?? source?.error_user_msg ?? source?.error_user_title, token);
+  const details = safeDetails(source?.error_data ?? source?.error_user_msg ?? source?.error_user_title, token, sensitive);
   const appThrottle = response.status === 403 && source?.code === 4;
   const transient = appThrottle || response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
   return new MetaManagementError(appThrottle ? "META_SAMPLE_APP_THROTTLED" : `META_${operation.toUpperCase()}_${transient ? "TRANSIENT" : "REJECTED"}`,
@@ -101,7 +122,7 @@ async function failure(response: Response, operation: "sample_session" | "sample
     });
 }
 
-function sourceFailure(error: unknown, operation: "sample_fetch" | "sample_session" | "sample_upload", token: string): MetaManagementError {
+function sourceFailure(error: unknown, operation: "sample_fetch" | "sample_session" | "sample_upload", token: string, sensitive: readonly string[] = []): MetaManagementError {
   if (error instanceof MetaManagementError) return error;
   if (error instanceof ShopBrandMediaError) {
     const code = `META_SAMPLE_FETCH_${error.code}`;
@@ -110,13 +131,14 @@ function sourceFailure(error: unknown, operation: "sample_fetch" | "sample_sessi
     });
   }
   const cause = error instanceof Error ? error : new Error("unknown-sdk-exception");
-  const message = bounded(cause.message, 512, token);
-  return new MetaManagementError(`META_${operation.toUpperCase()}_TRANSPORT`, "uncertain", { cause }, {
+  const message = bounded(cause.message, 512, token, sensitive);
+  const safeCause = sensitive.length ? Object.assign(new Error(message.value ?? "sample transport failed"), { name: cause.name }) : cause;
+  return new MetaManagementError(`META_${operation.toUpperCase()}_TRANSPORT`, "uncertain", { cause: safeCause }, {
     origin: "sdk_exception", operation, reasonCode: `META_${operation.toUpperCase()}_TRANSPORT`,
     errorName: cause.name.slice(0, 64), errorMessage: message.value,
     redactionApplied: message.redactionApplied, truncated: message.truncated,
     causeName: cause.cause instanceof Error ? cause.cause.name.slice(0, 64) : undefined,
-    causeMessage: cause.cause instanceof Error ? bounded(cause.cause.message, 512, token).value : undefined,
+    causeMessage: cause.cause instanceof Error ? bounded(cause.cause.message, 512, token, sensitive).value : undefined,
   });
 }
 
@@ -151,27 +173,30 @@ export class MetaImageHeaderSampleUploader {
     catch (error) { throw sourceFailure(error, "sample_session", input.accessToken); }
     const sessionId = sessionJson && typeof sessionJson === "object" && "id" in sessionJson
       ? (sessionJson as { id?: unknown }).id : undefined;
-    if (typeof sessionId !== "string" || !/^upload:[A-Za-z0-9_-]{8,256}$/.test(sessionId)) {
+    const uploadUrl = uploadSessionUrl(base, sessionId);
+    if (!uploadUrl) {
       throw new MetaManagementError("META_UPLOAD_SESSION_INVALID", "uncertain", undefined, {
         origin: "provider_response", provider: "meta_graph", operation: "sample_session",
         reasonCode: "META_UPLOAD_SESSION_INVALID", httpStatus: session.status,
       });
     }
+    const sessionIdentity = sessionId as string;
+    const sensitive = [sessionIdentity, sessionIdentity.slice(7).split("?", 1)[0]!, uploadUrl.searchParams.get("sig") ?? ""];
 
     const uploadSignal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
     await input.beforeHttp?.();
     uploadSignal.throwIfAborted();
     let uploaded: Response;
     try {
-      uploaded = await withSignal(this.request(new URL(`${base}/${sessionId}`), {
+      uploaded = await withSignal(this.request(uploadUrl, {
         method: "POST", headers: { Authorization: `OAuth ${input.accessToken}`, file_offset: "0", "Content-Type": "application/octet-stream" },
         body: new Uint8Array(image.bytes), signal: uploadSignal,
       }), uploadSignal);
-    } catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken); }
-    if (!uploaded.ok) throw await failure(uploaded, "sample_upload", input.accessToken, uploadSignal);
+    } catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken, sensitive); }
+    if (!uploaded.ok) throw await failure(uploaded, "sample_upload", input.accessToken, uploadSignal, sensitive);
     let uploadedJson: unknown;
     try { uploadedJson = await boundedJson(uploaded, uploadSignal); }
-    catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken); }
+    catch (error) { throw sourceFailure(error, "sample_upload", input.accessToken, sensitive); }
     const handle = uploadedJson && typeof uploadedJson === "object" && "h" in uploadedJson
       ? (uploadedJson as { h?: unknown }).h : undefined;
     if (typeof handle !== "string" || handle.length < 5 || handle.length > 4096 ||
