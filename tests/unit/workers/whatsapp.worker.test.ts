@@ -656,3 +656,7 @@ it("loads a recovery turn with its current, outreach-pinned CustomerPhone when t
   owned.customer.phones[0]!.whatsappCanonicalPhone = "447400123457";
   await expect(loadConversationTurn("conversation-1", new Date())).rejects.toThrow("no outbound ownership");
 });
+
+describe('branded main rollout startup proof',()=>{
+ it.each([undefined,'false','TRUE','true'])('emits only safe enabled boolean for %s',value=>{vi.stubEnv('RECOVERY_BRANDED_MAIN_REPLY_ENABLED',value);try{vi.clearAllMocks();createWhatsappWorker();expect(mocks.logger.info).toHaveBeenCalledWith('whatsapp.worker.started',expect.objectContaining({recoveryBrandedMainReplyEnabled:value==='true'}));}finally{vi.unstubAllEnvs();}});
+});

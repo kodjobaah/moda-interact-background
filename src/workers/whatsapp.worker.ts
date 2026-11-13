@@ -1,3 +1,4 @@
+import { brandedMainReplyEnabled } from '../services/recovery-multipart/composition.js';
 import { bindMultipartQueue, recoveryMultipartEngine, processMultipartStatus, MULTIPART_CONTINUATION_JOB } from "../services/recovery-multipart/runtime.js";
 import { Queue, Worker } from "bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -155,6 +156,7 @@ export function createWhatsappWorker() {
   logger.info("whatsapp.worker.started", {
     queueName: "whatsapp-events",
     concurrency: worker.concurrency,
+    recoveryBrandedMainReplyEnabled: brandedMainReplyEnabled(),
   });
   return worker;
 }
