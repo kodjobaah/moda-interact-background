@@ -106,7 +106,9 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
         where: { merchantSendCommandId: commandId },
       });
       expect(decision?.decision).toBe("BLOCK");
-      assertModerationHttp(aimock.journal(), ["moderation-fixture-block"]);
+      const prepared=await f.db.merchantConversationSendCommand.findUniqueOrThrow({where:{id:commandId},select:{preparedTextBody:true}});
+      expect(prepared.preparedTextBody).toContain("moderation-fixture-block");
+      assertModerationHttp(aimock.journal(), [prepared.preparedTextBody!]);
       expect(await f.db.conversationMessage.count({ where: { conversationId: f.conversationId, senderType: "HUMAN" } })).toBe(0);
       expect(f.providerHttpRequests).toHaveLength(0);
       expect(f.billing.admitAndRevalidate).not.toHaveBeenCalled();
