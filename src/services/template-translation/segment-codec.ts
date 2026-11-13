@@ -24,7 +24,7 @@ const SnapshotSchema = z.object({
   sourceLanguageTag: z.string().min(2).max(16),
   segments: z.array(SourceSegment).min(1).max(64),
 }).strict();
-const ResultSchema = z.object({
+export const ResultSchema = z.object({
   schemaVersion: z.literal(1),
   segments: z.array(z.object({
     key: z.string().min(1).max(256),
