@@ -181,6 +181,11 @@ describe("WhatsApp worker inbound execution gate", () => {
     mocks.routing.isCurrentActiveRoute.mockResolvedValue(true);
   });
 
+  it("never sends guidance or enqueues a reply for a foreign-sender quote ignored by routing",async()=>{
+    mocks.routing.resolveInboundMessage.mockResolvedValue({kind:"ignored"});
+    await processInboundJobData({...event,providerAccountId:"foreign-account",contextMessageId:"known-physical-part"});
+    expect(mocks.guidance).not.toHaveBeenCalled();expect(mocks.processor.enqueue).not.toHaveBeenCalled();expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+  });
   it("B011-03 performs raw admission before routing and persistence", async () => {
     mocks.routing.resolveInboundMessage.mockResolvedValue({
       kind: "resolved",

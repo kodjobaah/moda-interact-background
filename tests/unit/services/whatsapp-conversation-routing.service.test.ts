@@ -1,3 +1,8 @@
+// These fixtures exercise legacy scalar routing. Actual child correlation,
+// sender isolation and PENDING-root routing are covered against PostgreSQL.
+vi.mock("../../../src/services/recovery-multipart/quote.js", () => ({
+  resolveMultipartQuote: vi.fn(async () => null),
+}));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({

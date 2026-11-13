@@ -1,3 +1,4 @@
+import { admitMultipartPart } from "../recovery-multipart/fence.js";
 import { readFrozenBrandMedia, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { currentBrandPlanMatches } from "../conversation-brand-media.js";
@@ -36,6 +37,9 @@ export type RecoveryMarketingPermit = {
   templateRegistration?: FinalTemplateIdentity;
 };
 export type DispatchInput = {
+  /** Server-only persisted child identity; never a model payload. */
+  multipartPartId?: string;
+  multipartConsent?: StoredRecoveryConsentSnapshot | null;
   recoveryShopHeader?: RecoveryShopHeaderReceipt;
   senderType: DispatchActor;
   conversationId: string; shopId: string; recoveryId: string;
@@ -137,20 +141,23 @@ export class OutboundSendFenceService {
         textBody: string | null; preparedTextBody: string | null; preparedWrapperEvidence: unknown;
         preparedAt: Date | null; templateName: string | null; templateLanguageCode: string | null;
         followUpClaimKey: string | null;
-        recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null;
+        recoveryOutreachAttemptId: string | null; providerDispatchKey: string | null; outboundMessageId: string | null;
       } | null = null;
       if (input.senderType === "HUMAN") {
         command = await first(tx, `
           SELECT "state"::text, "leaseToken", "leaseExpiresAt", "expectedControlRevision",
             "kind"::text, "recipientSnapshot", "textBody", "preparedTextBody",
             "preparedWrapperEvidence", "preparedAt", "templateName", "templateLanguageCode",
-            "followUpClaimKey", "recoveryOutreachAttemptId", "providerDispatchKey"
+            "followUpClaimKey", "recoveryOutreachAttemptId", "providerDispatchKey", "outboundMessageId"
           FROM "whatsapp"."MerchantConversationSendCommand"
           WHERE "id"=$1 AND "conversationId"=$2 AND "shopId"=$3 FOR UPDATE`,
           input.commandId, context.id, context.shopId);
-        if (!command || command.state !== "CLAIMED" || command.leaseToken !== input.leaseToken ||
-            !command.leaseExpiresAt || command.leaseExpiresAt <= now || command.providerDispatchKey)
+        const multipartContinuation = !!input.multipartPartId && command?.state === "DISPATCH_ADMITTED" &&
+          command.outboundMessageId === input.messageId && command.leaseToken === input.leaseToken && !!command.providerDispatchKey;
+        if (!multipartContinuation && (!command || command.state !== "CLAIMED" || command.leaseToken !== input.leaseToken ||
+            !command.leaseExpiresAt || command.leaseExpiresAt <= now || command.providerDispatchKey))
           return { kind: "suppressed", reason: "invalid-lease" } as const;
+        if (!command) return {kind: "suppressed",reason: "invalid-lease"} as const;
         if (command.expectedControlRevision !== context.revision)
           return { kind: "suppressed", reason: "stale-control-revision" } as const;
         if (command.recipientSnapshot !== input.recipient)
@@ -247,7 +254,7 @@ export class OutboundSendFenceService {
       const permitNow = this.clock();
       if (!Number.isFinite(permitNow.getTime()))
         return { kind: "suppressed", reason: "invalid-clock" } as const;
-      if (command?.leaseExpiresAt && command.leaseExpiresAt <= permitNow)
+      if (command?.state === "CLAIMED" && command.leaseExpiresAt && command.leaseExpiresAt <= permitNow)
         return { kind: "suppressed", reason: "invalid-lease" } as const;
       const freeText = input.senderType === "AGENT" ||
         (input.senderType === "AUTOMATION" && input.deliveryKind !== "TEMPLATE") ||
@@ -299,6 +306,11 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
+      if (input.multipartPartId) {
+        if (!input.messageId || input.initialOutreach || input.proactive || input.deliveryKind === "TEMPLATE" || input.senderType === "AUTOMATION")
+          return {kind: "suppressed",reason: "multipart-invalid-scope"} as const;
+        return admitMultipartPart(tx,input,context,permitNow);
+      }
       if (input.deliveryPlan?.kind === "BRAND_IMAGE") {
         const storedMedia = input.senderType === "HUMAN"
           ? parsePreparedEvidence(command!.preparedTextBody,command!.preparedWrapperEvidence,command!.preparedAt)?.mediaPreparation

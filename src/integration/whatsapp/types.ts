@@ -8,11 +8,18 @@ export interface SendMessageResult {
   providerMessageId: string;
 }
 
+export type WhatsAppSenderIdentity = Readonly<{
+  providerAccountId: string;
+  providerPhoneNumberId: string;
+}>;
+
 export interface SendImageInput {
   to: string;
   link: string;
   caption: string;
   replyToProviderMessageId?: string;
+  /** Local frozen identity check; never included in the Meta request body. */
+  expectedSender?: WhatsAppSenderIdentity;
 }
 
 export interface SendTextInput {
@@ -20,6 +27,8 @@ export interface SendTextInput {
   text: string;
   previewUrl?: boolean;
   replyToProviderMessageId?: string;
+  /** Local frozen identity check; never included in the Meta request body. */
+  expectedSender?: WhatsAppSenderIdentity;
 }
 
 export interface WhatsAppTemplateImageHeader {

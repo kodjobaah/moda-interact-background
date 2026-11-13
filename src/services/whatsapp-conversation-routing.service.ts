@@ -1,3 +1,4 @@
+import { resolveMultipartQuote } from "./recovery-multipart/quote.js";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
@@ -42,6 +43,7 @@ export class WhatsAppConversationRoutingService {
   async resolveInboundMessage(
     event: WhatsAppInboundEvent,
   ): Promise<ConversationRoute> {
+    const quotedPart=event.contextMessageId ? await resolveMultipartQuote(prisma,{providerMessageId:event.contextMessageId,providerAccountId:event.providerAccountId,providerPhoneNumberId:event.providerPhoneNumberId}) : null;
     const sender = await whatsAppService.resolveSender();
     if (
       event.providerAccountId !== sender.providerAccountId ||
@@ -50,7 +52,9 @@ export class WhatsAppConversationRoutingService {
       return { kind: "ignored" };
     }
 
+    if(quotedPart?.kind==="invalid") return {kind:"guidance",reason:"INVALID_REFERENCE"};
     const phone = canonicalPhone(event.customerPhone);
+    if(quotedPart?.kind==="matched" && phone!==quotedPart.recipient) return {kind:"guidance",reason:"INVALID_REFERENCE"};
     const stored = await prisma.conversationMessage.findUnique({
       where: { providerMessageId: event.providerMessageId },
       select: { conversationId: true, direction: true },
@@ -61,7 +65,7 @@ export class WhatsAppConversationRoutingService {
     }
 
     if (event.contextMessageId) {
-      const original = await prisma.conversationMessage.findUnique({
+      const original = quotedPart?.kind==="matched" ? {direction:"OUTBOUND",sentAt:quotedPart.acknowledgedAt,conversationId:quotedPart.conversationId} : await prisma.conversationMessage.findUnique({
         where: { providerMessageId: event.contextMessageId },
         select: {
           direction: true,

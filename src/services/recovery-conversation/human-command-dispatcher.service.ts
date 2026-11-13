@@ -1,3 +1,5 @@
+import { humanMultipartMessageId } from "../recovery-multipart/frozen.js";
+import type { RecoveryMultipartDeliveryEngine } from "../recovery-multipart/engine.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import type { ConversationMediaDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { frozenBrandPlanCurrent } from "../conversation-brand-media.js";
@@ -41,6 +43,7 @@ const MAX_IN_FLIGHT = 4;
 
 export type HumanDispatcherDependencies = {
   database: RecoveryDatabase;
+  multipart?: Pick<RecoveryMultipartDeliveryEngine,"continue">;
   outreach: Pick<RecoveryOutreachAttemptService, "markWaitingAfterConfirmedSend">;
   commands: MerchantSendCommandService;
   evaluator: HumanCommandEvaluationService;
@@ -72,6 +75,7 @@ export function createHumanDispatcherDependencies(): HumanDispatcherDependencies
   const followUps = new RecoveryFollowUpPolicyService();
   const policy = new HumanSendPolicyService(recoveryDatabase, connectionRedis);
   return {
+    multipart: {continue: async messageId => (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine.continue(messageId)},
     database: recoveryDatabase, outreach: recoveryOutreachAttemptService,
     commands, followUps,
     evaluator: new HumanCommandEvaluationService(commands, followUps, policy),
@@ -160,6 +164,7 @@ export class HumanCommandDispatcherService {
       SELECT "id", "leaseToken" FROM "whatsapp"."MerchantConversationSendCommand"
       WHERE "state"='DISPATCH_ADMITTED' AND "providerDispatchKey" IS NOT NULL
         AND "leaseToken" IS NOT NULL AND "leaseExpiresAt"<=statement_timestamp()
+        AND NOT EXISTS (SELECT 1 FROM "whatsapp"."ConversationDeliveryPart" part WHERE part."messageId"="MerchantConversationSendCommand"."outboundMessageId")
       ORDER BY "leaseExpiresAt","id" LIMIT 25`);
     for (const command of expired) {
       await this.deps.reconciliation.recordProviderUnknown({
@@ -247,6 +252,7 @@ export class HumanCommandDispatcherService {
     // R0: freeze full customer-visible HUMAN_TEXT under the current SQL lease.
     // Retry and reclaim reuse the same bytes; do not re-render or fall back to raw.
     let frozenBody: string | undefined;
+    let multipartPrepared=false;
     let frozenPlan: ConversationMediaDeliveryPlan | undefined;
     if (command.kind === "HUMAN_TEXT") {
       const frozen = await this.deps.preparation.freeze(command, leaseToken);
@@ -257,6 +263,7 @@ export class HumanCommandDispatcherService {
         await this.rejectTerminal(commandId, leaseToken, frozen.reason);
         return;
       }
+      multipartPrepared=frozen.evidence.recoveryShopHeader?.schemaVersion===2;
       frozenBody = frozen.body;
       frozenPlan = frozen.evidence?.mediaPreparation?.plan;
     }
@@ -302,6 +309,14 @@ export class HumanCommandDispatcherService {
       });
       await this.rejectTerminal(commandId, leaseToken, decision.failureCode.toLowerCase());
       return;
+    }
+
+    if(multipartPrepared){
+      const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
+      const outcome=await engine.continue(humanMultipartMessageId(commandId));
+      if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
+      else if(outcome==="cancelled"||outcome==="failed")await this.rejectTerminal(commandId,leaseToken,"multipart_preparation_refused");
+      return; // Reader delegation only: never synthesize/flatten v2 content.
     }
 
     // Missing sender credentials are a known pre-provider failure. Record them

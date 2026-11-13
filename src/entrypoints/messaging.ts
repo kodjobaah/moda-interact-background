@@ -1,3 +1,4 @@
+import { startMultipartRepair } from "../services/recovery-multipart/runtime.js";
 import { startReadyWorkerProcess } from "../runtime/readiness.js";
 import { closeWorkerObservability } from "../runtime/observability.js";
 import { connectionRedis } from "../lib/redis.js";
@@ -19,6 +20,7 @@ void startReadyWorkerProcess({
     ]);
     const whatsappWorker = createWhatsappWorker();
     const closePendingTurnRepair = startProductionPendingTurnRepair(whatsappQueue);
+    const closeMultipartRepair = startMultipartRepair();
     const closeHumanDispatcher = await startHumanCommandDispatcher();
     const closeTemplateDuePoller = startProductionMetaTemplateDuePoller();
     const stopQueueConcurrencyController = await startQueueConcurrencyController({
@@ -35,6 +37,7 @@ void startReadyWorkerProcess({
       workers: [whatsappWorker],
       closeResources: [
         closePendingTurnRepair,
+        closeMultipartRepair,
         closeHumanDispatcher,
         closeTemplateDuePoller,
         ...closeWorkerResources,
