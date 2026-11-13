@@ -44,11 +44,22 @@ export async function composeCommonReply(input:RenderConversationResponseInput,c
    const built=buildConversationBrandImageDeliveryPlan({plan:header,origin:image.origin,publicOrigin:image.publicOrigin,image});if(built.plan.kind!=='IMAGE')header=built.plan;if(header.kind==='BRAND_IMAGE')brandMediaPolicy=policy;
   }
  }catch{/* Optional logo cannot discard authored content. */}}
- const captionFits=Array.from(answerBody).length<=1024;
+ const consolidated=brandedMainReplyEnabled();
+ const captionFits=!consolidated&&Array.from(answerBody).length<=1024;
  const media=input.commercePresentation?await prepareConversationDelivery({body:captionFits?answerBody:boundaries.footer,binding:{variable:'response.productImage',placement:'BEFORE_BODY',optional:true},shopId:context.shopId,displayedPairs:presentedPairs,verifiedProducts:input.commercePresentation.verifiedProducts,deadlineAt:input.commercePresentation.deadlineAt??Date.now(),signal:input.commercePresentation.signal},deps.mediaDependencies):null;
- const parts:RecoveryMultipartDeliveryPlan['parts']=[{role:'HEADER',plan:header}];
- if(media?.plan.kind==='IMAGE'){parts.push({role:'PRODUCT',plan:media.plan});if(!captionFits)parts.push({role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:answerBody}});}
- else parts.push({role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:answerBody}});
+ const parts:RecoveryMultipartDeliveryPlan['parts']=[];
+ if(consolidated){
+  let main:typeof header={schemaVersion:1,kind:'TEXT',body};
+  if(Array.from(body).length<=1024&&header.kind==='BRAND_IMAGE')main={...header,body};
+  else brandMediaPolicy=undefined;
+  if(main.kind==='BRAND_IMAGE'||media?.plan.kind==='IMAGE')parts.push({role:'HEADER',plan:main});
+  else parts.push({role:'ANSWER',plan:main});
+  if(media?.plan.kind==='IMAGE')parts.push({role:'PRODUCT',plan:media.plan});
+ }else {
+  parts.push({role:'HEADER',plan:header});
+  if(media?.plan.kind==='IMAGE'){parts.push({role:'PRODUCT',plan:media.plan});if(!captionFits)parts.push({role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:answerBody}});}
+  else parts.push({role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:answerBody}});
+ }
  // If a physical caption/text cannot fit, preserve the whole valid logical
  // response in the existing one-message TEXT fallback, never truncate it.
  let multipartPlan:RecoveryMultipartDeliveryPlan;
@@ -58,3 +69,6 @@ export async function composeCommonReply(input:RenderConversationResponseInput,c
  const applicationKey=input.source==='HUMAN'?humanCommonLayoutApplicationKey({commandId:input.messageIdentity,conversationId:input.conversationId,shopId:context.shopId,slotEditVersion:selected.slot.editVersion,textBody:input.responseBody,body,receipt:commonLayout}):wrapperApplicationKey({conversationId:input.conversationId,messageIdentity:input.messageIdentity,source:input.source,wrapperDefinitionId:selected.reference.definitionId,localeId:selected.reference.localeId,contentHash:selected.reference.contentHash,editVersion:selected.slot.editVersion,responseDigest,body,recoveryCheckoutUrl:checkout,commonLayout,multipartPlan});
  return {kind:'rendered',body,wrapperDefinitionId:selected.reference.definitionId,localeId:selected.reference.localeId,audience:'SHARED',slotEditVersion:selected.slot.editVersion,languageTag:selected.reference.languageTag,contentHash:selected.reference.contentHash,messageIdentity:input.messageIdentity,source:input.source,applicationKey,responseDigest,replayed:false,recoveryCheckoutUrl:checkout,commonLayout,multipartPlan,presentedPairs,...(brandMediaPolicy?{brandMediaPolicy}:{})};
 }
+
+/** Reader-first rollout: all unrecognized values keep legacy writes disabled. */
+export const brandedMainReplyEnabled=()=>process.env.RECOVERY_BRANDED_MAIN_REPLY_ENABLED==='true';

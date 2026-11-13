@@ -1,3 +1,4 @@
+import { exactCommonDecomposition } from './common-decomposition.js';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import { parseRecoveryMultipartDeliveryPlan,digestRecoveryMultipartDeliveryPlan,type RecoveryMultipartDeliveryPlan } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { readBrandPreparationReceipt,type BrandPreparationReceipt,validConversationPlan } from '../conversation-delivery-plan.js';
@@ -13,7 +14,7 @@ export function readCommonMultipartPreparation(raw:unknown,common:CommonLayoutRe
  if(Object.keys(r).length!==3||!['plan','policyRef','receipt'].every(k=>Object.hasOwn(r,k)))return null;
  const receipt=readBrandPreparationReceipt(r.receipt),policyRef=r.policyRef===null?null:readBrandMediaPolicyRef(r.policyRef);if(!receipt||receipt.shopId!==common.shopId||r.policyRef!==null&&!policyRef)return null;
  let plan:RecoveryMultipartDeliveryPlan;try{plan=parseRecoveryMultipartDeliveryPlan(r.plan,common.variables['checkout.url']);}catch{return null;}
- if(plan.parts.length===1?plan.parts[0]!.plan.body!==commonLayoutBody(common):plan.parts[0]!.plan.body!==common.boundaries.header+common.boundaries.footer||plan.parts.at(-1)!.plan.body!==common.boundaries.body+common.boundaries.footer||plan.parts.length===3&&plan.parts[1]!.plan.body!==common.boundaries.footer)return null;
+ if(!exactCommonDecomposition(plan,common))return null;
  for(const p of plan.parts){if(!validConversationPlan(p.plan,p.plan.body,receipt.shopId,{...receipt,messageId:receipt.sourceId}))return null;if(p.plan.kind==='BRAND_IMAGE'&&(!policyRef||policyRef.publicOrigin!==p.plan.image.publicOrigin))return null;}
  return {plan,policyRef,receipt};
 }

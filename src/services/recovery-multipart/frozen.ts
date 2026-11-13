@@ -1,3 +1,4 @@
+import { exactCommonDecomposition } from './common-decomposition.js';
 import { readRecoveryLayoutReceipt,commonLayoutBody,type RecoveryLayoutReceipt } from './common-layout.js';
 import { createHash } from 'node:crypto';
 import { CommerceConversationProductContextSchema,type CommerceConversationProductContext } from '@modainteract/moda-interact-shared/commerce';
@@ -55,15 +56,10 @@ export function readFrozenMultipart(raw: unknown): FrozenMultipart|null {
     if (part.plan.kind === 'BRAND_IMAGE' && (!policy || policy.publicOrigin !== part.plan.image.publicOrigin)) return null;
   }
   // Exact canonical boundary decomposition: no substring/prose heuristics.
-  // The complete authored middle occurs exactly once, in PRODUCT or ANSWER;
-  // a third product-image caption is only the existing trusted footer.
+  // Both previously frozen plans and consolidated main replies are readable;
+  // product-only captions contain exactly the trusted footer.
   if(header.schemaVersion===2){
-    const {boundaries}=header;
-    if(plan.parts.length===1){if(plan.parts[0]!.plan.body!==raw.body)return null;}
-    else {
-      if(plan.parts[0]!.plan.body!==boundaries.header+boundaries.footer || plan.parts.at(-1)!.plan.body!==boundaries.body+boundaries.footer)return null;
-      if(plan.parts.length===3&&plan.parts[1]!.plan.body!==boundaries.footer)return null;
-    }
+    if(!exactCommonDecomposition(plan,header))return null;
   }else {
   const prefix=recoveryShopHeaderPrefix(header);
   const emptyFooter=withHumanRecoveryCheckoutFooter('',raw.checkoutUrl);
