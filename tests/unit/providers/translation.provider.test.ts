@@ -74,6 +74,19 @@ describe("OpenAI translation provider", () => {
     );
   });
 
+  it("uploads mixed keyed and ordinary requests with output schema only on keyed lines", async () => {
+    const client = createFakeClient();
+    const provider = createOpenAITranslationProvider({ client: client as never, model: "gpt-4.1-mini" });
+    await provider.prepareBatchInput([request, { ...request, translationId: "keyed-id", providerCustomId: "keyed-correlation",
+      translationFormat: "keyed-segments-v1", sourceText: '{"schemaVersion":1,"segments":[{"key":"body","text":"Synthetic"}]}' }]);
+    const upload = client.files.create.mock.calls[0]?.[0] as { file: Blob };
+    const lines = (await upload.file.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines[0].body).not.toHaveProperty("text");
+    expect(lines[1]).toMatchObject({ custom_id: "keyed-correlation", method: "POST", url: "/v1/responses",
+      body: { model: "gpt-4.1-mini", text: { format: { type: "json_schema", strict: true } } } });
+    expect(Object.keys(lines[1].body.text.format.schema.properties.segments.items.properties)).toEqual(["key", "text"]);
+    expect(client.batches.create).not.toHaveBeenCalled();
+  });
   it("accepts generic translation requests without a support-message direction", async () => {
     const client = createFakeClient();
     const provider = createOpenAITranslationProvider({

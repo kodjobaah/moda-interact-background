@@ -98,6 +98,31 @@ describe("Admin-owned WhatsApp source snapshot -> keyed segments", () => {
     expect(() => prepared.restore(JSON.stringify({ ...result, other: "data" }))).toThrow(TemplateTranslationValidationError);
   });
 
+  it.each([
+    ["empty key", "", "Synthetic"], ["oversized key", "k".repeat(257), "Synthetic"],
+    ["empty text", "body.text", ""], ["oversized text", "body.text", "t".repeat(8193)],
+  ])("keeps strict local %s bounds", (_label, key, text) => {
+    const prepared = prepareTemplateTranslation(source());
+    expect(() => prepared.restore(JSON.stringify({ schemaVersion: 1, segments: [{ key, text }] })))
+      .toThrow(new TemplateTranslationValidationError("INVALID_TRANSLATED_SEGMENTS"));
+  });
+  it("keeps local segment count bounds and numeric literal schemaVersion", () => {
+    const prepared = prepareTemplateTranslation(source());
+    for (const value of [{ schemaVersion: 1, segments: [] },
+      { schemaVersion: 1, segments: Array.from({ length: 65 }, (_, i) => ({ key: `key${i}`, text: "Synthetic" })) },
+      { ...toProvider(prepared.requestText), schemaVersion: "1" }]) {
+      expect(() => prepared.restore(JSON.stringify(value)))
+        .toThrow(new TemplateTranslationValidationError("INVALID_TRANSLATED_SEGMENTS"));
+    }
+  });
+  it.each(["protectedTokens", "context", "unknown"])("rejects echoed input-only %s segment metadata instead of stripping it", (property) => {
+    const prepared = prepareTemplateTranslation(source());
+    const result = toProvider(prepared.requestText);
+    const echoed = { ...result, segments: result.segments.map((segment, index) => index === 1
+      ? { ...segment, [property]: property === "protectedTokens" ? [] : "synthetic metadata" } : segment) };
+    expect(() => prepared.restore(JSON.stringify(echoed)))
+      .toThrow(new TemplateTranslationValidationError("INVALID_TRANSLATED_SEGMENTS"));
+  });
   it("rejects incompatible source hashes, versions, duplicate keys and unprotected variables", () => {
     expect(() => parseTemplateTranslationSnapshot(input(), { definitionId: "template-v2", sourceHash: "b".repeat(64) }))
       .toThrow(TemplateTranslationValidationError);

@@ -1,9 +1,13 @@
 import OpenAI, { toFile } from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
+import { ResultSchema } from "../services/template-translation/segment-codec.js";
 import {
   MERCHANT_COMMUNICATIONS_SCHEMA_VERSION,
   MerchantTranslationDirectionSchema,
   type MerchantTranslationDirection,
 } from "@modainteract/moda-interact-shared/merchant-communications";
+
+const KEYED_SEGMENTS_RESPONSE_FORMAT = zodTextFormat(ResultSchema, "keyed_translation_segments_v1");
 
 const BATCH_ENDPOINT = "/v1/responses";
 const COMPLETION_WINDOW = "24h" as const;
@@ -330,6 +334,8 @@ function buildBatchRequestLine(request: TranslationRequest, model: string): stri
           content: `Translate from ${request.sourceLanguageTag} to ${request.targetLanguageTag}.\n\n${request.sourceText}`,
         },
       ],
+      ...(request.translationFormat === "keyed-segments-v1"
+        ? { text: { format: KEYED_SEGMENTS_RESPONSE_FORMAT } } : {}),
       tools: [],
       max_output_tokens: request.translationFormat === "keyed-segments-v1" ? 8_192 : 2_000,
     },
