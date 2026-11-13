@@ -82,8 +82,9 @@ async function failure(response: Response, operation: "sample_session" | "sample
   const tokenRedacted = messageWithTokenRedacted !== sourceMessage;
   const originalMessage = bounded(messageWithTokenRedacted);
   const details = safeDetails(source?.error_data ?? source?.error_user_msg ?? source?.error_user_title, token);
-  const transient = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
-  return new MetaManagementError(`META_${operation.toUpperCase()}_${transient ? "TRANSIENT" : "REJECTED"}`,
+  const appThrottle = response.status === 403 && source?.code === 4;
+  const transient = appThrottle || response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+  return new MetaManagementError(appThrottle ? "META_SAMPLE_APP_THROTTLED" : `META_${operation.toUpperCase()}_${transient ? "TRANSIENT" : "REJECTED"}`,
     transient ? "uncertain" : "blocked", undefined, {
       origin: "provider_response", provider: "meta_graph", operation,
       httpStatus: response.status,
@@ -93,7 +94,7 @@ async function failure(response: Response, operation: "sample_session" | "sample
       ...(details.details !== undefined ? { providerErrorDetails: details.details } : {}),
       ...(requestId(response) ?? (typeof source?.fbtrace_id === "string" ? source.fbtrace_id.slice(0, 128) : null)
         ? { providerRequestId: requestId(response) ?? source?.fbtrace_id?.slice(0, 128) } : {}),
-      reasonCode: `META_${operation.toUpperCase()}_${transient ? "TRANSIENT" : "REJECTED"}`,
+      reasonCode: appThrottle ? "META_SAMPLE_APP_THROTTLED" : `META_${operation.toUpperCase()}_${transient ? "TRANSIENT" : "REJECTED"}`,
       redactionApplied: tokenRedacted || originalMessage.redactionApplied || details.redactionApplied,
       truncated: originalMessage.truncated || details.truncated || raw.length > 4096,
       ...(raw && !source ? { providerErrorBody: originalMessage.value } : {}),
@@ -125,12 +126,12 @@ export class MetaImageHeaderSampleUploader {
     private readonly source: MetaTemplateSampleSource = createProductionMetaTemplateSampleSource(),
   ) {}
 
-  async upload(input: { appId: string; accessToken: string; graphBase: string; signal?: AbortSignal }): Promise<TrustedMetaImageSampleHandle> {
+  async upload(input: { appId: string; accessToken: string; graphBase: string; signal?: AbortSignal; beforeHttp?: () => Promise<void> }): Promise<TrustedMetaImageSampleHandle> {
     if (!/^\d{1,32}$/.test(input.appId) || !input.accessToken || input.accessToken.length > 4096) {
       throw new MetaManagementError("META_APP_CONFIGURATION_INVALID", "blocked");
     }
     let image;
-    try { image = await this.source.read(input.signal); }
+    try { image = await withSignal(this.source.read(input.signal), input.signal ?? AbortSignal.timeout(90_000)); }
     catch (error) { throw sourceFailure(error, "sample_fetch", input.accessToken); }
     validateMetaTemplateSample(image.bytes, image.declaredContentType);
 
@@ -138,6 +139,8 @@ export class MetaImageHeaderSampleUploader {
     const sessionUrl = new URL(`${base}/${input.appId}/uploads`);
     sessionUrl.search = new URLSearchParams({ file_length: String(image.bytes.length), file_type: "image/jpeg", file_name: SAMPLE_FILE_NAME }).toString();
     const sessionSignal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+    await input.beforeHttp?.();
+    sessionSignal.throwIfAborted();
     let session: Response;
     try {
       session = await withSignal(this.request(sessionUrl, { method: "POST", headers: { Authorization: `OAuth ${input.accessToken}` }, signal: sessionSignal }), sessionSignal);
@@ -156,6 +159,8 @@ export class MetaImageHeaderSampleUploader {
     }
 
     const uploadSignal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+    await input.beforeHttp?.();
+    uploadSignal.throwIfAborted();
     let uploaded: Response;
     try {
       uploaded = await withSignal(this.request(new URL(`${base}/${sessionId}`), {

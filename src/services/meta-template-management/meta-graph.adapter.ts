@@ -1,3 +1,4 @@
+import { MetaAppSampleOperation, resolveMetaAppScope } from "./app-operation.js";
 import { platformConsumerConfiguration } from "../platform-configuration/consumers.js";
 import { DEFAULT_WHATSAPP_API_BASE_URL } from "../whatsapp.service.js";
 import {
@@ -58,7 +59,8 @@ export interface MetaTemplateProvider {
  */
 export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
   constructor(private readonly request: typeof fetch = fetch,
-    private readonly sampleUploader = new MetaImageHeaderSampleUploader(request)) {}
+    private readonly sampleUploader = new MetaImageHeaderSampleUploader(request),
+    private readonly sampleOperation: Pick<MetaAppSampleOperation, "run"> = new MetaAppSampleOperation()) {}
 
   private async configuration(wabaId: string) {
     if (!/^\d{1,32}$/.test(wabaId)) throw new MetaManagementError("INVALID_WABA", "blocked");
@@ -77,7 +79,20 @@ export class MetaGraphTemplateAdapter implements MetaTemplateProvider {
     const appId = process.env.META_APP_ID?.trim() ?? "";
     if (!/^\d{1,32}$/.test(appId)) throw new MetaManagementError("META_APP_ID_MISSING_OR_INVALID", "blocked");
     try {
-      return await this.sampleUploader.upload({ appId, accessToken: config.accessToken, graphBase: config.base });
+      const scope = resolveMetaAppScope(appId);
+      return await this.sampleOperation.run(scope, (signal, beforeHttp) =>
+        this.sampleUploader.upload({ appId, accessToken: config.accessToken, graphBase: config.base, signal,
+          beforeHttp: async () => {
+            await beforeHttp();
+            const current = await this.configuration(wabaId);
+            const currentScope = resolveMetaAppScope(process.env.META_APP_ID?.trim() ?? "");
+            if (currentScope.appId !== scope.appId || currentScope.environment !== scope.environment ||
+                current.accessToken !== config.accessToken || current.base !== config.base) {
+              throw new MetaManagementError("META_APP_CONFIGURATION_CHANGED", "uncertain");
+            }
+            signal.throwIfAborted();
+          },
+        }));
     } catch (error) {
       if (error instanceof MetaManagementError) throw error;
       throw new MetaManagementError("META_SAMPLE_UPLOAD_UNEXPECTED", "uncertain", { cause: error });

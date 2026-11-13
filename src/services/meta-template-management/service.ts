@@ -19,10 +19,12 @@ export class MetaTemplateManagementService {
   ) {}
 
   async submitPreparedRegistration(registrationId: string): Promise<SubmissionOutcome> {
+    let preclaimWabaId: string | undefined;
     let claim: Awaited<ReturnType<MetaTemplateRepository["claim"]>> | null = null;
     try {
       const row = await this.repository.load(registrationId);
       if (!row) return { kind: "blocked", code: "REGISTRATION_NOT_FOUND" };
+      preclaimWabaId = row.wabaId;
       await this.provider.verifyWaba(row.wabaId);
       if (row.providerTemplateId && row.submissionState === "SUBMITTED") {
         return { kind: "already-submitted", providerId: row.providerTemplateId };
@@ -39,6 +41,8 @@ export class MetaTemplateManagementService {
         }
         return { kind: "busy", code: "NOT_READY_TO_SUBMIT" };
       }
+
+      if (row.nextRetryAt && row.nextRetryAt > new Date()) return { kind: "busy", code: "NOT_DUE_TO_SUBMIT" };
 
       // Validate the immutable Admin provider transport shape before any create. The Admin
       // digest relationship and confirmed reviewer are checked during SQL claim.
@@ -100,6 +104,13 @@ export class MetaTemplateManagementService {
       const details = safeMetaError(error);
       this.reporting.error("meta.template.create.error", { registrationId, ...details });
       if (!claim) {
+        if (error instanceof MetaManagementError && ["META_SAMPLE_APP_THROTTLED", "META_SAMPLE_OPERATION_DEFERRED", "META_SAMPLE_LEASE_LOST"].includes(error.code)) {
+          const retryAt = error.diagnostics?.retryAt;
+          if (typeof retryAt !== "string" || !Number.isFinite(Date.parse(retryAt))) throw error;
+          await this.repository.deferReadyRegistration(registrationId, new Date(retryAt), error);
+          if (!preclaimWabaId) throw error;
+          return { kind: "busy", code: error.code, retryAt, wabaId: preclaimWabaId };
+        }
         if (error instanceof MetaManagementError && error.disposition === "blocked") {
           if (["INVALID_COMPILED_COMPONENTS", "IMAGE_SAMPLE_HANDLE_REQUIRED", "UNTRUSTED_IMAGE_SAMPLE_HANDLE",
             "INVALID_CATEGORY", "FROZEN_SNAPSHOT_NOT_CONFIRMED", "META_APP_ID_MISSING_OR_INVALID",
@@ -227,7 +238,14 @@ export class MetaTemplateManagementService {
         if (item.submissionState === "READY_TO_SUBMIT") {
           const pendingStatus = await this.repository.hasPendingObservation(item.id);
           if (pendingStatus) await this.reconcileRegistration(item.id);
-          else await this.submitPreparedRegistration(item.id);
+          else {
+            const outcome = await this.submitPreparedRegistration(item.id);
+            if (outcome.kind === "busy" && ["META_SAMPLE_APP_THROTTLED", "META_SAMPLE_OPERATION_DEFERRED", "META_SAMPLE_LEASE_LOST"].includes(outcome.code)) {
+              if (!outcome.retryAt || !outcome.wabaId) throw new MetaManagementError("META_SAMPLE_DEFERRAL_NOT_PERSISTED", "uncertain");
+              await this.repository.deferReadyCohort(due.map((entry) => entry.id), outcome.wabaId, new Date(outcome.retryAt));
+              break;
+            }
+          }
         } else {
           await this.reconcileRegistration(item.id);
         }

@@ -24,7 +24,8 @@ export type PreparedRegistration = TemplateIdentity & Readonly<{
 }>;
 export type SubmissionOutcome =
   | { kind: "submitted" | "already-submitted"; providerId: string }
-  | { kind: "busy" | "unknown" | "blocked" | "failed"; code: string };
+  | { kind: "busy"; code: string; retryAt?: string; wabaId?: string }
+  | { kind: "unknown" | "blocked" | "failed"; code: string };
 export type ReconcileOutcome = { kind: "current" | "unconfirmed" | "drift" | "stale"; status?: ProviderStatus };
 
 /** A verified Messaging observation, not the unagreed queue payload. Only the owning

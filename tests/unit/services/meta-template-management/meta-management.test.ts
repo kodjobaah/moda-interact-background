@@ -28,6 +28,7 @@ function fixture() {
   const repository = {
     load: vi.fn(async () => record), claim: vi.fn(async () => claim),
     finishSubmission: vi.fn(async () => true), recordPostIntent: vi.fn(async () => {}),
+    deferReadyRegistration: vi.fn(async () => true), deferReadyCohort: vi.fn(async () => undefined), hasPendingObservation: vi.fn(async () => false),
     blockReadyRegistration: vi.fn(async () => true), listDue: vi.fn(async () => []),
     recordObservation: vi.fn(async () => ({ duplicate: false, registrationId: "reg-1" })),
     recordReconciliation: vi.fn(async () => true),
@@ -94,6 +95,25 @@ describe("BG003 Meta template management", () => {
     expect(text.provider.uploadImageHeaderSample).not.toHaveBeenCalled();
   });
 
+  it("defers sample app throttles before intent and stops the remaining due cohort", async () => {
+    const f = fixture(); const retryAt = new Date(Date.now()+900000).toISOString();
+    f.repository.load.mockResolvedValue({ ...record, componentsSnapshot: [{ type: "HEADER", format: "IMAGE" }] } as never);
+    f.repository.listDue.mockResolvedValue([{ id: "reg-1", submissionState: "READY_TO_SUBMIT" }, { id: "reg-2", submissionState: "READY_TO_SUBMIT" }] as never);
+    const failure = new MetaManagementError("META_SAMPLE_APP_THROTTLED", "uncertain", undefined, { retryAt, appId: "123", environment: "TEST", providerErrorCode: 4, httpStatus: 403 });
+    f.provider.uploadImageHeaderSample.mockRejectedValueOnce(failure);
+    expect(await f.service.processDueRegistrations(25)).toEqual({ inspected: 2, processed: 0 });
+    expect(f.repository.deferReadyRegistration).toHaveBeenCalledWith("reg-1", new Date(retryAt), failure);
+    expect(f.repository.deferReadyCohort).toHaveBeenCalledWith(["reg-1", "reg-2"], record.wabaId, new Date(retryAt));
+    expect(f.provider.uploadImageHeaderSample).toHaveBeenCalledOnce();
+    expect(f.repository.claim).not.toHaveBeenCalled(); expect(f.repository.recordPostIntent).not.toHaveBeenCalled();
+    expect(f.provider.create).not.toHaveBeenCalled(); expect(f.repository.blockReadyRegistration).not.toHaveBeenCalled();
+  });
+  it("checks a future registration due date before sample upload", async () => {
+    const f = fixture();
+    f.repository.load.mockResolvedValue({ ...record, nextRetryAt: new Date(Date.now()+900000), componentsSnapshot: [{ type: "HEADER", format: "IMAGE" }] } as never);
+    expect(await f.service.submitPreparedRegistration(record.id)).toEqual({ kind: "busy", code: "NOT_DUE_TO_SUBMIT" });
+    expect(f.provider.uploadImageHeaderSample).not.toHaveBeenCalled(); expect(f.repository.claim).not.toHaveBeenCalled();
+  });
   it("blocks without provider I/O if the frozen registration changes between read and claim", async () => {
     const f = fixture();
     f.repository.claim.mockResolvedValueOnce({ ...claim, components: [{ type: "BODY", text: "changed" }] } as never);
@@ -344,7 +364,7 @@ describe("BG003 server-side Meta Graph API adapter", () => {
       const { MetaImageHeaderSampleUploader } = await import("../../../../src/services/meta-template-management/image-header-sample.js");
       const uploadClient = new MetaGraphTemplateAdapter(request as typeof fetch, new MetaImageHeaderSampleUploader(
         uploaderRequest as typeof fetch, { read: vi.fn(async () => ({ bytes, declaredContentType: "image/jpeg" })) },
-      ));
+      ), { run: async (_scope, work) => work(AbortSignal.timeout(90000), async () => undefined) });
       const handle = await uploadClient.uploadImageHeaderSample("123456");
       expect(uploaderRequest.mock.calls[0]?.[0]).toMatchObject({
         pathname: "/v25.0/777888999/uploads",

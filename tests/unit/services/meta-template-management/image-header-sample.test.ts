@@ -61,6 +61,32 @@ describe("trusted Meta template image sample upload", () => {
     await expect(badHandle.upload(input)).rejects.toMatchObject({ code: "META_UPLOAD_HANDLE_INVALID" });
   });
 
+  it.each(["sample_session", "sample_upload"])("classifies only numeric code4 on HTTP403 at %s as app throttle", async (operation) => {
+    const request = vi.fn();
+    if (operation === "sample_upload") request.mockResolvedValueOnce(new Response(JSON.stringify({ id: "upload:abcdefgh" })));
+    request.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 4, message: "synthetic throttle" } }), { status: 403 }));
+    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher());
+    await expect(uploader.upload(input)).rejects.toMatchObject({ code: "META_SAMPLE_APP_THROTTLED", disposition: "uncertain",
+      diagnostics: { httpStatus: 403, providerErrorCode: 4, operation } });
+  });
+  it.each([190, 10, "4"])("keeps other/string403 code %s blocked without message inference", async (code) => {
+    const request = vi.fn(async () => new Response(JSON.stringify({ error: { code, message: "Application request limit reached" } }), { status: 403 }));
+    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload(input)).rejects.toMatchObject({ code: "META_SAMPLE_SESSION_REJECTED", disposition: "blocked" });
+  });
+  it("checks the fence before each sample HTTP and stops after fence loss", async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({ id: "upload:abcdefgh" })));
+    const check = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("synthetic stale fence"));
+    await expect(new MetaImageHeaderSampleUploader(request as typeof fetch, fetcher()).upload({ ...input, beforeHttp: check })).rejects.toThrow("synthetic stale fence");
+    expect(check).toHaveBeenCalledTimes(2); expect(request).toHaveBeenCalledOnce();
+  });
+  it("aborts an uncooperative source read before any provider HTTP", async () => {
+    const controller = new AbortController(); const request = vi.fn();
+    const uploader = new MetaImageHeaderSampleUploader(request as typeof fetch, { read: () => new Promise(() => {}) });
+    const operation = uploader.upload({ ...input, signal: controller.signal });
+    controller.abort();
+    await expect(operation).rejects.toMatchObject({ disposition: "uncertain" });
+    expect(request).not.toHaveBeenCalled();
+  });
   it("retains safe original Meta error code/message while redacting echoed credentials", async () => {
     const request = vi.fn(async () => new Response(JSON.stringify({ error: {
       message: "Invalid access token test-token; please reconnect", code: 190, error_subcode: 463,
