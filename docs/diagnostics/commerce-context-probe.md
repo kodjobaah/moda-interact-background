@@ -40,3 +40,11 @@ Only if separately authorized, additionally set `liveReadTools: true` and inject
 Limits are fixed to the reviewed incident's actual configuration: 12 model steps, 6 remote calls, 60 seconds, 2048 output tokens. There is no additional repair, retry loop, result selection, final-response rewrite, persistence or delivery. Do not repeat calls merely to obtain a preferred answer.
 
 Unexpected invocation errors must be reported with a fixed generic error code only; inspect detailed errors privately. The returned safe result is conformance/diagnostic evidence, not a production delivery or incident-resolution receipt.
+
+## Single-request previous-output counterfactual
+
+`withUntrustedPreviousModelAttempt(request, previousStep)` is a pure diagnostic helper; no production host path calls it. It acts only on an existing forced `finalResponse` request. It adds exact prior model calls/name/arguments and optional visible text as `context.untrustedPreviousModelAttempt`, explicitly labelled untrusted data rather than instructions or evidence. Provider/transport/reasoning metadata is excluded. Existing context fields, instructions, tool schemas/order, customer objective, arguments and model budget are unchanged.
+
+The complete frame must fit 8192 UTF-8 bytes and the resulting context plus history/current messages must fit the existing 131072-byte input ceiling. Collisions, non-object/unsupported/cyclic input or insufficient space return the original request unchanged; nothing is truncated. A normal prior discovery call must be described as discovery, not an invalid final answer. The existing runner's budget-forced finalization and missing-selection repair are different paths even though both set `requiredToolName`.
+
+Root may evaluate a specifically authorized captured request/prior-output pair with one actual configured SDK call and no MCP calls. Record exact input/output hashes, full pinned-schema validation and accepted observed selections separately. Nonempty details or schema validity alone do not establish accepted product identities or delivery success. A negative counterfactual does not authorize production wiring or repeated calls chasing a preferred result.
