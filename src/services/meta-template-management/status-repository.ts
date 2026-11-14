@@ -1,3 +1,4 @@
+import { adminReconciliationMatches } from './admin-reconciliation.js';
 import prisma from "../../lib/db.js";
 import { MetaManagementError, observedContentHash, validatedComponents, type AuthenticatedTemplateObservation,
   type ProviderStatus, type MetaTextEquivalenceEvidence } from "./contracts.js";
@@ -10,6 +11,28 @@ export class MetaTemplateStatusRepository {
     protected readonly db: MetaRegistrationDatabase = prisma,
     protected readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /** Only snapshot-selected commands can authorize a read. Invalid commands
+   * terminate as REJECTED, never as a successful reconciliation. */
+  async prepareAdminReconciliation(registration: RegistrationWithLocale, ids: readonly string[]): Promise<string[]> {
+    if (!ids.length || ids.length > 50 || new Set(ids).size !== ids.length) return [];
+    return this.db.$transaction(async tx => {
+      const current = await tx.whatsAppTemplateMetaRegistration.findUnique({ where: { id: registration.id },
+        include: { locale: { include: { definition: true } } } });
+      if (!current || current.updatedAt.getTime() !== registration.updatedAt.getTime()) return [];
+      const requests = await tx.whatsAppTemplateMetaEvent.findMany({ where: { id: { in: [...ids] },
+        registrationId: registration.id, source: "ADMIN", eventType: "RECONCILE_REQUESTED", processedAt: null } });
+      const valid: string[] = [];
+      for (const request of requests) {
+        if (adminReconciliationMatches(current, request)) valid.push(request.id);
+        else await tx.whatsAppTemplateMetaEvent.updateMany({ where: { id: request.id, processedAt: null,
+          registrationId: registration.id, source: "ADMIN", eventType: "RECONCILE_REQUESTED" },
+          data: { processedAt: this.clock(), outcome: "REJECTED", failureCode: "ADMIN_RECONCILE_IDENTITY_STALE" } });
+      }
+      if (["PROVIDER_RECONCILIATION_FAILED", "PROVIDER_NOT_FOUND"].includes(current.failureCode ?? "") && current.nextRetryAt && current.nextRetryAt > this.clock()) return [];
+      return valid;
+    });
+  }
 
   /** An authenticated observation fences the existing registration BEFORE Meta GET.
    * The receipt and status UNKNOWN change are atomic. A later network failure
@@ -99,6 +122,7 @@ export class MetaTemplateStatusRepository {
     outcome: { kind: "absent" } | { kind: "found"; providerId: string;
       status: ProviderStatus; category: string; observedHash: string; drift: boolean;
       equivalenceEvidence?: MetaTextEquivalenceEvidence },
+    adminReceiptIds?: readonly string[],
   ): Promise<boolean | "drift"> {
     if (outcome.kind === "found" && outcome.equivalenceEvidence) {
       const proof = outcome.equivalenceEvidence;
@@ -115,6 +139,12 @@ export class MetaTemplateStatusRepository {
         where: { id: registration.id }, select: { updatedAt: true },
       });
       if (!current || current.updatedAt.getTime() !== registration.updatedAt.getTime()) return false;
+      if (adminReceiptIds) {
+        if (!adminReceiptIds.length || adminReceiptIds.length > 50) return false;
+        const covered = await tx.whatsAppTemplateMetaEvent.findMany({ where: { id: { in: [...adminReceiptIds] },
+          registrationId: registration.id, source: "ADMIN", eventType: "RECONCILE_REQUESTED", processedAt: null } });
+        if (covered.length !== adminReceiptIds.length || covered.some(receipt => !adminReconciliationMatches(registration, receipt))) return false;
+      }
       // A preflight failure can leave CREATE_INTENT without any provider POST.
       // Never adopt a same-name external template without POST_INTENT evidence.
       const postIntentCount = await tx.whatsAppTemplateMetaEvent.count({
@@ -178,6 +208,15 @@ export class MetaTemplateStatusRepository {
           ...(outcome.kind === "absent" ? { failureCode: "PROVIDER_NOT_FOUND" } : {}),
         },
       });
+      if (adminReceiptIds) {
+       const handled = await tx.whatsAppTemplateMetaEvent.updateMany({
+        where: { id: { in: [...adminReceiptIds] }, registrationId: registration.id, source: "ADMIN",
+          eventType: "RECONCILE_REQUESTED", processedAt: null },
+        data: { processedAt: now, outcome: drift ? "RECONCILED_DRIFT" : outcome.kind === "absent" ? "RECONCILED_ABSENT" : "RECONCILED",
+          failureCode: drift ? "PROVIDER_DRIFT" : outcome.kind === "absent" ? "PROVIDER_NOT_FOUND" : null },
+      });
+       if (handled.count !== adminReceiptIds.length) throw new MetaManagementError("ADMIN_RECONCILE_RECEIPT_RACE", "uncertain");
+      }
       return unlinkedProvider ? "drift" : true;
     });
   }

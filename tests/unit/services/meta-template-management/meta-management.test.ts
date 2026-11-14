@@ -32,6 +32,7 @@ function fixture() {
     blockReadyRegistration: vi.fn(async () => true), listDue: vi.fn(async () => []),
     recordObservation: vi.fn(async () => ({ duplicate: false, registrationId: "reg-1" })),
     recordReconciliation: vi.fn(async () => true),
+    prepareAdminReconciliation: vi.fn(async () => ["request-1"]),
   };
   const provider = {
     verifyWaba: vi.fn(async () => {}),
@@ -47,6 +48,20 @@ function fixture() {
 describe("BG003 Meta template management", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("normal timer routes Admin requests only through reconciliation, never submission",async()=>{
+    const f=fixture();f.repository.load.mockResolvedValue({...record,submissionState:'SUBMITTED',providerTemplateId:'987654321'} as never);
+    f.repository.listDue.mockResolvedValue([{id:'reg-1',submissionState:'SUBMITTED',adminReceiptIds:['request-1']}] as never);
+    expect(await f.service.processDueRegistrations(1)).toEqual({inspected:1,processed:1});
+    expect(f.repository.prepareAdminReconciliation).toHaveBeenCalledWith(expect.objectContaining({id:'reg-1'}),['request-1']);
+    expect(f.repository.recordReconciliation).toHaveBeenCalledWith(expect.anything(),{kind:'absent'},['request-1']);
+    expect(f.provider.find).toHaveBeenCalledOnce();expect(f.provider.create).not.toHaveBeenCalled();expect(f.repository.claim).not.toHaveBeenCalled();
+  });
+  it("does not call Graph or CREATE for rejected/stale Admin request snapshots",async()=>{
+    const f=fixture();f.repository.prepareAdminReconciliation.mockResolvedValue([]);
+    f.repository.listDue.mockResolvedValue([{id:'reg-1',submissionState:'READY_TO_SUBMIT',adminReceiptIds:['request-1']}] as never);
+    expect(await f.service.processDueRegistrations(1)).toEqual({inspected:1,processed:0});
+    expect(f.provider.verifyWaba).not.toHaveBeenCalled();expect(f.provider.find).not.toHaveBeenCalled();expect(f.provider.create).not.toHaveBeenCalled();
+  });
   it("submits the frozen Admin-compiled components unchanged using create only", async () => {
     const { service, provider, repository } = fixture();
     await expect(service.submitPreparedRegistration("reg-1"))
