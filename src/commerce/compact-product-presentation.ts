@@ -1,3 +1,4 @@
+import { briefProductDetailCandidates } from './brief-product-list.js';
 import { type ModaSupportedLanguageTag, resolveModaConfigurationLocale } from '@modainteract/moda-interact-shared/internationalization';
 import type { CommercePresentationInput } from '../services/conversation-wrappers/contracts.js';
 import type { CommonLayoutReceipt } from '../services/recovery-multipart/common-layout.js';
@@ -18,7 +19,7 @@ const pairKey = (pair: { productId: string; variantId: string | null }) => JSON.
 export function fitVerifiedProductCaption(input: CommercePresentationInput, render: (body: string) => Boundaries | null): {
  boundaries: Boundaries; pairs: { productId: string; variantId: string | null }[]; presentation: CommercePresentationInput;
 } | null {
- const candidates = presentationCandidates(input, { completePrefixes: true });
+ const candidates = briefProductDetailCandidates(input) ?? presentationCandidates(input, { completePrefixes: true });
  for (const candidate of candidates) {
   if (!candidate.pairs.length) continue;
   const middle = candidate.body + `\n\n${PRODUCT_SHOW_MORE[resolveModaConfigurationLocale(input.verified.locale)]}`;
