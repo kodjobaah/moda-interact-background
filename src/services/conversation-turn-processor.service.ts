@@ -115,7 +115,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     ) => Promise<OutboundAdmissionResult>;
     sendPreparedConversation?: (
       input: Admitted & {
-        compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
+        compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
@@ -351,7 +351,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);

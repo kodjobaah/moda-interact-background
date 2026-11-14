@@ -31,7 +31,7 @@ export type WrappedResult = Readonly<{
   replayed: boolean;
   compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt;
   commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt;
-  multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan;
+  multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
   /** Trusted runtime augmentation, bound into application provenance. */
   recoveryCheckoutUrl?: string;
   recoveryShopHeader?: RecoveryShopHeaderReceipt;

@@ -6,7 +6,7 @@ import { digest, stableJson } from "./projection.js";
 export function wrapperApplicationKey(input: {conversationId: string; messageIdentity: string; source: WrapperSource;
  wrapperDefinitionId: string; localeId: string; contentHash: string; editVersion: number; responseDigest: string;
  compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt;
- commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan;
+ commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
  body: string; recoveryCheckoutUrl?: string | undefined; recoveryShopHeader?: RecoveryShopHeaderReceipt | undefined; deliveryPlan?: ConversationMediaDeliveryPlan | undefined}): string {
  return digest(stableJson({conversationId: input.conversationId, messageIdentity: input.messageIdentity,
   source: input.source, wrapperDefinitionId: input.wrapperDefinitionId, localeId: input.localeId,

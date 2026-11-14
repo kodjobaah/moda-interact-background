@@ -25,7 +25,7 @@ export type AiOutboundComposition =
       text: string;
       compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt;
       commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt;
-      multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan;
+      multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
       recoveryShopHeader?: RecoveryShopHeaderReceipt;
       brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];

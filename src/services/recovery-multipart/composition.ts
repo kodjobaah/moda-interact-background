@@ -1,5 +1,6 @@
+import { readTemplateCompositeProfile } from './composite-profile.js';
 import { prepareCompositeReply, compositeReplyEnabled, type CompositeReceipt, type CompositeDependencies } from './composite.js';
-import { buildRecoveryMultipartDeliveryPlan, readCommonRecoveryLayoutReference, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlan, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
+import { buildRecoveryMultipartDeliveryPlan, readCommonRecoveryLayoutReference, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlanV2, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { commerceStoreHostname } from '@modainteract/moda-interact-shared/commerce';
 import { digest,readPreparedWrapper,stableJson } from '../conversation-wrappers/projection.js';
 import { languageChoices,validDefinition } from '../conversation-wrappers/selection.js';
@@ -8,7 +9,7 @@ import { prepareConversationDelivery } from '../conversation-product-media.js';
 import { resolveConversationLogo,readBrandMediaPolicyRef,type ConversationLogoResolver,type BrandMediaPolicyRef } from '../conversation-brand-media.js';
 import { commonLayoutVariables,renderCommonLayoutBoundaries,commonLayoutBody,humanCommonLayoutApplicationKey,type CommonLayoutReceipt } from './common-layout.js';
 import { wrapperApplicationKey } from '../conversation-wrappers/application-key.js';
-export type CommonReplyPreparation=Readonly<{commonLayout:CommonLayoutReceipt;multipartPlan:RecoveryCompositeMultipartDeliveryPlan;brandMediaPolicy?:BrandMediaPolicyRef}>;
+export type CommonReplyPreparation=Readonly<{commonLayout:CommonLayoutReceipt;multipartPlan:RecoveryCompositeMultipartDeliveryPlanV2;brandMediaPolicy?:BrandMediaPolicyRef}>;
 /** A common-shaped active SHARED revision is the only opt-in. Existing generic
  * audience wrappers remain exact legacy content until coordinated activation. */
 export function selectedCommonLayout(slots:readonly WrapperSlot[],context:VerifiedWrapperContext,preferred?:string|null){
@@ -37,8 +38,9 @@ export async function composeCommonReply(input:RenderConversationResponseInput,c
  const boundaries=renderCommonLayoutBoundaries(selected.reference,variables,middle,context.shopId,input.conversationId);if(!boundaries)return null;
  const commonLayout:CommonLayoutReceipt={schemaVersion:2,kind:'RECOVERY_COMMON_LAYOUT',shopId:context.shopId,commonRef:selected.reference,variables,boundaries};
  const body=commonLayoutBody(commonLayout);if(Array.from(body).length>4096)return null;
- let multipartPlan:RecoveryCompositeMultipartDeliveryPlan,brandMediaPolicy:BrandMediaPolicyRef|undefined,compositeReceipt:CompositeReceipt|undefined;
+ let multipartPlan:RecoveryCompositeMultipartDeliveryPlanV2,brandMediaPolicy:BrandMediaPolicyRef|undefined,compositeReceipt:CompositeReceipt|undefined;
  if(compositeReplyEnabled()){
+  if(!readTemplateCompositeProfile(commonLayout))return null;
   const prepared=await prepareCompositeReply({common:commonLayout,presentedPairs,...(input.commercePresentation?{presentation:input.commercePresentation}:{}),deadlineAt:input.mediaDeadlineAt??input.commercePresentation?.deadlineAt??0,...(input.mediaSignal??input.commercePresentation?.signal?{signal:input.mediaSignal??input.commercePresentation?.signal}:{})},{...deps.compositeDependencies,...(deps.logoResolver?{logoResolver:deps.logoResolver}:{})});
   if(prepared){multipartPlan=prepared.plan;brandMediaPolicy=prepared.policy;compositeReceipt=prepared.receipt;}
   else multipartPlan=buildRecoveryMultipartDeliveryPlan({parts:[{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body}}],checkoutUrl:checkout});

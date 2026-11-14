@@ -185,7 +185,7 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
     productContextUpdate?: CommerceConversationProductContext;
-    compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlan;
+    compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
     brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
