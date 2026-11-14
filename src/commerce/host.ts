@@ -1,3 +1,4 @@
+import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
 import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
 import { createProductContextRepository } from "./product-context-repository.js";
 import { prepareProductFactsPresentation, PresentationVerificationError } from "./presentation.js";
@@ -474,6 +475,7 @@ async function execute(
               logger, modelBridgeIdentifiers, "production_model_invoke",
               () => deps.model.invoke(request, modelSignal),
             );
+            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse", manifest.responseContractHash);
             return observeCommerceModelBridgePhase(
               logger, modelBridgeIdentifiers, "response_postprocess", async () => {
                 if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
@@ -749,17 +751,7 @@ async function execute(
       const details = envelope.details && typeof envelope.details === "object" && !Array.isArray(envelope.details)
         ? envelope.details as Record<string, unknown> : {};
       const selection = readRecommendationSelection(details);
-      // Log only bounded structural states; never model prose or arbitrary detail keys.
-      const selectionArrayShape = (value: unknown) => value === undefined ? "ABSENT" : Array.isArray(value) ? "ARRAY" : "INVALID";
-      const selectionArrayCount = (value: unknown) => Array.isArray(value) ? Math.min(value.length, 4) : 0;
-      compositionDiagnostic({ stage: 'SELECTION_SHAPE',
-        recommendationVersion: details.productRecommendationVersion === undefined ? 'ABSENT' : details.productRecommendationVersion === '1' ? 'V1' : 'INVALID',
-        recommendationArray: selectionArrayShape(details.productRecommendations), recommendationCount: selectionArrayCount(details.productRecommendations),
-        detailArray: selectionArrayShape(details.productDetailSelections), detailCount: selectionArrayCount(details.productDetailSelections),
-        optionArray: selectionArrayShape(details.productOptionSelections), optionCount: selectionArrayCount(details.productOptionSelections),
-        disposition: details.responseDisposition === undefined ? 'ABSENT' :
-          typeof details.responseDisposition === 'string' && ['STANDARD', 'OUT_OF_SCOPE_REDIRECT', 'SHIPPING_INFORMATION_UNVERIFIED', 'PRODUCT_DETAILS', 'PRODUCT_OPTIONS'].includes(details.responseDisposition) ? details.responseDisposition : 'INVALID',
-        rawShippingSelectionPresent: Object.hasOwn(details, 'shippingInformationSelection'),
+      compositionDiagnostic({ stage: 'SELECTION_SHAPE', ...projectFinalSelectionShape(envelope),
         parsedShippingSelectionPresent: Boolean(selection?.shippingInformationSelection),
         parsedRecommendationCount: Math.min(selection?.productRecommendations?.length ?? 0, 4) });
       compositionDiagnostic({ stage: 'RECOMMENDATION_SELECTION', answerKind: envelope.answerKind, selectionValid: selection !== null, disposition: selection?.responseDisposition ?? 'STANDARD', proposals: selection?.productRecommendations?.map(p => ({ productId: p.productId, variantId: p.variantId, promotionKind: p.promotionKind, scope: p.scope })) ?? [], reason: selection?.productRecommendations?.length ? null : 'MODEL_SELECTED_NO_RECOMMENDATIONS', factsPresentation: factsPresentation !== null });
