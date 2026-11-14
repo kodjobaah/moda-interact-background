@@ -1,3 +1,4 @@
+import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
 import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
 import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
 import { createProductContextRepository } from "./product-context-repository.js";
@@ -431,6 +432,9 @@ async function execute(
       conversationId: current.id,
       inboundVersion: current.inboundVersion,
     };
+    const finalizationInstructions = structuredFinalizationInstructions(verifyResponseContract(
+      manifest.responseContract, manifest.responseContractHash, digest,
+    ));
     const result = await runCommerceTurn({
       turn,
       productContext,
@@ -438,7 +442,7 @@ async function execute(
       grant,
       manifest,
       signal,
-      hostInstructions: [...RECOVERY_INSTRUCTIONS, PRODUCT_DISCOVERY_INSTRUCTION, recommendationContext.platformText,
+      hostInstructions: [...RECOVERY_INSTRUCTIONS, ...finalizationInstructions, PRODUCT_DISCOVERY_INSTRUCTION, recommendationContext.platformText,
         ...(recommendationContext.shopText ? [recommendationContext.shopText] : []), shopVoiceInstruction(recovery.shop.brand?.brandName)],
       context: {
         recovery: {
