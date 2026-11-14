@@ -1,3 +1,4 @@
+import { fitVerifiedProductCaption } from '../../commerce/compact-product-presentation.js';
 import { readTemplateCompositeProfile } from './composite-profile.js';
 import { prepareCompositeReply, compositeReplyEnabled, type CompositeReceipt, type CompositeDependencies } from './composite.js';
 import { buildRecoveryMultipartDeliveryPlan, readCommonRecoveryLayoutReference, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlanV2, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
@@ -35,13 +36,18 @@ export async function composeCommonReply(input:RenderConversationResponseInput,c
   const facts=p.verified.disposition==='PRODUCT_DETAILS'?p.verified.productFacts:p.verified.disposition==='PRODUCT_OPTIONS'?p.verified.optionFacts:null;
   presentedPairs=p.envelope.answerKind==='ANSWER'?(facts?facts.map(({productId,variantId})=>({productId,variantId})):[...(p.productPairs??[])]):[];
  }
- const boundaries=renderCommonLayoutBoundaries(selected.reference,variables,middle,context.shopId,input.conversationId);if(!boundaries)return null;
+ let boundaries=renderCommonLayoutBoundaries(selected.reference,variables,middle,context.shopId,input.conversationId);if(!boundaries)return null;
+ let mediaPresentation=input.commercePresentation;
+ if(compositeReplyEnabled()&&input.source==='AI'&&input.commercePresentation?.envelope.answerKind==='ANSWER'&&Array.from(boundaries.body+boundaries.footer).length>1024){
+  const fitted=fitVerifiedProductCaption(input.commercePresentation,candidate=>renderCommonLayoutBoundaries(selected.reference,variables,candidate,context.shopId,input.conversationId));
+  if(fitted){boundaries=fitted.boundaries;presentedPairs=fitted.pairs;mediaPresentation=fitted.presentation;}
+ }
  const commonLayout:CommonLayoutReceipt={schemaVersion:2,kind:'RECOVERY_COMMON_LAYOUT',shopId:context.shopId,commonRef:selected.reference,variables,boundaries};
  const body=commonLayoutBody(commonLayout);if(Array.from(body).length>4096)return null;
  let multipartPlan:RecoveryCompositeMultipartDeliveryPlanV2,brandMediaPolicy:BrandMediaPolicyRef|undefined,compositeReceipt:CompositeReceipt|undefined;
  if(compositeReplyEnabled()){
   if(!readTemplateCompositeProfile(commonLayout))return null;
-  const prepared=await prepareCompositeReply({common:commonLayout,presentedPairs,...(input.commercePresentation?{presentation:input.commercePresentation}:{}),deadlineAt:input.mediaDeadlineAt??input.commercePresentation?.deadlineAt??0,...(input.mediaSignal??input.commercePresentation?.signal?{signal:input.mediaSignal??input.commercePresentation?.signal}:{})},{...deps.compositeDependencies,...(deps.logoResolver?{logoResolver:deps.logoResolver}:{})});
+  const prepared=await prepareCompositeReply({common:commonLayout,presentedPairs,...(mediaPresentation?{presentation:mediaPresentation}:{}),deadlineAt:input.mediaDeadlineAt??input.commercePresentation?.deadlineAt??0,...(input.mediaSignal??input.commercePresentation?.signal?{signal:input.mediaSignal??input.commercePresentation?.signal}:{})},{...deps.compositeDependencies,...(deps.logoResolver?{logoResolver:deps.logoResolver}:{})});
   if(prepared){multipartPlan=prepared.plan;brandMediaPolicy=prepared.policy;compositeReceipt=prepared.receipt;}
   else multipartPlan=buildRecoveryMultipartDeliveryPlan({parts:[{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body}}],checkoutUrl:checkout});
  }else {

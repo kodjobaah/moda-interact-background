@@ -8,7 +8,7 @@ import type { CommercePresentationInput } from '../services/conversation-wrapper
 import type { PresentedPair } from './product-context-write.js';
 
 /** Candidate metadata comes from verified render inputs, never customer/model text. */
-export function presentationCandidates(input: CommercePresentationInput): { body: string; pairs: readonly PresentedPair[] }[] {
+export function presentationCandidates(input: CommercePresentationInput, options: { completePrefixes?: boolean } = {}): { body: string; pairs: readonly PresentedPair[] }[] {
   const p = CommerceVerifiedPresentationSchema.parse(input.verified);
   if (input.envelope.answerKind !== 'ANSWER') return [];
   const facts = p.disposition === 'PRODUCT_DETAILS' ? p.productFacts
@@ -35,6 +35,8 @@ export function presentationCandidates(input: CommercePresentationInput): { body
       requiresShipping: p.requiresShipping, policyUrl: p.policyUrl,
     });
   };
-  return [pairs.length, ...(pairs.length > 1 ? [1] : []), 0]
+  const counts = options.completePrefixes ? Array.from({ length: pairs.length }, (_, index) => pairs.length - index)
+    : [pairs.length, ...(pairs.length > 1 ? [1] : []), 0];
+  return counts
     .map(count => ({ body: render(count), pairs: pairs.slice(0, count) }));
 }
