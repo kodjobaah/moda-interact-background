@@ -28,12 +28,14 @@ function setup(hasEligibleEvidence?: (ids: readonly string[]) => boolean) {
   const responseContractHash = digest(responseContractCanonicalJson(contract));
   const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash, digest, platform: "SHOPIFY", locale: "en", ...(hasEligibleEvidence ? { hasEligibleEvidence } : {}) })!;
   const common = { replyText: exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] };
-  const project = (name: string, args: Record<string, unknown>, requiredReferral: unknown = null, currentObservations: unknown[] = observations) => {
+  const project = (name: string, args: Record<string, unknown>, requiredReferral: unknown = null, currentObservations: unknown[] = observations, batch?: Array<{ name: string; arguments: Record<string, unknown> }>) => {
     const call = { id: "actual-provider-id", name, arguments: args };
-    const transportStep = { calls: [call], outputTokens: 1 };
-    const input = { binding: { turn: exampleTurn, modelStep: 3, callId: call.id, toolName: name, rawCallSha256: digest(canonicalJson(call)),
-      callIds: [call.id], rawStepSha256: digest(canonicalJson(transportStep)), rawCallsSha256: digest(canonicalJson(transportStep.calls)), responseContractHash },
-      call, calls: [call], transportStep,
+    const calls = batch ? batch.map((member, index) => ({ ...member, id: `actual-provider-${index}` })) : [call];
+    const first = calls[0]!;
+    const transportStep = { calls, text: "Untrusted companion text", outputTokens: 1 };
+    const input = { binding: { turn: exampleTurn, modelStep: 3, callId: first.id, toolName: first.name, rawCallSha256: digest(canonicalJson(first)),
+      callIds: calls.map(member => member.id), rawStepSha256: digest(canonicalJson(transportStep)), rawCallsSha256: digest(canonicalJson(transportStep.calls)), responseContractHash },
+      call: first, calls, transportStep,
       observations: currentObservations, requiredReferral } as unknown as TerminalDecisionInput;
     const before = structuredClone(input); const output = port.project(input);
     expect(input).toEqual(before); expect(output.binding).toBe(input.binding);
@@ -65,6 +67,30 @@ describe("application flat terminal finalization", () => {
   });
   it.each([[], [pair, pair], [{ productId: 3, variantId: null }], [pair, pair, pair, pair]].map(selections => [selections]))("refuses invalid selected identity arrays", selections => {
     const { project, common } = setup(); expect(project("recovery_complete_details_with_context", { ...common, productDetailSelections: selections }).kind).toBe("invalid");
+  });
+  it("unions every explicit same-mode identity in first-occurrence order without changing the raw batch", () => {
+    const { project, port } = setup(); expect(port.batchMode).toBe("atomic");
+    const pairs = [pair, { productId: "second", variantId: "v2" }, { productId: "third", variantId: null }];
+    const current = [toolResult("commerce_search_products", { products: pairs.map((identity, index) => ({ ...observedProduct, ...identity, title: `Title ${index}` })), cursor: null, truncated: false })];
+    for (const [name, field] of [["recovery_complete_details", "productDetailSelections"], ["recovery_complete_options", "productOptionSelections"]]) {
+      const batch = [{ name: name!, arguments: { selectedPairs: [pairs[1], pairs[0]] } }, { name: name!, arguments: { selectedPairs: [pairs[0], pairs[2]] } }];
+      expect(project(name!, {}, null, current, batch)).toMatchObject({ kind: "decision", value: { replyText: "Title 1\n\nTitle 0\n\nTitle 2", details: { [field!]: [pairs[1], pairs[0], pairs[2]] } } });
+    }
+  });
+  it("rejects the entire atomic batch for mixed/rich/bad/foreign calls or aggregate overflow", () => {
+    const { project } = setup(); const name = "recovery_complete_details";
+    const pairs = [pair, ...[2, 3, 4].map(n => ({ productId: `product-${n}`, variantId: null }))];
+    const current = [toolResult("commerce_search_products", { products: pairs.map((identity, index) => ({ ...observedProduct, ...identity, title: `Title ${index}` })), cursor: null, truncated: false })];
+    const good = { name, arguments: { selectedPairs: [pair] } };
+    for (const bad of [
+      { name: "recovery_complete_options", arguments: { selectedPairs: [pair] } },
+      { name: "recovery_complete_details_with_context", arguments: { selectedPairs: [pair] } },
+      { name, arguments: { selectedPairs: [] } }, { name, arguments: { selectedPairs: [pair], extra: true } },
+      { name, arguments: { selectedPairs: [{ productId: "foreign", variantId: null }] } },
+      { name, arguments: { selectedPairs: pairs.slice(1) } },
+    ]) expect(project(name, {}, null, current, [good, bad]).kind).toBe("invalid");
+    const conflicting = [...current, toolResult("commerce_get_product", { product: { ...observedProduct, title: "Conflicting title" } })];
+    expect(project(name, {}, null, conflicting, [good, good]).kind).toBe("invalid");
   });
   it("refuses extra fields, missing fields, invalid language pair and recommendation version", () => {
     const { project, common } = setup();

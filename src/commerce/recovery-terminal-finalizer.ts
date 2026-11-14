@@ -1,6 +1,6 @@
 import type { ModaSupportedLanguageTag } from "@modainteract/moda-interact-shared/internationalization";
 import {
-  canonicalJson, finalResponseSchema, finalResponseToolSchema, verifyResponseContract,
+  canonicalJson, matchesSubset, finalResponseSchema, finalResponseToolSchema, verifyResponseContract,
   CommerceToolOutputs, CommerceResponseDispositionSchema, readCommerceObservedShippingSelections, readCommerceRecommendationSelection,
   type CommerceResponseContract, type Digest, type SubsetSchema,
 } from "@modainteract/moda-interact-shared/commerce";
@@ -129,6 +129,7 @@ export function makeRecoveryTerminalFinalizer(input: {
   const schema = finalResponseSchema(contract);
   return {
     responseContractHash: input.responseContractHash,
+    batchMode: "atomic",
     terminalTools,
     selectTools: ({ observations, requiredReferral }) => {
       if (requiredReferral) return ["recovery_complete_referral"];
@@ -144,11 +145,15 @@ export function makeRecoveryTerminalFinalizer(input: {
         return productsObserved;
       });
     },
-    project: ({ binding, call, requiredReferral, observations }) => {
+    project: ({ binding, call, calls, requiredReferral, observations }) => {
       const invalid = () => ({ kind: "invalid" as const, binding });
       const mapping = mappings.get(call.name);
       const descriptor = terminalTools.find(tool => tool.name === call.name);
-      if (!mapping || !descriptor || !object(call.arguments)) return invalid();
+      if (!mapping || !descriptor || !object(call.arguments) || !Array.isArray(calls) || !calls.length) return invalid();
+      // Atomic admission is generic; application semantics cover EVERY call.
+      // Rich completion retains its prior single/equivalent behavior.
+      if (calls.some(member => member.name !== call.name) || (!mapping.identity &&
+          calls.some(member => canonicalJson(member.arguments) !== canonicalJson(call.arguments)))) return invalid();
       const args = call.arguments;
       if (!mapping.identity && (args.detectedLanguageTag === null) !== (args.detectedLanguageConfidence === null)) return invalid();
       if (mapping.kind === "REFER_TO_STORE" && (typeof args.referralReason !== "string" || !args.referralReason)) return invalid();
@@ -158,17 +163,30 @@ export function makeRecoveryTerminalFinalizer(input: {
       let identityBody: string | undefined;
       const selectedDetails: Record<string, unknown> = { ...mapping.fixed };
       if (mapping.identity) {
-        const pairs = args.selectedPairs;
-        if (!Array.isArray(pairs) || malformedCurrentProductObservation(observations)) return invalid();
+        if (malformedCurrentProductObservation(observations)) return invalid();
         const products = currentProducts(observations);
+        const pairs: Array<{ productId: string; variantId: string | null }> = [];
         const titles: string[] = [];
-        for (const pair of pairs) {
-          if (!object(pair) || typeof pair.productId !== "string" || pair.variantId !== null && typeof pair.variantId !== "string") return invalid();
-          const matches = products.filter(product => product.productId === pair.productId && product.variantId === pair.variantId);
-          const agreed = new Set(matches.map(product => product.title));
-          if (!matches.length || agreed.size !== 1 || !matches[0]!.title.trim()) return invalid();
-          titles.push(matches[0]!.title);
+        const aggregate = new Set<string>();
+        for (const member of calls) {
+          if (!matchesSubset(descriptor.inputSchema as SubsetSchema, member.arguments) || !object(member.arguments) ||
+              !Array.isArray(member.arguments.selectedPairs)) return invalid();
+          const perCall = new Set<string>();
+          for (const pair of member.arguments.selectedPairs) {
+            if (!object(pair) || typeof pair.productId !== "string" || pair.variantId !== null && typeof pair.variantId !== "string") return invalid();
+            const identity = canonicalJson([pair.productId, pair.variantId]);
+            if (perCall.has(identity)) return invalid();
+            perCall.add(identity);
+            const matches = products.filter(product => product.productId === pair.productId && product.variantId === pair.variantId);
+            const agreed = new Set(matches.map(product => product.title));
+            if (!matches.length || agreed.size !== 1 || !matches[0]!.title.trim()) return invalid();
+            if (!aggregate.has(identity)) {
+              aggregate.add(identity); pairs.push({ productId: pair.productId, variantId: pair.variantId }); titles.push(matches[0]!.title);
+            }
+          }
         }
+        const pinned = details.properties![mapping.identity]!;
+        if (pairs.length < Math.max(1, pinned.minItems ?? 0) || pairs.length > Math.min(3, pinned.maxItems ?? 3)) return invalid();
         // Initial decision carries titles only, never a chosen price/stock DTO.
         // The bound production host must independently refresh before delivery.
         identityBody = titles.join("\n\n");

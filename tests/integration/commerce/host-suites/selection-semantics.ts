@@ -147,6 +147,29 @@ export function registerSelectionSemanticsTests() {
       expect(calls).toBe(3); expect(raw).toEqual(before);
       expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2);
     });
+    it.each([false, true])("refreshes every unioned atomic identity before any body can return (missing second=%s)", async missing => {
+      configureIdentity(); let calls = 0;
+      const second = { productId: "gid://shopify/Product/202", variantId: null };
+      const other = { ...product, ...second, title: "Second initial title" };
+      f.toolResults = { commerce_get_product: [ok({ product }), ok({ product: other }),
+        ok({ product: { ...product, title: "First refreshed", unitPrice: "28.00" } }),
+        ok({ product: missing ? null : { ...other, title: "Second refreshed", unitPrice: "39.00" } })] };
+      const raw = { text: "Untrusted historical price prose", calls: [
+        { id: "atomic-first", name: "recovery_complete_details", arguments: { selectedPairs: [pair] } },
+        { id: "atomic-second", name: "recovery_complete_details", arguments: { selectedPairs: [second, pair] } },
+      ], outputTokens: 1 }; const before = structuredClone(raw);
+      const run = f.run(async () => {
+        calls++; if (calls === 1) return { calls: [pair, second].map(arguments_ => ({ name: "commerce_get_product", arguments: arguments_ })), outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Product facts", outputTokens: 1 };
+        return raw;
+      });
+      if (missing) await expect(run).rejects.toMatchObject({ code: "PRODUCT_NOT_FOUND" });
+      else { const result = await run; expect(result.replyText).toContain("First refreshed"); expect(result.replyText).toContain("Second refreshed");
+        expect(result.replyText).toContain("28.00"); expect(result.replyText).toContain("39.00"); expect(result.replyText).not.toContain("historical price");
+        expect(result.commercePresentation!.envelope.details.productDetailSelections).toEqual([pair, second]); }
+      expect(raw).toEqual(before); expect(calls).toBe(3);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(4);
+    });
     it("does not replace an ordinary model answer that has no bound identity completion", async () => {
       configureIdentity(); let calls = 0;
       const result = await f.run(async () => ++calls === 1 ? { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 } :
