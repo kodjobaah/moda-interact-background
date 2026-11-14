@@ -22,6 +22,17 @@ export function structuredFinalizationInstructions(contract: CommerceResponseCon
     const selection = properties?.[field];
     if (supportsObservedIdentityArray(selection)) {
       instructions.push(`For ${purpose}, finish with a nonempty details.${field} array using the exact productId and variantId from authorized observations, as accepted by the pinned field schema. Never invent identities or use prose in place of these selections.`);
+      if (field === "productDetailSelections") {
+        const item = selection?.items;
+        const required = item?.required ?? [];
+        const allowed = Object.keys(item?.properties ?? {});
+        if (required.includes("productId") && required.includes("variantId") &&
+            required.every(key => key === "productId" || key === "variantId") &&
+            allowed.includes("productId") && allowed.includes("variantId")) {
+          const limit = Math.min(3, selection?.maxItems ?? 3);
+          instructions.push(`Category, catalogue and availability questions such as what do you sell are product-facts answers when successful authorized observations contain relevant products, even when the customer is not asking for a recommendation. Select at most ${limit} relevant observed product/variant pairs in details.productDetailSelections. The details shape is {"productDetailSelections":[{"productId":<exact observed productId>,"variantId":<exact observed variantId>}]}; angle-bracket values describe bindings, not literal IDs. Use null for variantId only when both the observation and pinned schema permit null. Do not substitute category-name prose or empty details for these selections. Do not create productRecommendations merely to enumerate the catalogue or infer discounts or promotion authority. If no relevant authorized product observation is available, preserve the existing clarification or referral behavior; never fabricate a selection. Preserve configured language, shipping limitations and required referral reasons.`);
+        }
+      }
     }
   }
   const version = properties?.productRecommendationVersion;
