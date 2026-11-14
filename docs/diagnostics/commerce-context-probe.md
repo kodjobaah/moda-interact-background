@@ -1,0 +1,42 @@
+# Isolated full-context Commerce probe
+
+This operator diagnostic calls the published runner in memory. It does not import the production host, database client, conversation processor, outbound sender, usage service or product-context persistence. It is not a replay of a production inbound event.
+
+Import `runCommerceContextProbe` from `dist/commerce/diagnostics/context-probe.js` after building the exact reviewed source. The repository agent runs synthetic tests only. Actual provider or MCP execution belongs to the authorized root operator.
+
+## Input snapshot
+
+Supply a protected, independently collected `RunCommerceTurnInput` snapshot without `signal`, `dependencies` or `budgets`, plus:
+
+- `provenance`: `CURRENT_RECONSTRUCTION` unless exact original request inputs were captured; otherwise `CAPTURED_ORIGINAL`.
+- `availableToolNames`: exact observed available read-tool names.
+- `capturedModelSteps`: original captured model outputs, in order, for default offline mode.
+- `capturedToolResults`: ordered `{name, arguments, result}` receipts. Arguments must match exactly.
+
+The runner input includes `turn`, `grant`, complete pinned `manifest` (including ordered `featureBehaviours` and response contract), `hostInstructions`, `context`, `history`, `currentCustomerMessages`, `language`, and applicable `platform`/`productContext`. Supply the application `hostInstructions` only, in the deployed host's order; the actual runner adds platform instructions, pinned response instructions, ordered feature prompts, current-customer and dynamic selection/repair instructions. Do not precompose these twice.
+
+Use the deployed bounded moderation-aware history reader and actual language/policy/context projections. Raw database messages, omitted feature prompts, current facts substituted for historical facts, or a reconstructed turn boundary must never be described as an exact historical replay. Record all reconstruction limitations privately alongside the snapshot.
+
+No credentials belong in this snapshot. Resolve the configured model/credential separately in the operator process using existing read-only configuration readers. Do not fabricate a conversation claim or invoke the production host to bypass its claim checks.
+
+## Default offline invocation
+
+```js
+const result = await runCommerceContextProbe(snapshot, {
+  outputDirectory: freshProtectedDirectory,
+});
+// Only this bounded shape/digest result may be printed.
+console.log(JSON.stringify(result));
+```
+
+The output directory must not exist. It is created as 0700; all artifacts are created exclusively as 0600. A repeated path refuses before any model/tool call. Each request, original model output, exact tool arguments/result, runner result and shared structured-log stream is saved privately. Inspect/export them only through protected operator channels; never paste raw prompts, history, IDs, checkout URLs or provider bodies into public logs or task reports.
+
+## Root-only actual model diagnostic
+
+Use `mode: "live-model"` and exact explicit `operatorConfirmation: "ROOT_AUTHORIZED_READ_ONLY_DIAGNOSTIC"`, with `{model: actualConfiguredModelInvoker}`. Tool results remain exact captured receipts by default. The model request is captured before invocation, with no argument or instruction transformation.
+
+Only if separately authorized, additionally set `liveReadTools: true` and inject `readTool(name, args, signal)` backed by the existing pinned read-only MCP client. The harness independently refuses unknown/non-read descriptor names and unavailable/non-granted calls. Allowed operations are product search/read/category resolution, shipping-information read and discount-options/details read. It does not permit create/apply/cart/order mutations. The operator adapter must preserve existing policy authorization and suppress/redirect its own generic transport logs to a private 0600 file; the probe cannot control a supplied adapter's external logging or side effects. If policy equivalence cannot be established, use captured results instead.
+
+Limits are fixed to the reviewed incident's actual configuration: 12 model steps, 6 remote calls, 60 seconds, 2048 output tokens. There is no additional repair, retry loop, result selection, final-response rewrite, persistence or delivery. Do not repeat calls merely to obtain a preferred answer.
+
+Unexpected invocation errors must be reported with a fixed generic error code only; inspect detailed errors privately. The returned safe result is conformance/diagnostic evidence, not a production delivery or incident-resolution receipt.
