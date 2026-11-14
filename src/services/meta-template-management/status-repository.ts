@@ -1,6 +1,6 @@
 import prisma from "../../lib/db.js";
-import { MetaManagementError, type AuthenticatedTemplateObservation,
-  type ProviderStatus } from "./contracts.js";
+import { MetaManagementError, observedContentHash, validatedComponents, type AuthenticatedTemplateObservation,
+  type ProviderStatus, type MetaTextEquivalenceEvidence } from "./contracts.js";
 import type { MetaRegistrationDatabase, RegistrationWithLocale } from "./repository.js";
 import { randomUUID } from "node:crypto";
 
@@ -97,8 +97,19 @@ export class MetaTemplateStatusRepository {
   async recordReconciliation(
     registration: RegistrationWithLocale,
     outcome: { kind: "absent" } | { kind: "found"; providerId: string;
-      status: ProviderStatus; category: string; observedHash: string; drift: boolean },
+      status: ProviderStatus; category: string; observedHash: string; drift: boolean;
+      equivalenceEvidence?: MetaTextEquivalenceEvidence },
   ): Promise<boolean | "drift"> {
+    if (outcome.kind === "found" && outcome.equivalenceEvidence) {
+      const proof = outcome.equivalenceEvidence;
+      if (proof.normalizationKind !== "U+00A0_TO_U+0020_TEXT_ONLY" ||
+          !/^[a-f0-9]{64}$/.test(proof.rawObservedContentHash) ||
+          proof.expectedContentHash !== outcome.observedHash ||
+          proof.expectedContentHash === proof.rawObservedContentHash ||
+          proof.expectedContentHash !== observedContentHash(validatedComponents(registration.componentsSnapshot))) {
+        throw new MetaManagementError("INVALID_PROVIDER_EQUIVALENCE_EVIDENCE", "blocked");
+      }
+    }
     return this.db.$transaction(async (tx) => {
       const current = await tx.whatsAppTemplateMetaRegistration.findUnique({
         where: { id: registration.id }, select: { updatedAt: true },
@@ -155,6 +166,7 @@ export class MetaTemplateStatusRepository {
         providerStatus: outcome.kind === "found" ? outcome.status : "UNKNOWN",
         failureCode: drift ? "PROVIDER_DRIFT" : null,
         requestDigest: registration.submittedContentHash,
+        ...(outcome.kind === "found" && outcome.equivalenceEvidence ? { evidence: outcome.equivalenceEvidence } : {}),
         processedAt: now,
       } });
       // Only mark receipts after a verified, complete provider snapshot has
