@@ -20,9 +20,10 @@ export class MetaTemplateRepository extends MetaTemplateStatusRepository {
 
   /** Bounded discovery; active shop templates refresh within 30 minutes even
    * when older producer releases scheduled a later retry. */
-  async listDue(limit = 25): Promise<Array<{ id: string; submissionState: string }>> {
+  async listDue(limit = 25): Promise<Array<{ id: string; submissionState: string; adminReceiptIds?: string[] }>> {
     const now = this.clock();
-    return this.db.whatsAppTemplateMetaRegistration.findMany({
+    const take = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 50)) : 25;
+    const normal = await this.db.whatsAppTemplateMetaRegistration.findMany({
       where: {
         OR: [
           { submissionState: "READY_TO_SUBMIT", OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }] },
@@ -35,9 +36,25 @@ export class MetaTemplateRepository extends MetaTemplateStatusRepository {
         ],
       },
       orderBy: [{ nextRetryAt: "asc" }, { createdAt: "asc" }],
-      take: Math.max(1, Math.min(limit, 50)),
-      select: { id: true, submissionState: true },
+      take,
+      select: { id: true, submissionState: true, nextRetryAt: true, createdAt: true },
     });
+    const requested = await this.db.whatsAppTemplateMetaEvent.findMany({
+      where: { source: "ADMIN", eventType: "RECONCILE_REQUESTED", processedAt: null, registrationId: { not: null },
+        registration: { OR: [{ failureCode: null }, { failureCode: { notIn: ["PROVIDER_RECONCILIATION_FAILED", "PROVIDER_NOT_FOUND"] } }, { nextRetryAt: null }, { nextRetryAt: { lte: now } }] } },
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }], take,
+      select: { id: true, registrationId: true, receivedAt: true, registration: { select: { submissionState: true } } },
+    });
+    const candidates = new Map<string, { id: string; submissionState: string; adminReceiptIds?: string[]; due: number }>();
+    for (const row of normal) candidates.set(row.id, { id: row.id, submissionState: row.submissionState, due: (row.nextRetryAt ?? row.createdAt).getTime() });
+    for (const receipt of requested) {
+      if (!receipt.registrationId || !receipt.registration) continue;
+      const previous = candidates.get(receipt.registrationId);
+      candidates.set(receipt.registrationId, { id: receipt.registrationId, submissionState: receipt.registration.submissionState,
+        due: Math.min(previous?.due ?? Infinity, receipt.receivedAt.getTime()), adminReceiptIds: [...(previous?.adminReceiptIds ?? []), receipt.id] });
+    }
+    return [...candidates.values()].sort((a, b) => a.due - b.due || a.id.localeCompare(b.id)).slice(0, take)
+      .map(({ due: _due, ...item }) => item);
   }
 
   /** Fail closed for a malformed Admin-frozen payload without a Graph call. */

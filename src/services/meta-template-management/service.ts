@@ -164,11 +164,16 @@ export class MetaTemplateManagementService {
     }
   }
 
-  async reconcileRegistration(registrationId: string): Promise<ReconcileOutcome> {
+  async reconcileRegistration(registrationId: string, adminReceiptIds?: readonly string[]): Promise<ReconcileOutcome> {
     let row: Awaited<ReturnType<MetaTemplateRepository["load"]>> | null = null;
     try {
       row = await this.repository.load(registrationId);
       if (!row) throw new MetaManagementError("REGISTRATION_NOT_FOUND", "blocked");
+      const coveredAdminIds = adminReceiptIds ? await this.repository.prepareAdminReconciliation(row, adminReceiptIds) : undefined;
+      if (coveredAdminIds && !coveredAdminIds.length) return { kind: "stale" };
+      const record = (observation: Parameters<MetaTemplateRepository["recordReconciliation"]>[1]) => coveredAdminIds
+        ? this.repository.recordReconciliation(row!, observation, coveredAdminIds)
+        : this.repository.recordReconciliation(row!, observation);
       await this.provider.verifyWaba(row.wabaId);
       if (!row.providerTemplateId && row.submissionState === "READY_TO_SUBMIT") {
         return { kind: "unconfirmed" };
@@ -178,7 +183,7 @@ export class MetaTemplateManagementService {
         language: row.providerLanguageCode,
       });
       if (current.kind === "absent") {
-        const updated = await this.repository.recordReconciliation(row, { kind: "absent" });
+        const updated = await record({ kind: "absent" });
         this.reporting.warn("meta.template.reconcile.unconfirmed", { registrationId });
         return { kind: updated ? "unconfirmed" : "stale" };
       }
@@ -193,7 +198,7 @@ export class MetaTemplateManagementService {
       const drift = template.category !== row.category || observedHash !== frozenHash ||
         (!!row.providerTemplateId && row.providerTemplateId !== template.id);
       const status = parseProviderStatus(template.status);
-      const updated = await this.repository.recordReconciliation(row, {
+      const updated = await record({
         kind: "found", providerId: template.id, status,
         category: template.category, observedHash, drift,
         ...(equivalence ? { equivalenceEvidence: equivalence } : {}),
@@ -242,6 +247,11 @@ export class MetaTemplateManagementService {
     const failures: unknown[] = [];
     for (const item of due) {
       try {
+        if (item.adminReceiptIds) {
+          const outcome = await this.reconcileRegistration(item.id, item.adminReceiptIds);
+          if (outcome.kind !== "stale") processed += 1;
+          continue;
+        }
         if (item.submissionState === "READY_TO_SUBMIT") {
           const pendingStatus = await this.repository.hasPendingObservation(item.id);
           if (pendingStatus) await this.reconcileRegistration(item.id);
