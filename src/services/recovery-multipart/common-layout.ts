@@ -1,5 +1,6 @@
+import { readRecoveryCommonReference } from './common-layout-policy.js';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
-import { readCommonRecoveryLayoutReference,renderPreparedWrapper,type CommonRecoveryLayoutReference,type VerifiedWrapperContext } from '@modainteract/moda-interact-shared/commerce/presentation';
+import { renderPreparedWrapper,type CommonRecoveryLayoutReference,type VerifiedWrapperContext } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { digest,readPreparedWrapper } from '../conversation-wrappers/projection.js';
 import { readRecoveryShopHeader,verifiedRecoveryShopHeader,type RecoveryShopHeaderReceipt } from '../conversation-wrappers/recovery-shop-header.js';
 import { validRecoveryCheckoutFooterUrl } from '../conversation-wrappers/recovery-checkout-footer.js';
@@ -21,6 +22,7 @@ export function commonLayoutVariables(shopId:string,domain:string,brandName:unkn
 /** Derive boundaries only from the approved renderer's own generated output,
  * never by searching/stripping the authored body. No layout copy lives here. */
 export function renderCommonLayoutBoundaries(reference:CommonRecoveryLayoutReference,variables:CommonLayoutVariables,body:string,shopId:string,conversationId=''):CommonLayoutReceipt['boundaries']|null{
+ if(readRecoveryCommonReference(reference).kind!=='ok')return null;
  const context:VerifiedWrapperContext={conversationId,shopId,conversationLanguageTag:reference.languageTag,merchantLanguageTag:null,checkoutAvailable:true,variables};
  const material=canonicalJson([reference.prepared,variables,body]);
  let marker:string|null=null;
@@ -39,7 +41,7 @@ export function readCommonLayoutReceipt(raw:unknown,conversationId=''):CommonLay
  if(typeof values['shop.name']!=='string'||typeof values['shop.websiteUrl']!=='string'||typeof values['checkout.url']!=='string')return null;
  const normalized=commonLayoutVariables(raw.shopId,values['shop.websiteUrl'],values['shop.name'],values['checkout.url']);
  if(!normalized||canonicalJson(normalized)!==canonicalJson(values))return null;
- const ref=readCommonRecoveryLayoutReference(raw.commonRef,digest);if(ref.kind!=='ok')return null;
+ const ref=readRecoveryCommonReference(raw.commonRef);if(ref.kind!=='ok')return null;
  const boundaries=raw.boundaries;
  if(!['header','body','footer'].every(k=>typeof boundaries[k]==='string'&&String(boundaries[k]).length<=4096)||typeof boundaries.body!=='string'||!boundaries.body.trim())return null;
  const rendered=renderCommonLayoutBoundaries(ref.reference,normalized,boundaries.body,raw.shopId,conversationId);
@@ -67,7 +69,7 @@ export async function currentCommonLayoutMatches(tx:SqlTransaction,receipt:Commo
  return currentCommonReferenceMatches(tx,parsed.commonRef,input.slotEditVersion);
 }
 export async function currentCommonReferenceMatches(tx:SqlTransaction,ref:CommonRecoveryLayoutReference,slotEditVersion?:number):Promise<boolean>{
- const parsedRef=readCommonRecoveryLayoutReference(ref,digest);if(parsedRef.kind!=='ok')return false;
+ const parsedRef=readRecoveryCommonReference(ref);if(parsedRef.kind!=='ok')return false;
  const active=await first<{definitionId:string;editVersion:number;sourceHash:string;kind:string;status:string;audience:string;publishedAt:Date|null;retiredAt:Date|null;sourceLanguageTag:string;astSchemaVersion:number;createdByAdminId:string}>(tx,`SELECT slot."definitionId",slot."editVersion",def."sourceHash",def."kind"::text,def."status"::text,def."audience"::text,def."publishedAt",def."retiredAt",def."sourceLanguageTag",def."astSchemaVersion",def."createdByAdminId"
    FROM "whatsapp"."WhatsAppConversationWrapperActiveSlot" slot JOIN "whatsapp"."WhatsAppTemplateDefinition" def ON def."id"=slot."definitionId"
    WHERE slot."audience"='SHARED' FOR SHARE OF slot,def`);
@@ -75,6 +77,6 @@ export async function currentCommonReferenceMatches(tx:SqlTransaction,ref:Common
  const locale=await first<{definitionId:string;languageTag:string;contentHash:string|null;status:string;localeAst:unknown;providerLanguageCode:string|null;reviewedAt:Date|null;reviewedByAdminId:string|null}>(tx,`SELECT "definitionId","languageTag","contentHash","status"::text,"localeAst","providerLanguageCode","reviewedAt","reviewedByAdminId" FROM "whatsapp"."WhatsAppTemplateLocale" WHERE "id"=$1 FOR SHARE`,ref.localeId);
  if(!locale||locale.definitionId!==ref.definitionId||locale.languageTag!==ref.languageTag||locale.contentHash!==ref.contentHash||locale.providerLanguageCode!==null||!(locale.languageTag==='en'?locale.status==='SOURCE_SAVED':locale.status==='REVIEWED'&&locale.reviewedAt&&locale.reviewedByAdminId))return false;
  const prepared=readPreparedWrapper(locale.localeAst,locale.contentHash);if(prepared.kind!=='ok')return false;
- const current=readCommonRecoveryLayoutReference({...ref,sourceHash:active.sourceHash,prepared:prepared.prepared},digest);
+ const current=readRecoveryCommonReference({...ref,sourceHash:active.sourceHash,prepared:prepared.prepared});
  return current.kind==='ok'&&canonicalJson(current.reference)===canonicalJson(ref);
 }

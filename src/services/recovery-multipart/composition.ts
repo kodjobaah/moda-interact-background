@@ -1,7 +1,8 @@
+import { readRecoveryCommonReference } from './common-layout-policy.js';
 import { fitVerifiedProductCaption } from '../../commerce/compact-product-presentation.js';
 import { readTemplateCompositeProfile } from './composite-profile.js';
 import { prepareCompositeReply, compositeReplyEnabled, type CompositeReceipt, type CompositeDependencies } from './composite.js';
-import { buildRecoveryMultipartDeliveryPlan, readCommonRecoveryLayoutReference, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlanV2, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
+import { buildRecoveryMultipartDeliveryPlan, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlanV2, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { commerceStoreHostname } from '@modainteract/moda-interact-shared/commerce';
 import { digest,readPreparedWrapper,stableJson } from '../conversation-wrappers/projection.js';
 import { languageChoices,validDefinition } from '../conversation-wrappers/selection.js';
@@ -19,7 +20,7 @@ export function selectedCommonLayout(slots:readonly WrapperSlot[],context:Verifi
  const choices=languageChoices({conversationTag:context.conversationLanguageTag,merchantTag:context.merchantLanguageTag,preferredTag:preferred,platformFallbackTag:null});if(choices==='invalid')return null;
  const locale=choices.map(tag=>slot.definition.locales.find(l=>l.languageTag===tag)).find(Boolean);if(!locale||locale.providerLanguageCode!==null||locale.status!==(locale.languageTag==='en'?'SOURCE_SAVED':'REVIEWED')||(locale.languageTag!=='en'&&(!locale.reviewedAt||!locale.reviewedByAdminId)))return null;
  const prepared=readPreparedWrapper(locale.localeAst,locale.contentHash);if(prepared.kind!=='ok')return null;
- const parsed=readCommonRecoveryLayoutReference({schemaVersion:1,definitionId:slot.definitionId,sourceHash:slot.definition.sourceHash,localeId:locale.id,languageTag:locale.languageTag,contentHash:locale.contentHash,prepared:prepared.prepared},digest);
+ const parsed=readRecoveryCommonReference({schemaVersion:1,definitionId:slot.definitionId,sourceHash:slot.definition.sourceHash,localeId:locale.id,languageTag:locale.languageTag,contentHash:locale.contentHash,prepared:prepared.prepared});
  return parsed.kind==='ok'?{slot,reference:parsed.reference}:null;
 }
 /** No new content formatter. Both the complete body and exact physical
