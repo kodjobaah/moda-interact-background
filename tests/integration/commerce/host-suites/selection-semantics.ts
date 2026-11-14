@@ -81,7 +81,9 @@ export function registerSelectionSemanticsTests() {
         expect(request.requiredToolName).toBeUndefined();
         return final;
       });
-      expect(calls).toBe(2); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1); expect(final).toEqual(original);
+      expect(calls).toBe(2);
+      // One model-requested read plus the existing independent final product verification.
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2); expect(final).toEqual(original);
     });
     it("forwards nested product selection constraints, strict and ordinary/forced choice through the actual SDK HTTP serializer", async () => {
       configure();
