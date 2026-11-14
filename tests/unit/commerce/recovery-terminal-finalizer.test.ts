@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { exampleManifest, exampleFinal, responseContractCanonicalJson, hasCommerceAcceptedProductSelection, type SubsetSchema, type CommerceResponseContract } from "@modainteract/moda-interact-shared/commerce";
+import { exampleManifest, exampleFinal, exampleTurn, canonicalJson, responseContractCanonicalJson, hasCommerceAcceptedProductSelection, type SubsetSchema, type CommerceResponseContract } from "@modainteract/moda-interact-shared/commerce";
 import type { TerminalDecisionInput } from "@modainteract/moda-interact-shared/commerce/runner";
 import { makeRecoveryTerminalFinalizer } from "../../../src/commerce/recovery-terminal-finalizer.js";
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -30,7 +30,10 @@ function setup(hasEligibleEvidence?: (ids: readonly string[]) => boolean) {
   const common = { replyText: exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] };
   const project = (name: string, args: Record<string, unknown>, requiredReferral: unknown = null, currentObservations: unknown[] = observations) => {
     const call = { id: "actual-provider-id", name, arguments: args };
-    const input = { binding: { callId: call.id }, call, transportStep: { calls: [call], outputTokens: 1 },
+    const transportStep = { calls: [call], outputTokens: 1 };
+    const input = { binding: { turn: exampleTurn, modelStep: 3, callId: call.id, toolName: name, rawCallSha256: digest(canonicalJson(call)),
+      callIds: [call.id], rawStepSha256: digest(canonicalJson(transportStep)), rawCallsSha256: digest(canonicalJson(transportStep.calls)), responseContractHash },
+      call, calls: [call], transportStep,
       observations: currentObservations, requiredReferral } as unknown as TerminalDecisionInput;
     const before = structuredClone(input); const output = port.project(input);
     expect(input).toEqual(before); expect(output.binding).toBe(input.binding);
@@ -60,7 +63,7 @@ describe("application flat terminal finalization", () => {
     expect(project("recovery_complete_answer", common, "UNVERIFIABLE_FACTS").kind).toBe("invalid");
     expect(project("recovery_complete_referral", { ...withoutEvidence, referralReason: "UNKNOWN" }).kind).toBe("invalid");
   });
-  it.each([[], [pair, pair], [{ productId: 3, variantId: null }], [pair, pair, pair, pair]])("refuses invalid selected identity arrays", selections => {
+  it.each([[], [pair, pair], [{ productId: 3, variantId: null }], [pair, pair, pair, pair]].map(selections => [selections]))("refuses invalid selected identity arrays", selections => {
     const { project, common } = setup(); expect(project("recovery_complete_details_with_context", { ...common, productDetailSelections: selections }).kind).toBe("invalid");
   });
   it("refuses extra fields, missing fields, invalid language pair and recommendation version", () => {

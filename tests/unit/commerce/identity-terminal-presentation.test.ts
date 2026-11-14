@@ -10,7 +10,7 @@ const product = { ...pair, title: "Current product", url: null, available: true,
 function fixture() {
   const verified = verifyCommerceProductFacts([pair], [product]); if (verified.kind !== "verified") throw Error("Invalid fixture");
   const original = { ...exampleFinal, answerKind: "ANSWER" as const, referralReason: null, evidenceIds: [], replyText: "Old title and stock from initial observation", details: { productDetailSelections: [pair] } };
-  const receipt = { binding: { turn: exampleTurn, modelStep: 3, callId: "actual-id", toolName: "recovery_complete_details", rawCallSha256: "a".repeat(64), responseContractHash: "b".repeat(64) }, mode: "PRODUCT_DETAILS" as const, canonicalSha256: digest(canonicalJson(original)) };
+  const receipt = { binding: { turn: exampleTurn, modelStep: 3, callId: "actual-id", toolName: "recovery_complete_details", rawCallSha256: "a".repeat(64), callIds: ["actual-id"], rawStepSha256: "c".repeat(64), rawCallsSha256: "d".repeat(64), responseContractHash: "b".repeat(64) }, mode: "PRODUCT_DETAILS" as const, canonicalSha256: digest(canonicalJson(original)) };
   const presentation: CommerceVerifiedPresentation = { schemaVersion: 1, brandName: null, locale: "en", disposition: "PRODUCT_DETAILS", storeUrl: "https://fixture.example", products: [], productFacts: verified.productFacts, optionFacts: [], requiresShipping: null, policyUrl: null, includeNoVerifiedOffer: false };
   return { receipt, original, turn: exampleTurn, responseContractHash: "b".repeat(64), presentation, currentProducts: [product], digest };
 }

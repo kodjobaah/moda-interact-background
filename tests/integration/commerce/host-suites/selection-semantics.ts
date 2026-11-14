@@ -298,7 +298,7 @@ export function registerSelectionSemanticsTests() {
         if (calls === 2) return { calls: [], text: "PRIVATE_PROSE_SENTINEL", outputTokens: 1 };
         return finalStep;
       }, f.context, undefined, logger)).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false,
-        diagnostic: { runnerDiagnostic: { reasonCode: "FINAL_PRODUCT_SELECTION_MISSING" } } });
+        diagnostic: { runnerDiagnostic: { reasonCode: "TERMINAL_DECISION_INVALID" } } });
       expect(calls).toBe(3);
       expect(finalStep).toEqual(snapshot); expect(finalStep.calls[0]).toBe(originalCall);
       expect(originalCall.arguments).toBe(originalArguments);
