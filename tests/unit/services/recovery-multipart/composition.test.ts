@@ -62,6 +62,24 @@ describe('single-bubble composite opt-in',()=>{
  async function render(f:ReturnType<typeof fixture>,source:'AI'|'HUMAN',product=false,answer='Exact authored answer'){
   const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:source==='HUMAN'?'command':'message',source,responseBody:answer,mediaDeadlineAt:Date.now()+15000,...(product?{commercePresentation:presentation(answer)}:{})});if(result.kind!=='rendered')throw Error('fixture');return result;
  }
+ it('compacts a fifteen-item AI lead using only retained verified products and freezes replay exactly',async()=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
+  const longLead=Array.from({length:15},(_,i)=>`Unverified catalogue item ${i}: ${'model prose '.repeat(6)}`).join('\n');
+  const p=presentation(longLead);const first=p.verifiedProducts.products[0]!;
+  const products=[first,...[1,2].map(i=>({...first,productId:`selected-${i}`,title:`Product ${i} ${'description '.repeat(20)}`}))];
+  const pairs=products.map(({productId,variantId})=>({productId,variantId}));const facts=verifyCommerceProductFacts(pairs,products);if(facts.kind!=='verified')throw Error('facts');
+  const full={...p,verified:{...p.verified,productFacts:facts.productFacts},verifiedProducts:{...p.verifiedProducts,products},envelope:{...p.envelope,details:{productDetailSelections:pairs}}};
+  const input={conversationId:'conversation',messageIdentity:'message',source:'AI' as const,responseBody:longLead,mediaDeadlineAt:Date.now()+15000,commercePresentation:full};
+  const r=await f.service.renderConversationResponse(input);if(r.kind!=='rendered')throw Error('fixture');
+  expect(r.multipartPlan!.parts).toHaveLength(1);expect(r.multipartPlan!.parts[0]!.plan.kind).toBe('COMPOSITE_IMAGE');
+  expect(r.commonLayout!.boundaries.body).not.toContain('Unverified catalogue');
+  expect(Array.from(r.multipartPlan!.parts[0]!.plan.body).length).toBeLessThanOrEqual(1024);
+  expect(r.presentedPairs!.length).toBeGreaterThan(0);expect(r.presentedPairs).toEqual(pairs.slice(0,r.presentedPairs!.length));
+  expect(r.compositeReceipt!.verifiedProducts!.products).toEqual(products.slice(0,r.presentedPairs!.length));
+  expect(r.responseDigest).toBe(digest(stableJson({envelope:full.envelope,verified:full.verified,productPairs:[],verifiedProducts:full.verifiedProducts})));
+  expect(r.commonLayout!.boundaries.footer).toContain(checkout);
+  const replay=await f.service.renderConversationResponse({...input,previousApplication:r});expect(replay).toEqual({...r,replayed:true});expect(f.prepare).toHaveBeenCalledTimes(1);
+ });
  it.each(['AI','HUMAN'] as const)('%s has one branded bubble with exact caption and canonical logical history',async source=>{
   vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();for(const product of source==='AI'?[false,true]:[false]){
    const result=await render(f,source,product),part=result.multipartPlan!.parts[0]!.plan;
@@ -74,6 +92,11 @@ describe('single-bubble composite opt-in',()=>{
   }
  });
  it.each([undefined,'false','TRUE','1',' true '])('preserves old exact plan and application bytes while flag %s',async value=>{const f=fixture();vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','false');const a=await render(f,'AI');vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED',value);const b=await render(f,'AI');expect(b.multipartPlan).toEqual(a.multipartPlan);expect(b.applicationKey).toEqual(a.applicationKey);expect(f.prepare).not.toHaveBeenCalled();});
+ it.each(['AI','HUMAN'] as const)('never compacts nonproduct %s prose to force a caption',async source=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),answer='😀'.repeat(1100);
+  const result=await render(f,source,false,answer);expect(result.commonLayout!.boundaries.body).toBe(answer);
+  expect(result.multipartPlan!.parts[0]!.plan).toEqual({schemaVersion:1,kind:'TEXT',body:result.body});expect(f.prepare).not.toHaveBeenCalled();
+ });
  it('uses one fullTEXT with complete footer on overflow, absent logo and expired lease',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');for(const reason of ['overflow','logo','expired']){const f=fixture();if(reason==='logo')f.logoResolver.mockResolvedValue(null);const r=reason==='expired'?await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'command',source:'HUMAN',responseBody:'Full answer',mediaDeadlineAt:Date.now()-1}):await render(f,'HUMAN',false,reason==='overflow'?'😀'.repeat(1030):'Full answer');if(r.kind!=='rendered')throw Error('fixture');expect(r.multipartPlan!.parts).toEqual([{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:r.body}}]);expect(r.commonLayout!.boundaries.body).toBe(reason==='overflow'?'😀'.repeat(1030):'Full answer');expect(f.prepare).not.toHaveBeenCalled();}});
  it('preserves full canonical TEXT when a valid current profile has typed HEADER_OVERFLOW',async()=>{
   vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();f.prepare.mockResolvedValue({kind:'OMITTED',reason:'HEADER_OVERFLOW',stage:'TRANSFORM',durationMs:1} as never);const r=await render(f,'HUMAN');expect(r.commonLayout!.commonRef.prepared.compositeProfile).toBeDefined();expect(r.multipartPlan!.parts).toEqual([{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:r.body}}]);expect(r.body).toBe(r.commonLayout!.boundaries.header+r.commonLayout!.boundaries.body+r.commonLayout!.boundaries.footer);expect(f.prepare).toHaveBeenCalledOnce();
