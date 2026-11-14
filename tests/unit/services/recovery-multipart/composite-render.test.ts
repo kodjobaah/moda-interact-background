@@ -9,8 +9,11 @@ import {conversationProductObjectKey,prepareRecoveryCompositeImageV2,createShopB
 import {prepareCompositeReply,compositeTrustedContextV2} from '../../../../src/services/recovery-multipart/composite.js';
 import type {CommonLayoutReceipt} from '../../../../src/services/recovery-multipart/common-layout.js';
 const hash=(b:Buffer|string)=>createHash('sha256').update(b).digest('hex');
+// Authored test frames allow the exact multiline header on host and Linux Pango.
+// Production profile values remain owned by the saved template.
+const renderProfiles=profiles.map((profile,index)=>index===0?{...profile,headerOnlyHeight:400,withProductHeight:1000,textHeight:340,productTop:400}:profile);
 describe('actual packed composite renderer through Background host',()=>{
- it.each([...profiles.flatMap(profile=>[false,true].map(product=>({profile,product,overflow:false}))),{profile:{...profiles[1]!,headerOnlyHeight:480,withProductHeight:1120,textHeight:320,productTop:520},product:false,overflow:true}])('renders/probes configured layout $profile.headerOnlyHeight (product $product, overflow $overflow)',async ({profile,product,overflow})=>{
+ it.each([...renderProfiles.flatMap(profile=>[false,true].map(product=>({profile,product,overflow:false}))),{profile:{...profiles[1]!,headerOnlyHeight:480,withProductHeight:1120,textHeight:320,productTop:520},product:false,overflow:true}])('renders/probes configured layout $profile.headerOnlyHeight (product $product, overflow $overflow)',async ({profile,product,overflow})=>{
   const logoBytes=await sharp({create:{width:1125,height:600,channels:3,background:'#146847'}}).jpeg().toBuffer(),productBytes=await sharp({create:{width:1125,height:600,channels:3,background:'#dcab37'}}).jpeg().toBuffer();
   const origin='https://media.example',logoKey=`shop-brands/shop.example/logo/sha256-${hash(logoBytes)}.jpg`;
   const logo={schemaVersion:1 as const,origin:{kind:'SHOP_BRAND' as const,shopId:'shop',shopDomain:'shop.example',role:'LOGO' as const,sourceGeneration:1,sourceFingerprint:`sha256:${'a'.repeat(64)}`},status:'READY' as const,kind:'R2_DERIVATIVE' as const,publicOrigin:origin,publicUrl:`${origin}/${logoKey}`,objectKey:logoKey,contentSha256:hash(logoBytes),contentType:'image/jpeg' as const,width:1125 as const,height:600 as const,sizeBytes:logoBytes.length,verifiedAt:'2026-11-13T00:00:00Z'};
