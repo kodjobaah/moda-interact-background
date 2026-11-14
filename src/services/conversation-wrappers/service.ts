@@ -29,6 +29,7 @@ const defaultLogger = createLogger({
 export type ConversationWrapperDependencies = Readonly<{
   repository?: WrapperReadPort;
   logoResolver?: ConversationLogoResolver;
+  compositeDependencies?: import("../recovery-multipart/composite.js").CompositeDependencies;
   mediaDependencies?: Parameters<typeof prepareConversationDelivery>[1];
   logger?: StructuredLogger;
   /** No wrapper is returned as unavailable unless policy opts into safe passthrough. */
@@ -76,7 +77,7 @@ export class ConversationWrapperService {
         const prior = input.previousApplication;
         if(prior.commonLayout){
           const common=readCommonLayoutReceipt(prior.commonLayout,input.conversationId);
-          if(!common||!prior.multipartPlan||commonLayoutBody(common)!==prior.body||prior.source!==input.source||prior.messageIdentity!==input.messageIdentity||prior.responseDigest!==(presentationDigest??digest(input.responseBody))||prior.applicationKey!==wrapperApplicationKey({conversationId:input.conversationId,messageIdentity:prior.messageIdentity,source:prior.source,wrapperDefinitionId:prior.wrapperDefinitionId,localeId:prior.localeId,contentHash:prior.contentHash,editVersion:prior.slotEditVersion,responseDigest:prior.responseDigest,body:prior.body,...(prior.recoveryCheckoutUrl?{recoveryCheckoutUrl:prior.recoveryCheckoutUrl}:{}),commonLayout:common,multipartPlan:prior.multipartPlan}))return this.refuse("rejected","REPLAY_MISMATCH",input);
+          if(!common||!prior.multipartPlan||commonLayoutBody(common)!==prior.body||prior.source!==input.source||prior.messageIdentity!==input.messageIdentity||prior.responseDigest!==(presentationDigest??digest(input.responseBody))||prior.applicationKey!==wrapperApplicationKey({conversationId:input.conversationId,messageIdentity:prior.messageIdentity,source:prior.source,wrapperDefinitionId:prior.wrapperDefinitionId,localeId:prior.localeId,contentHash:prior.contentHash,editVersion:prior.slotEditVersion,responseDigest:prior.responseDigest,body:prior.body,...(prior.recoveryCheckoutUrl?{recoveryCheckoutUrl:prior.recoveryCheckoutUrl}:{}),commonLayout:common,multipartPlan:prior.multipartPlan,...(prior.compositeReceipt?{compositeReceipt:prior.compositeReceipt}:{})}))return this.refuse("rejected","REPLAY_MISMATCH",input);
           return {...prior,replayed:true};
         }
         const matchedBody = presentationDigest !== null

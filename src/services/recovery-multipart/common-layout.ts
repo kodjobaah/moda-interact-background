@@ -48,7 +48,7 @@ export function readCommonLayoutReceipt(raw:unknown,conversationId=''):CommonLay
 }
 export function readRecoveryLayoutReceipt(raw:unknown,conversationId=''):RecoveryLayoutReceipt|null{return readRecoveryShopHeader(raw)??readCommonLayoutReceipt(raw,conversationId);}
 export function commonLayoutBody(receipt:CommonLayoutReceipt):string{return receipt.boundaries.header+receipt.boundaries.body+receipt.boundaries.footer;}
-export function humanCommonLayoutApplicationKey(input:{commandId:string;conversationId:string;shopId:string;slotEditVersion:number;textBody:string;body:string;receipt:CommonLayoutReceipt}):string{
+export function humanCommonLayoutApplicationKey(input:{commandId:string;conversationId:string;shopId:string;slotEditVersion:number;textBody:string;body:string;receipt:CommonLayoutReceipt;composite?:{plan:import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;receipt:import("./composite.js").CompositeReceipt;policyRef:import("../conversation-brand-media.js").BrandMediaPolicyRef|null}}):string{
  return digest(canonicalJson({schemaVersion:2,kind:'RECOVERY_COMMON_HUMAN_APPLICATION',...input}));
 }
 /** Fresh authority only; pure reference snapshots are never their own grant.

@@ -4,7 +4,7 @@ import type { ConversationTurnFacadeContext } from "../conversation-turn-process
 
 /** The real delivery service persists and moderates input.text before Meta. */
 export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
-  const { harness, ConversationTurnProcessor, first, state } = context;
+  const { harness, ConversationTurnProcessor, first, state, PROCESSING_LEASE_MS } = context;
   const rendered = (body: string) => ({
     kind: "rendered" as const, body,
     source: "AI" as const, messageIdentity: "message-1",
@@ -54,7 +54,7 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
     expect(test.runAgent).toHaveBeenCalledOnce();
     expect(test.aiWrapper.renderConversationResponse).toHaveBeenCalledExactlyOnceWith({
       conversationId: "conversation-1", messageIdentity: "message-1",
-      responseBody: "reply", source: "AI",
+      responseBody: "reply", source: "AI", mediaDeadlineAt:first.getTime()+20000+PROCESSING_LEASE_MS,
     });
     expect(test.admission.sendPreparedText).toHaveBeenCalledOnce();
     expect(test.admission.sendPreparedText).toHaveBeenCalledWith(expect.objectContaining({

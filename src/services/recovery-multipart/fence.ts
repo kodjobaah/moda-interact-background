@@ -1,3 +1,4 @@
+import { currentCompositeMatches } from './composite.js';
 import { commitAdmittedProductContext } from "../../commerce/product-context-repository.js";
 import { currentCommonLayoutMatches } from './common-layout.js';
 import { parsePreparedEvidence } from '../recovery-conversation/human-prepared-command.service.js';
@@ -34,7 +35,7 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
   if(source.actor==='HUMAN' && source.recoveryShopHeader.schemaVersion===2){
     const command=await first<{preparedTextBody:string|null;preparedWrapperEvidence:unknown;preparedAt:Date|null;textBody:string|null}>(tx,`SELECT "preparedTextBody","preparedWrapperEvidence","preparedAt","textBody" FROM "whatsapp"."MerchantConversationSendCommand" WHERE "id"=$1`,source.command!.id);
     const evidence=command?parsePreparedEvidence(command.preparedTextBody,command.preparedWrapperEvidence,command.preparedAt):null;
-    if(evidence?.multipartPreparation && canonicalJson(evidence.multipartPreparation)!==canonicalJson({plan:source.plan,policyRef:source.policyRef,receipt:source.receipt}))return {kind:'suppressed',reason:'multipart-command-preparation-mismatch'};
+    if(evidence?.multipartPreparation && canonicalJson(evidence.multipartPreparation)!==canonicalJson({plan:source.plan,policyRef:source.policyRef,receipt:source.receipt,...(source.compositeReceipt?{compositeReceipt:source.compositeReceipt}:{})}))return {kind:'suppressed',reason:'multipart-command-preparation-mismatch'};
     if(!evidence || evidence.outcome!=='RENDERED' || command!.textBody!==source.recoveryShopHeader.boundaries.body || canonicalJson(evidence.recoveryShopHeader)!==canonicalJson(source.recoveryShopHeader))return {kind:'suppressed',reason:'multipart-command-frame-invalid'};
   }
   const parts = await rows<{id:string;ordinal:number;role:string;payload:unknown;payloadDigest:string;sourceIdentity:unknown;state:string;deadlineAt:Date;providerAccountId:string;providerPhoneNumberId:string}>(tx,`
@@ -63,7 +64,7 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
       AND "decision"='ALLOW' AND "inputKind"='TEXT' AND "contentSha256"=$2 AND "policyVersion"=$3 LIMIT 1`,source.command?.id ?? row.id,sha256(source.body),moderationConfig().policyVersion);
   if (!assessment) return {kind:'suppressed',reason:'moderation_content_stale'};
   const plan = source.plan.parts[index]!.plan;
-  for(const component of source.plan.parts) if (!(await currentBrandPlanMatches(tx,component.plan,context.shopId,source.policyRef ?? undefined))) return {kind:'suppressed',reason:'brand-media-stale'};
+  for(const component of source.plan.parts) if (!(component.plan.kind==='COMPOSITE_IMAGE'?source.recoveryShopHeader.schemaVersion===2&&await currentCompositeMatches(tx,source.compositeReceipt,source.recoveryShopHeader,source.policyRef,source.receipt.firstPair):await currentBrandPlanMatches(tx,component.plan,context.shopId,source.policyRef ?? undefined))) return {kind:'suppressed',reason:'brand-media-stale'};
   const rootKey = source.actor === 'HUMAN' ? `arch040-human-${sha256(source.command!.id)}` : `arch040-auto-${sha256(row.id)}`;
   if (index === 0) {
     if (row.providerDispatchKey) return {kind:'suppressed',reason:'already-admitted-or-sent'};

@@ -258,3 +258,9 @@ it('a HUMAN takeover while handback moderation awaits prevents model and provide
  const processor=new ConversationTurnProcessor({queue:t.queue,conversation:t.conversation,admission:t.admission,abuseAdmission:t.abuseAdmission,ownership:ownership as never,moderation:{moderatePending:async(_id,_pending,deadline)=>{expect(deadline).toEqual(new Date(first.getTime()+20000+PROCESSING_LEASE_MS));mode='HUMAN';return 'allowed';}},loadTurn:vi.fn().mockResolvedValue(t.loaded),runAgent:t.runAgent,aiWrapper:t.aiWrapper,getResult:(r:any)=>r,now:()=>new Date(first.getTime()+20000),runtimeConfig:t.runtimeConfig,logger:t.logger});
  await processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.runAgent).not.toHaveBeenCalled();expect(t.admission.reserve).not.toHaveBeenCalled();expect(t.admission.sendPreparedText).not.toHaveBeenCalled();
 });
+
+it('carries the original AI claim deadline into optional media after a slow model and respects an earlier host deadline',async()=>{
+ let current=first.getTime()+20000;const t=harness({now:()=>new Date(current)}),claimedAt=current,hostDeadline=claimedAt+90000;
+ t.runAgent.mockImplementation(async()=>{current+=60000;return {replyText:'Grounded answer',commercePresentation:{deadlineAt:hostDeadline}};});
+ await t.processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(expect.objectContaining({mediaDeadlineAt:hostDeadline}));
+});

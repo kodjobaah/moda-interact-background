@@ -115,7 +115,7 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     ) => Promise<OutboundAdmissionResult>;
     sendPreparedConversation?: (
       input: Admitted & {
-        commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
+        compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan;
         presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt;
         to: string;
         text: string;
@@ -351,7 +351,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       reservationCleanupSucceeded = true;
     };
     const sendPreparedText = async (
-      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
+      input: Admitted & { to: string; text: string; prepareRecoveryFooter?: true; recoveryShopHeader?: RecoveryShopHeaderReceipt; productContextUpdate?: CommerceConversationProductContext; compositeReceipt?: import("./recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("./recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2; brandMediaPolicy?: import("./conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationMediaDeliveryPlan; presentationReceipt?: import("./conversation-delivery-plan.js").ConversationDeliveryReceipt },
     ) => {
       if (!(await checkControl("before-provider", input.shopId))) {
         await failPrepared(input.messageId);
@@ -620,6 +620,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         messageId: reserved.messageId,
         generatedResponse: agentResult.replyText,
+        mediaDeadlineAt: Math.min(now.getTime()+PROCESSING_LEASE_MS,agentResult.commercePresentation?.deadlineAt??Infinity),
         ...(agentResult.commercePresentation ? { commercePresentation: agentResult.commercePresentation } : {}),
         ...(agentResult.hostComposedReplyCandidates
           ? { hostComposedReplyCandidates: agentResult.hostComposedReplyCandidates }
@@ -677,7 +678,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         to: loaded.to,
         text: composed.text,
         ...(composed.recoveryShopHeader ? {recoveryShopHeader: composed.recoveryShopHeader} : {}),
-        ...(composed.commonLayout ? {commonLayout:composed.commonLayout,multipartPlan:composed.multipartPlan,presentationReceipt:{shopId:loaded.shopId,conversationId,messageId:reserved.messageId,inboundVersion:observedVersion,controlRevision:controlRevision ?? -1,firstPair:composed.presentedPairs?.[0]??null}} : {}),
+        ...(composed.commonLayout ? {commonLayout:composed.commonLayout,multipartPlan:composed.multipartPlan,...(composed.compositeReceipt?{compositeReceipt:composed.compositeReceipt}:{}),presentationReceipt:{shopId:loaded.shopId,conversationId,messageId:reserved.messageId,inboundVersion:observedVersion,controlRevision:controlRevision ?? -1,firstPair:composed.presentedPairs?.[0]??null}} : {}),
         ...(composed.brandMediaPolicy ? {brandMediaPolicy:composed.brandMediaPolicy} : {}), ...(composed.deliveryPlan ? {deliveryPlan: composed.deliveryPlan,
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),

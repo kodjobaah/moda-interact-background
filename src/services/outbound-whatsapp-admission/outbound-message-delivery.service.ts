@@ -158,7 +158,7 @@ export class OutboundMessageDeliveryService {
   }
 
   async sendPreparedConversation({
-    commonLayout, multipartPlan,
+    compositeReceipt, commonLayout, multipartPlan,
     brandMediaPolicy,
     messageId,
     shopId,
@@ -185,7 +185,7 @@ export class OutboundMessageDeliveryService {
     expectedControlRevision?: number;
     expectedInboundVersion?: number;
     productContextUpdate?: CommerceConversationProductContext;
-    commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan;
+    compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt; commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt; multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
     brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
     presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<OutboundAdmissionResult> {
@@ -201,7 +201,7 @@ export class OutboundMessageDeliveryService {
       // never recompose a prepared group or acquire a newer ownership snapshot.
       if(await this.hasCompletedPreparation(messageId))return {kind:"admitted",shopId,messageId,conversationId,terminal,executionScope,deliveryState:"pending"};
       const suppression=await this.revalidateBeforeProvider({kind:"admitted",shopId,messageId,conversationId,terminal,executionScope});if(suppression)return suppression;
-      const source=prepareFrozenCommonReply({preparation:{plan:multipartPlan,policyRef:brandMediaPolicy??null,receipt:messageBrandReceipt(presentationReceipt!)},common,messageId,recoveryId:owner.recoveryId,recipient:to,sender:await this.provider.resolveSender(),command:null,now:new Date(),...(productContextUpdate?{productContextUpdate}:{})});
+      const source=prepareFrozenCommonReply({preparation:{plan:multipartPlan,policyRef:brandMediaPolicy??null,receipt:messageBrandReceipt(presentationReceipt!),...(compositeReceipt?{compositeReceipt}:{})},common,messageId,recoveryId:owner.recoveryId,recipient:to,sender:await this.provider.resolveSender(),command:null,now:new Date(),...(productContextUpdate?{productContextUpdate}:{})});
       if(!(await this.prepareUnadmittedContent(messageId,text,undefined,{shopId,conversationId})))return {kind:"suppressed",reason:"duplicate"};
       await engine.freeze(source);
       if(!(await this.approvePreparedOutbound({shopId,conversationId,messageId,outboundText:text})))return {kind:"suppressed",reason:"conversation-invalid"};

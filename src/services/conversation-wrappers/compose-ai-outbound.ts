@@ -23,8 +23,9 @@ export type AiOutboundComposition =
   | Readonly<{
       kind: "ready";
       text: string;
+      compositeReceipt?: import("../recovery-multipart/composite.js").CompositeReceipt;
       commonLayout?: import("../recovery-multipart/common-layout.js").CommonLayoutReceipt;
-      multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryMultipartDeliveryPlan;
+      multipartPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2;
       recoveryShopHeader?: RecoveryShopHeaderReceipt;
       brandMediaPolicy?: BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan;
       presentedPairs?: readonly { productId: string; variantId: string | null }[];
@@ -51,6 +52,7 @@ export async function composeAiOutbound(
     conversationId: string;
     messageId: string;
     generatedResponse: string;
+    mediaDeadlineAt?: number;
     hostComposedReplyCandidates?: readonly string[];
     commercePresentation?: CommercePresentationInput;
   }>,
@@ -59,6 +61,7 @@ export async function composeAiOutbound(
     conversationId: input.conversationId,
     messageIdentity: input.messageId,
     responseBody: input.generatedResponse,
+    ...(input.mediaDeadlineAt!==undefined?{mediaDeadlineAt:input.mediaDeadlineAt}:{}),
     ...(input.hostComposedReplyCandidates ? { hostComposedReplyCandidates: input.hostComposedReplyCandidates } : {}),
     ...(input.commercePresentation ? { commercePresentation: input.commercePresentation } : {}),
     source: "AI",
@@ -69,13 +72,14 @@ export async function composeAiOutbound(
     if (result.commonLayout && (!readCommonLayoutReceipt(result.commonLayout,input.conversationId) || commonLayoutBody(result.commonLayout)!==result.body || !result.multipartPlan)) throw new Error("AI_WRAPPER_PROVENANCE_MISMATCH");
     if (result.messageIdentity !== input.messageId || result.source !== "AI" ||
         (result.recoveryShopHeader !== undefined && !hasPreparedRecoveryShopHeader(result.body, result.recoveryShopHeader)) ||
-        result.applicationKey !== wrapperApplicationKey({conversationId: input.conversationId, messageIdentity: result.messageIdentity, source: result.source, wrapperDefinitionId: result.wrapperDefinitionId, localeId: result.localeId, contentHash: result.contentHash, editVersion: result.slotEditVersion, responseDigest: result.responseDigest, body: result.body, ...(result.commonLayout?{commonLayout:result.commonLayout}:{}), ...(result.multipartPlan?{multipartPlan:result.multipartPlan}:{}), recoveryCheckoutUrl: result.recoveryCheckoutUrl, recoveryShopHeader: result.recoveryShopHeader, deliveryPlan: result.deliveryPlan})) {
+        result.applicationKey !== wrapperApplicationKey({conversationId: input.conversationId, messageIdentity: result.messageIdentity, source: result.source, wrapperDefinitionId: result.wrapperDefinitionId, localeId: result.localeId, contentHash: result.contentHash, editVersion: result.slotEditVersion, responseDigest: result.responseDigest, body: result.body, ...(result.commonLayout?{commonLayout:result.commonLayout}:{}), ...(result.multipartPlan?{multipartPlan:result.multipartPlan}:{}), ...(result.compositeReceipt?{compositeReceipt:result.compositeReceipt}:{}), recoveryCheckoutUrl: result.recoveryCheckoutUrl, recoveryShopHeader: result.recoveryShopHeader, deliveryPlan: result.deliveryPlan})) {
       throw new Error("AI_WRAPPER_PROVENANCE_MISMATCH");
     }
     return {
       kind: "ready",
       text: result.body,
       ...(result.commonLayout?{commonLayout:result.commonLayout,multipartPlan:result.multipartPlan}:{}),
+      ...(result.compositeReceipt?{compositeReceipt:result.compositeReceipt}:{}),
       ...(result.recoveryShopHeader ? {recoveryShopHeader: result.recoveryShopHeader} : {}),
       ...(result.brandMediaPolicy ? {brandMediaPolicy:result.brandMediaPolicy} : {}), ...(result.deliveryPlan ? {deliveryPlan: result.deliveryPlan} : {}),
       ...(result.presentedPairs ? { presentedPairs: result.presentedPairs } : {}),
