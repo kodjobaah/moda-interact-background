@@ -65,6 +65,65 @@ const answer = (details: Record<string, unknown>) => f.final({ answerKind: "ANSW
   replyText: "Our current catalogue has the blue linen shirt.", details });
 export function registerSelectionSemanticsTests() {
   describe("published runner to host selection semantics", () => {
+    it("guides catalogue facts to exact detail selections on the ordinary final call without granting promotions", async () => {
+      configure();
+      f.active.responseContract.detailsSchema.properties!.productDetailSelections = { type: "array", maxItems: 3, items: { type: "object", properties: {
+        productId: { type: "string", maxLength: 128 }, variantId: { type: ["string", "null"], maxLength: 128 },
+      }, required: ["productId", "variantId"], additionalProperties: false } };
+      f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
+      const final = answer({ productDetailSelections: [pair] }); const original = structuredClone(final);
+      let calls = 0;
+      await f.run(async request => {
+        calls++;
+        expect(request.instructions.join("\n")).toContain("Category, catalogue and availability questions");
+        expect(request.instructions.join("\n")).toContain("Do not create productRecommendations merely to enumerate");
+        if (calls === 1) return { calls: [{ id: "read-category-facts", name: "commerce_get_product", arguments: pair }], outputTokens: 20 };
+        expect(request.requiredToolName).toBeUndefined();
+        return final;
+      });
+      expect(calls).toBe(2);
+      // One model-requested read plus the existing independent final product verification.
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2); expect(final).toEqual(original);
+    });
+    it("forwards nested product selection constraints, strict and ordinary/forced choice through the actual SDK HTTP serializer", async () => {
+      configure();
+      f.active.responseContract.detailsSchema.properties!.productDetailSelections = { type: "array", maxItems: 3, items: { type: "object", properties: {
+        productId: { type: "string", maxLength: 128 }, variantId: { type: ["string", "null"], maxLength: 128 },
+      }, required: ["productId", "variantId"], additionalProperties: false } };
+      f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
+      const mock = new f.LLMock({ port: 0 }); await mock.start();
+      try {
+        const url = new URL(mock.url); expect(["localhost", "127.0.0.1", "[::1]"]).toContain(url.hostname);
+        f.aiMockRoute.baseURL = `${url.origin}/v1`; f.aiMockRoute.constructions.length = 0;
+        const hasResult = (messages: readonly { content: unknown }[]) => messages.some(message => typeof message.content === "string" && message.content.includes("Trusted commerce Tool result JSON"));
+        mock.on({ model: "moda/test-only", predicate: request => !hasResult(request.messages) }, { toolCalls: [{ name: "commerce_get_product", arguments: pair }] });
+        const empty = answer({}).calls[0]!.arguments;
+        mock.on({ model: "moda/test-only", predicate: request => hasResult(request.messages) }, { toolCalls: [{ name: "finalResponse", arguments: empty }] });
+        const model = new f.OpenRouterModelClient({ provider: "moda", providerModelId: "test-only", configurationSchemaVersion: 1, configuration: {}, credential: "test-only-no-provider-key" });
+        expect(f.aiMockRoute.constructions).toEqual([{ model: "moda/test-only", baseURL: `${url.origin}/v1` }]);
+        const inputs: import("@modainteract/moda-interact-shared/commerce/runner").ModelRequest[] = [];
+        const steps: import("@modainteract/moda-interact-shared/commerce/runner").ModelStep[] = [];
+        await expect(f.run(async (request, signal) => { inputs.push(request); const step = await model.invoke(request, signal); steps.push(step); return step; }))
+          .rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false, diagnostic: { runnerDiagnostic: { reasonCode: "FINAL_PRODUCT_SELECTION_MISSING" } } });
+        const requests = mock.getRequests().filter(request => request.method === "POST" && request.path.endsWith("/chat/completions"));
+        expect(requests).toHaveLength(3);
+        for (let index = 0; index < requests.length; index++) {
+          const body = requests[index]!.body as { tools: { function: { name: string; description: string; parameters: Record<string, unknown>; strict: boolean } }[]; tool_choice: unknown; max_tokens: number };
+          const final = body.tools.find(tool => tool.function.name === "finalResponse")!.function;
+          const expected = inputs[index]!.tools.find(tool => tool.name === "finalResponse")!;
+          expect(final.parameters).toEqual(expected.inputSchema); expect(final.description).toBe(expected.description); expect(final.strict).toBe(true);
+          expect(body.max_tokens).toBe(inputs[index]!.maxOutputTokens);
+          expect(body.tool_choice).toEqual(index === 2 ? { type: "function", function: { name: "finalResponse" } } : "auto");
+          if (index > 0) {
+            const allOf = final.parameters.allOf as { anyOf?: { properties?: { details?: { anyOf: unknown[] } } }[] }[];
+            const constraint = allOf.at(-1)!.anyOf!.find(branch => branch.properties?.details)!.properties!.details!;
+            expect(constraint.anyOf).toContainEqual({ required: ["productDetailSelections"], properties: { productDetailSelections: { type: "array", minItems: 1 } } });
+          }
+        }
+        expect(steps.slice(1).map(step => step.calls[0]!.arguments)).toEqual([empty, empty]);
+        expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+      } finally { f.aiMockRoute.baseURL = null; f.aiMockRoute.constructions.length = 0; await mock.stop(); }
+    });
     it("forces one typed JSON-null correction then verifies two products and the trusted recovery footer", async () => {
       configure();
       const otherPair = { productId: "gid://shopify/Product/102", variantId: "gid://shopify/ProductVariant/102" };

@@ -21,9 +21,24 @@ describe("recovery application structured finalization guidance", () => {
   it.each(["productDetailSelections", "productOptionSelections"])("describes only the pinned supported identity array %s and preserves contract bytes", field => {
     const value = contract(); value.detailsSchema.properties![field] = structuredClone(identityArray);
     const before = structuredClone(value); const result = structuredFinalizationInstructions(value);
-    expect(result).toHaveLength(2); expect(result[1]).toContain(`details.${field}`);
+    expect(result).toHaveLength(field === "productDetailSelections" ? 3 : 2); expect(result[1]).toContain(`details.${field}`);
     expect(result[1]).toContain("exact productId and variantId from authorized observations");
     expect(value).toEqual(before); expect(result.join("\n")).not.toContain("responseDisposition");
+  });
+  it("maps catalogue enumeration to bounded detail identities without recommendation or promotion authority", () => {
+    const value = contract(); value.detailsSchema.properties!.productDetailSelections = structuredClone(identityArray);
+    value.detailsSchema.properties!.productDetailSelections.maxItems = 2;
+    const instructions = structuredFinalizationInstructions(value).join("\n");
+    expect(instructions).toContain("at most 2 relevant observed product/variant pairs");
+    expect(instructions).toContain('"productDetailSelections":[{"productId":<exact observed productId>');
+    expect(instructions).toContain("Do not create productRecommendations merely to enumerate");
+    expect(instructions).toContain("never fabricate a selection");
+    expect(instructions).toContain("shipping limitations and required referral reasons");
+  });
+  it("does not give the concrete category recipe for custom required item fields", () => {
+    const value = contract(); value.detailsSchema.properties!.productDetailSelections = structuredClone(identityArray);
+    value.detailsSchema.properties!.productDetailSelections.items!.required!.push("customRequired");
+    expect(structuredFinalizationInstructions(value).join("\n")).not.toContain("Category, catalogue");
   });
   it.each([{}, { type: "string" }, { ...identityArray, maxItems: 0 }, { ...identityArray, items: { type: "object", properties: { productId: { type: "integer" }, variantId: { type: "string" } } } }])("does not advertise unsupported/custom identity fields %s", schema => {
     const value = contract(); value.detailsSchema.properties = { productDetailSelections: schema as typeof identityArray };
