@@ -27,7 +27,7 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
-export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string; deliveryPlan?: ConversationMediaDeliveryPlan }
+export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").ConversationCompositeMediaDeliveryPlan }
   | { kind: "suppressed"; reason: string };
 export type RecoveryMarketingPermit = {
   consent: StoredRecoveryConsentSnapshot | null;

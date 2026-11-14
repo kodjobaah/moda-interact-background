@@ -29,7 +29,7 @@ export type FrozenHumanBody = { kind: "frozen"; body: string; evidence: Prepared
 type FrozenRow = {
   kind: string; conversationId: string; textBody: string | null;
   preparedTextBody: string | null; preparedWrapperEvidence: unknown; preparedAt: Date | null;
-  expectedControlRevision?: number; preparedInboundVersion?: number | null;
+  leaseExpiresAt?: Date; expectedControlRevision?: number; preparedInboundVersion?: number | null;
 };
 
 /** Never silently interpret an absent/partial prepared command as raw merchant text. */
@@ -97,7 +97,7 @@ export class HumanPreparedCommandService {
     const receipt: BrandPreparationReceipt | undefined = Number.isSafeInteger(current.expectedControlRevision) && Number.isSafeInteger(current.preparedInboundVersion)
       ? {sourceKind: "HUMAN_COMMAND", sourceId: command.id, shopId: command.shopId, conversationId: command.conversationId,
           inboundVersion: current.preparedInboundVersion!, controlRevision: current.expectedControlRevision!, firstPair: null} : undefined;
-    const result = await this.preparer.prepare({...command, ...(receipt ? {mediaReceipt: receipt} : {})});
+    const result = await this.preparer.prepare({...command, mediaDeadlineAt:current.leaseExpiresAt?.getTime()??0, ...(receipt ? {mediaReceipt: receipt} : {})});
     if (result.kind === "refused") return { kind: "refused", reason: result.reason.toLowerCase() };
     if (result.kind === "not-applicable") return { kind: "refused", reason: "not_human_text" };
     if (result.kind === "prepared" && result.application.audience === "AI") {
@@ -108,7 +108,7 @@ export class HumanPreparedCommandService {
     const policy = result.kind === "passthrough" ? result.brandMediaPolicy : result.application.brandMediaPolicy;
     if(plan?.kind === "BRAND_IMAGE" && !policy) return {kind:"refused",reason:"prepared_invalid"};
     const common=result.kind==="prepared"?result.application.commonLayout:undefined;
-    const multipartPreparation=common&&receipt&&result.kind==="prepared"&&result.application.multipartPlan?readCommonMultipartPreparation({plan:result.application.multipartPlan,policyRef:result.application.brandMediaPolicy??null,receipt},common):null;
+    const multipartPreparation=common&&receipt&&result.kind==="prepared"&&result.application.multipartPlan?readCommonMultipartPreparation({plan:result.application.multipartPlan,policyRef:result.application.brandMediaPolicy??null,receipt,...(result.application.compositeReceipt?{compositeReceipt:result.application.compositeReceipt}:{})},common):null;
     if(common&&!multipartPreparation)return {kind:"refused",reason:"prepared_invalid"};
     const multipart=multipartPreparation?{multipartPreparation}:{};
     const media = plan?.kind === "BRAND_IMAGE" && receipt ? {mediaPreparation: freezeBrandMedia(plan, receipt, (result.kind === "passthrough" ? result.recoveryShopHeader : result.application.recoveryShopHeader)!, policy!)} : {};
@@ -160,7 +160,7 @@ export class HumanPreparedCommandService {
   private read(commandId: string, leaseToken: string) {
     return first<FrozenRow>(this.database, `
       SELECT "kind"::text,"conversationId","textBody","preparedTextBody",
-        "preparedWrapperEvidence","preparedAt","expectedControlRevision",
+        "preparedWrapperEvidence","preparedAt","expectedControlRevision","leaseExpiresAt",
         (SELECT c."inboundVersion" FROM "whatsapp"."Conversation" c
           WHERE c."id"=cmd."conversationId" AND c."controlRevision"=cmd."expectedControlRevision" AND c."controlMode"='HUMAN') AS "preparedInboundVersion"
       FROM "whatsapp"."MerchantConversationSendCommand" cmd
@@ -176,7 +176,7 @@ export function readFrozenHumanBody(row: FrozenRow, original: string | null, com
       return { kind: "refused", reason: "prepared_invalid" };
     }
     if(evidence.multipartPreparation && (evidence.multipartPreparation.receipt.sourceId!==commandId||evidence.multipartPreparation.receipt.shopId!==shopId||evidence.multipartPreparation.receipt.conversationId!==row.conversationId))return {kind:"refused",reason:"prepared_invalid"};
-    if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader})))return {kind:"refused",reason:"prepared_invalid"};
+    if(evidence.recoveryShopHeader?.schemaVersion===2 && (evidence.outcome!=="RENDERED" || evidence.recoveryShopHeader.shopId!==shopId || evidence.recoveryShopHeader.boundaries.body!==original || typeof original!=="string" || evidence.applicationKey!==humanCommonLayoutApplicationKey({commandId,conversationId:row.conversationId,shopId,slotEditVersion:evidence.slotEditVersion,textBody:original,body:row.preparedTextBody!,receipt:evidence.recoveryShopHeader,...(evidence.multipartPreparation?.compositeReceipt?{composite:{plan:evidence.multipartPreparation.plan,receipt:evidence.multipartPreparation.compositeReceipt,policyRef:evidence.multipartPreparation.policyRef}}:{})})))return {kind:"refused",reason:"prepared_invalid"};
     if(evidence.outcome==='RENDERED'&&evidence.recoveryShopHeader?.schemaVersion!==2&&
       (typeof original!=='string'||!row.preparedTextBody!.includes(original)||evidence.applicationKey!==wrapperApplicationKey({conversationId:row.conversationId,messageIdentity:commandId,source:'HUMAN',wrapperDefinitionId:evidence.wrapperDefinitionId,localeId:evidence.localeId,contentHash:evidence.contentHash,editVersion:evidence.slotEditVersion,responseDigest:digest(original),body:row.preparedTextBody!,recoveryCheckoutUrl:evidence.recoveryCheckoutUrl,recoveryShopHeader:evidence.recoveryShopHeader,deliveryPlan:evidence.mediaPreparation?.plan})))return {kind:'refused',reason:'prepared_invalid'};
     return { kind: "frozen", body: row.preparedTextBody!, evidence };
@@ -192,7 +192,7 @@ export async function currentHumanWrapperMatches(
   if (!evidence) return false;
   if(evidence.recoveryShopHeader?.schemaVersion===2){
     const common=evidence.recoveryShopHeader;
-    return Boolean(command?.shopId && typeof command.textBody==="string" && common.boundaries.body===command.textBody && evidence.outcome==="RENDERED" && evidence.audience==="SHARED" && evidence.applicationKey===humanCommonLayoutApplicationKey({commandId:command.commandId,conversationId:command.conversationId,shopId:command.shopId,slotEditVersion:evidence.slotEditVersion,textBody:command.textBody,body:body!,receipt:common}) && await currentCommonLayoutMatches(tx,common,body!,{shopId:command.shopId,conversationId:command.conversationId,slotEditVersion:evidence.slotEditVersion}));
+    return Boolean(command?.shopId && typeof command.textBody==="string" && common.boundaries.body===command.textBody && evidence.outcome==="RENDERED" && evidence.audience==="SHARED" && evidence.applicationKey===humanCommonLayoutApplicationKey({commandId:command.commandId,conversationId:command.conversationId,shopId:command.shopId,slotEditVersion:evidence.slotEditVersion,textBody:command.textBody,body:body!,receipt:common,...(evidence.multipartPreparation?.compositeReceipt?{composite:{plan:evidence.multipartPreparation.plan,receipt:evidence.multipartPreparation.compositeReceipt,policyRef:evidence.multipartPreparation.policyRef}}:{})}) && await currentCommonLayoutMatches(tx,common,body!,{shopId:command.shopId,conversationId:command.conversationId,slotEditVersion:evidence.slotEditVersion}));
   }
   if (evidence.recoveryShopHeader && (!command?.shopId || !(await currentRecoveryShopHeaderMatches(tx, evidence.recoveryShopHeader, body, command.shopId)))) return false;
   // Share-lock the active slot and definition until the provider permit commits.

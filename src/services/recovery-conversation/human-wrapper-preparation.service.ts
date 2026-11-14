@@ -20,6 +20,7 @@ export type HumanWrapperCommand = Readonly<{
   conversationId: string;
   kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
   textBody: string | null;
+  mediaDeadlineAt?: number;
   mediaReceipt?: BrandPreparationReceipt;
 }>;
 
@@ -53,6 +54,7 @@ export class HumanWrapperPreparationService {
         source: "HUMAN",
         messageIdentity: command.id,
         responseBody: command.textBody,
+        ...(command.mediaDeadlineAt!==undefined?{mediaDeadlineAt:command.mediaDeadlineAt}:{}),
         ...(command.mediaReceipt ? {allowBrandImage: true} : {}),
       });
       if (rendered.kind === "no-wrapper" || rendered.kind === "rendered") {

@@ -1,10 +1,11 @@
+import { compositeTrustedContext, readCompositeReceipt, type CompositeReceipt } from './composite.js';
 import { exactCommonDecomposition } from './common-decomposition.js';
 import { readRecoveryLayoutReceipt,commonLayoutBody,type RecoveryLayoutReceipt } from './common-layout.js';
 import { createHash } from 'node:crypto';
 import { CommerceConversationProductContextSchema,type CommerceConversationProductContext } from '@modainteract/moda-interact-shared/commerce';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
-import { parseRecoveryMultipartDeliveryPlan, digestRecoveryMultipartDeliveryPlan,
-  type RecoveryMultipartDeliveryPlan } from '@modainteract/moda-interact-shared/commerce/presentation';
+import { parseRecoveryCompositeMultipartDeliveryPlan, digestRecoveryCompositeMultipartDeliveryPlan,
+  type RecoveryCompositeMultipartDeliveryPlan } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { readBrandPreparationReceipt, type BrandPreparationReceipt, validConversationPlan, asMessageDeliveryReceipt } from '../conversation-delivery-plan.js';
 import { hasPreparedRecoveryShopHeader, recoveryShopHeaderPrefix, withRecoveryShopHeader } from '../conversation-wrappers/recovery-shop-header.js';
 import { validRecoveryCheckoutFooterUrl, hasPreparedRecoveryCheckoutFooter, RECOVERY_CHECKOUT_SEPARATOR, withHumanRecoveryCheckoutFooter } from '../conversation-wrappers/recovery-checkout-footer.js';
@@ -20,20 +21,21 @@ export function deliveryDeadline(now: Date, seconds = MULTIPART_DEADLINE_SECONDS
   return new Date(now.getTime() + seconds * 1000);
 }
 export type FrozenMultipart = Readonly<{
+  compositeReceipt?: CompositeReceipt;
   productContextUpdate?: CommerceConversationProductContext;
   schemaVersion: 1; kind: 'RECOVERY_MULTIPART_PREPARATION'; messageId: string; body: string;
   checkoutUrl: string; recipient: string; recoveryId: string; actor: 'AGENT'|'HUMAN';
   receipt: BrandPreparationReceipt; recoveryShopHeader: RecoveryLayoutReceipt;
   policyRef: BrandMediaPolicyRef|null; command: {id: string; leaseToken: string}|null;
   sender: {providerAccountId: string; providerPhoneNumberId: string};
-  plan: RecoveryMultipartDeliveryPlan; planDigest: string; frozenAt: string; deadlineAt: string;
+  plan: RecoveryCompositeMultipartDeliveryPlan; planDigest: string; frozenAt: string; deadlineAt: string;
 }>;
 const object = (v: unknown): v is Record<string,unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const identifier = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
 const exact = (v: Record<string,unknown>, keys: string[]) => Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v,k));
 /** Private immutable server receipt, never accepted from model/queue payload. */
 export function readFrozenMultipart(raw: unknown): FrozenMultipart|null {
-  if (!object(raw) || !exact(raw,['schemaVersion','kind','messageId','body','checkoutUrl','recipient','recoveryId','actor','receipt','recoveryShopHeader','policyRef','command','sender','plan','planDigest','frozenAt','deadlineAt',...(raw.productContextUpdate===undefined?[]:['productContextUpdate'])]) || raw.schemaVersion !== 1 || raw.kind !== 'RECOVERY_MULTIPART_PREPARATION' ||
+  if (!object(raw) || !exact(raw,['schemaVersion','kind','messageId','body','checkoutUrl','recipient','recoveryId','actor','receipt','recoveryShopHeader','policyRef','command','sender','plan','planDigest','frozenAt','deadlineAt',...(raw.productContextUpdate===undefined?[]:['productContextUpdate']),...(raw.compositeReceipt===undefined?[]:['compositeReceipt'])]) || raw.schemaVersion !== 1 || raw.kind !== 'RECOVERY_MULTIPART_PREPARATION' ||
       !identifier(raw.messageId) || !identifier(raw.recoveryId) || typeof raw.body !== 'string' || !raw.body.trim() || Array.from(raw.body).length > 4096 ||
       !validRecoveryCheckoutFooterUrl(raw.checkoutUrl) || typeof raw.recipient !== 'string' || !/^[1-9][0-9]{6,14}$/.test(raw.recipient) || (raw.actor !== 'AGENT' && raw.actor !== 'HUMAN')) return null;
   if(raw.productContextUpdate!==undefined && (raw.actor!=='AGENT'||!CommerceConversationProductContextSchema.safeParse(raw.productContextUpdate).success))return null;
@@ -47,12 +49,16 @@ export function readFrozenMultipart(raw: unknown): FrozenMultipart|null {
   const frozenAt = typeof raw.frozenAt === 'string' ? Date.parse(raw.frozenAt) : NaN;
   const deadlineAt = typeof raw.deadlineAt === 'string' ? Date.parse(raw.deadlineAt) : NaN;
   if (!Number.isFinite(frozenAt) || !Number.isFinite(deadlineAt) || deadlineAt-frozenAt < 30_000 || deadlineAt-frozenAt > 300_000) return null;
-  let plan: RecoveryMultipartDeliveryPlan;
-  try { plan = parseRecoveryMultipartDeliveryPlan(raw.plan,raw.checkoutUrl); } catch { return null; }
-  if (raw.planDigest !== digestRecoveryMultipartDeliveryPlan(plan,sha256)) return null;
-  const messageReceipt = asMessageDeliveryReceipt(receipt) ?? {...receipt,messageId:raw.messageId};
+  const compositeReceipt=raw.compositeReceipt===undefined?undefined:readCompositeReceipt(raw.compositeReceipt);
+  const trusted=compositeReceipt&&header.schemaVersion===2?compositeTrustedContext(compositeReceipt,header,policy,receipt.firstPair):null;
+  if(raw.compositeReceipt!==undefined&&(!compositeReceipt||!trusted))return null;
+  let plan: RecoveryCompositeMultipartDeliveryPlan;
+  try { plan = parseRecoveryCompositeMultipartDeliveryPlan(raw.plan,{checkoutUrl:raw.checkoutUrl,composite:trusted},sha256); } catch { return null; }
+  if (raw.planDigest !== digestRecoveryCompositeMultipartDeliveryPlan(plan,sha256)) return null;
+if(!!compositeReceipt!==plan.parts.some(p=>p.plan.kind==='COMPOSITE_IMAGE'))return null;
+   const messageReceipt = asMessageDeliveryReceipt(receipt) ?? {...receipt,messageId:raw.messageId};
   for (const part of plan.parts) {
-    if (!validConversationPlan(part.plan,part.plan.body,receipt.shopId,messageReceipt)) return null;
+    if (part.plan.kind==='COMPOSITE_IMAGE'?!trusted:!validConversationPlan(part.plan,part.plan.body,receipt.shopId,messageReceipt)) return null;
     if (part.plan.kind === 'BRAND_IMAGE' && (!policy || policy.publicOrigin !== part.plan.image.publicOrigin)) return null;
   }
   // Exact canonical boundary decomposition: no substring/prose heuristics.
