@@ -181,11 +181,13 @@ it("preserves invalid original provider arguments through native schema repair w
     calls++;
     if (calls === 1) return original;
     expect(calls).toBe(2);
-    expect(request.requiredToolName).toBe("finalResponse");
+    expect(request.requiredToolName).toBeUndefined(); expect(request.requireToolCall).toBe(true);
     const assistant = request.toolTranscript?.find(row => row.role === "assistant");
     expect(assistant && assistant.role === "assistant" ? assistant.calls[0]?.arguments : null).toEqual(snapshot.calls[0]!.arguments);
-    return { ...f.final({ answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} }),
-      calls: [{ ...f.final().calls[0]!, id: "corrected-final", arguments: { ...f.exampleFinal, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} } }] };
+    return { calls: [{ id: "corrected-final", name: "recovery_complete_referral", arguments: {
+      replyText: f.exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null,
+      referralReason: "UNVERIFIABLE_FACTS",
+    } }], outputTokens: 1 };
   });
   expect(calls).toBe(2); expect(original).toEqual(snapshot);
 });

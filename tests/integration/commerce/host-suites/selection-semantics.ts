@@ -63,6 +63,12 @@ function configure() {
 }
 const answer = (details: Record<string, unknown>) => f.final({ answerKind: "ANSWER", referralReason: null,
   replyText: "Our current catalogue has the blue linen shirt.", details });
+const flatRecommendation = (selected: unknown[], replyText = "Our current catalogue has verified products.") => ({
+  calls: [{ id: "flat-provider-final", name: "recovery_complete_recommendations", arguments: {
+    replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [],
+    productRecommendationVersion: "1", productRecommendations: selected,
+  } }], outputTokens: 1,
+});
 export function registerSelectionSemanticsTests() {
   describe("published runner to host selection semantics", () => {
     it.each(["missing", "duplicate"])("refuses raw native provider %s call IDs before any tool dispatch", async mode => {
@@ -75,6 +81,33 @@ export function registerSelectionSemanticsTests() {
         code: "INVALID_FINAL", diagnostic: { runnerDiagnostic: { reasonCode: "MODEL_TOOL_CALL_ID_INVALID" } },
       });
       expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(0);
+    });
+    it.each(["empty", "foreign", "multi", "nonproduct"])("rejects terminal %s completion without another model or read", async mode => {
+      configure(); let calls = 0;
+      const args = { replyText: "Current product facts.", detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [],
+        productDetailSelections: mode === "empty" ? [] : [{ ...pair, ...(mode === "foreign" ? { productId: "foreign-product" } : {}) }] };
+      const raw = { calls: [{ id: "raw-terminal-1", name: mode === "nonproduct" ? "recovery_complete_answer" : "recovery_complete_details",
+        arguments: mode === "nonproduct" ? { replyText: args.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] } : args }], outputTokens: 1 };
+      if (mode === "multi") raw.calls.push({ ...raw.calls[0]!, id: "raw-terminal-2" });
+      const before = structuredClone(raw);
+      await expect(f.run(async request => {
+        calls++; if (calls > 3) throw new Error("Terminal invalid decision must not retry");
+        if (calls === 1) return { calls: [{ id: "read-before-terminal", name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Product facts without selections.", outputTokens: 1 };
+        expect(request.requireToolCall).toBe(true); return raw;
+      })).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
+      expect(calls).toBe(3); expect(raw).toEqual(before);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+    });
+    it("refuses stale current-turn state after flat completion before final reads or delivery", async () => {
+      configure(); let calls = 0;
+      await expect(f.run(async () => {
+        calls++; if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Product facts.", outputTokens: 1 };
+        f.state.inboundVersion = 2;
+        return flatRecommendation([recommendation]);
+      })).rejects.toMatchObject({ code: "STALE_TURN" });
+      expect(calls).toBe(3); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
     });
     it("guides catalogue facts to exact detail selections on the ordinary final call without granting promotions", async () => {
       configure();
@@ -113,30 +146,41 @@ export function registerSelectionSemanticsTests() {
         const hasResult = (messages: readonly { content: unknown }[]) => messages.some(message => typeof message.content === "string" && message.content.includes("Trusted commerce Tool result JSON"));
         mock.on({ model: "moda/test-only", predicate: request => !hasResult(request.messages) }, { toolCalls: [{ name: "commerce_get_product", arguments: pair }] });
         const empty = answer({}).calls[0]!.arguments;
-        mock.on({ model: "moda/test-only", predicate: request => hasResult(request.messages) }, { toolCalls: [{ name: "finalResponse", arguments: empty }] });
+        const isTerminal = (request: { tools?: Array<{ function?: { name?: string } }> }) => request.tools?.some(tool => tool.function?.name === "recovery_complete_details") === true;
+        mock.on({ model: "moda/test-only", predicate: request => hasResult(request.messages) && !isTerminal(request) }, { toolCalls: [{ name: "finalResponse", arguments: empty }] });
+        const flat = { replyText: "The verified product is available.", detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [], productDetailSelections: [pair] };
+        mock.on({ model: "moda/test-only", predicate: request => isTerminal(request) }, { toolCalls: [{ name: "recovery_complete_details", arguments: flat }] });
         const model = new f.OpenRouterModelClient({ provider: "moda", providerModelId: "test-only", configurationSchemaVersion: 1, configuration: {}, credential: "test-only-no-provider-key" });
         expect(f.aiMockRoute.constructions).toEqual([{ model: "moda/test-only", baseURL: `${url.origin}/v1` }]);
         const inputs: import("@modainteract/moda-interact-shared/commerce/runner").ModelRequest[] = [];
         const steps: import("@modainteract/moda-interact-shared/commerce/runner").ModelStep[] = [];
-        await expect(f.run(async (request, signal) => { inputs.push(request); const step = await model.invoke(request, signal); steps.push(step); return step; }))
-          .rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false, diagnostic: { runnerDiagnostic: { reasonCode: "FINAL_PRODUCT_SELECTION_MISSING" } } });
+        const result = await f.run(async (request, signal) => { inputs.push(request); const step = await model.invoke(request, signal); steps.push(step); return step; });
+        expect(result.commercePresentation!.envelope.details).toMatchObject({ productDetailSelections: [pair] });
+        expect(result.commercePresentation!.verified.productFacts).toHaveLength(1);
         const requests = mock.getRequests().filter(request => request.method === "POST" && request.path.endsWith("/chat/completions"));
         expect(requests).toHaveLength(3);
         for (let index = 0; index < requests.length; index++) {
           const body = requests[index]!.body as { tools: { function: { name: string; description: string; parameters: Record<string, unknown>; strict: boolean } }[]; tool_choice: unknown; max_tokens: number };
-          const final = body.tools.find(tool => tool.function.name === "finalResponse")!.function;
-          const expected = inputs[index]!.tools.find(tool => tool.name === "finalResponse")!;
+          const name = index === 2 ? "recovery_complete_details" : "finalResponse";
+          const final = body.tools.find(tool => tool.function.name === name)!.function;
+          const expected = inputs[index]!.tools.find(tool => tool.name === name)!;
           expect(final.parameters).toEqual(expected.inputSchema); expect(final.description).toBe(expected.description); expect(final.strict).toBe(true);
           expect(body.max_tokens).toBe(inputs[index]!.maxOutputTokens);
-          expect(body.tool_choice).toEqual(index === 2 ? { type: "function", function: { name: "finalResponse" } } : "auto");
-          if (index > 0) {
+          expect(body.tool_choice).toEqual(index === 2 ? "required" : "auto");
+          if (index === 2) {
+            expect(final.parameters).not.toHaveProperty("allOf");
+            expect(final.parameters).toMatchObject({ type: "object", properties: { productDetailSelections: { type: "array", minItems: 1 } } });
+          }
+          if (index === 1) {
             const allOf = final.parameters.allOf as { anyOf?: { properties?: { details?: { anyOf: unknown[] } } }[] }[];
             const constraint = allOf.at(-1)!.anyOf!.find(branch => branch.properties?.details)!.properties!.details!;
             expect(constraint.anyOf).toContainEqual({ required: ["productDetailSelections"], properties: { productDetailSelections: { type: "array", minItems: 1 } } });
           }
         }
-        expect(steps.slice(1).map(step => step.calls[0]!.arguments)).toEqual([empty, empty]);
-        expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+        expect(steps.slice(1).map(step => step.calls[0]!.arguments)).toEqual([empty, flat]);
+        expect(steps[2]!.calls[0]!.name).toBe("recovery_complete_details");
+        expect(steps[2]!.calls[0]!.id).toBeTruthy();
+        expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2);
       } finally { f.aiMockRoute.baseURL = null; f.aiMockRoute.constructions.length = 0; await mock.stop(); }
     });
     it("forces one typed JSON-null correction then verifies two products and the trusted recovery footer", async () => {
@@ -149,14 +193,9 @@ export function registerSelectionSemanticsTests() {
         calls++;
         if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }, { name: "commerce_get_product", arguments: otherPair }], outputTokens: 1 };
         if (calls === 2) return { calls: [], text: "We offer blue and green linen shirts.", outputTokens: 1 };
-        expect(calls).toBe(3); expect(request.requiredToolName).toBe("finalResponse");
-        expect(request.tools.map(tool => tool.name)).toEqual(["finalResponse"]);
-        expect(request.tools[0]!.inputSchema).toMatchObject({ properties: { referralReason: { type: ["string", "null"] } } });
-        expect(request.instructions.join("\n")).toContain("JSON null");
-        const correction = answer({ productRecommendationVersion: "1", productRecommendations: [recommendation, { ...recommendation, ...otherPair }] });
-        correction.calls[0]!.arguments.replyText = "We offer Blue linen shirt and Green linen shirt.";
-        expect(correction.calls[0]!.arguments.referralReason).toBeNull();
-        return correction;
+        expect(calls).toBe(3); expect(request.requiredToolName).toBeUndefined(); expect(request.requireToolCall).toBe(true);
+        expect(request.tools.map(tool => tool.name)).toContain("recovery_complete_recommendations"); expect(request.tools.map(tool => tool.name)).not.toContain("recovery_complete_answer");
+        return flatRecommendation([recommendation, { ...recommendation, ...otherPair }], "We offer Blue linen shirt and Green linen shirt.");
       });
       expect(calls).toBe(3); expect(result.referralReason).toBeNull();
       expect(result.commercePresentation!.verified.products).toHaveLength(2);
@@ -179,7 +218,7 @@ export function registerSelectionSemanticsTests() {
         calls++;
         if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
         if (calls === 2) return { calls: [], text: "We offer a linen shirt.", outputTokens: 1 };
-        expect(calls).toBe(3); expect(request.requiredToolName).toBe("finalResponse");
+        expect(calls).toBe(3); expect(request.requiredToolName).toBeUndefined(); expect(request.requireToolCall).toBe(true);
         const correction = answer({ productRecommendationVersion: "1", productRecommendations: [recommendation] });
         if (reason === "missing") delete correction.calls[0]!.arguments.referralReason;
         else correction.calls[0]!.arguments.referralReason = reason === "literal-null" ? "null" : "UNVERIFIABLE_FACTS";
@@ -245,9 +284,9 @@ export function registerSelectionSemanticsTests() {
         if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
         if (calls === 2) return answer(mode === "missing version" ? { responseDisposition: "STANDARD", productRecommendations: [recommendation] } :
           mode === "unobserved shipping" ? { shippingInformationSelection: generic } : { responseDisposition: "SHIPPING_INFORMATION_UNVERIFIED" });
-        expect(calls).toBe(3); expect(request.requiredToolName).toBe("finalResponse");
-        expect(request.tools.map(tool => tool.name)).toEqual(["finalResponse"]);
-        return answer({ productRecommendationVersion: "1", productRecommendations: [recommendation] });
+        expect(calls).toBe(3); expect(request.requiredToolName).toBeUndefined(); expect(request.requireToolCall).toBe(true);
+        expect(request.tools.map(tool => tool.name)).toContain("recovery_complete_recommendations"); expect(request.tools.map(tool => tool.name)).not.toContain("recovery_complete_answer");
+        return flatRecommendation([recommendation]);
       });
       expect(calls).toBe(3); expect(result.commercePresentation!.verified.products).toHaveLength(1);
       expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2);

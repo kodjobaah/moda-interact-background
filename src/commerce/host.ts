@@ -1,3 +1,4 @@
+import { makeRecoveryTerminalFinalizer } from "./recovery-terminal-finalizer.js";
 import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
 import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
 import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
@@ -435,6 +436,8 @@ async function execute(
     const finalizationInstructions = structuredFinalizationInstructions(verifyResponseContract(
       manifest.responseContract, manifest.responseContractHash, digest,
     ));
+    const terminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
+      responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider });
     const result = await runCommerceTurn({
       toolProtocol: "native",
       turn,
@@ -469,6 +472,7 @@ async function execute(
       language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
       budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens, remoteCalls: planCommerceVerificationBudget(10).discoveryCalls },
       dependencies: {
+        ...(terminalFinalizer ? { finalizeTerminal: terminalFinalizer } : {}),
         model: {
           invoke: async (request, modelSignal) => preserveRunnerFailure(async () => {
             logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "turn_state_check");
@@ -480,7 +484,7 @@ async function execute(
               logger, modelBridgeIdentifiers, "production_model_invoke",
               () => deps.model.invoke(request, modelSignal),
             );
-            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse", manifest.responseContractHash);
+            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse" || request.requireToolCall === true, manifest.responseContractHash);
             return observeCommerceModelBridgePhase(
               logger, modelBridgeIdentifiers, "response_postprocess", async () => {
                 if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
