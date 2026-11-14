@@ -130,11 +130,13 @@ it.each(["unknown", "expired"])(
       };
     }
     let modelCalls = 0;
-    const originalFinal = f.final({ answerKind: "ANSWER", referralReason: null, evidenceIds: [evidenceId] });
+    const originalFinal = { calls: [{ id: "raw-evidence-final", name: "recovery_complete_answer", arguments: {
+      replyText: f.exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [evidenceId],
+    } }], outputTokens: 1 };
     const originalSnapshot = structuredClone(originalFinal);
     const result = await f.run(async () => {
       modelCalls++;
-      if (modelCalls > (kind === "expired" ? 2 : 1)) throw new Error("Referral rewrite must be terminal; never re-present modified provider arguments");
+      if (modelCalls > (kind === "expired" ? 3 : 2)) throw new Error("Referral rewrite must be terminal; never re-present modified provider arguments");
       if (kind === "expired" && step++ === 0)
         return {
           calls: [
@@ -145,9 +147,10 @@ it.each(["unknown", "expired"])(
           ],
           outputTokens: 10,
         };
+      if (modelCalls === (kind === "expired" ? 2 : 1)) return f.final({ replyText: 42, evidenceIds: [] });
       return originalFinal;
     });
-    expect(modelCalls).toBe(kind === "expired" ? 2 : 1);
+    expect(modelCalls).toBe(kind === "expired" ? 3 : 2);
     expect(originalFinal).toEqual(originalSnapshot);
     expect(result).toMatchObject({
       answerKind: "REFER_TO_STORE",

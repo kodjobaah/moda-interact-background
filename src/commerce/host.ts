@@ -437,7 +437,8 @@ async function execute(
       manifest.responseContract, manifest.responseContractHash, digest,
     ));
     const terminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
-      responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider });
+      responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider,
+      hasEligibleEvidence: ids => evidence.hasEligibleEvidence(ids, Date.now()) });
     const result = await runCommerceTurn({
       toolProtocol: "native",
       turn,

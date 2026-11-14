@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { exampleManifest, exampleFinal, responseContractCanonicalJson, hasCommerceAcceptedProductSelection, type SubsetSchema } from "@modainteract/moda-interact-shared/commerce";
+import { exampleManifest, exampleFinal, responseContractCanonicalJson, hasCommerceAcceptedProductSelection, type SubsetSchema, type CommerceResponseContract } from "@modainteract/moda-interact-shared/commerce";
 import type { TerminalDecisionInput } from "@modainteract/moda-interact-shared/commerce/runner";
 import { makeRecoveryTerminalFinalizer } from "../../../src/commerce/recovery-terminal-finalizer.js";
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -16,7 +17,7 @@ const observations = [toolResult("commerce_get_product", { product: observedProd
 const identity: SubsetSchema = { type: "array", maxItems: 3, items: { type: "object", properties: {
   productId: { type: "string", maxLength: 128 }, variantId: { type: ["string", "null"], maxLength: 128 },
 }, required: ["productId", "variantId"], additionalProperties: false } };
-function setup() {
+function setup(hasEligibleEvidence?: (ids: readonly string[]) => boolean) {
   const contract = exampleManifest(digest, true).responseContract;
   contract.detailsSchema = { type: "object", properties: {
     productDetailSelections: structuredClone(identity), productOptionSelections: structuredClone(identity),
@@ -25,7 +26,7 @@ function setup() {
     responseDisposition: { type: "string", enum: ["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED"], maxLength: 64 },
   }, required: [], additionalProperties: false };
   const responseContractHash = digest(responseContractCanonicalJson(contract));
-  const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash, digest, platform: "SHOPIFY" })!;
+  const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash, digest, platform: "SHOPIFY", ...(hasEligibleEvidence ? { hasEligibleEvidence } : {}) })!;
   const common = { replyText: exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] };
   const project = (name: string, args: Record<string, unknown>, requiredReferral: unknown = null, currentObservations: unknown[] = observations) => {
     const call = { id: "actual-provider-id", name, arguments: args };
@@ -122,6 +123,25 @@ describe("application flat terminal finalization", () => {
     expect(reason.type).toBe("string"); expect(reason.enum).not.toContain(null);
     const { evidenceIds: _, ...rest } = common;
     expect(project(descriptor.name, { ...rest, referralReason: null }).kind).toBe("invalid");
+  });
+  it("accepts the exact production pinned schema structure with all canonical dispositions", () => {
+    const contract = JSON.parse(readFileSync(new URL("../../fixtures/commerce/pinned-terminal-response-structure.json", import.meta.url), "utf8")) as CommerceResponseContract;
+    expect(contract.detailsSchema.properties!.responseDisposition!.enum).toEqual(["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED", "PRODUCT_OPTIONS", "PRODUCT_DETAILS"]);
+    const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY" });
+    expect(port).not.toBeNull();
+    expect(port!.terminalTools.map(tool => tool.name)).toContain("recovery_complete_details");
+    const shipping = port!.terminalTools.find(tool => tool.name === "recovery_complete_shipping")!;
+    expect((shipping.inputSchema as SubsetSchema).properties!.responseDisposition!.enum).toEqual(["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED"]);
+  });
+  it("keeps evidence authority explicit and preserves the existing ineligible-evidence referral", () => {
+    const absent = setup(); const args = { ...absent.common, evidenceIds: ["a".repeat(64)] };
+    expect(absent.project("recovery_complete_answer", args).kind).toBe("invalid");
+    const rejected = setup(() => false);
+    expect(rejected.project("recovery_complete_answer", args)).toMatchObject({ kind: "decision", value: { answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} } });
+    const accepted = setup(() => true);
+    expect(accepted.project("recovery_complete_answer", args)).toMatchObject({ kind: "decision", value: { answerKind: "ANSWER", evidenceIds: args.evidenceIds } });
+    const failed = setup(() => { throw new Error("eligibility unavailable"); });
+    expect(failed.project("recovery_complete_answer", args).kind).toBe("invalid");
   });
   it("uses direct bounded root tools and refuses unsupported custom pinned detail shapes", () => {
     const { port, contract } = setup();

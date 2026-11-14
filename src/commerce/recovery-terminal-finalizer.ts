@@ -1,6 +1,6 @@
 import {
   canonicalJson, finalResponseSchema, finalResponseToolSchema, verifyResponseContract,
-  CommerceToolOutputs, readCommerceObservedShippingSelections,
+  CommerceToolOutputs, CommerceResponseDispositionSchema, readCommerceObservedShippingSelections, readCommerceRecommendationSelection,
   type CommerceResponseContract, type Digest, type SubsetSchema,
 } from "@modainteract/moda-interact-shared/commerce";
 import type { TerminalDecisionPort, TerminalDecisionInput, TerminalToolDescriptor } from "@modainteract/moda-interact-shared/commerce/runner";
@@ -26,6 +26,7 @@ function currentProductPairs(observations: TerminalDecisionInput["observations"]
 export function makeRecoveryTerminalFinalizer(input: {
   responseContract: CommerceResponseContract; responseContractHash: string; digest: Digest;
   platform: "SHOPIFY" | "WOOCOMMERCE";
+  hasEligibleEvidence?: (evidenceIds: readonly string[]) => boolean;
 }): TerminalDecisionPort | null {
   const contract = verifyResponseContract(input.responseContract, input.responseContractHash, input.digest);
   const details = contract.detailsSchema;
@@ -46,7 +47,7 @@ export function makeRecoveryTerminalFinalizer(input: {
     if (!details.properties?.productRecommendations || recommendationVersion?.type !== "string" ||
         recommendationVersion.enum?.length !== 1 || recommendationVersion.enum[0] !== "1") return null;
   }
-  const supportedDispositions = new Set(["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED"]);
+  const supportedDispositions = new Set<string>(CommerceResponseDispositionSchema.options);
   const pinnedDisposition = details.properties?.responseDisposition;
   if (pinnedDisposition && (pinnedDisposition.type !== "string" || !pinnedDisposition.enum?.length ||
       pinnedDisposition.enum.some(value => typeof value !== "string" || !supportedDispositions.has(value)))) return null;
@@ -71,6 +72,12 @@ export function makeRecoveryTerminalFinalizer(input: {
       properties[field] = structuredClone(details.properties![field]!);
       if (SELECTIONS.includes(field as typeof SELECTIONS[number]))
         properties[field] = { ...details.properties![field]!, minItems: Math.max(1, details.properties![field]!.minItems ?? 0) };
+    }
+    if (name === "recovery_complete_shipping") {
+      const source = details.properties!.responseDisposition!;
+      const allowed = source.enum?.filter(value => typeof value === "string" && readCommerceRecommendationSelection({ responseDisposition: value })?.responseDisposition === value) ?? [];
+      if (!allowed.length) return;
+      properties.responseDisposition = { ...structuredClone(source), enum: allowed };
     }
     const required = Object.keys(properties);
     const optional = kind === "ANSWER" && fields.some(field => SELECTIONS.includes(field as typeof SELECTIONS[number]))
@@ -149,6 +156,16 @@ export function makeRecoveryTerminalFinalizer(input: {
       if (requiredReferral && (value.answerKind !== "REFER_TO_STORE" || value.referralReason !== requiredReferral)) return invalid();
       const parsed = schema.safeParse(value);
       if (!parsed.success) return invalid();
+      if (parsed.data.answerKind === "ANSWER" && parsed.data.evidenceIds.length > 0) {
+        if (!input.hasEligibleEvidence) return invalid();
+        let eligible: boolean;
+        try { eligible = input.hasEligibleEvidence(parsed.data.evidenceIds); } catch { return invalid(); }
+        if (typeof eligible !== "boolean") return invalid();
+        if (!eligible) {
+          const referral = schema.safeParse({ ...parsed.data, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} });
+          return referral.success ? { kind: "decision", binding, value: referral.data } : invalid();
+        }
+      }
       const observedPairs = new Set(currentProductPairs(observations).map(pair => canonicalJson([pair.productId, pair.variantId])));
       for (const field of SELECTIONS) {
         const selected = selectedDetails[field];
