@@ -1,3 +1,4 @@
+import { metaNbspEquivalenceEvidence } from './provider-text-equivalence.js';
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { MetaManagementError, fingerprint, observedContentHash, parseProviderStatus,
@@ -182,14 +183,20 @@ export class MetaTemplateManagementService {
         return { kind: updated ? "unconfirmed" : "stale" };
       }
       const template = current.template;
-      const observedHash = observedContentHash(template.components);
-      const frozenHash = observedContentHash(validatedComponents(row.componentsSnapshot));
+      const rawObservedHash = observedContentHash(template.components);
+      const frozenComponents = validatedComponents(row.componentsSnapshot);
+      const frozenHash = observedContentHash(frozenComponents);
+      const identityMatches = template.category === row.category &&
+        (!row.providerTemplateId || row.providerTemplateId === template.id);
+      const equivalence = identityMatches ? metaNbspEquivalenceEvidence(frozenComponents, template.components) : null;
+      const observedHash = equivalence ? frozenHash : rawObservedHash;
       const drift = template.category !== row.category || observedHash !== frozenHash ||
         (!!row.providerTemplateId && row.providerTemplateId !== template.id);
       const status = parseProviderStatus(template.status);
       const updated = await this.repository.recordReconciliation(row, {
         kind: "found", providerId: template.id, status,
         category: template.category, observedHash, drift,
+        ...(equivalence ? { equivalenceEvidence: equivalence } : {}),
       });
       if (!updated) {
         this.reporting.warn("meta.template.reconcile.stale", { registrationId });

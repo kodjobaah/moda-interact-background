@@ -26,6 +26,12 @@ export type SubmissionOutcome =
   | { kind: "submitted" | "already-submitted"; providerId: string }
   | { kind: "busy"; code: string; retryAt?: string; wabaId?: string }
   | { kind: "unknown" | "blocked" | "failed"; code: string };
+/** Hash-only audit proof for provider display-text equivalence; no raw content. */
+export type MetaTextEquivalenceEvidence = Readonly<{
+  normalizationKind: "U+00A0_TO_U+0020_TEXT_ONLY";
+  rawObservedContentHash: string;
+  expectedContentHash: string;
+}>;
 export type ReconcileOutcome = { kind: "current" | "unconfirmed" | "drift" | "stale"; status?: ProviderStatus };
 
 /** A verified Messaging observation, not the unagreed queue payload. Only the owning

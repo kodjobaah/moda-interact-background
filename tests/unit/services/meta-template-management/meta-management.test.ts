@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MetaTemplateManagementService } from "../../../../src/services/meta-template-management/service.js";
-import { MetaManagementError, safeMetaError, validatedComponents, validatedProviderComponents } from "../../../../src/services/meta-template-management/contracts.js";
+import { MetaManagementError, observedContentHash, safeMetaError, validatedComponents, validatedProviderComponents } from "../../../../src/services/meta-template-management/contracts.js";
 import { MetaGraphTemplateAdapter } from "../../../../src/services/meta-template-management/meta-graph.adapter.js";
 
 vi.mock("../../../../src/services/platform-configuration/consumers.js", () => ({
@@ -309,6 +309,20 @@ describe("BG003 Meta template management", () => {
     expect(f.repository.recordReconciliation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       status: "PAUSED", drift: false,
     }));
+  });
+
+  it.each(['exact','category','provider-id'] as const)('records proven NBSP representative only with exact identity/category: %s',async change=>{
+    const f=fixture(),components=[{type:'HEADER',format:'IMAGE'},{type:'BODY',text:'Boutique\u00a0: Exemple\nPanier\u00a0: {{1}}'}];
+    const row={...record,componentsSnapshot:components,submissionState:'SUBMITTED',providerTemplateId:'meta-1'},before=structuredClone(row);
+    f.repository.load.mockResolvedValueOnce(row as never);
+    const observed=[{type:'HEADER',format:'IMAGE'},{type:'BODY',text:'Boutique : Exemple\nPanier : {{1}}'}];
+    f.provider.find.mockResolvedValueOnce({kind:'found',template:{...claim,id:change==='provider-id'?'other-id':'meta-1',status:'APPROVED',category:change==='category'?'UTILITY':'MARKETING',components:observed}} as never);
+    expect(await f.service.reconcileRegistration('reg-1')).toMatchObject({kind:change==='exact'?'current':'drift'});
+    const outcome=(f.repository.recordReconciliation.mock.calls[0] as unknown as [unknown,{observedHash:string;equivalenceEvidence?:unknown}])[1];
+    expect(outcome.observedHash).toBe(observedContentHash(change==='exact'?components:observed));
+    if(change==='exact')expect(outcome.equivalenceEvidence).toEqual({normalizationKind:'U+00A0_TO_U+0020_TEXT_ONLY',rawObservedContentHash:observedContentHash(observed),expectedContentHash:observedContentHash(components)});
+    else expect(outcome.equivalenceEvidence).toBeUndefined();
+    expect(row).toEqual(before);expect(f.provider.create).not.toHaveBeenCalled();
   });
 
   it("detects category/content drift and never activates any shop", async () => {
