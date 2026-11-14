@@ -60,10 +60,10 @@ describe("isolated commerce context probe", () => {
  it("replays only the exact captured read and refuses a mismatched argument without network", async () => {
   const source = snapshot(), directory = await output();
   source.capturedModelSteps.unshift({ calls: [{ name: "commerce_get_product", arguments: { handle: "shirt" } }], outputTokens: 12 });
-  source.capturedToolResults = [{ name: "commerce_get_product", arguments: { handle: "shirt" }, result: { contractVersion: "commerce.v1", status: "OK", data: { synthetic: true }, renderedText: "PRIVATE_TOOL_CANARY" } }];
-  const readTool = vi.fn();
-  const result = await runCommerceContextProbe(source, { outputDirectory: directory }, { readTool });
-  expect(result.toolCalls).toBe(1); expect(readTool).not.toHaveBeenCalled();
+  source.capturedToolResults = [{ name: "commerce_get_product", arguments: { handle: "shirt" }, result: { contractVersion: "commerce.v1", status: "OK", data: { product: null }, renderedText: "PRIVATE_TOOL_CANARY" } }];
+  const readTool = vi.fn(), extractEvidence = vi.fn(() => []);
+  const result = await runCommerceContextProbe(source, { outputDirectory: directory }, { readTool, extractEvidence });
+  expect(result.toolCalls).toBe(1); expect(readTool).not.toHaveBeenCalled(); expect(extractEvidence).toHaveBeenCalledWith(source.capturedToolResults[0]!.result);
   expect(JSON.parse(await readFile(join(directory, "tool-output-1.json"), "utf8"))).toEqual(source.capturedToolResults[0]!.result);
   const mismatched = structuredClone(source); mismatched.capturedToolResults[0]!.arguments = { handle: "other" };
   const failed = await runCommerceContextProbe(mismatched, { outputDirectory: await output() }, { readTool });
@@ -74,6 +74,17 @@ describe("isolated commerce context probe", () => {
   const model = { invoke: vi.fn() };
   await expect(runCommerceContextProbe(source, { outputDirectory: await output() }, { model })).rejects.toThrow("PROBE_CAPTURE_BUDGET_INVALID");
   expect(model.invoke).not.toHaveBeenCalled();
+ });
+
+ it("never dispatches an unsafe model-requested operation to the injected read adapter", async () => {
+  const source = snapshot(), readTool = vi.fn();
+  let calls = 0;
+  const model = { invoke: vi.fn(async () => ++calls === 1
+    ? { calls: [{ name: "commerce_create_order", arguments: { customer: "PRIVATE_CUSTOMER_CANARY" } }], outputTokens: 12 }
+    : { calls: [{ name: "finalResponse", arguments: structuredClone(exampleFinal) }], outputTokens: 12 }) };
+  const result = await runCommerceContextProbe(source, { outputDirectory: await output(), mode: "live-model", liveReadTools: true, operatorConfirmation: "ROOT_AUTHORIZED_READ_ONLY_DIAGNOSTIC" }, { model, readTool });
+  expect(readTool).not.toHaveBeenCalled(); expect(result.toolCalls).toBe(0);
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_");
  });
 
 });

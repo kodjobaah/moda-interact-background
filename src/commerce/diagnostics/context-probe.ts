@@ -26,6 +26,7 @@ export type CommerceContextProbeOptions = {
 };
 type Dependencies = {
   model?: CommerceModelInvoker;
+  extractEvidence?: RunCommerceTurnInput["dependencies"]["tools"][number]["extractEvidence"];
   readTool?: (name: string, arguments_: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 };
 
@@ -76,6 +77,7 @@ export async function runCommerceContextProbe(snapshot: CommerceContextProbeSnap
           return step; // Preserve original step/call/argument identity; no repair outside the published runner.
         } },
         tools: descriptors.map(descriptor => ({ descriptor,
+          ...(dependencies.extractEvidence ? { extractEvidence: dependencies.extractEvidence } : {}),
           isAuthorized: async authorized => names.has(descriptor.name) && snapshot.grant.grantedTools.some(granted => canonicalJson(granted) === canonicalJson(authorized) && granted.toolName === descriptor.name && granted.definitionVersion === descriptor.definitionVersion && ("toolId" in descriptor ? "toolId" in granted && granted.toolId === descriptor.toolId && granted.toolRevisionId === descriptor.toolRevisionId : isBuiltInTool(granted) && isTrustedCommerceBuiltInGrant(granted))),
           execute: async (arguments_, signal) => {
             if (!READ_TOOLS.has(descriptor.name) || !names.has(descriptor.name) || ++toolCalls > 6) throw new Error("PROBE_TOOL_REFUSED");
