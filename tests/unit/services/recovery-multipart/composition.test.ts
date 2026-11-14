@@ -62,6 +62,24 @@ describe('single-bubble composite opt-in',()=>{
  async function render(f:ReturnType<typeof fixture>,source:'AI'|'HUMAN',product=false,answer='Exact authored answer'){
   const result=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:source==='HUMAN'?'command':'message',source,responseBody:answer,mediaDeadlineAt:Date.now()+15000,...(product?{commercePresentation:presentation(answer)}:{})});if(result.kind!=='rendered')throw Error('fixture');return result;
  }
+ it.each(['AI','HUMAN'] as const)('uses saved website-caption frame in %s composite without copying website into bitmap',async source=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
+  const locale=f.slot.definition.locales[0]!,saved={...prepared,...templateProfile(profiles[0])};
+  saved.header=[{kind:'text',value:'Shop: '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\n──────────'}];
+  saved.conditionals=[{when:'checkout.available',tokens:[{kind:'text',value:'Website: '},{kind:'variable',name:'shop.websiteUrl'},{kind:'text',value:'\nCheckout:\n'},{kind:'variable',name:'checkout.url'}]}];
+  locale.localeAst={schemaVersion:1,prepared:saved};locale.contentHash=digest(stableJson(saved));
+  const result=await render(f,source,source==='AI'),part=result.multipartPlan!.parts[0]!.plan;
+  expect(part.kind).toBe('COMPOSITE_IMAGE');expect(result.multipartPlan!.parts).toHaveLength(1);
+  expect(part.body).toBe(result.commonLayout!.boundaries.body+result.commonLayout!.boundaries.footer);
+  expect(part.body.split('https://shop.example').length-1).toBe(2); // website and distinct checkout URL, never rewritten
+  expect(part.body).toContain('Website: https://shop.example\nCheckout:\n'+checkout);
+  expect(part.body.endsWith(checkout)).toBe(true);
+  expect(f.prepare.mock.calls[0]![0].provenance.headerText).toBe('Shop: Saved Shop\n──────────\n');
+  expect(f.prepare.mock.calls[0]![0].provenance.headerText).not.toContain('https://');
+  const sourceId=source==='HUMAN'?'command':'message';
+  const frozen=prepareFrozenCommonReply({common:result.commonLayout!,preparation:{plan:result.multipartPlan!,compositeReceipt:result.compositeReceipt!,policyRef:result.brandMediaPolicy!,receipt:{sourceKind:source==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId,shopId:'shop',conversationId:'conversation',inboundVersion:1,controlRevision:2,firstPair:source==='AI'?{productId:'selected',variantId:null}:null}},messageId:source==='HUMAN'?humanMultipartMessageId(sourceId):sourceId,recoveryId:'recovery',recipient:'447400123456',sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},command:source==='HUMAN'?{id:sourceId,leaseToken:'lease'}:null,now:new Date()});
+  expect(requireFrozenMultipart(frozen)).toEqual(frozen);
+ });
  it('compacts a fifteen-item AI lead using only retained verified products and freezes replay exactly',async()=>{
   vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
   const longLead=Array.from({length:15},(_,i)=>`Unverified catalogue item ${i}: ${'model prose '.repeat(6)}`).join('\n');
