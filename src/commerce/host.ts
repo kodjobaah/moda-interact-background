@@ -1,3 +1,4 @@
+import { isCatalogueDiscoveryTool, shouldReferAfterUngroundedDiscovery } from "./discovery-factuality.js";
 import { makeRecoveryTerminalFinalizer } from "./recovery-terminal-finalizer.js";
 import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
 import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
@@ -290,6 +291,7 @@ async function execute(
     releaseId: grant.releaseId,
   });
   const extractEvidence = deps.extractEvidence ?? extractTrustedEvidence;
+  let currentDiscoveryAttempted = false;
   try {
     await client.connect();
     const manifest = await client.manifest();
@@ -575,6 +577,9 @@ async function execute(
                     hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
               }
             }
+            // Shared validated arguments and authorization before execute; the
+            // host has just rechecked current scope and tool availability.
+            if (isCatalogueDiscoveryTool(descriptor.name)) currentDiscoveryAttempted = true;
             const result = await observeMcp(() => client.call(descriptor.name, args, toolSignal));
             if (isDiscount) await refreshRecommendationPolicy({
               context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent,
@@ -705,6 +710,7 @@ async function execute(
         });
       }
     }
+    let currentShippingPresentationVerified = false;
     let commerceVerifiedPresentation: CommerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
       schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null,
       locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
@@ -1092,6 +1098,7 @@ async function execute(
         imageProducts.push(...retained.map(item => item.product));
         presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
+        currentShippingPresentationVerified = Boolean(shippingPresentation);
         compositionDiagnostic({ stage: 'SHIPPING_SELECTION_EVIDENCE', selected: Boolean(shippingSelection), verified: Boolean(shippingPresentation) });
         const hasObservedProducts = initialProductObservations.some(observation => {
           const output = observation.output as { products?: Product[]; product?: Product | null };
@@ -1114,6 +1121,10 @@ async function execute(
         });
 
       }
+    }
+    if (shouldReferAfterUngroundedDiscovery({ attempted: currentDiscoveryAttempted, answerKind: envelope.answerKind,
+      presentation: commerceVerifiedPresentation, shippingVerified: currentShippingPresentationVerified })) {
+      envelope = { ...envelope, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} };
     }
     compositionDiagnostic({ stage: 'VERIFIED_PROJECTION', disposition: commerceVerifiedPresentation.disposition, productCount: commerceVerifiedPresentation.products.length, optionCount: commerceVerifiedPresentation.optionFacts.length, detailCount: (commerceVerifiedPresentation.productFacts?.length ?? 0) });
     // Referrals retain the trusted contact/language grounding boundary. Only
