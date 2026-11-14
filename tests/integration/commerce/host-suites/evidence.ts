@@ -129,7 +129,12 @@ it.each(["unknown", "expired"])(
         renderedText: "expired evidence",
       };
     }
+    let modelCalls = 0;
+    const originalFinal = f.final({ answerKind: "ANSWER", referralReason: null, evidenceIds: [evidenceId] });
+    const originalSnapshot = structuredClone(originalFinal);
     const result = await f.run(async () => {
+      modelCalls++;
+      if (modelCalls > (kind === "expired" ? 2 : 1)) throw new Error("Referral rewrite must be terminal; never re-present modified provider arguments");
       if (kind === "expired" && step++ === 0)
         return {
           calls: [
@@ -140,12 +145,10 @@ it.each(["unknown", "expired"])(
           ],
           outputTokens: 10,
         };
-      return f.final({
-        answerKind: "ANSWER",
-        referralReason: null,
-        evidenceIds: [evidenceId],
-      });
+      return originalFinal;
     });
+    expect(modelCalls).toBe(kind === "expired" ? 2 : 1);
+    expect(originalFinal).toEqual(originalSnapshot);
     expect(result).toMatchObject({
       answerKind: "REFER_TO_STORE",
       referralReason: "UNVERIFIABLE_FACTS",
@@ -168,3 +171,21 @@ it("still rejects a structurally malformed final envelope", async () => {
 });
   });
 }
+
+
+it("preserves invalid original provider arguments through native schema repair without evidence rewriting", async () => {
+  const original = f.final({ replyText: 42, evidenceIds: ["f".repeat(64)] });
+  const snapshot = structuredClone(original);
+  let calls = 0;
+  await f.run(async request => {
+    calls++;
+    if (calls === 1) return original;
+    expect(calls).toBe(2);
+    expect(request.requiredToolName).toBe("finalResponse");
+    const assistant = request.toolTranscript?.find(row => row.role === "assistant");
+    expect(assistant && assistant.role === "assistant" ? assistant.calls[0]?.arguments : null).toEqual(snapshot.calls[0]!.arguments);
+    return { ...f.final({ answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} }),
+      calls: [{ ...f.final().calls[0]!, id: "corrected-final", arguments: { ...f.exampleFinal, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} } }] };
+  });
+  expect(calls).toBe(2); expect(original).toEqual(snapshot);
+});

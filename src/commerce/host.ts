@@ -436,6 +436,7 @@ async function execute(
       manifest.responseContract, manifest.responseContractHash, digest,
     ));
     const result = await runCommerceTurn({
+      toolProtocol: "native",
       turn,
       productContext,
       platform: recommendationContext.provider,
@@ -502,6 +503,7 @@ async function execute(
                     ...step,
                     calls: [
                       {
+                        ...step.calls[0],
                         name: "finalResponse",
                         arguments: {
                           ...parsed.data,

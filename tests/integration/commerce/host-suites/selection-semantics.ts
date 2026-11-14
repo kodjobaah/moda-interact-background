@@ -65,6 +65,17 @@ const answer = (details: Record<string, unknown>) => f.final({ answerKind: "ANSW
   replyText: "Our current catalogue has the blue linen shirt.", details });
 export function registerSelectionSemanticsTests() {
   describe("published runner to host selection semantics", () => {
+    it.each(["missing", "duplicate"])("refuses raw native provider %s call IDs before any tool dispatch", async mode => {
+      configure();
+      const call = { name: "commerce_get_product", arguments: pair };
+      await expect(f.run(async request => {
+        expect(request.toolTranscript).toEqual([]);
+        return { calls: mode === "missing" ? [call] : [{ ...call, id: "same" }, { ...call, id: "same" }], outputTokens: 1 };
+      }, undefined, undefined, undefined, true)).rejects.toMatchObject({
+        code: "INVALID_FINAL", diagnostic: { runnerDiagnostic: { reasonCode: "MODEL_TOOL_CALL_ID_INVALID" } },
+      });
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(0);
+    });
     it("guides catalogue facts to exact detail selections on the ordinary final call without granting promotions", async () => {
       configure();
       f.active.responseContract.detailsSchema.properties!.productDetailSelections = { type: "array", maxItems: 3, items: { type: "object", properties: {
@@ -75,6 +86,10 @@ export function registerSelectionSemanticsTests() {
       let calls = 0;
       await f.run(async request => {
         calls++;
+        if (calls === 1) expect(request.toolTranscript).toEqual([]);
+        else expect(request.toolTranscript).toEqual([
+          expect.objectContaining({ role: "assistant" }), expect.objectContaining({ role: "tool" }),
+        ]);
         expect(request.instructions.join("\n")).toContain("Category, catalogue and availability questions");
         expect(request.instructions.join("\n")).toContain("Do not create productRecommendations merely to enumerate");
         if (calls === 1) return { calls: [{ id: "read-category-facts", name: "commerce_get_product", arguments: pair }], outputTokens: 20 };
