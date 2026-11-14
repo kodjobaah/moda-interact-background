@@ -22,6 +22,14 @@ describe('Background owning common layout policy',()=>{
   expect(identity).not.toBeNull();
   expect(commonTemplateParametersMatch(identity,{header:[],body:[{variable:'shop.name',position:1},{variable:'shop.websiteUrl',position:2},{variable:'checkout.url',position:3}]},parameters)).toBe(true);
  });
+ it('accepts only semantically empty static footer tokens without rewriting hash-bound source',()=>{
+  const p={...prepared,footer:[{kind:'text' as const,value:''},{kind:'text' as const,value:''}]};
+  const ref=reference(p),before=structuredClone(ref),variables=commonLayoutVariables('shop','store.example','Shop Name',url)!;
+  expect(readRecoveryCommonReference(ref)).toEqual({kind:'ok',reference:ref});expect(ref).toEqual(before);
+  expect(renderCommonLayoutBoundaries(ref,variables,'Answer','shop')).toEqual(renderCommonLayoutBoundaries(reference(),variables,'Answer','shop'));
+  expect(ref.contentHash).not.toBe(reference().contentHash);
+  expect(readRecoveryCommonReference({...ref,contentHash:reference().contentHash}).kind).toBe('invalid');
+ });
  it('retains old reviewed header-site sources without changing hashes',()=>{
   const p=structuredClone(prepared);p.header.push({kind:'variable',name:'shop.websiteUrl'});p.conditionals[0]!.tokens=p.conditionals[0]!.tokens.filter(t=>t.kind!=='variable'||t.name!=='shop.websiteUrl');
   const ref=reference(p);expect(readRecoveryCommonReference(ref)).toEqual({kind:'ok',reference:ref});
@@ -31,6 +39,8 @@ describe('Background owning common layout policy',()=>{
   {...prepared,header:[...prepared.header,{kind:'variable',name:'shop.websiteUrl'}]},
   {...prepared,header:[...prepared.header,{kind:'variable',name:'customer.firstName'}]},
   {...prepared,footer:[{kind:'text',value:'unprojected footer'}]},
+  {...prepared,footer:[{kind:'text',value:' '}]},
+  {...prepared,footer:[{kind:'variable',name:'shop.websiteUrl'}]},
   {...prepared,conditionals:[]},
   {...prepared,conditionals:[{when:'checkout.available',tokens:[{kind:'variable',name:'shop.websiteUrl'},{kind:'variable',name:'checkout.url'}]}]},
   {...prepared,conditionals:[{when:'checkout.available',tokens:[...prepared.conditionals[0]!.tokens,{kind:'text',value:'after checkout'}]}]},

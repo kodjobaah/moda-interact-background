@@ -5,7 +5,7 @@ import { digest } from '../conversation-wrappers/projection.js';
  * Both reviewed website positions are valid immutable authored sources. */
 export function recoveryCommonLayoutPolicy(prepared: PreparedWrapper): boolean {
  const header = prepared.header;
- if (prepared.footer.length !== 0 || prepared.conditionals.length !== 1) return false;
+ if (!prepared.footer.every(token => token.kind === 'text' && token.value === '') || prepared.conditionals.length !== 1) return false;
  if (!header.every(token => token.kind === 'text' || token.kind === 'variable' &&
    (token.name === 'shop.name' || token.name === 'shop.websiteUrl'))) return false;
  if (header.filter(token => token.kind === 'variable' && token.name === 'shop.name').length !== 1) return false;
