@@ -113,6 +113,34 @@ export function registerSelectionSemanticsTests() {
       })).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
       expect(calls).toBe(3); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
     });
+    it("observes an omitted final selection before the unchanged terminal refusal", async () => {
+      configure(); let calls = 0;
+      const records: Array<Record<string, unknown>> = [];
+      const logger = f.createLogger({ serviceName: "moda-messaging-worker", environment: f.environment,
+        sink: record => records.push(record as unknown as Record<string, unknown>) });
+      const finalStep = answer({}); const originalCall = finalStep.calls[0]!;
+      const originalArguments = originalCall.arguments; const snapshot = structuredClone(finalStep);
+      await expect(f.run(async () => {
+        calls++;
+        if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "PRIVATE_PROSE_SENTINEL", outputTokens: 1 };
+        return finalStep;
+      }, f.context, undefined, logger)).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false,
+        diagnostic: { runnerDiagnostic: { reasonCode: "FINAL_PRODUCT_SELECTION_MISSING" } } });
+      expect(calls).toBe(3);
+      expect(finalStep).toEqual(snapshot); expect(finalStep.calls[0]).toBe(originalCall);
+      expect(originalCall.arguments).toBe(originalArguments);
+      const shapes = records.filter(record => record.event === "commerce.host.model_bridge.final_selection_shape");
+      expect(shapes).toHaveLength(3);
+      expect(shapes[1]!.data).toMatchObject({ exactOneFinalResponse: false, forcedFinalResponse: false });
+      expect(shapes[2]!.data).toMatchObject({ exactOneFinalResponse: true, forcedFinalResponse: true,
+        detailsContainer: "OBJECT", detailArray: "ABSENT", recommendationArray: "ABSENT",
+        responseContractHash: f.active.responseContractHash });
+      const shapeIndex = records.indexOf(shapes[2]!);
+      expect(records.slice(shapeIndex + 1).some(record => record.event === "commerce.turn.failed")).toBe(true);
+      expect(JSON.stringify(shapes)).not.toContain("PRIVATE_PROSE_SENTINEL");
+      expect(JSON.stringify(shapes)).not.toContain(pair.productId);
+    });
     it("preserves a valid typed referral through the actual host", async () => {
       configure();
       const result = await f.run(async () => f.final({ answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", details: {} }));
@@ -185,9 +213,17 @@ export function registerSelectionSemanticsTests() {
     });
     it("refuses an exhausted correction without repeating product reads", async () => {
       configure(); let calls = 0;
+      const records: Array<Record<string, unknown>> = [];
+      const logger = f.createLogger({ serviceName: "moda-messaging-worker", environment: f.environment,
+        sink: record => records.push(record as unknown as Record<string, unknown>) });
       await expect(f.run(async () => ++calls === 1 ? { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 } :
-        answer({ responseDisposition: "STANDARD", productRecommendations: [recommendation] }))).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
+        answer({ responseDisposition: "STANDARD", productRecommendations: [recommendation] }), f.context, undefined, logger)).rejects.toMatchObject({ code: "INVALID_FINAL", retryable: false });
       expect(calls).toBe(3); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+      const shapes = records.filter(record => record.event === "commerce.host.model_bridge.final_selection_shape");
+      expect(shapes).toHaveLength(3);
+      expect(shapes[2]!.data).toMatchObject({ exactOneFinalResponse: true, forcedFinalResponse: true,
+        recommendationVersion: "ABSENT", recommendationArray: "ARRAY", recommendationCount: 1 });
+      expect(JSON.stringify(shapes)).not.toContain(pair.productId);
     });
     it.each([false, true])("accepts observed generic policy limitations, dispositionOnly=%s", async dispositionOnly => {
       configure(); let calls = 0;
