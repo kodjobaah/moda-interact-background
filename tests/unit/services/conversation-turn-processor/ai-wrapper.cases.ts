@@ -13,12 +13,12 @@ export function registerAiWrapperCases(context: ConversationTurnFacadeContext) {
     applicationKey: wrapperApplicationKey({conversationId:"conversation-1", messageIdentity:"message-1", source:"AI", wrapperDefinitionId:"published-ai", localeId:"locale-en",contentHash:"hash",editVersion:7,responseDigest:"response-hash",body}), responseDigest: "response-hash", replayed: false,
   });
 
-  it('carries exact rendered pairs and body to final admission without an early cache write', async () => {
+  it('carries only retained rendered pairs to presentation metadata while preserving omitted observed knowledge', async () => {
     const test = harness();
     const now = first.toISOString();
     const pairs = [{ productId:'30',variantId:null },{productId:'10',variantId:null}];
     const productContextUpdate = {schemaVersion:1,shopId:'shop-1',conversationId:'conversation-1',platform:'WOOCOMMERCE',updatedAt:now,
-      references:[...pairs].reverse().map(pair=>({...pair,title:'Tree',observedAt:now}))};
+      references:[...pairs,{productId:'20',variantId:null}].reverse().map(pair=>({...pair,title:'Tree',observedAt:now}))};
     test.runAgent.mockResolvedValue({replyText:'model stock 7',commercePresentation:{envelope:{},verified:{}},productContextUpdate});
     test.aiWrapper.renderConversationResponse.mockResolvedValue({...rendered('Tree\nStock: 2'),presentedPairs:pairs});
     await test.processor.process({conversationId:'conversation-1',observedVersion:3});
