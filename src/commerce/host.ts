@@ -1,3 +1,5 @@
+import { captureRecoveryIdentityDecision, renderRefreshedRecoveryIdentityDecision, type RecoveryIdentityDecisionReceipt } from "./identity-terminal-presentation.js";
+import { recoveryTerminalModelRequest } from "./terminal-phase-instructions.js";
 import { isCatalogueDiscoveryTool, shouldReferAfterUngroundedDiscovery } from "./discovery-factuality.js";
 import { makeRecoveryTerminalFinalizer } from "./recovery-terminal-finalizer.js";
 import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
@@ -438,9 +440,16 @@ async function execute(
     const finalizationInstructions = structuredFinalizationInstructions(verifyResponseContract(
       manifest.responseContract, manifest.responseContractHash, digest,
     ));
-    const terminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
+    const identityDecisionState: { receipt: RecoveryIdentityDecisionReceipt | null } = { receipt: null };
+    const rawTerminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
       responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider,
+      locale: resolveModaConfigurationLocale(language.tag),
       hasEligibleEvidence: ids => evidence.hasEligibleEvidence(ids, Date.now()) });
+    const terminalFinalizer = rawTerminalFinalizer ? { ...rawTerminalFinalizer, project: (input: Parameters<typeof rawTerminalFinalizer.project>[0]) => {
+      const decision = rawTerminalFinalizer.project(input);
+      identityDecisionState.receipt = captureRecoveryIdentityDecision(input, decision, digest);
+      return decision;
+    } } : null;
     const result = await runCommerceTurn({
       toolProtocol: "native",
       turn,
@@ -485,7 +494,7 @@ async function execute(
             logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "production_model_invoke");
             const step = await observeCommerceModelBridgePhase(
               logger, modelBridgeIdentifiers, "production_model_invoke",
-              () => deps.model.invoke(request, modelSignal),
+              () => deps.model.invoke(recoveryTerminalModelRequest(request, manifest.responseContract), modelSignal),
             );
             logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse" || request.requireToolCall === true, manifest.responseContractHash);
             return observeCommerceModelBridgePhase(
@@ -1120,6 +1129,15 @@ async function execute(
           requiresShipping: shippingPresentation?.requiresShipping ?? null, policyUrl: shippingPresentation?.policyUrl ?? null,
         });
 
+      }
+    }
+    if (identityDecisionState.receipt && envelope.answerKind === "ANSWER") {
+      try {
+        envelope = { ...envelope, replyText: renderRefreshedRecoveryIdentityDecision({ receipt: identityDecisionState.receipt,
+          original: result.result, turn, responseContractHash: manifest.responseContractHash,
+          presentation: commerceVerifiedPresentation, currentProducts: imageProducts, digest }) };
+      } catch {
+        throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
       }
     }
     if (shouldReferAfterUngroundedDiscovery({ attempted: currentDiscoveryAttempted, answerKind: envelope.answerKind,

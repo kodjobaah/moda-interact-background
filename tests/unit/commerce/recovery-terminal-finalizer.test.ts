@@ -26,7 +26,7 @@ function setup(hasEligibleEvidence?: (ids: readonly string[]) => boolean) {
     responseDisposition: { type: "string", enum: ["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED"], maxLength: 64 },
   }, required: [], additionalProperties: false };
   const responseContractHash = digest(responseContractCanonicalJson(contract));
-  const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash, digest, platform: "SHOPIFY", ...(hasEligibleEvidence ? { hasEligibleEvidence } : {}) })!;
+  const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash, digest, platform: "SHOPIFY", locale: "en", ...(hasEligibleEvidence ? { hasEligibleEvidence } : {}) })!;
   const common = { replyText: exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] };
   const project = (name: string, args: Record<string, unknown>, requiredReferral: unknown = null, currentObservations: unknown[] = observations) => {
     const call = { id: "actual-provider-id", name, arguments: args };
@@ -39,7 +39,7 @@ function setup(hasEligibleEvidence?: (ids: readonly string[]) => boolean) {
   return { contract, port, common, project };
 }
 describe("application flat terminal finalization", () => {
-  it.each([ ["recovery_complete_details", "productDetailSelections"], ["recovery_complete_options", "productOptionSelections"],
+  it.each([ ["recovery_complete_details_with_context", "productDetailSelections"], ["recovery_complete_options_with_context", "productOptionSelections"],
     ["recovery_complete_recommendations", "productRecommendations"] ])("maps only model-issued %s selections", (name, field) => {
     const { project, common } = setup();
     const args = { ...common, [field]: [pair], ...(field === "productRecommendations" ? { productRecommendationVersion: "1" } : {}) };
@@ -61,7 +61,7 @@ describe("application flat terminal finalization", () => {
     expect(project("recovery_complete_referral", { ...withoutEvidence, referralReason: "UNKNOWN" }).kind).toBe("invalid");
   });
   it.each([[], [pair, pair], [{ productId: 3, variantId: null }], [pair, pair, pair, pair]])("refuses invalid selected identity arrays", selections => {
-    const { project, common } = setup(); expect(project("recovery_complete_details", { ...common, productDetailSelections: selections }).kind).toBe("invalid");
+    const { project, common } = setup(); expect(project("recovery_complete_details_with_context", { ...common, productDetailSelections: selections }).kind).toBe("invalid");
   });
   it("refuses extra fields, missing fields, invalid language pair and recommendation version", () => {
     const { project, common } = setup();
@@ -72,7 +72,7 @@ describe("application flat terminal finalization", () => {
   });
   it("preserves explicitly selected shipping adjuncts on each sole product family", () => {
     const { project, common } = setup();
-    for (const [name, field] of [["recovery_complete_details", "productDetailSelections"], ["recovery_complete_options", "productOptionSelections"], ["recovery_complete_recommendations", "productRecommendations"]]) {
+    for (const [name, field] of [["recovery_complete_details_with_context", "productDetailSelections"], ["recovery_complete_options_with_context", "productOptionSelections"], ["recovery_complete_recommendations", "productRecommendations"]]) {
       expect(project(name!, { ...common, [field!]: [pair], ...(field === "productRecommendations" ? { productRecommendationVersion: "1" } : {}),
         shippingInformationSelection: pair, responseDisposition: "SHIPPING_INFORMATION_UNVERIFIED" })).toMatchObject({ kind: "decision", value: { details: {
         [field!]: [pair], shippingInformationSelection: pair, responseDisposition: "SHIPPING_INFORMATION_UNVERIFIED" } } });
@@ -83,11 +83,11 @@ describe("application flat terminal finalization", () => {
     const select = (observations: unknown[], requiredReferral: unknown = null) => port.selectTools!({ turn: {}, modelStep: 3, responseContractHash: port.responseContractHash,
       observations, requiredReferral } as never);
     expect(select([])).toEqual(expect.arrayContaining(["recovery_complete_answer", "recovery_complete_referral"]));
-    expect(select([])).not.toContain("recovery_complete_details");
+    expect(select([])).not.toContain("recovery_complete_details_with_context");
     const product = { ...pair, title: "Blue shirt", url: null, available: true, unitPrice: "24.00", currency: "GBP", productType: "Shirt", vendor: "Fixture",
       categories: [], categoryIds: [], collectionIds: [], saleEvidence: null, observedAt: "2026-11-05T12:00:00Z" };
     const observations = [{ tool: "commerce_get_product", result: { contractVersion: "commerce.v1", status: "OK", data: { product } } }];
-    expect(select(observations)).toContain("recovery_complete_details");
+    expect(select(observations)).toContain("recovery_complete_details_with_context");
     expect(select(observations)).not.toContain("recovery_complete_answer");
     expect(select(observations)).not.toContain("recovery_complete_redirect");
     expect(select(observations)).not.toContain("recovery_complete_shipping");
@@ -95,8 +95,8 @@ describe("application flat terminal finalization", () => {
   });
   it("refuses unobserved or foreign product/shipping identities without filling them", () => {
     const { project, common } = setup();
-    expect(project("recovery_complete_details", { ...common, productDetailSelections: [pair] }, null, []).kind).toBe("invalid");
-    expect(project("recovery_complete_details", { ...common, productDetailSelections: [{ ...pair, productId: "foreign" }] }).kind).toBe("invalid");
+    expect(project("recovery_complete_details_with_context", { ...common, productDetailSelections: [pair] }, null, []).kind).toBe("invalid");
+    expect(project("recovery_complete_details_with_context", { ...common, productDetailSelections: [{ ...pair, productId: "foreign" }] }).kind).toBe("invalid");
     expect(project("recovery_complete_shipping", { ...common, shippingInformationSelection: pair, responseDisposition: "STANDARD" }, null, []).kind).toBe("invalid");
     expect(project("recovery_complete_shipping_unverified", common, null, []).kind).toBe("invalid");
     const foreign = [toolResult("commerce_get_shipping_information", { ...shippingData(false), provider: "WOOCOMMERCE" })];
@@ -115,7 +115,7 @@ describe("application flat terminal finalization", () => {
     const { contract } = setup();
     if (mode === "custom disposition") contract.detailsSchema.properties!.responseDisposition!.enum!.push("CUSTOM");
     else contract.detailsSchema.properties!.productRecommendationVersion!.enum = ["2"];
-    expect(makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY" })).toBeNull();
+    expect(makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY", locale: "en" })).toBeNull();
   });
   it("advertises only non-null canonical referral reasons", () => {
     const { port, project, common } = setup(); const descriptor = port.terminalTools.find(tool => tool.name === "recovery_complete_referral")!;
@@ -127,9 +127,9 @@ describe("application flat terminal finalization", () => {
   it("accepts the exact production pinned schema structure with all canonical dispositions", () => {
     const contract = JSON.parse(readFileSync(new URL("../../fixtures/commerce/pinned-terminal-response-structure.json", import.meta.url), "utf8")) as CommerceResponseContract;
     expect(contract.detailsSchema.properties!.responseDisposition!.enum).toEqual(["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED", "PRODUCT_OPTIONS", "PRODUCT_DETAILS"]);
-    const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY" });
+    const port = makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY", locale: "en" });
     expect(port).not.toBeNull();
-    expect(port!.terminalTools.map(tool => tool.name)).toContain("recovery_complete_details");
+    expect(port!.terminalTools.map(tool => tool.name)).toContain("recovery_complete_details_with_context");
     const shipping = port!.terminalTools.find(tool => tool.name === "recovery_complete_shipping")!;
     expect((shipping.inputSchema as SubsetSchema).properties!.responseDisposition!.enum).toEqual(["STANDARD", "OUT_OF_SCOPE_REDIRECT", "SHIPPING_INFORMATION_UNVERIFIED"]);
   });
@@ -143,15 +143,39 @@ describe("application flat terminal finalization", () => {
     const failed = setup(() => { throw new Error("eligibility unavailable"); });
     expect(failed.project("recovery_complete_answer", args).kind).toBe("invalid");
   });
+  it.each(["recovery_complete_details", "recovery_complete_options"])("accepts only model-selected identity fields for %s", name => {
+    const { port, project } = setup();
+    const descriptor = port.terminalTools.find(tool => tool.name === name)!;
+    expect(descriptor.inputSchema).toMatchObject({ type: "object", required: ["selectedPairs"], additionalProperties: false });
+    expect(Object.keys((descriptor.inputSchema as SubsetSchema).properties!)).toEqual(["selectedPairs"]);
+    const result = project(name, { selectedPairs: [pair] });
+    expect(result).toMatchObject({ kind: "decision", value: { answerKind: "ANSWER", evidenceIds: [], detectedLanguageTag: null, detectedLanguageConfidence: null } });
+    for (const selectedPairs of [[], [pair, pair], [{ ...pair, productId: "foreign" }]]) expect(project(name, { selectedPairs }).kind).toBe("invalid");
+    expect(project(name, { selectedPairs: [pair], replyText: "model claim" }).kind).toBe("invalid");
+    expect(project(name, { selectedPairs: [pair] }, "UNVERIFIABLE_FACTS").kind).toBe("invalid");
+  });
+  it("handles30 repeated rows by exact agreed titles without choosing any initial price", () => {
+    const { project } = setup();
+    const products = Array.from({ length: 10 }, (_, index) => ({ ...observedProduct, productId: `product-${index}`, title: `Title ${index}`, unitPrice: "991.00" }));
+    const repeated = [0, 1, 2].map(index => toolResult("commerce_search_products", { products: products.map(product => ({ ...product, unitPrice: index === 1 ? "992.00" : product.unitPrice })), cursor: null, truncated: false }));
+    const selectedPairs = products.slice(0, 3).map(({ productId, variantId }) => ({ productId, variantId }));
+    const result = project("recovery_complete_details", { selectedPairs }, null, repeated);
+    expect(result).toMatchObject({ kind: "decision", value: { replyText: "Title 0\n\nTitle 1\n\nTitle 2" } });
+    expect(JSON.stringify(result)).not.toMatch(/991|992/);
+    const conflicting = structuredClone(repeated); (conflicting[1]!.result.data as { products: typeof products }).products[0]!.title = "Conflicting title";
+    expect(project("recovery_complete_details", { selectedPairs }, null, conflicting).kind).toBe("invalid");
+    const malformed = structuredClone(repeated); (malformed[1]!.result.data as { products: Record<string, unknown>[] }).products[0]!.title = null;
+    expect(project("recovery_complete_details", { selectedPairs }, null, malformed).kind).toBe("invalid");
+  });
   it("uses direct bounded root tools and refuses unsupported custom pinned detail shapes", () => {
     const { port, contract } = setup();
-    expect(port.terminalTools.length).toBeLessThanOrEqual(9);
+    expect(port.terminalTools.length).toBeLessThanOrEqual(11);
     for (const tool of port.terminalTools) {
       const schema = tool.inputSchema as SubsetSchema;
       expect(schema.type).toBe("object"); expect(schema.additionalProperties).toBe(false);
-      expect(schema.required).toEqual(expect.arrayContaining(["replyText", "detectedLanguageTag", "detectedLanguageConfidence"])); expect(schema).not.toHaveProperty("anyOf");
+      expect(schema.required).toEqual(expect.arrayContaining(tool.name === "recovery_complete_details" || tool.name === "recovery_complete_options" ? ["selectedPairs"] : ["replyText", "detectedLanguageTag", "detectedLanguageConfidence"])); expect(schema).not.toHaveProperty("anyOf");
     }
     contract.detailsSchema.properties!.customRequired = { type: "string", maxLength: 20 };
-    expect(makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY" })).toBeNull();
+    expect(makeRecoveryTerminalFinalizer({ responseContract: contract, responseContractHash: digest(responseContractCanonicalJson(contract)), digest, platform: "SHOPIFY", locale: "en" })).toBeNull();
   });
 });

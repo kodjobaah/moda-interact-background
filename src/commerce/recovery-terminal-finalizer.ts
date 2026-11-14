@@ -1,3 +1,4 @@
+import type { ModaSupportedLanguageTag } from "@modainteract/moda-interact-shared/internationalization";
 import {
   canonicalJson, finalResponseSchema, finalResponseToolSchema, verifyResponseContract,
   CommerceToolOutputs, CommerceResponseDispositionSchema, readCommerceObservedShippingSelections, readCommerceRecommendationSelection,
@@ -9,7 +10,7 @@ const SELECTIONS = ["productDetailSelections", "productOptionSelections", "produ
 const KNOWN = new Set<string>([...SELECTIONS, "productRecommendationVersion", "shippingInformationSelection", "responseDisposition"]);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
-function currentProductPairs(observations: TerminalDecisionInput["observations"]): Array<{ productId: string; variantId: string | null }> {
+function currentProducts(observations: TerminalDecisionInput["observations"]) {
   return observations.flatMap(observation => {
     if (observation.tool !== "commerce_get_product" && observation.tool !== "commerce_search_products") return [];
     const result = observation.result;
@@ -17,8 +18,13 @@ function currentProductPairs(observations: TerminalDecisionInput["observations"]
     const parsed = CommerceToolOutputs[observation.tool].safeParse(result.data);
     if (!parsed.success) return [];
     const products = "product" in parsed.data ? parsed.data.product ? [parsed.data.product] : [] : "products" in parsed.data ? parsed.data.products : [];
-    return products.map(product => ({ productId: product.productId, variantId: product.variantId }));
+    return products;
   });
+}
+
+function malformedCurrentProductObservation(observations: TerminalDecisionInput["observations"]): boolean {
+  return observations.some(observation => (observation.tool === "commerce_get_product" || observation.tool === "commerce_search_products") &&
+    object(observation.result) && observation.result.status === "OK" && !CommerceToolOutputs[observation.tool].safeParse(observation.result.data).success);
 }
 
 /** Application mapping only. The runner retains raw transport and applies all
@@ -26,6 +32,7 @@ function currentProductPairs(observations: TerminalDecisionInput["observations"]
 export function makeRecoveryTerminalFinalizer(input: {
   responseContract: CommerceResponseContract; responseContractHash: string; digest: Digest;
   platform: "SHOPIFY" | "WOOCOMMERCE";
+  locale: ModaSupportedLanguageTag;
   hasEligibleEvidence?: (evidenceIds: readonly string[]) => boolean;
 }): TerminalDecisionPort | null {
   const contract = verifyResponseContract(input.responseContract, input.responseContractHash, input.digest);
@@ -41,6 +48,11 @@ export function makeRecoveryTerminalFinalizer(input: {
         !(variantType === "string" || Array.isArray(variantType) && variantType.includes("string")) ||
         !item.required?.includes("productId") || !item.required.includes("variantId") ||
         selection.maxItems !== undefined && selection.maxItems < 1) return null;
+  }
+  for (const field of ["productDetailSelections", "productOptionSelections"] as const) {
+    const item = details.properties?.[field]?.items;
+    if (item && (Object.keys(item.properties ?? {}).some(key => key !== "productId" && key !== "variantId") ||
+        item.required?.some(key => key !== "productId" && key !== "variantId"))) return null;
   }
   const recommendationVersion = details.properties?.productRecommendationVersion;
   if (details.properties?.productRecommendations || recommendationVersion) {
@@ -58,7 +70,7 @@ export function makeRecoveryTerminalFinalizer(input: {
     if (!property) return null;
     common[key] = structuredClone(property);
   }
-  const mappings = new Map<string, { fields: string[]; optional: string[]; kind: "ANSWER" | "REFER_TO_STORE"; fixed?: Record<string, unknown> }>();
+  const mappings = new Map<string, { fields: string[]; optional: string[]; kind: "ANSWER" | "REFER_TO_STORE"; fixed?: Record<string, unknown>; identity?: "productDetailSelections" | "productOptionSelections" }>();
   const terminalTools: TerminalToolDescriptor[] = [];
   function add(name: string, description: string, fields: string[], kind: "ANSWER" | "REFER_TO_STORE" = "ANSWER", fixed?: Record<string, unknown>) {
     const properties = { ...common };
@@ -93,7 +105,11 @@ export function makeRecoveryTerminalFinalizer(input: {
   ] as const) {
     const selection = details.properties?.[field];
     if (selection?.type === "array" && selection.items?.type === "object" && (selection.maxItems === undefined || selection.maxItems > 0)) {
-      add(name, `Complete ${purpose}. Supply exact currently observed product/variant identities; never invent selections.`, [field]);
+      const selectedPairs = { ...structuredClone(selection), minItems: Math.max(1, selection.minItems ?? 0) };
+      terminalTools.push({ name, description: `Select exact current observed identities for ${purpose}. Only selectedPairs is required; the application supplies verified factual wording and resolved language.`,
+        inputSchema: { type: "object", properties: { selectedPairs }, required: ["selectedPairs"], additionalProperties: false } });
+      mappings.set(name, { fields: [], optional: [], kind: "ANSWER", identity: field });
+      add(`${name}_with_context`, `Complete ${purpose} with explicitly supplied wording/evidence/shipping/disposition/language-detection adjuncts. Use the minimal identity tool when those adjuncts are unnecessary.`, [field]);
     }
   }
   if (details.properties?.productRecommendations?.type === "array" && details.properties?.productRecommendationVersion?.type === "string")
@@ -116,7 +132,8 @@ export function makeRecoveryTerminalFinalizer(input: {
     terminalTools,
     selectTools: ({ observations, requiredReferral }) => {
       if (requiredReferral) return ["recovery_complete_referral"];
-      const productsObserved = currentProductPairs(observations).length > 0;
+      if (malformedCurrentProductObservation(observations)) return ["recovery_complete_referral"];
+      const productsObserved = currentProducts(observations).length > 0;
       const shipping = readCommerceObservedShippingSelections(observations, input.platform);
       const needsProduct = productsObserved && SELECTIONS.some(field => Object.hasOwn(details.properties ?? {}, field));
       return terminalTools.map(tool => tool.name).filter(name => {
@@ -133,12 +150,30 @@ export function makeRecoveryTerminalFinalizer(input: {
       const descriptor = terminalTools.find(tool => tool.name === call.name);
       if (!mapping || !descriptor || !object(call.arguments)) return invalid();
       const args = call.arguments;
-      if ((args.detectedLanguageTag === null) !== (args.detectedLanguageConfidence === null)) return invalid();
+      if (!mapping.identity && (args.detectedLanguageTag === null) !== (args.detectedLanguageConfidence === null)) return invalid();
       if (mapping.kind === "REFER_TO_STORE" && (typeof args.referralReason !== "string" || !args.referralReason)) return invalid();
       const properties = (descriptor.inputSchema as SubsetSchema).properties!;
       const required = (descriptor.inputSchema as SubsetSchema).required!;
       if (required.some(key => !Object.hasOwn(args, key)) || Object.keys(args).some(key => !Object.hasOwn(properties, key))) return invalid();
+      let identityBody: string | undefined;
       const selectedDetails: Record<string, unknown> = { ...mapping.fixed };
+      if (mapping.identity) {
+        const pairs = args.selectedPairs;
+        if (!Array.isArray(pairs) || malformedCurrentProductObservation(observations)) return invalid();
+        const products = currentProducts(observations);
+        const titles: string[] = [];
+        for (const pair of pairs) {
+          if (!object(pair) || typeof pair.productId !== "string" || pair.variantId !== null && typeof pair.variantId !== "string") return invalid();
+          const matches = products.filter(product => product.productId === pair.productId && product.variantId === pair.variantId);
+          const agreed = new Set(matches.map(product => product.title));
+          if (!matches.length || agreed.size !== 1 || !matches[0]!.title.trim()) return invalid();
+          titles.push(matches[0]!.title);
+        }
+        // Initial decision carries titles only, never a chosen price/stock DTO.
+        // The bound production host must independently refresh before delivery.
+        identityBody = titles.join("\n\n");
+        selectedDetails[mapping.identity] = pairs;
+      }
       for (const field of mapping.fields) selectedDetails[field] = args[field];
       for (const field of mapping.optional) if (Object.hasOwn(args, field)) selectedDetails[field] = args[field];
       for (const field of SELECTIONS) {
@@ -148,10 +183,10 @@ export function makeRecoveryTerminalFinalizer(input: {
         const identities = selected.map(pair => canonicalJson([pair.productId, pair.variantId]));
         if (new Set(identities).size !== identities.length) return invalid();
       }
-      const value = { answerKind: mapping.kind, replyText: args.replyText,
+      const value = { answerKind: mapping.kind, replyText: mapping.identity ? identityBody : args.replyText,
         referralReason: mapping.kind === "REFER_TO_STORE" ? args.referralReason : null,
-        detectedLanguageTag: args.detectedLanguageTag, detectedLanguageConfidence: args.detectedLanguageConfidence,
-        evidenceIds: mapping.kind === "REFER_TO_STORE" ? [] : args.evidenceIds,
+        detectedLanguageTag: mapping.identity ? null : args.detectedLanguageTag, detectedLanguageConfidence: mapping.identity ? null : args.detectedLanguageConfidence,
+        evidenceIds: mapping.kind === "REFER_TO_STORE" || mapping.identity ? [] : args.evidenceIds,
         details: mapping.kind === "REFER_TO_STORE" ? {} : selectedDetails };
       if (requiredReferral && (value.answerKind !== "REFER_TO_STORE" || value.referralReason !== requiredReferral)) return invalid();
       const parsed = schema.safeParse(value);
@@ -166,7 +201,7 @@ export function makeRecoveryTerminalFinalizer(input: {
           return referral.success ? { kind: "decision", binding, value: referral.data } : invalid();
         }
       }
-      const observedPairs = new Set(currentProductPairs(observations).map(pair => canonicalJson([pair.productId, pair.variantId])));
+      const observedPairs = new Set(currentProducts(observations).map(pair => canonicalJson([pair.productId, pair.variantId])));
       for (const field of SELECTIONS) {
         const selected = selectedDetails[field];
         if (Array.isArray(selected) && selected.some(pair => !observedPairs.has(canonicalJson([pair.productId, pair.variantId])))) return invalid();

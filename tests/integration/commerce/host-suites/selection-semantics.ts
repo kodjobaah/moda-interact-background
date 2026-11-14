@@ -61,6 +61,14 @@ function configure() {
   f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
   f.toolResults = { commerce_get_product: ok({ product }), commerce_get_shipping_information: ok(shipping) };
 }
+function configureIdentity() {
+  configure();
+  const selection = { type: "array", maxItems: 3, items: { type: "object", properties: {
+    productId: { type: "string", maxLength: 128 }, variantId: { type: ["string", "null"], maxLength: 128 },
+  }, required: ["productId", "variantId"], additionalProperties: false } };
+  Object.assign(f.active.responseContract.detailsSchema.properties!, { productDetailSelections: selection, productOptionSelections: structuredClone(selection) });
+  f.active.responseContractHash = f.digest(f.responseContractCanonicalJson(f.active.responseContract));
+}
 const answer = (details: Record<string, unknown>) => f.final({ answerKind: "ANSWER", referralReason: null,
   replyText: "Our current catalogue has the blue linen shirt.", details });
 const flatRecommendation = (selected: unknown[], replyText = "Our current catalogue has verified products.") => ({
@@ -84,10 +92,9 @@ export function registerSelectionSemanticsTests() {
     });
     it.each(["empty", "foreign", "multi", "nonproduct"])("rejects terminal %s completion without another model or read", async mode => {
       configure(); let calls = 0;
-      const args = { replyText: "Current product facts.", detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [],
-        productDetailSelections: mode === "empty" ? [] : [{ ...pair, ...(mode === "foreign" ? { productId: "foreign-product" } : {}) }] };
+      const args = { selectedPairs: mode === "empty" ? [] : [{ ...pair, ...(mode === "foreign" ? { productId: "foreign-product" } : {}) }] };
       const raw = { calls: [{ id: "raw-terminal-1", name: mode === "nonproduct" ? "recovery_complete_answer" : "recovery_complete_details",
-        arguments: mode === "nonproduct" ? { replyText: args.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] } : args }], outputTokens: 1 };
+        arguments: mode === "nonproduct" ? { replyText: "Current product facts.", detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [] } : args }], outputTokens: 1 };
       if (mode === "multi") raw.calls.push({ ...raw.calls[0]!, id: "raw-terminal-2" });
       const before = structuredClone(raw);
       await expect(f.run(async request => {
@@ -108,6 +115,58 @@ export function registerSelectionSemanticsTests() {
         return flatRecommendation([recommendation]);
       })).rejects.toMatchObject({ code: "STALE_TURN" });
       expect(calls).toBe(3); expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(1);
+    });
+    it("replaces only a bound identity decision with independently refreshed product facts and price", async () => {
+      configureIdentity(); let calls = 0;
+      const initial = { ...product, title: "Initial title", unitPrice: "24.00", stock: { status: "KNOWN", scope: "VARIANT", quantity: 10 } };
+      const fresh = { ...initial, title: "Refreshed title", unitPrice: "29.00", stock: { status: "KNOWN", scope: "VARIANT", quantity: 7 } };
+      f.toolResults = { commerce_get_product: [ok({ product: initial }), ok({ product: fresh })] };
+      const raw = { calls: [{ id: "identity-final", name: "recovery_complete_details", arguments: { selectedPairs: [pair] } }], outputTokens: 1 };
+      const before = structuredClone(raw);
+      const result = await f.run(async request => {
+        calls++; if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Initial model prose", outputTokens: 1 };
+        expect(request.requireToolCall).toBe(true); expect(request.instructions.join("\n")).toContain("supply only its schema fields");
+        return raw;
+      });
+      expect(result.replyText).toContain("Refreshed title"); expect(result.replyText).toContain("29.00");
+      expect(result.replyText).not.toMatch(/Initial title|24\.00|Initial model prose/);
+      expect(raw).toEqual(before); expect(calls).toBe(3);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2);
+    });
+    it("never returns the initial identity title body when independent refresh fails", async () => {
+      configureIdentity(); let calls = 0;
+      f.toolResults = { commerce_get_product: [ok({ product }), ok({ product: null })] };
+      const raw = { calls: [{ id: "identity-no-refresh", name: "recovery_complete_details", arguments: { selectedPairs: [pair] } }], outputTokens: 1 };
+      const before = structuredClone(raw);
+      await expect(f.run(async () => {
+        calls++; if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Initial model prose", outputTokens: 1 };
+        return raw;
+      })).rejects.toMatchObject({ code: "PRODUCT_NOT_FOUND" });
+      expect(calls).toBe(3); expect(raw).toEqual(before);
+      expect(f.observations.filter(call => call.method === "tools/call")).toHaveLength(2);
+    });
+    it("does not replace an ordinary model answer that has no bound identity completion", async () => {
+      configureIdentity(); let calls = 0;
+      const result = await f.run(async () => ++calls === 1 ? { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 } :
+        { ...answer({ productDetailSelections: [pair] }), calls: [{ ...answer({ productDetailSelections: [pair] }).calls[0]!, arguments: { ...answer({ productDetailSelections: [pair] }).calls[0]!.arguments, replyText: "Ordinary verified model reply." } }] });
+      expect(result.replyText).toBe("Ordinary verified model reply."); expect(calls).toBe(2);
+    });
+    it("retains explicit language detection through the rich factual completion branch", async () => {
+      configureIdentity(); f.state.languageTag = "en"; f.state.languageSource = "DETECTED";
+      const context = structuredClone(f.context); context.conversation.messages = [{ role: "user", content: "¿Qué opciones tiene este producto? Por favor, responde en español." }];
+      let calls = 0;
+      const result = await f.run(async request => {
+        calls++; if (calls === 1) return { calls: [{ name: "commerce_get_product", arguments: pair }], outputTokens: 1 };
+        if (calls === 2) return { calls: [], text: "Tenemos este producto.", outputTokens: 1 };
+        expect(request.instructions.join("\n")).toContain("new language detection");
+        return { calls: [{ id: "rich-language-final", name: "recovery_complete_details_with_context", arguments: {
+          replyText: "Aquí están los detalles del producto.", detectedLanguageTag: "es", detectedLanguageConfidence: 0.99, evidenceIds: [], productDetailSelections: [pair],
+        } }], outputTokens: 1 };
+      }, context);
+      expect(result.detectedLanguageTag).toBe("es"); expect(result.replyText).toBe("Aquí están los detalles del producto.");
+      expect(result.commercePresentation!.verified.locale).toBe("es");
     });
     it("guides catalogue facts to exact detail selections on the ordinary final call without granting promotions", async () => {
       configure();
@@ -148,7 +207,7 @@ export function registerSelectionSemanticsTests() {
         const empty = answer({}).calls[0]!.arguments;
         const isTerminal = (request: { tools?: Array<{ function?: { name?: string } }> }) => request.tools?.some(tool => tool.function?.name === "recovery_complete_details") === true;
         mock.on({ model: "moda/test-only", predicate: request => hasResult(request.messages) && !isTerminal(request) }, { toolCalls: [{ name: "finalResponse", arguments: empty }] });
-        const flat = { replyText: "The verified product is available.", detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [], productDetailSelections: [pair] };
+        const flat = { selectedPairs: [pair] };
         mock.on({ model: "moda/test-only", predicate: request => isTerminal(request) }, { toolCalls: [{ name: "recovery_complete_details", arguments: flat }] });
         const model = new f.OpenRouterModelClient({ provider: "moda", providerModelId: "test-only", configurationSchemaVersion: 1, configuration: {}, credential: "test-only-no-provider-key" });
         expect(f.aiMockRoute.constructions).toEqual([{ model: "moda/test-only", baseURL: `${url.origin}/v1` }]);
@@ -169,7 +228,7 @@ export function registerSelectionSemanticsTests() {
           expect(body.tool_choice).toEqual(index === 2 ? "required" : "auto");
           if (index === 2) {
             expect(final.parameters).not.toHaveProperty("allOf");
-            expect(final.parameters).toMatchObject({ type: "object", properties: { productDetailSelections: { type: "array", minItems: 1 } } });
+            expect(final.parameters).toMatchObject({ type: "object", properties: { selectedPairs: { type: "array", minItems: 1 } } });
           }
           if (index === 1) {
             const allOf = final.parameters.allOf as { anyOf?: { properties?: { details?: { anyOf: unknown[] } } }[] }[];
