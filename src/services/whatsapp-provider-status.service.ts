@@ -130,6 +130,7 @@ export class WhatsAppProviderStatusService {
         message.conversation.checkoutRecovery && message.conversation.checkoutRecovery.shopId !== pointerShopId) {
         throw new ProviderStatusConcurrencyConflict();
       }
+      if (!message.dispatchProviderAccountId || !message.dispatchProviderPhoneNumberId) return "ignored";
       if ((message.dispatchProviderAccountId || message.dispatchProviderPhoneNumberId) &&
           (message.dispatchProviderAccountId !== event.providerAccountId || message.dispatchProviderPhoneNumberId !== event.providerPhoneNumberId)) return "ignored";
       const actualShopId = message.conversation.shopId ?? message.conversation.checkoutRecovery?.shopId;

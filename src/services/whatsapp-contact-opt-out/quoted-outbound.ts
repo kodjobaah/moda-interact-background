@@ -1,3 +1,5 @@
+import { quotedOwner } from "../recovery-sender-pool/inbound-authority.js";
+import type { WhatsAppInboundEvent } from "../../integration/whatsapp/types.js";
 import type { PrismaClient } from "@prisma/client";
 import { canonicalWhatsAppSender, matchesRegisteredPhone } from "./phone.js";
 
@@ -5,10 +7,12 @@ import { canonicalWhatsAppSender, matchesRegisteredPhone } from "./phone.js";
  * A missing/ambiguous reference always falls back to global negative suppression.
  */
 export async function resolveQuotedStopShop(
-  database: Pick<PrismaClient, "conversationMessage">,
+  database: Pick<PrismaClient, "conversationMessage"|"$queryRawUnsafe">,
   providerMessageId: string,
   canonicalSender: string,
+  event:WhatsAppInboundEvent,
 ): Promise<string | null> {
+  if(!await quotedOwner(database,providerMessageId,event))return null;
   const original = await database.conversationMessage.findUnique({
     where: { providerMessageId },
     select: {

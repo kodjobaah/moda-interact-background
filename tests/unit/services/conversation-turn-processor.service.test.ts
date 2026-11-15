@@ -112,12 +112,14 @@ function harness(overrides: Partial<any> = {}) {
       conversationMaxSettleWindowMs: 10_000,
     }),
   };
+  const loadTurn=vi.fn().mockResolvedValue(loaded);
   const processor = new ConversationTurnProcessor({
+    currentRouteActive:overrides.currentRouteActive,
     queue,
     conversation,
     admission,
     abuseAdmission,
-    loadTurn: vi.fn().mockResolvedValue(loaded),
+    loadTurn,
     runAgent,
     aiWrapper,
     getResult: (result: any) => result,
@@ -128,6 +130,7 @@ function harness(overrides: Partial<any> = {}) {
 
   return {
     processor,
+    loadTurn,
     queue,
     conversation,
     admission,
@@ -263,4 +266,13 @@ it('carries the original AI claim deadline into optional media after a slow mode
  let current=first.getTime()+20000;const t=harness({now:()=>new Date(current)}),claimedAt=current,hostDeadline=claimedAt+90000;
  t.runAgent.mockImplementation(async()=>{current+=60000;return {replyText:'Grounded answer',commercePresentation:{deadlineAt:hostDeadline}};});
  await t.processor.process({conversationId:'conversation-1',observedVersion:3});expect(t.aiWrapper.renderConversationResponse).toHaveBeenCalledWith(expect.objectContaining({mediaDeadlineAt:hostDeadline}));
+});
+
+describe('sender ownership before delayed model work',()=>{
+ it('rejects expired/released owner before state, context, capacity or model access',async()=>{
+  const currentRouteActive=vi.fn(async()=>false),f=harness({currentRouteActive});await f.processor.process({conversationId:'conversation-1',observedVersion:3});expect(f.conversation.getTurnState).not.toHaveBeenCalled();expect(f.loadTurn).not.toHaveBeenCalled();expect(f.admission.reserve).not.toHaveBeenCalled();expect(f.runAgent).not.toHaveBeenCalled();
+ });
+ it('rechecks owner after turn claim before context or model',async()=>{
+  const currentRouteActive=vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false),f=harness({currentRouteActive});await f.processor.process({conversationId:'conversation-1',observedVersion:3});expect(f.conversation.claimTurn).toHaveBeenCalled();expect(f.loadTurn).not.toHaveBeenCalled();expect(f.runAgent).not.toHaveBeenCalled();expect(f.admission.reserve).not.toHaveBeenCalled();
+ });
 });

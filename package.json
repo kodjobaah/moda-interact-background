@@ -56,7 +56,8 @@
     "test:meta-sample:artifact": "node scripts/smoke-meta-template-sample.mjs",
     "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs",
     "test:arch076-sender-dispatch:postgres": "node scripts/test-integration.mjs tests/integration/arch076-dispatch-sender.integration.test.ts",
-    "test:arch076-sender-pool:postgres": "node scripts/test-integration.mjs tests/integration/arch076-sender-pool.integration.test.ts"
+    "test:arch076-sender-pool:postgres": "node scripts/test-integration.mjs tests/integration/arch076-sender-pool.integration.test.ts",
+    "test:arch076-inbound-routing:postgres": "node scripts/test-integration.mjs tests/integration/arch076-inbound-routing.integration.test.ts"
   },
   "keywords": [],
   "author": "",

@@ -1,3 +1,4 @@
+import { canProcessConversation } from "../services/recovery-sender-pool/inbound-authority.js";
 import { AiFailureFallbackService, withGenerationBudget } from '../services/ai-failure-fallback.js';
 import { brandedMainReplyEnabled } from '../services/recovery-multipart/composition.js';
 import { compositeReplyEnabled } from '../services/recovery-multipart/composite.js';
@@ -73,6 +74,7 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   Awaited<ReturnType<typeof runCommerceAgent>>
 >({
   queue: whatsappQueue,
+  currentRouteActive: id => canProcessConversation(prisma,id),
   conversation: conversationService,
   moderation: moderationTurnGate,
   ownership: new AiTurnOwnershipService(),
