@@ -90,6 +90,11 @@ describe('single-bubble composite opt-in',()=>{
   const caption=result.multipartPlan!.parts[0]!.plan.body;expect(result.multipartPlan!.parts[0]!.plan.kind).toBe('COMPOSITE_IMAGE');expect(Array.from(caption).length).toBeLessThanOrEqual(400);expect(caption).toContain('The Videographer Snowboard —');expect(caption).toContain('Stock: 50');expect(caption).not.toContain('optional longer');expect(caption.endsWith(url)).toBe(true);expect(caption.split(url)).toHaveLength(2);expect(result.commonLayout!.boundaries.footer).toContain('Reply STOP to opt out.');expect(result.compositeReceipt!.verifiedProducts!.products).toEqual([product]);expect(result.presentedPairs).toEqual([{productId:'selected',variantId:null}]);
   expect(result.responseDigest).toBe(digest(stableJson({envelope:full.envelope,verified:full.verified,productPairs:[],verifiedProducts:full.verifiedProducts})));
  });
+ it.each([null,false])('preserves the complete rich DETAIL shipping answer rather than briefly rewriting it (%s)',async requiresShipping=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),reply='Shipping costs could not be verified. Preserve this required qualification. '+ 'Complete grounded answer. '.repeat(14),p=presentation(reply);
+  const rich={...p,envelope:{...p.envelope,details:{...p.envelope.details,responseDisposition:'SHIPPING_INFORMATION_UNVERIFIED',shippingInformationSelection:{productId:null,variantId:null}}},verified:{...p.verified,requiresShipping}};
+  const r=await f.service.renderConversationResponse({conversationId:'conversation',messageIdentity:'message',source:'AI',responseBody:reply,mediaDeadlineAt:Date.now()+15000,commercePresentation:rich});if(r.kind!=='rendered')throw Error('fixture');expect(r.commonLayout!.boundaries.body).toBe(reply);expect(r.commonLayout!.boundaries.footer.endsWith(checkout)).toBe(true);expect(r.body).toContain('Preserve this required qualification.');expect(r.presentedPairs).toEqual([{productId:'selected',variantId:null}]);
+ });
  it('compacts a fifteen-item AI lead using only retained verified products and freezes replay exactly',async()=>{
   vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture();
   const longLead=Array.from({length:15},(_,i)=>`Unverified catalogue item ${i}: ${'model prose '.repeat(6)}`).join('\n');

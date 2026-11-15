@@ -28,7 +28,10 @@ export function fitVerifiedProductCaption(input: CommercePresentationInput, rend
 } | null {
  // Mixed detail/policy contracts must keep their complete original body; the
  // ordinary recommendation renderer already carries mandatory terms verbatim.
- if(input.verified.disposition==='PRODUCT_DETAILS' && (input.verified.requiresShipping || input.verified.includeNoVerifiedOffer || input.verified.products.some(product=>(product.offerTerms??[]).length)))return null;
+ const details=input.envelope.details;
+ if(input.verified.disposition==='PRODUCT_DETAILS' && (input.verified.requiresShipping!=null || input.verified.policyUrl!=null || input.verified.includeNoVerifiedOffer ||
+  Object.hasOwn(details,'shippingInformationSelection') || details.responseDisposition==='SHIPPING_INFORMATION_UNVERIFIED' || details.responseDisposition==='OUT_OF_SCOPE_REDIRECT' ||
+  input.verified.products.some(product=>(product.offerTerms??[]).length)))return null;
  const candidates = briefProductDetailCandidates(input,{concise:true}) ?? presentationCandidates(input, { completePrefixes: true });
  const locale=resolveModaConfigurationLocale(input.verified.locale);
  const invitation=input.verified.disposition==='PRODUCT_DETAILS' && new Set(input.verified.productFacts?.map(pair=>pair.productId)).size===1?'':PRODUCT_SHOW_MORE[locale];
