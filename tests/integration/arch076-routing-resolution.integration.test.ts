@@ -256,7 +256,7 @@ suite('ARCH076 R15 frozen routing association', () => {
     return { f, originalText, q1, q2, q3, q1Decision, q2Decision, q3Decision, baskets, selected, assessments, knownScope };
   }
 
-  it.each(['TEXT', 'AUDIO', 'AUDIO_FOREIGN', 'AUDIO_SOURCE_TAMPER'] as const)('runs actual %s accept/process through shop and basket clarification exactly once', async mode => {
+  it.each(['TEXT', 'AUDIO', 'AUDIO_FOREIGN', 'AUDIO_SOURCE_TAMPER', 'AUDIO_NEW'] as const)('runs actual %s accept/process through shop and basket clarification exactly once', async mode => {
     const f = await fixture();
     const admin = await db.platformAdmin.create({ data: { email: `${randomUUID()}@example.test`, role: 'SUPER_ADMIN' } });
     const prepared = {
@@ -307,10 +307,11 @@ suite('ARCH076 R15 frozen routing association', () => {
       const candidate = input.candidates.find(c => c.conversationId === f.first.conversation.id)!;
       const prompt = input.prompts.find(p => p.turnId === q2Id)!;
       return { kind: 'decision' as const, decision: {
-        role: mode === 'AUDIO' ? 'SELECT_AND_QUESTION' as const : 'SELECT_ONLY' as const, confidence: 100, originalTurnId: q1Id, promptTurnId: q2Id,
-        confirmedPromptProviderMessageId: prompt.confirmedProviderMessageId,
+        role: mode === 'AUDIO_NEW' ? 'NEW_QUESTION' as const : mode === 'AUDIO' ? 'SELECT_AND_QUESTION' as const : 'SELECT_ONLY' as const, confidence: 100,
+        originalTurnId: mode === 'AUDIO_NEW' ? null : q1Id, promptTurnId: mode === 'AUDIO_NEW' ? null : q2Id,
+        confirmedPromptProviderMessageId: mode === 'AUDIO_NEW' ? null : prompt.confirmedProviderMessageId,
         selectedConversationId: candidate.conversationId, selectedRouteId: candidate.routeId,
-        offeredOptionKey: candidate.optionKey, newQuestionClause: mode === 'AUDIO' ? { start: transcript.indexOf('Can I'), end: transcript.length } : null,
+        offeredOptionKey: mode === 'AUDIO_NEW' ? null : candidate.optionKey, newQuestionClause: mode === 'AUDIO' ? { start: transcript.indexOf('Can I'), end: transcript.length } : null,
       } };
     });
     const sendPrompt = vi.fn(async (_database: PrismaClient, input: { turnId: string; prompt: { body: string } }) => {
@@ -325,6 +326,32 @@ suite('ARCH076 R15 frozen routing association', () => {
       senderSnapshot: async () => ({ rowId: senderConfigurationId, version: 1, environment: 'test', providerAccountId, providerPhoneNumberId }),
     });
     const enqueue = vi.fn(async () => undefined);
+    if (mode === 'AUDIO_NEW') {
+      const direct = inbound(f, '');
+      direct.content = { type: 'audio', mediaId: randomUUID(), mimeType: 'audio/ogg', sha256: null, voice: true };
+      const scope = { ...f.scope, routeId: f.first.sender.routeId };
+      expect(await runtime.accept(direct, scope, enqueue)).toMatchObject({ kind: 'admitted', conversationId: f.first.conversation.id });
+      const turn = await db.recoveryBasketRoutingTurn.findUniqueOrThrow({ where: { inboundProviderMessageId: direct.providerMessageId } });
+      const frozen = turn.routingDecision as FrozenRoutingDecision;
+      expect(turn.parentProviderMessageId).toBeNull();
+      expect(frozen).toMatchObject({ role: 'NEW_QUESTION', originalInboundProviderMessageId: null, originalTurnId: null });
+      expect(frozen.associatedMessages.originalMessageId).toBe(frozen.associatedMessages.currentMessageId);
+      expect(frozen.audioOriginal).toEqual(frozen.audioCurrent);
+      expect(frozen.audioOriginal).toMatchObject({ verified: true, providerMessageId: direct.providerMessageId });
+      const message = await db.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: direct.providerMessageId } });
+      expect(message).toMatchObject({ conversationId: f.first.conversation.id, content: transcript,
+        contentType: 'AUDIO', transcriptionStatus: 'COMPLETED' });
+      const reviews = await db.conversationModerationAssessment.findMany({ where: { conversationMessageId: message.id } });
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({ inputKind: 'TRANSCRIPT', decision: 'ALLOW', contentSha256: sha256(transcript) });
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(await runtime.accept(direct, scope, enqueue)).toMatchObject({ kind: 'terminal' });
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(audio).toHaveBeenCalledTimes(1);
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(sendPrompt).not.toHaveBeenCalled();
+      return;
+    }
     const q1 = inbound(f, 'Can it arrive Friday?'); q1Id = q1.providerMessageId;
     expect(await runtime.accept(q1, f.scope, enqueue)).toMatchObject({ kind: 'sent' });
     const original = await db.recoveryBasketRoutingTurn.findUniqueOrThrow({ where: { inboundProviderMessageId: q1Id } });
