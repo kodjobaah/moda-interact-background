@@ -12,3 +12,18 @@ export const commerceHistoryVisible: Prisma.ConversationMessageWhereInput = {
 export function priorCommerceHistorySelection(conversationId:string,boundary:Date):{where:Prisma.ConversationMessageWhereInput;orderBy:Prisma.ConversationMessageOrderByWithRelationInput[];take:number}{
  return {where:{AND:[commerceHistoryVisible,{conversationId,OR:[{contentType:{not:'AUDIO'},createdAt:{lt:boundary}},{contentType:'AUDIO',transcriptionCompletedAt:{lt:boundary}}]}]},orderBy:[{createdAt:'desc'},{id:'desc'}],take:20};
 }
+
+/** The inbound version advances when an audio transcript becomes ready. Use the
+ * same readiness chronology for objective selection, with stable identity ties. */
+export type CommerceHistoryActivity = {id:string;createdAt?:Date;contentType?:string;transcriptionCompletedAt?:Date|null};
+export function commerceHistoryActivityAt(row:CommerceHistoryActivity):Date|undefined {
+ return row.contentType==='AUDIO' ? row.transcriptionCompletedAt??row.createdAt : row.createdAt;
+}
+export function orderCommerceHistory<T extends CommerceHistoryActivity>(rows:readonly T[]):T[]{
+ return [...rows].sort((a,b)=>{
+  const left=commerceHistoryActivityAt(a)?.getTime(),right=commerceHistoryActivityAt(b)?.getTime();
+  // Unit/adaptor rows without timestamps retain their explicitly supplied order.
+  if(left===undefined||right===undefined)return 0;
+  return left-right||(a.createdAt?.getTime()??left)-(b.createdAt?.getTime()??right)||a.id.localeCompare(b.id);
+ });
+}

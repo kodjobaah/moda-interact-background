@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PostgresModerationAssessmentService, sha256Text } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
+import { loadCommerceHistory } from "../../src/commerce/history.js";
 import { ModerationTurnGate } from "../../src/services/conversation-moderation/moderation-turn-gate.js";
 import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import { allowedHistoryCandidates } from "../../src/services/conversation-moderation/moderation-history.js";
@@ -317,5 +318,24 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       expect(f.providerHttpRequests).toHaveLength(0);
     } finally { await close(); }
   }, 120_000);
+
+  it.each([false,true])("keeps failed old backlog historical and latest blocked=%s authoritative in PostgreSQL",async blocked=>{
+    const {f,aimock,close}=await moderatedFixture('latest-objective-'+blocked);
+    const {platformConsumerConfiguration}=await import('../../src/services/platform-configuration/consumers.js');
+    const operation=vi.spyOn(platformConsumerConfiguration,'requireModerationOperation').mockImplementation(aimock.readOperation as never);
+    try{
+      const boundary=new Date(Date.now()-8*60*60*1000),latestAt=new Date(Date.now()-1000);
+      const old=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'What categories do you sell?',createdAt:boundary}});
+      const content=blocked?'moderation-fixture-block':'Tell me about The Videographer Snowboard';
+      await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content,createdAt:latestAt}});
+      const gate=new ModerationTurnGate(new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation));
+      expect(await gate.moderatePending(f.conversationId,boundary)).toBe(blocked?'suppressed':'allowed');
+      const loaded=await loadCommerceHistory(f.conversationId,boundary);
+      expect(loaded.currentMessages).toEqual(blocked?[]:[{role:'user',content}]);
+      expect(loaded.history).toContainEqual({role:'user',content:old.content});
+      expect(f.whatsapp.messages).toHaveLength(0);
+      expect(await f.db.conversationMessage.count({where:{conversationId:f.conversationId,direction:'INBOUND'}})).toBeGreaterThanOrEqual(2);
+    }finally{operation.mockRestore();await close();}
+  },120000);
 
 });
