@@ -297,7 +297,7 @@ suite('ARCH076 R15 frozen routing association', () => {
       return { text: transcript, provenance: {
         schemaVersion: 1 as const, verified: true as const, sourceSha256: mode === 'AUDIO_SOURCE_TAMPER' ? '0'.repeat(64) : sourceSha256,
         providerMessageId: mode === 'AUDIO_FOREIGN' ? randomUUID() : event.providerMessageId,
-        mediaIdSha256: sha256(event.content.mediaId), mediaSha256: sha256('fixture audio bytes'),
+        mediaIdSha256: sha256(event.content.mediaId), mediaSha256: event.content.sha256 ?? null,
         transcriptSha256: sha256(transcript), provider: 'openai', model: 'fixture-transcription', durationMs: 1200,
         operationRows: [{ id: policy.rowId, version: policy.version }],
       } };
