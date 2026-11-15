@@ -568,14 +568,16 @@ export class ConversationTurnProcessor<TContext, TResult> {
           const owned=await this.dependencies.conversation.getTurnState(conversationId);
           if(owned.processingInboundVersion!==observedVersion ||
               owned.processingStartedAt?.getTime()!==now.getTime())return undefined;
-          this.logger.warn("whatsapp.turn.agent_generation_failed", {conversationId,observedVersion,error});
+          this.logger.warn("whatsapp.turn.agent_generation_failed", {conversationId,observedVersion,
+            failureKind:error instanceof GenerationBudgetTimeout?"generation-child-timeout":"commerce-host-generation-failure",
+            errorCode:error instanceof CommerceHostError && ["INVALID_FINAL","BUDGET_EXHAUSTED","UNAVAILABLE","DEADLINE","TOOL_ERROR","MODEL_ERROR"].includes(error.code)?error.code:"OTHER_GENERATION_FAILURE"});
           let fallback:AiFailureFallback|null;
           try {
             fallback=await this.dependencies.prepareFailureFallback({conversationId,shopId:loaded.shopId,
               checkoutRecoveryId:loaded.checkoutRecoveryId,deadlineAt:now.getTime()+PROCESSING_LEASE_MS});
           } catch(preparationError) {
             this.logger.error("whatsapp.turn.fallback_preparation_failed",{conversationId,observedVersion,
-              reason:"preparation-error",errorType:preparationError instanceof Error?preparationError.name:"unknown"});
+              reason:"preparation-error",errorKind:preparationError instanceof Error?"error":"non-error"});
             throw preparationError;
           }
           if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS) {
