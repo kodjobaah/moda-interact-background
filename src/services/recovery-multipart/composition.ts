@@ -1,5 +1,5 @@
 import { readRecoveryCommonReference } from './common-layout-policy.js';
-import { fitVerifiedProductCaption } from '../../commerce/compact-product-presentation.js';
+import { captionWithinDisplayTarget, fitVerifiedProductCaption } from '../../commerce/compact-product-presentation.js';
 import { readTemplateCompositeProfile } from './composite-profile.js';
 import { prepareCompositeReply, compositeReplyEnabled, type CompositeReceipt, type CompositeDependencies } from './composite.js';
 import { buildRecoveryMultipartDeliveryPlan, composeCommerceWhatsAppPreview, buildConversationBrandImageDeliveryPlan, type RecoveryCompositeMultipartDeliveryPlanV2, type WrapperSlot } from '@modainteract/moda-interact-shared/commerce/presentation';
@@ -39,7 +39,7 @@ export async function composeCommonReply(input:RenderConversationResponseInput,c
  }
  let boundaries=renderCommonLayoutBoundaries(selected.reference,variables,middle,context.shopId,input.conversationId);if(!boundaries)return null;
  let mediaPresentation=input.commercePresentation;
- if(compositeReplyEnabled()&&input.source==='AI'&&input.commercePresentation?.envelope.answerKind==='ANSWER'&&Array.from(boundaries.body+boundaries.footer).length>1024){
+ if(compositeReplyEnabled()&&input.source==='AI'&&input.commercePresentation?.envelope.answerKind==='ANSWER'&&!captionWithinDisplayTarget(boundaries.body+boundaries.footer)){
   const fitted=fitVerifiedProductCaption(input.commercePresentation,candidate=>renderCommonLayoutBoundaries(selected.reference,variables,candidate,context.shopId,input.conversationId));
   if(fitted){boundaries=fitted.boundaries;presentedPairs=fitted.pairs;mediaPresentation=fitted.presentation;}
  }
