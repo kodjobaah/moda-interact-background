@@ -1,3 +1,5 @@
+import { readMultipartPartIdentity, sha256 } from "../recovery-multipart/frozen.js";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { platformConsumerConfiguration } from "../platform-configuration/consumers.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import prisma from "../../lib/db.js";
@@ -20,8 +22,8 @@ export async function readRecoveryDispatchSender(conversationId: string, recipie
     const existing = await prisma.recoverySenderAssignment.findUnique({where:{conversationId}});
     if (!existing) {
       const snapshot = await readDispatchSenderSnapshot();
-      const proof = await prisma.$queryRawUnsafe<unknown[]>(legacyProofSql, conversationId, recipient, snapshot.providerAccountId, snapshot.providerPhoneNumberId);
-      if (proof.length) return {providerAccountId:snapshot.providerAccountId,providerPhoneNumberId:snapshot.providerPhoneNumberId};
+      const proof = await hasLegacyProof(prisma, conversationId, recipient, snapshot);
+      if (proof) return {providerAccountId:snapshot.providerAccountId,providerPhoneNumberId:snapshot.providerPhoneNumberId};
     }
   }
   if (rows.length !== 1) throw new Error("RECOVERY_DISPATCH_ASSIGNMENT_UNAVAILABLE");
@@ -52,24 +54,39 @@ export async function checkDispatchSender(tx: SqlTransaction, input: {
         AND s."verifiedAt"<=statement_timestamp() FOR SHARE OF a,r,t,s`, input.conversationId);
     if (!assignment || assignment.canonicalRecipient !== canonicalDispatchRecipient(input.recipient) || assignment.providerAccountId !== input.snapshot.providerAccountId) return null;
     sender = assignment;
-  } else if (input.recovery && !await first(tx, legacyProofSql, input.conversationId, input.recipient, input.snapshot.providerAccountId, input.snapshot.providerPhoneNumberId)) return null;
+  } else if (input.recovery && !await hasLegacyProof(tx, input.conversationId, input.recipient, input.snapshot)) return null;
   if (input.expectedSender && (input.expectedSender.providerAccountId !== sender.providerAccountId || input.expectedSender.providerPhoneNumberId !== sender.providerPhoneNumberId)) return null;
   return {providerAccountId: sender.providerAccountId, providerPhoneNumberId: sender.providerPhoneNumberId};
 }
 
 /** Exact prior contact evidence, never the mutable Conversation phone/current config alone. */
-const legacyProofSql = `SELECT m.id FROM whatsapp."ConversationMessage" m
- WHERE m."conversationId"=$1 AND m.direction='OUTBOUND' AND m.status IN ('PENDING','SENT','DELIVERED','READ') AND m."failedAt" IS NULL AND (
-   (m."sentAt" IS NOT NULL AND m.status IN ('SENT','DELIVERED','READ') AND m."dispatchProviderAccountId"=$3 AND m."dispatchProviderPhoneNumberId"=$4 AND m."providerDispatchKey" IS NOT NULL AND m."providerDispatchAdmittedAt" IS NOT NULL AND EXISTS (
-     SELECT 1 FROM commerce."RecoveryOutreachAttempt" a JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId"=a."checkoutRecoveryId"
-     WHERE c.id=$1 AND a.sequence=1 AND a."outboundMessageId"=m.id AND a.recipient=$2 AND a."sentAt" IS NOT NULL))
-   OR (m."outboundPresentation"->>'kind'='RECOVERY_MULTIPART_PREPARATION'
-     AND m."outboundPresentation"->>'recipient'=$2
-     AND m."outboundPresentation"#>>'{sender,providerAccountId}'=$3
-     AND m."outboundPresentation"#>>'{sender,providerPhoneNumberId}'=$4
-     AND EXISTS (SELECT 1 FROM whatsapp."ConversationDeliveryPart" p WHERE p."messageId"=m.id
-       AND p."providerAccountId"=$3 AND p."providerPhoneNumberId"=$4 AND p.state IN ('ACKNOWLEDGED','DELIVERED','READ') AND p."providerDispatchKey" IS NOT NULL AND p."providerDispatchAdmittedAt" IS NOT NULL AND p."acknowledgedAt" IS NOT NULL))
- ) LIMIT 1`;
+async function hasLegacyProof(db: SqlTransaction, conversationId: string, recipient: string, sender: WhatsAppSenderIdentity): Promise<boolean> {
+  const root = await first(db, `SELECT m.id FROM whatsapp."ConversationMessage" m
+    JOIN commerce."RecoveryOutreachAttempt" a ON a."outboundMessageId"=m.id AND a.sequence=1
+    JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId"=a."checkoutRecoveryId" AND c.id=m."conversationId"
+    WHERE m."conversationId"=$1 AND m.direction='OUTBOUND' AND m."sentAt" IS NOT NULL
+      AND m.status IN ('SENT','DELIVERED','READ') AND m."failedAt" IS NULL AND m."providerMessageId" IS NOT NULL
+      AND m."dispatchProviderAccountId"=$3 AND m."dispatchProviderPhoneNumberId"=$4
+      AND m."providerDispatchKey" IS NOT NULL AND m."providerDispatchAdmittedAt" IS NOT NULL
+      AND a.recipient=$2 AND a."sentAt" IS NOT NULL LIMIT 1`, conversationId, recipient, sender.providerAccountId, sender.providerPhoneNumberId);
+  if (root) return true;
+  const part = await first<{id:string;content:string;outboundPresentation:unknown;sourceIdentity:unknown;actualShopId:string}>(db, `SELECT m.id,m.content,m."outboundPresentation",p."sourceIdentity",r."shopId" AS "actualShopId"
+    FROM whatsapp."ConversationMessage" m JOIN whatsapp."ConversationDeliveryPart" p ON p."messageId"=m.id
+    JOIN whatsapp."Conversation" c ON c.id=m."conversationId"
+    JOIN commerce."CheckoutRecovery" r ON r.id=c."checkoutRecoveryId"
+    WHERE c.type='RECOVERY' AND (c."shopId" IS NULL OR c."shopId"=r."shopId") AND m."conversationId"=$1 AND m.direction='OUTBOUND' AND m.status IN ('PENDING','SENT','DELIVERED','READ') AND m."failedAt" IS NULL
+      AND p."providerAccountId"=$2 AND p."providerPhoneNumberId"=$3
+      AND p.state IN ('ACKNOWLEDGED','DELIVERED','READ') AND p."providerMessageId" IS NOT NULL AND p."providerDispatchKey" IS NOT NULL
+      AND p."providerDispatchAdmittedAt" IS NOT NULL AND p."acknowledgedAt" IS NOT NULL
+    ORDER BY p."acknowledgedAt" DESC,p.id LIMIT 1`, conversationId,sender.providerAccountId,sender.providerPhoneNumberId);
+  // Sender provenance is checked independently of obsolete presentation geometry.
+  // The immutable admitted part must attest the exact frozen root bytes.
+  // The current identity has no messageId field (extra fields are rejected);
+  // source.messageId below must still equal the actual root, not another row.
+  const source=part?.outboundPresentation as {schemaVersion?:unknown;kind?:unknown;messageId?:unknown;body?:unknown;recipient?:unknown;sender?:WhatsAppSenderIdentity;receipt?:{conversationId?:unknown;shopId?:unknown}} | undefined;
+  const identity=readMultipartPartIdentity(part?.sourceIdentity);
+  return !!part && !!source && !!identity && source.schemaVersion===1 && source.kind==='RECOVERY_MULTIPART_PREPARATION' && identity.sourceDigest===sha256(canonicalJson(source)) && identity.conversationId===conversationId && identity.shopId===part.actualShopId && source.receipt?.shopId===part.actualShopId && source.messageId===part.id && source.body===part.content && source.receipt?.conversationId===conversationId && source.recipient===recipient && source.sender?.providerAccountId===sender.providerAccountId && source.sender?.providerPhoneNumberId===sender.providerPhoneNumberId;
+}
 
 function canonicalDispatchRecipient(value: string): string | null {
   const digits = value.startsWith("+") ? value.slice(1) : value;
