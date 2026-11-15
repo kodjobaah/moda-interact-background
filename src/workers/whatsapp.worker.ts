@@ -1,3 +1,4 @@
+import { AiFailureFallbackService, withGenerationBudget } from '../services/ai-failure-fallback.js';
 import { brandedMainReplyEnabled } from '../services/recovery-multipart/composition.js';
 import { compositeReplyEnabled } from '../services/recovery-multipart/composite.js';
 import { bindMultipartQueue, recoveryMultipartEngine, processMultipartStatus, MULTIPART_CONTINUATION_JOB } from "../services/recovery-multipart/runtime.js";
@@ -78,7 +79,8 @@ const conversationTurnProcessor = new ConversationTurnProcessor<
   admission: outboundWhatsAppAdmissionService,
   abuseAdmission: inboundWhatsAppAbuseAdmissionService,
   loadTurn: loadConversationTurn,
-  runAgent: runCommerceAgent,
+  runAgent: (context,options) => options ? withGenerationBudget(options.deadlineAt, signal => runCommerceAgent(context,{signal})) : runCommerceAgent(context),
+  prepareFailureFallback: input => new AiFailureFallbackService().prepare(input),
   aiWrapper: new ConversationWrapperService({ onMissingSlot: "passthrough", logger }),
   getResult: (result) => result,
   logger,

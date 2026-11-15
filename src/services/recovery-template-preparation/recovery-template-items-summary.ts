@@ -53,3 +53,24 @@ export function formatCheckoutItemsSummary(lineItems: unknown, languageTag: stri
   if (summary.length <= MAX_SUMMARY_LENGTH) return summary;
   return `${Array.from(summary).slice(0, MAX_SUMMARY_LENGTH - 1).join("").trimEnd()}…`;
 }
+
+/** Saved-snapshot fallback: retain complete entries, never slice a title. */
+export function formatWholeCheckoutItemsSummary(lineItems: unknown, languageTag: string): string | null {
+  if (!Array.isArray(lineItems) || !lineItems.length || lineItems.length > MAX_LINE_ITEMS) return null;
+  const items = lineItems.map(parseItem);
+  // A basket snapshot is all-or-nothing; invalid rows must not disappear.
+  if (items.some(item => item === null)) return null;
+  let numbers: Intl.NumberFormat;
+  try { numbers = new Intl.NumberFormat(languageTag, {maximumFractionDigits: 0}); } catch { return null; }
+  const visible: string[] = [];
+  for (const item of items.slice(0, MAX_DISPLAYED_ITEMS)) {
+    const entry = `${numbers.format(item!.quantity)} × ${item!.title}`;
+    const remaining = items.length - visible.length - 1;
+    const candidate = [...visible, entry, ...(remaining ? [`+${numbers.format(remaining)}`] : [])].join("\n");
+    if (Array.from(candidate).length > MAX_SUMMARY_LENGTH) break;
+    visible.push(entry);
+  }
+  if (!visible.length) return null;
+  if (visible.length < items.length) visible.push(`+${numbers.format(items.length - visible.length)}`);
+  return visible.join("\n");
+}

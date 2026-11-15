@@ -158,3 +158,9 @@ describe("OutboundWhatsAppAdmissionService", () => {
     expect(failPrepared).toHaveBeenCalledWith("message-1");
   });
 });
+
+describe("generation-only recovery before reservation cleanup",()=>{
+ const admission={kind:"admitted" as const,shopId:"shop",messageId:"same",conversationId:"conversation",terminal:false};
+ it("returns typed recovery on the same reservation without invoking a sender or cleanup",async()=>{const failure=Error("generation"),failPrepared=vi.fn(),sendPreparedText=vi.fn(),outcome={kind:"fallback",body:"trusted"};const recoverGenerationFailure=vi.fn(async()=>outcome);expect(await runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure,failPrepared,sendPreparedText})).toBe(outcome);expect(recoverGenerationFailure).toHaveBeenCalledWith(failure);expect(failPrepared).not.toHaveBeenCalled();expect(sendPreparedText).not.toHaveBeenCalled();});
+ it.each(["refused","failed"])("preserves original cleanup/error when recovery %s",async mode=>{const failure=Error("original"),failPrepared=vi.fn(),sendPreparedText=vi.fn();await expect(runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure:async()=>{if(mode==="failed")throw Error("snapshot unavailable");return undefined;},failPrepared,sendPreparedText})).rejects.toBe(failure);expect(failPrepared).toHaveBeenCalledExactlyOnceWith("same");expect(sendPreparedText).not.toHaveBeenCalled();});
+});
