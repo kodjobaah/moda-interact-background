@@ -2,6 +2,7 @@ import {describe,it,expect,vi,afterEach} from 'vitest';
 import {createLogger} from '@modainteract/moda-interact-shared/logging';
 vi.mock('../../../src/lib/db.js',()=>({default:{}}));
 import {AiFailureFallbackService,eligibleGenerationFailure,FAILURE_COPY,withGenerationBudget,GenerationBudgetTimeout} from '../../../src/services/ai-failure-fallback.js';
+import {CommerceModelInvocationFailure} from '@modainteract/moda-interact-shared/commerce/runner';
 import {CommerceHostError} from '../../../src/commerce/mcp-client.js';
 import {hostDiagnostic} from '../../../src/commerce/host-diagnostics.js';
 import {formatWholeCheckoutItemsSummary} from '../../../src/services/recovery-template-preparation/recovery-template-items-summary.js';
@@ -26,6 +27,20 @@ describe('technical-generation failure recovery',()=>{
  it.each(['INVALID_FINAL','BUDGET_EXHAUSTED','UNAVAILABLE'])('accepts typed runner %s',code=>expect(eligibleGenerationFailure(new CommerceHostError(code,false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE')))).toBe(true));
  it.each(['DENIED','CANCELLED','INVALID_INPUT','CONFIGURATION','INCOMPATIBLE_VERSION'])('refuses %s',code=>expect(eligibleGenerationFailure(new CommerceHostError(code,false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE')))).toBe(false));
  it.each(['host.authorization','host.turn_state','host.grant','host.release','presentation.verify'] as const)('refuses %s',stage=>expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE',true,hostDiagnostic(stage,'HOST_CANCELLED')))).toBe(false));
+ it.each([401,403])('accepts model-account HTTP %s in the actual nested model diagnostic domain',statusCode=>{
+  // production-model creates this typed model failure; the runner preserves it
+  // as UNAVAILABLE and host.ts nests it without copying its status to MCP fields.
+  const model=new CommerceModelInvocationFailure({stage:'model.invoke',reasonCode:'PROVIDER_AUTH_FAILED',statusCode});
+  const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE',{runnerDiagnostic:model.diagnostic}),model);
+  expect(host.diagnostic!.statusCode).toBeUndefined();expect(host.sourceFailure).toBeUndefined();expect(eligibleGenerationFailure(host)).toBe(true);
+ });
+ it.each([401,403])('refuses MCP-account HTTP %s in the actual source-failure domain',httpStatus=>{
+  const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('mcp.tool_call','MCP_TOOL_CALL_FAILED'),undefined,{origin:'mcp_response',provider:'commerce-mcp',operation:'call_tool',httpStatus,redactionApplied:true,truncated:false});
+  expect(eligibleGenerationFailure(host)).toBe(false);
+ });
+ it('refuses nested tool authorization and stale-turn failures despite unavailable transport classification',()=>{
+  for(const [stage,reasonCode] of [['tool.authorize','TOOL_AUTHORIZATION_FAILED'],['tool.execute','TOOL_STALE_TURN']] as const){const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE',{runnerDiagnostic:{stage,reasonCode}}));expect(eligibleGenerationFailure(host)).toBe(false);}
+ });
  it('refuses actual tool HTTP authentication errors even if wrapped as unavailable',()=>{expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('mcp.tool_call','MCP_HTTP_FORBIDDEN',{statusCode:403})))).toBe(false);});
  it('derives authority from the real recovery when optional conversation links are absent',async()=>{const f=fixture();f.row.shopId=null as never;f.row.customerId=null as never;expect(await f.service.prepare(f.input)).not.toBeNull();});
  it('does not classify arbitrary errors or missing diagnostic as generation',()=>{expect(eligibleGenerationFailure(Error('no'))).toBe(false);expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE'))).toBe(false);});
