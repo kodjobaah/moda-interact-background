@@ -1,3 +1,6 @@
+import {AiFailureFallbackService} from '../../src/services/ai-failure-fallback.js';
+import {CommerceHostError} from '../../src/commerce/mcp-client.js';
+import {hostDiagnostic} from '../../src/commerce/host-diagnostics.js';
 import { presentedProductContext } from '../../src/commerce/product-context-write.js';
 import {profiles,templateProfile} from '../unit/services/recovery-multipart/composite-profile.fixture.js';
 import {ModerationTurnGate} from '../../src/services/conversation-moderation/moderation-turn-gate.js';
@@ -228,6 +231,37 @@ suite('ARCH075 real v2 common source reader and HUMAN frozen compatibility',()=>
   const root=await f.db.conversationMessage.findUniqueOrThrow({where:{id:f.source.messageId}});const frozen=readFrozenCommonText(root.outboundPresentation);expect(frozen?.recoveryShopHeader.commonRef).toEqual(f.common.commonRef);expect(frozen?.plan.body).toContain('Our custom welcome: Common Shop Name');expect(frozen?.plan.body).toContain('Audio could not be transcribed.');expect(root.contentType).toBe('TEXT');expect(result.kind).toBe(stale?'suppressed':'admitted');expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(stale?0:1);expect(await f.db.conversationDeliveryPart.count({where:{messageId:root.id}})).toBe(0);
  }finally{await f.close();}},120000);
 
+ it.each(['normal','unknown','missing-common','revoked'] as const)('AI generation failure uses one guarded saved-basket fallback root (%s)',async mode=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');
+  const f=await fixture(`generation-fallback-${mode}`,'AGENT',false,false,false,180000,profiles[0],true);
+  try{
+   await f.db.checkoutRecovery.update({where:{id:f.recoveryId},data:{lineItems:[{title:'Saved basket board',quantity:2,price:'99999',stock:12345}]}});
+   const repository=new PrismaConversationWrapperReadRepository(f.db,undefined,{read:async()=>7}),wrapper=new ConversationWrapperService({repository,logoResolver:async()=>null}),ownership=new AiTurnOwnershipService(f.db);
+   const delivery=new OutboundMessageDeliveryService(f.db,{...f.provider,resolveSender:async()=>f.source.sender} as never,f.execution,ownership,new OutboundSendFenceService(f.db,recoveryRuntimeEligibility),f.persistedAllowModeration(),undefined,undefined,undefined,undefined,repository,async()=>null,f.engine);
+   if(mode==='unknown')f.provider.sendWhatsAppText.mockRejectedValue(new Error('uncertain transport'));
+   if(mode==='missing-common')await f.db.whatsAppConversationWrapperActiveSlot.delete({where:{audience:'SHARED'}});
+   const pendingAt=new Date(Date.now()-30000);await f.db.conversation.update({where:{id:f.conversationId},data:{inboundVersion:1,lastProcessedVersion:0,pendingTurnStartedAt:pendingAt,pendingAiNotBeforeAt:pendingAt,pendingAiDelayMinutes:0,pendingAiControlRevision:2}});
+   const reserved={kind:'admitted' as const,shopId:f.shopId,conversationId:f.conversationId,messageId:f.source.messageId,terminal:false,executionScope:'general' as const};
+   const reserve=vi.fn(async()=>reserved),runAgent=vi.fn(async():Promise<never>=>{throw new CommerceHostError('INVALID_FINAL',false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE'));});
+   const prepare=new AiFailureFallbackService(f.db,repository);
+   const processor=new ConversationTurnProcessor({queue:{add:async()=>{}},conversation:new ConversationService(),ownership,
+    admission:{reserve,sendPreparedText:i=>delivery.sendPreparedText(i),sendPreparedConversation:i=>delivery.sendPreparedConversation(i),failPrepared:id=>delivery.failPrepared(id)},
+    abuseAdmission:{admitSettledTurn:async()=>({kind:'allowed'})},loadTurn:async()=>({shopId:f.shopId,to:f.recipient,customerPhone:f.recipient,conversationType:'RECOVERY',checkoutRecoveryId:f.recoveryId,hasReplyContext:true,context:{},languageMessage:'Question'}),
+    prepareFailureFallback:async input=>{const body=await prepare.prepare(input);if(mode==='revoked')await f.changeOwner('AI','HUMAN',2);return body;},
+    aiWrapper:wrapper,runAgent,getResult:()=>{throw Error('no model success result');},runtimeConfig:{current:()=>({conversationQuietWindowMs:0,conversationMaxSettleWindowMs:0})} as never});
+   const before=await f.db.conversationMessage.count({where:{conversationId:f.conversationId}});
+   await processor.process({conversationId:f.conversationId,observedVersion:1}).catch(error=>{if(mode!=='missing-common'&&mode!=='unknown')throw error;});
+   expect(runAgent).toHaveBeenCalledOnce();expect(reserve).toHaveBeenCalledOnce();
+   expect(await f.db.conversationMessage.count({where:{conversationId:f.conversationId}})).toBe(before);
+   const parts=await f.list();
+   if(mode==='missing-common'||mode==='revoked'){expect(f.provider.sendWhatsAppText).not.toHaveBeenCalled();expect(parts).toHaveLength(0);return;}
+   expect(parts).toHaveLength(1);expect(parts[0]!.payload).toMatchObject({kind:'TEXT',body:expect.stringContaining('Saved basket snapshot\n2 × Saved basket board')});
+   const root=await f.db.conversationMessage.findUniqueOrThrow({where:{id:f.source.messageId}});expect(root.content).not.toMatch(/99999|12345/);expect(root.content.endsWith(f.source.checkoutUrl)).toBe(true);
+   await f.engine.continue(f.source.messageId);await processor.process({conversationId:f.conversationId,observedVersion:1}).catch(()=>{});
+   expect(f.provider.sendWhatsAppText).toHaveBeenCalledOnce();expect(await f.db.usageEvent.count({where:{sourceId:f.source.messageId}})).toBe(1);
+   if(mode==='unknown')expect((await f.list())[0]!.state).toBe('UNKNOWN');
+  }finally{await f.close();}
+ },120000);
  it('actual Free normal contract AI processor composes common source, freezes one logical root and waits for delivery before final answer',async()=>{const f=await fixture('producer-ai','AGENT',false,false);try{
   const repository=new PrismaConversationWrapperReadRepository(f.db,undefined,{read:async()=>7});
   const wrapper=new ConversationWrapperService({repository,logoResolver:async()=>null});const ownership=new AiTurnOwnershipService(f.db);
