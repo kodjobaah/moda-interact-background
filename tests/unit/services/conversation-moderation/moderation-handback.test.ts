@@ -26,3 +26,17 @@ describe('bounded resumed AI customer history moderation',()=>{
  it('does not start after history lookup consumes the elapsed budget',async()=>{let clock=0;const f=setup();db.conversationMessage.findMany.mockReset().mockImplementation(async args=>{if(args.take===20){clock=16000;return [row('past')];}return [row('current')];});const gate=new ModerationTurnGate({assessText:f.assessText} as never,()=>new Date(clock));expect(await gate.moderatePending('conversation',boundary,new Date(120000))).toBe('retry');expect(f.assessText).toHaveBeenCalledOnce();});
 
 });
+
+describe('latest pending objective moderation',()=>{
+ beforeEach(()=>{vi.resetAllMocks();db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});});
+it.each(['block','review_required','retry'])('an older pending allow never authorizes newest %s',async kind=>{
+ const f=setup([row('older'),row('latest')],[],{latest:kind});
+ expect(await f.gate.moderatePending('conversation',boundary)).toBe(kind==='retry'?'retry':'suppressed');
+ expect(f.assessText.mock.calls.map(([a])=>a.subject.messageId)).toEqual(['older','latest']);
+});
+it('does not authorize older pending text when latest input is unsupported',async()=>{
+ const f=setup([row('older'),row('latest',{contentType:'UNSUPPORTED'})],[]);
+ expect(await f.gate.moderatePending('conversation',boundary)).toBe('suppressed');
+});
+
+});
