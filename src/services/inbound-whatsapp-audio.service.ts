@@ -11,7 +11,7 @@ import { speechTranscriptionService, SpeechTranscriptionError, validateTranscrip
 import { recoveryOutreachAttemptService } from "./recovery-outreach-attempt.service.js";
 import { recordProcessableInbound } from "./conversation-ai-delay/pending-turn-repository.js";
 
-const MAX_DURATION_MS = 120_000;
+export const MAX_DURATION_MS = 120_000;
 const TOO_LONG = "Please send a voice note that is 2 minutes or shorter.";
 const UNREADABLE = "I couldn't understand that voice note. Please try again or send your message as text.";
 

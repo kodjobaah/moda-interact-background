@@ -1,3 +1,4 @@
+import { scrubRoutingPayload } from './recovery-sender-pool/routing-store.js';
 import {
   safeParseNormalizedWhatsAppStatus,
   type NormalizedWhatsAppStatus,
@@ -86,6 +87,13 @@ export class WhatsAppProviderStatusService {
         select: { id: true, providerMessageId: true, conversation: { select: { shopId: true, checkoutRecovery: { select: { shopId: true } } } } },
       });
       if (!pointer) {
+        const prompt=await transaction.recoveryBasketRoutingTurn.findUnique({where:{promptProviderMessageId:event.providerMessageId},include:{thread:{include:{sender:true}}}});
+        if(prompt){
+          if(prompt.thread.providerPhoneNumberId!==event.providerPhoneNumberId||prompt.thread.sender.providerAccountId!==event.providerAccountId)return "ignored";
+          if(event.status==='FAILED'&&['RECEIVED','PROMPT_ADMITTED','PROMPT_UNKNOWN'].includes(prompt.state))await transaction.recoveryBasketRoutingTurn.update({where:{inboundProviderMessageId:prompt.inboundProviderMessageId},data:{...scrubRoutingPayload,state:'EXPIRED'}});
+          // Router receipts have no merchant usage, compensation or reachability effects.
+          return "applied";
+        }
         this.serviceLogger.warn("whatsapp.provider_status.unknown_message", { providerMessageId: event.providerMessageId });
         return "unknown-message";
       }

@@ -1,3 +1,4 @@
+import { routingRuntime } from "../recovery-sender-pool/routing-runtime.js";
 import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import type { Queue } from "bullmq";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -79,5 +80,5 @@ export function startProductionPendingTurnRepair(
     queue,
     backgroundRuntimeConfigService,
   );
-  return startPendingTurnRepairPoller({ runPass: async () => { await recoveryAllowanceService.repairPass(); return service.runPass(); }, log: logger });
+  return startPendingTurnRepairPoller({ runPass: async () => { await recoveryAllowanceService.repairPass(); await routingRuntime.repairPass(async()=>undefined); return service.runPass(); }, log: logger });
 }

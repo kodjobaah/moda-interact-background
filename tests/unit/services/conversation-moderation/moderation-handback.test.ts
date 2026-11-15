@@ -1,3 +1,7 @@
+vi.mock("../../../../src/services/recovery-sender-pool/routing-projection.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../../src/services/recovery-sender-pool/routing-projection.js")>(),
+  readRoutingHistoryProjection: vi.fn(async () => ({ bindings: [], excludedMessageIds: [] })),
+}));
 import {beforeEach,describe,it,expect,vi} from 'vitest';
 const db=vi.hoisted(()=>({conversation:{findUniqueOrThrow:vi.fn()},conversationMessage:{findMany:vi.fn()}}));
 vi.mock('../../../../src/lib/db.js',()=>({default:db}));
@@ -39,4 +43,27 @@ it('does not authorize older pending text when latest input is unsupported',asyn
  expect(await f.gate.moderatePending('conversation',boundary)).toBe('suppressed');
 });
 
+});
+
+it('moderates original plus the exact new clause after role projection and before newest selection', async () => {
+ db.conversationMessage.findMany.mockReset(); db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});
+ const { readRoutingHistoryProjection } = await import('../../../../src/services/recovery-sender-pool/routing-projection.js');
+ const original = row('original',{content:'Can it arrive Friday?',createdAt:new Date(boundary.getTime()-10000)});
+ const current = row('selection',{content:'2. Can I collect on Saturday?',createdAt:new Date(boundary.getTime()-1000)});
+ const hash = (await import('node:crypto')).createHash('sha256').update(current.content.slice(3)).digest('hex');
+ vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({bindings:[{role:'SELECT_AND_QUESTION',original,current,clause:{start:3,end:current.content.length,sha256:hash},group:'selection',at:boundary}],excludedMessageIds:[]} as never);
+ const f = setup([],[]);
+ expect(await f.gate.moderatePending('conversation',boundary)).toBe('allowed');
+ expect(f.assessText.mock.calls.map(([input])=>(input as any).effectiveText)).toEqual(['Can it arrive Friday?','Can I collect on Saturday?']);
+});
+
+it('does not promote an allowed original when its associated newest additional clause is blocked', async () => {
+ db.conversationMessage.findMany.mockReset(); db.conversation.findUniqueOrThrow.mockResolvedValue({shopId:'shop',checkoutRecovery:{shopId:'shop'}});
+ const { readRoutingHistoryProjection } = await import('../../../../src/services/recovery-sender-pool/routing-projection.js');
+ const original = row('original',{content:'Can it arrive Friday?',createdAt:boundary});
+ const current = row('selection',{content:'2. Blocked clause',createdAt:boundary});
+ vi.mocked(readRoutingHistoryProjection).mockResolvedValueOnce({bindings:[{role:'SELECT_AND_QUESTION',original,current,clause:{start:3,end:current.content.length,sha256:'unused-pure-projection'},group:'selection',at:boundary}],excludedMessageIds:[]} as never);
+ const f = setup([],[],{selection:'block'});
+ expect(await f.gate.moderatePending('conversation',boundary)).toBe('suppressed');
+ expect(f.assessText).toHaveBeenCalledTimes(2);
 });

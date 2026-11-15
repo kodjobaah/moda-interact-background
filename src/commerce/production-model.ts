@@ -128,7 +128,7 @@ function boundedDetails(value: unknown, depth = 0, secrets: readonly string[] = 
   return { value: output, redacted, truncated: truncated || Object.keys(source).length > 8 };
 }
 
-function sourceFailureFields(
+export function sourceFailureFields(
   error: unknown,
   provider: string,
   reasonCode: string,
