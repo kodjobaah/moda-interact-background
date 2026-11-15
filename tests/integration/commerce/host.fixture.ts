@@ -113,7 +113,7 @@ const context: RecoveryAgentContext = {
 };
 const final = (overrides: Record<string, unknown> = {}) => ({
   calls: [
-    { name: "finalResponse", arguments: { ...exampleFinal, ...overrides } },
+    { id: "fixture-final", name: "finalResponse", arguments: { ...exampleFinal, ...overrides } },
   ],
   outputTokens: 20,
 });
@@ -331,9 +331,19 @@ const run = (
   c = context,
   signal?: AbortSignal,
   logger?: ReturnType<typeof createLogger>,
-) =>
-  executeCommerceHost(c, {
-    model: { invoke },
+  preserveRawModelCalls = false,
+) => {
+  let fixtureStep = 0;
+  return executeCommerceHost(c, {
+    // This is the synthetic test provider boundary. Production never invents
+    // IDs; raw malformed-provider negatives opt out explicitly.
+    model: { invoke: async (request, signal) => {
+      const step = await invoke(request, signal);
+      fixtureStep++;
+      if (preserveRawModelCalls || !step || !Array.isArray(step.calls)) return step;
+      return { ...step, calls: step.calls.map((call: Record<string, unknown>, index: number) =>
+        call && typeof call === "object" && (call.id === undefined || call.id === "fixture-final") ? { ...call, id: `fixture-${fixtureStep}-${index}` } : call) };
+    } },
     resolvedBudgetForTest: {
       shopId: c.shopId, conversationId: c.conversation.conversationId, recoveryId: c.recovery.id,
       inboundVersion: c.conversation.version, environment: resolveCommerceEnvironment(), deadlineMs: 60_000, outputTokens: 800,
@@ -354,6 +364,7 @@ const run = (
       },
     } : {}),
   });
+};
 // The real Shared model adapter constructs the real LangChain SDK client.
 // Only its constructor baseURL is rewritten; request/response serialization
 // and MCP execution remain production code. No real AI provider is contacted.

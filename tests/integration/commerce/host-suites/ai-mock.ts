@@ -67,6 +67,17 @@ it("sends two SDK requests with budgets, granted tools and the MCP result", asyn
       expect(hasToolResult((requests[1]!.body as {
         messages: Array<{ content: unknown }>;
       }).messages)).toBe(true);
+      const second = (requests[1]!.body as { messages: Array<{ role: string; content: unknown; tool_call_id?: string;
+        tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> }> }).messages;
+      const assistantIndex = second.findIndex(message => message.role === "assistant" && message.tool_calls?.length);
+      expect(assistantIndex).toBeGreaterThanOrEqual(0);
+      const call = second[assistantIndex]!.tool_calls![0]!;
+      expect(call.id).toBeTruthy(); expect(call.function.name).toBe(grantedTool);
+      expect(JSON.parse(call.function.arguments)).toEqual({ handle: "linen" });
+      const tool = second[assistantIndex + 1]!;
+      expect(tool.role).toBe("tool"); expect(tool.tool_call_id).toBe(call.id);
+      expect(String(tool.content)).toContain("Trusted commerce Tool result JSON");
+      expect(second.filter(message => message.role === "user" && String(message.content).includes("Trusted commerce Tool result JSON"))).toHaveLength(0);
       expect(f.observations.filter((entry) => entry.method === "tools/call")).toHaveLength(1);
     } finally {
       f.aiMockRoute.baseURL = null;

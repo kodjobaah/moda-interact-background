@@ -37,3 +37,6 @@ registerSelectionSemanticsTests();
 
 import { registerCurrentCustomerHostTests } from "./host-suites/current-customer.js";
 registerCurrentCustomerHostTests();
+
+import { registerDiscoveryFactualityTests } from "./host-suites/discovery-factuality.js";
+registerDiscoveryFactualityTests();
