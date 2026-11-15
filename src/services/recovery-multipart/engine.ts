@@ -97,7 +97,7 @@ export class RecoveryMultipartDeliveryEngine {
       ...(source.actor==='AGENT'?{expectedInboundVersion:source.receipt.inboundVersion}:{}),
       ...(part.ordinal===0&&source.productContextUpdate?{productContextUpdate:source.productContextUpdate}:{}),
       ...(source.command?{commandId:source.command.id,leaseToken:source.command.leaseToken}:{}),
-      messageId,recipient:source.recipient,expectedContent:source.body,deliveryKind:'TEXT',now:this.clock(),multipartPartId:part.id,multipartConsent:consent.snapshot,...(source.recoveryShopHeader.schemaVersion===1?{recoveryShopHeader:source.recoveryShopHeader}:{})});
+      messageId,recipient:source.recipient,expectedSender:source.sender,expectedContent:source.body,deliveryKind:'TEXT',now:this.clock(),multipartPartId:part.id,multipartConsent:consent.snapshot,...(source.recoveryShopHeader.schemaVersion===1?{recoveryShopHeader:source.recoveryShopHeader}:{})});
     if (permit.kind !== 'admitted') {
       if(permit.reason==='moderation_content_stale' && await this.moderationMayProgress(source))return 'waiting';
       if (['multipart-predecessor-pending','multipart-earlier-group-pending','multipart-already-attempted','already-admitted-or-sent'].includes(permit.reason)) return 'waiting';

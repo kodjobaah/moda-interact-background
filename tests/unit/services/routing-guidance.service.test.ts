@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 const mocks = vi.hoisted(() => ({
   set: vi.fn(), send: vi.fn(), noContact: vi.fn(), query: vi.fn(), transaction: vi.fn(),
-  info: vi.fn(), error: vi.fn(),
+  info: vi.fn(), error: vi.fn(), senderPermit: vi.fn(),
 }));
 vi.mock("../../../src/services/whatsapp-contact-opt-out/local-no-contact.js", () => ({
   hasLocalNoContact: mocks.noContact,
@@ -21,6 +21,10 @@ vi.mock("../../../src/services/whatsapp.service.js", () => ({
     sendWhatsAppText: mocks.send,
     resolveSender: () => ({ providerAccountId: "waba", providerPhoneNumberId: "phone" }),
   },
+}));
+vi.mock("../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async()=>({rowId:"fixture",version:1,environment:"test",providerAccountId:"waba",providerPhoneNumberId:"phone"}),
+ checkDispatchSender: mocks.senderPermit,
 }));
 import { sendRoutingGuidance } from "../../../src/services/routing-guidance.service.js";
 
@@ -46,6 +50,7 @@ function send(reason: "MULTIPLE_RECOVERIES" | "NO_RECOVERY" | "INVALID_REFERENCE
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.set.mockResolvedValue("OK");
+  mocks.senderPermit.mockResolvedValue({providerAccountId:"waba",providerPhoneNumberId:"phone"});
   mocks.noContact.mockResolvedValue(false);
   mocks.query.mockResolvedValue([{ acquired: 1 }]);
   mocks.transaction.mockImplementation(async (run: (tx: unknown) => Promise<unknown>) =>
@@ -63,7 +68,7 @@ it.each([
     `moda:test:whatsapp:clarification:${createHash("sha256").update("inbound").digest("hex")}`,
     "1", "EX", 86400, "NX",
   );
-  expect(mocks.send).toHaveBeenCalledWith({ to: "447400123456", text }, expect.any(AbortSignal));
+  expect(mocks.send).toHaveBeenCalledWith({ to: "447400123456", text, expectedSender: {providerAccountId:"waba",providerPhoneNumberId:"phone"} }, expect.any(AbortSignal));
   expect(mocks.transaction).toHaveBeenCalledOnce();
   expect(mocks.query.mock.calls[0]?.[0]).toContain("pg_advisory_xact_lock");
   expect(mocks.noContact).toHaveBeenCalledOnce();
@@ -145,3 +150,5 @@ it("does not send until recipient lock and no-contact checks complete", async ()
   await guidance;
   expect(mocks.send).toHaveBeenCalledOnce();
 });
+
+it("never sends legacy guidance once its sender is enrolled, even disabled", async()=>{mocks.senderPermit.mockResolvedValue(null);expect((await send("NO_RECOVERY")).kind).toBe("suppressed");expect(mocks.send).not.toHaveBeenCalled();});

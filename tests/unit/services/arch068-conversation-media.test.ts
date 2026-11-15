@@ -1,3 +1,9 @@
+// Isolate the existing policy fixture from the separately tested sender authority port.
+vi.mock("../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+}));
 import {OutboundSendFenceService} from "../../../src/services/recovery-conversation/outbound-send-fence.service.js";
 import {describe, it, expect, vi} from 'vitest';
 import {prepareConversationDelivery} from '../../../src/services/conversation-product-media.js';

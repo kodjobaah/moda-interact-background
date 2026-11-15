@@ -1,3 +1,5 @@
+import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
+import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { cancelReopenedContinuation } from "../recovery-allowance/storage.js";
 import type { Prisma } from "@prisma/client";
 import { readFrozenCommonText } from "../conversation-delivery-plan.js";
@@ -29,7 +31,7 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 const logger = createLogger({ serviceName: "moda-background-runtime", environment: resolveDeploymentEnvironmentName() });
 
 export type DispatchActor = "HUMAN" | "AGENT" | "AUTOMATION";
-export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; messageContent?: string; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2['parts'][number]['plan'] }
+export type DispatchPermit = { kind: "admitted"; messageId: string; dispatchKey: string; admittedAt: Date; sender: WhatsAppSenderIdentity; messageContent?: string; deliveryPlan?: import("@modainteract/moda-interact-shared/commerce/presentation").RecoveryCompositeMultipartDeliveryPlanV2['parts'][number]['plan'] }
   | { kind: "suppressed"; reason: string };
 export type RecoveryMarketingPermit = {
   consent: StoredRecoveryConsentSnapshot | null;
@@ -41,6 +43,7 @@ export type RecoveryMarketingPermit = {
 };
 export type DispatchInput = {
   /** Server-only persisted child identity; never a model payload. */
+  expectedSender?: WhatsAppSenderIdentity;
   multipartPartId?: string;
   multipartConsent?: StoredRecoveryConsentSnapshot | null;
   recoveryShopHeader?: import("../recovery-multipart/common-layout.js").RecoveryLayoutReceipt;
@@ -102,6 +105,7 @@ export class OutboundSendFenceService {
       return { kind: 'suppressed', reason: 'product-context-invalid-scope' };
     const durableEligibility = this.durableEligibility;
     if (!durableEligibility) return { kind: "suppressed", reason: "durable-eligibility-unavailable" };
+    const senderSnapshot = await readDispatchSenderSnapshot();
     try {
     return await this.database.$transaction(async (tx) => {
       // Linearization point: the commit of this short transaction. Shop row
@@ -309,6 +313,8 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
+      const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: input.expectedSender, allowLegacyContinuation: freeText && (input.senderType === "AGENT" || input.senderType === "HUMAN") && !input.proactive && !input.initialOutreach });
+      if (!sender || (input.proactive?.templateRegistration && input.proactive.templateRegistration.senderWabaId !== sender.providerAccountId)) return {kind: "suppressed", reason: "sender-assignment-unavailable"} as const;
       // Every newly admitted recovery action is pinned to its immutable funded
       // block. Historical initial messages are deliberately not rewritten.
       let followUpBlockId: string | null = null;
@@ -346,7 +352,7 @@ export class OutboundSendFenceService {
       if (input.multipartPartId) {
         if (!input.messageId || input.initialOutreach || input.proactive || input.deliveryKind === "TEMPLATE" || input.senderType === "AUTOMATION")
           return {kind: "suppressed",reason: "multipart-invalid-scope"} as const;
-        return admitMultipartPart(tx,input,context,permitNow);
+        return admitMultipartPart(tx,input,context,permitNow,sender);
       }
       if (input.deliveryPlan?.kind === "BRAND_IMAGE") {
         const storedMedia = input.senderType === "HUMAN"
@@ -371,10 +377,10 @@ export class OutboundSendFenceService {
         const admittedMessage = await rows<{ content: string; outboundPresentation: unknown }>(tx, `
           INSERT INTO "whatsapp"."ConversationMessage"
             ("id","conversationId","direction","senderType","status","content",
-              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision","outboundPresentation","allowanceBlockId")
-          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5,$6::jsonb,$7)
+              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision","outboundPresentation","dispatchProviderAccountId","dispatchProviderPhoneNumberId","allowanceBlockId")
+          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5,$6::jsonb,$7,$8,$9)
           RETURNING "content","outboundPresentation"`,
-          messageId, context.id, content, dispatchKey, context.revision, JSON.stringify(evidence?.mediaPreparation ?? null),followUpBlockId);
+          messageId, context.id, content, dispatchKey, context.revision, JSON.stringify(evidence?.mediaPreparation ?? null), sender.providerAccountId, sender.providerPhoneNumberId,followUpBlockId);
         if (admittedMessage.length !== 1 || admittedMessage[0]?.content !== content || canonicalJson(admittedMessage[0]?.outboundPresentation ?? null) !== canonicalJson(evidence?.mediaPreparation ?? null)) {
           throw new Error("ARCH047 admitted content mismatch");
         }
@@ -402,7 +408,7 @@ export class OutboundSendFenceService {
             WHERE "id"=$1 AND "outboundMessageId" IS NULL`,
             command!.recoveryOutreachAttemptId, messageId);
         }
-        return { kind: "admitted", messageId, dispatchKey,
+        return { kind: "admitted", messageId, dispatchKey, sender,
           admittedAt: cmd[0]!.providerDispatchAdmittedAt,
           ...(command!.kind === "HUMAN_TEXT" ? { messageContent: admittedMessage[0]!.content } : {}),
           ...(evidence?.mediaPreparation?.plan ? {deliveryPlan: readFrozenBrandMedia(admittedMessage[0]!.outboundPresentation)!.plan} : {}),
@@ -427,16 +433,16 @@ export class OutboundSendFenceService {
       const message = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
         UPDATE "whatsapp"."ConversationMessage"
         SET "providerDispatchKey"=$2,"providerDispatchAdmittedAt"=statement_timestamp(),
-          "providerDispatchControlRevision"=$3
+          "providerDispatchControlRevision"=$3,"dispatchProviderAccountId"=$7,"dispatchProviderPhoneNumberId"=$8
         WHERE "id"=$1 AND "conversationId"=$4 AND "direction"='OUTBOUND'
           AND "senderType"=$5::"whatsapp"."MessageSenderType"
           AND "providerDispatchKey" IS NULL AND "status"='PENDING'
           ${initial ? `AND "content"=$6 AND "providerDispatchAdmittedAt" IS NULL
             AND "providerDispatchControlRevision" IS NULL AND "providerMessageId" IS NULL
-            AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : input.expectedContent !== undefined ? `AND "content"=$6` : ""}
+            AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : `AND ($6::text IS NULL OR "content"=$6)`}
         RETURNING "providerDispatchAdmittedAt"`,
         messageId, dispatchKey, context.revision, context.id, input.senderType,
-        ...(initial ? [initial.expectedContent] : input.expectedContent !== undefined ? [input.expectedContent] : []));
+        initial ? initial.expectedContent : input.expectedContent ?? null, sender.providerAccountId, sender.providerPhoneNumberId);
       if (!message.length) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
       if (input.productContextUpdate) {
         await commitAdmittedProductContext(tx, {
@@ -445,7 +451,7 @@ export class OutboundSendFenceService {
           messageId, body: input.expectedContent!, dispatchKey,
         });
       }
-      return { kind: "admitted", messageId, dispatchKey, admittedAt: message[0]!.providerDispatchAdmittedAt } as const;
+      return { kind: "admitted", messageId, dispatchKey, sender, admittedAt: message[0]!.providerDispatchAdmittedAt } as const;
     });
     } catch (error) {
       // The transaction has rolled back both permit and context before suppression.

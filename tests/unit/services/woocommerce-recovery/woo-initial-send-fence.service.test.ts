@@ -1,3 +1,9 @@
+// Isolate the existing policy fixture from the separately tested sender authority port.
+vi.mock("../../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+}));
 import { describe, expect, it, vi } from "vitest";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { WooInitialSendFenceService } from "../../../../src/services/woocommerce-recovery/woo-initial-send-fence.service.js";
@@ -76,7 +82,7 @@ function harness() {
 describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
   it("locks Shop before conversation/attempt/message, checks consent/STOP and commits exactly one permit", async () => {
     const f = harness();
-    expect(await f.fence.admitFinalSend(scope)).toEqual({ kind: "admitted" });
+    expect(await f.fence.admitFinalSend(scope)).toEqual({ kind: "admitted", sender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"} });
     expect(f.queries[0]).toContain('"Shop"');
     expect(f.queries[0]).toContain("FOR UPDATE");
     expect(f.queries.findIndex((s) => s.includes('"Shop"')))
@@ -128,7 +134,7 @@ describe("ARCH-046-BACKGROUND-004 final Woo SQL permit", () => {
     recent.outcomes['FROM "commerce"."CheckoutRecovery"'] = [{ shopId: "shop-1",
       checkoutToken: "checkout-1", customerId: "customer-1", status: "DETECTED",
       completedAt: null, expiredAt: null, lastExternalActivityAt: new Date(now.getTime() - 21 * 86_400_000 + 1) }];
-    expect(await recent.fence.admitFinalSend(scope)).toEqual({ kind: "admitted" });
+    expect(await recent.fence.admitFinalSend(scope)).toEqual({ kind: "admitted", sender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"} });
 
     const future = harness();
     future.outcomes['FROM "commerce"."CheckoutRecovery"'] = [{ shopId: "shop-1",
