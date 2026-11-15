@@ -87,6 +87,7 @@ export type LoadedConversationTurn<TContext> = {
 
 export type ConversationTurnProcessorDependencies<TContext, TResult> = {
   queue: QueueLike;
+  currentRouteActive?: (conversationId:string)=>Promise<boolean>;
   conversation: Pick<
     ConversationService,
     | "getTurnState"
@@ -228,6 +229,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       observedVersion,
       jobId: activeJob?.id ?? null,
     });
+    if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId))return;
     const state =
       await this.dependencies.conversation.getTurnState(conversationId);
     const staleReason = turnStaleReason(state, observedVersion);
@@ -317,6 +319,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
     // after a delay or HUMAN -> AI cycle.
     const controlRevision = state.pendingAiControlRevision ?? undefined;
     const checkControl = async (phase: "before-agent" | "after-await" | "before-provider", shopId?: string) => {
+      if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId))return false;
       if (controlRevision === undefined || !this.dependencies.ownership) return true;
       const result = await this.dependencies.ownership.checkAutomatedTurn({
         conversationId, expectedRevision: controlRevision, phase,
@@ -377,6 +380,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
     };
 
     try {
+      if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId)){await this.finishSuppressedTurn(conversationId,observedVersion,controlRevision);return;}
       if (this.dependencies.moderation) {
         const gate = await this.dependencies.moderation.moderatePending(
           conversationId, state.pendingTurnStartedAt as Date, new Date(now.getTime()+PROCESSING_LEASE_MS),

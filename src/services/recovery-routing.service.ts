@@ -1,4 +1,4 @@
-import { resolveMultipartQuote } from "./recovery-multipart/quote.js";
+import { resolveSenderInbound, quotedOwner, readAssignedOwner, isAssignedConversationActive, isLegacyConversationActive, type InboundOwnerEvidence, type SenderHandoff } from "./recovery-sender-pool/inbound-authority.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
@@ -11,7 +11,7 @@ import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environm
 import { shopExecutionEligibilityService } from "./shop-execution-eligibility.service.js";
 import { whatsAppService } from "./whatsapp.service.js";
 import {
-  recoveryRecipientAttemptsSelect, recoveryRecipientCandidateSql,
+  recoveryRecipientAttemptsSelect,
   recoveryRecipientCustomerSelect, resolveRecoveryRecipient,
 } from "./recovery-recipient-ownership.js";
 
@@ -27,8 +27,10 @@ export type RecoveryRoute =
       checkoutRecoveryId: string;
       shopId: string;
       mode: "active" | "historical";
+      senderEvidence?: InboundOwnerEvidence;
     }
   | { kind: "guidance"; reason: RoutingGuidanceReason }
+  | { kind: "routing"; scope: SenderHandoff }
   | { kind: "ignored" };
 export const canonicalPhone = (phone: string) =>
   phone.trim().replace(/^\+/, "");
@@ -72,7 +74,13 @@ export class RecoveryRoutingService {
     const messageDigest = providerMessageDigest(event.providerMessageId);
     let identifiers: { conversationId: string; checkoutRecoveryId: string; shopId: string } | undefined;
     try {
-      const quotedPart=event.contextMessageId ? await resolveMultipartQuote(this.database,{providerMessageId:event.contextMessageId,providerAccountId:event.providerAccountId,providerPhoneNumberId:event.providerPhoneNumberId}) : null;
+      const pooled=await resolveSenderInbound(this.database as PrismaClient,event);
+      if(pooled.kind==='invalid')return {kind:'ignored'};
+      if(pooled.kind==='routing')return pooled;
+      if(pooled.kind==='owned'){
+        if(!await this.executionEligibility.isShopExecutionActive(pooled.evidence.shopId,pooled.mode==='active'?'recovery':'general'))return {kind:'ignored'};
+        return {kind:'resolved',conversationId:pooled.evidence.conversationId,checkoutRecoveryId:pooled.evidence.checkoutRecoveryId,shopId:pooled.evidence.shopId,mode:pooled.mode,senderEvidence:pooled.evidence};
+      }
       const sender = await this.senderService.resolveSender();
       if (
         event.providerAccountId !== sender.providerAccountId ||
@@ -83,13 +91,12 @@ export class RecoveryRoutingService {
         });
         return { kind: "ignored" };
       }
-      if(quotedPart?.kind==="invalid") return {kind:"guidance",reason:"INVALID_REFERENCE"};
       const phone = canonicalPhone(event.customerPhone);
       const stored = await this.database.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
-        select: { conversationId: true, direction: true },
+        select: { conversationId: true, direction: true, dispatchProviderAccountId:true, dispatchProviderPhoneNumberId:true },
       });
-      if (stored && stored.direction !== "INBOUND") {
+      if (stored && (stored.direction !== "INBOUND" || stored.dispatchProviderAccountId !== event.providerAccountId || stored.dispatchProviderPhoneNumberId !== event.providerPhoneNumberId)) {
         logGuidance(log, messageDigest, "stored-provider-message", "INVALID_REFERENCE");
         return { kind: "guidance", reason: "INVALID_REFERENCE" };
       }
@@ -100,68 +107,15 @@ export class RecoveryRoutingService {
         // even if a later payload carries different context or newer outreach.
         conversationId = stored.conversationId;
       } else if (event.contextMessageId) {
-        const original = quotedPart?.kind==="matched" ? {direction:"OUTBOUND",sentAt:quotedPart.acknowledgedAt,conversationId:quotedPart.conversationId,
-          recoveryOutreachAttempt:{recipient:quotedPart.recipient},merchantSendCommand:null} : await this.database.conversationMessage.findUnique({
-          where: { providerMessageId: event.contextMessageId },
-          select: {
-            direction: true,
-            sentAt: true,
-            conversationId: true,
-            recoveryOutreachAttempt: { select: { recipient: true } },
-            merchantSendCommand: { select: { recipientSnapshot: true } },
-          },
-        });
-        if (
-          !original ||
-          original.direction !== "OUTBOUND" ||
-          !original.sentAt ||
-          !original.conversationId ||
-          (original.recoveryOutreachAttempt && canonicalPhone(original.recoveryOutreachAttempt.recipient) !== phone) ||
-          (original.merchantSendCommand && canonicalPhone(original.merchantSendCommand.recipientSnapshot) !== phone)
-        ) {
-          logGuidance(log, messageDigest, "explicit-context", "INVALID_REFERENCE");
-          return { kind: "guidance", reason: "INVALID_REFERENCE" };
+        const originalConversationId=await quotedOwner(this.database as PrismaClient,event.contextMessageId,event);
+        if(!originalConversationId){
+          logGuidance(log,messageDigest,"explicit-context","INVALID_REFERENCE");
+          return {kind:'guidance',reason:'INVALID_REFERENCE'};
         }
-        conversationId = original.conversationId;
+        conversationId=originalConversationId;
       } else {
-        // The newest generation owns a Woo checkout lineage even before it
-        // sends. A closed predecessor therefore cannot remain an inbound target.
-        const candidates = await this.database.$queryRaw<Array<{ conversationId: string }>>(Prisma.sql`
-          SELECT DISTINCT c.id AS "conversationId"
-          FROM commerce."CheckoutRecovery" r
-          JOIN whatsapp."Conversation" c ON c."checkoutRecoveryId" = r.id
-          JOIN commerce."Customer" customer ON customer.id = r."customerId"
-          JOIN commerce."Shop" shop ON shop.id = r."shopId"
-          WHERE ${recoveryRecipientCandidateSql(phone)}
-            AND (
-              shop.platform <> 'WOOCOMMERCE'
-              OR (
-                r.status IN ('MESSAGE_SENT', 'ENGAGED')
-                AND NOT EXISTS (
-                  SELECT 1 FROM commerce."CheckoutRecovery" newer
-                  WHERE newer."shopId" = r."shopId"
-                    AND newer."checkoutToken" = r."checkoutToken"
-                    AND newer.generation > r.generation
-                )
-              )
-            )
-            AND EXISTS (
-              SELECT 1 FROM whatsapp."ConversationMessage" m
-              WHERE m."conversationId" = c.id
-                AND m.direction = 'OUTBOUND'
-                AND m."providerMessageId" IS NOT NULL
-                AND m."sentAt" IS NOT NULL
-            )
-          LIMIT 2
-        `);
-        if (candidates.length !== 1) {
-          const reason = candidates.length ? "MULTIPLE_RECOVERIES" : "NO_RECOVERY";
-          log.info("whatsapp.inbound.route_decision", {
-            messageDigest, stage: "candidate-selection", decision: "guidance", reason,
-          });
-          return { kind: "guidance", reason };
-        }
-        conversationId = candidates[0]!.conversationId;
+        // An unenrolled singleton has no recipient-only routing authority.
+        return {kind:'guidance',reason:'NO_RECOVERY'};
       }
 
       const conversation = await this.database.conversation.findUnique({
@@ -206,7 +160,7 @@ export class RecoveryRoutingService {
         ) AS "isLatest"
       `)
         : [{ isLatest: true }];
-      const mode = isContinuingRecoveryStatus(recovery.status) && lineage?.isLatest
+      const mode = isContinuingRecoveryStatus(recovery.status) && lineage?.isLatest && await isLegacyConversationActive(this.database as PrismaClient,conversationId,new Date(),Boolean(stored||event.contextMessageId))
         ? "active"
         : "historical";
       const executionScope = mode === "active" ? "recovery" : "general";
@@ -217,7 +171,7 @@ export class RecoveryRoutingService {
       log.info("whatsapp.inbound.route_decision", {
         ...identifiers, mode, stage: "routing", decision: "resolved", messageDigest,
       });
-      return { kind: "resolved", ...identifiers, mode };
+      return { kind: "resolved", ...identifiers, mode, senderEvidence:{...identifiers,threadId:null,routeId:null,canonicalRecipient:phone,providerAccountId:event.providerAccountId,providerPhoneNumberId:event.providerPhoneNumberId,referenceProviderMessageId:event.contextMessageId} };
     } catch (error) {
       log.error("whatsapp.inbound.route_failed", {
         ...identifiers, messageDigest, stage: "routing", error,
@@ -228,6 +182,15 @@ export class RecoveryRoutingService {
 
   async isCurrentActiveRoute(route: Extract<RecoveryRoute, { kind: "resolved" }>): Promise<boolean> {
     if (route.mode !== "active") return false;
+    if(route.senderEvidence){
+      const e=route.senderEvidence;
+      if(e.threadId===null){
+        const direct=!!e.referenceProviderMessageId&&await quotedOwner(this.database as PrismaClient,e.referenceProviderMessageId,{schemaVersion:1,provider:'whatsapp',providerAccountId:e.providerAccountId,providerPhoneNumberId:e.providerPhoneNumberId,providerMessageId:'route-current-proof',customerPhone:e.canonicalRecipient,contextMessageId:e.referenceProviderMessageId,occurredAt:new Date().toISOString(),content:{type:'text',text:''}})===e.conversationId;
+        return isLegacyConversationActive(this.database as PrismaClient,e.conversationId,new Date(),direct);
+      }
+      const current=await readAssignedOwner(this.database as PrismaClient,e.conversationId);
+      return !!current&&current.threadId===e.threadId&&current.routeId===e.routeId&&current.providerAccountId===e.providerAccountId&&current.providerPhoneNumberId===e.providerPhoneNumberId&&current.canonicalRecipient===e.canonicalRecipient&&await isAssignedConversationActive(this.database as PrismaClient,e.conversationId,new Date(),e.referenceProviderMessageId)===true;
+    }
     const [current] = await this.database.$queryRaw<Array<{ current: boolean }>>(Prisma.sql`
       SELECT EXISTS (
         SELECT 1

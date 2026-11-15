@@ -63,7 +63,7 @@ function setup(phones: Phone[], quoted?: { shopId: string; recipient?: string } 
         return { count: 1 };
       }),
     },
-    $queryRawUnsafe: vi.fn(async () => []),
+    $queryRawUnsafe: vi.fn(async (sql:string) => sql.includes('COALESCE(i.recipient') && quoted ? [{id:"root",conversationId:"original",recipient:quoted.recipient??number,account:"waba-1",phone:"phone-1"}] : []),
   };
   const db = {
     ...tx,
