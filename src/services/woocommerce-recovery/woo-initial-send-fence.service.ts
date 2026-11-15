@@ -1,3 +1,5 @@
+import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
+import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import { hasExactInitialCredit } from "../recovery-conversation/outbound-send-fence.service.js";
 import { createHash } from "node:crypto";
@@ -38,7 +40,7 @@ export type WooInitialFinalPermitInput = Readonly<{
 }>;
 
 export type WooInitialFinalPermit =
-  | { kind: "admitted" }
+  | { kind: "admitted"; sender: WhatsAppSenderIdentity }
   | { kind: "suppressed"; reason: string };
 
 type WooFinalPermitDatabase = Pick<PrismaClient, "$transaction">;
@@ -105,6 +107,7 @@ export class WooInitialSendFenceService {
       return { kind: "suppressed", reason: "invalid-woo-initial-scope" };
     }
 
+    const senderSnapshot = await readDispatchSenderSnapshot();
     return await this.database.$transaction(async (tx): Promise<WooInitialFinalPermit> => {
       // Same lock order as the accepted STOP writer and recovery sender:
       // Shop -> Conversation -> recovery -> attempt -> message. No I/O beyond
@@ -262,11 +265,13 @@ export class WooInitialSendFenceService {
         sourceKey: input.recoveryCreditSourceKey, allowPaid: false, clock: this.clock,
       }))) return { kind: "suppressed", reason: "woo-recovery-credit-not-reserved" };
 
+      const sender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: input.conversationId, recipient: input.recipient, recovery: true});
+      if (!sender || sender.providerAccountId !== registration.senderWabaId) return {kind: "suppressed", reason: "sender-assignment-unavailable"};
       const permitted = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
         UPDATE "whatsapp"."ConversationMessage"
         SET "providerDispatchKey"=$2,
           "providerDispatchAdmittedAt"=statement_timestamp(),
-          "providerDispatchControlRevision"=$3
+          "providerDispatchControlRevision"=$3,"dispatchProviderAccountId"=$6,"dispatchProviderPhoneNumberId"=$7
         WHERE "id"=$1 AND "conversationId"=$4
           AND "direction"='OUTBOUND' AND "senderType"='AUTOMATION'
           AND "status"='PENDING' AND "providerDispatchKey" IS NULL
@@ -274,9 +279,9 @@ export class WooInitialSendFenceService {
           AND "providerMessageId" IS NULL AND "sentAt" IS NULL AND "deliveredAt" IS NULL
           AND "readAt" IS NULL AND "failedAt" IS NULL AND "content"=$5
         RETURNING "id"`, input.messageId, key, conversation.controlRevision,
-        input.conversationId, input.expectedContent);
+        input.conversationId, input.expectedContent, sender.providerAccountId, sender.providerPhoneNumberId);
       return permitted.length === 1
-        ? { kind: "admitted" }
+        ? { kind: "admitted", sender }
         : { kind: "suppressed", reason: "already-admitted-or-sent" };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     } catch (error) {

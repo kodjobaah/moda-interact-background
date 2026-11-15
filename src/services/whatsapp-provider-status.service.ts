@@ -75,10 +75,12 @@ export class WhatsAppProviderStatusService {
     event: NormalizedWhatsAppStatus,
   ): Promise<ProviderStatusOutcome> {
     const occurredAt = new Date(event.occurredAt);
+    let ownedStatus = false;
     let appliedInfo: { messageId: string; status: string; outcome: string } | null = null;
 
     const outcome = await this.withRetry(event, () => this.database.$transaction(async (transaction) => {
       appliedInfo = null;
+      ownedStatus = false;
       const pointer = await transaction.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
         select: { id: true, providerMessageId: true, conversation: { select: { shopId: true, checkoutRecovery: { select: { shopId: true } } } } },
@@ -100,6 +102,7 @@ export class WhatsAppProviderStatusService {
         select: {
           id: true,
           providerMessageId: true,
+          dispatchProviderAccountId: true, dispatchProviderPhoneNumberId: true,
           direction: true,
           status: true,
           sentAt: true,
@@ -127,6 +130,8 @@ export class WhatsAppProviderStatusService {
         message.conversation.checkoutRecovery && message.conversation.checkoutRecovery.shopId !== pointerShopId) {
         throw new ProviderStatusConcurrencyConflict();
       }
+      if ((message.dispatchProviderAccountId || message.dispatchProviderPhoneNumberId) &&
+          (message.dispatchProviderAccountId !== event.providerAccountId || message.dispatchProviderPhoneNumberId !== event.providerPhoneNumberId)) return "ignored";
       const actualShopId = message.conversation.shopId ?? message.conversation.checkoutRecovery?.shopId;
       if (actualShopId !== pointerShopId) throw new ProviderStatusConcurrencyConflict();
 
@@ -149,6 +154,7 @@ export class WhatsAppProviderStatusService {
         return "ignored";
       }
 
+      ownedStatus = true;
       const canApplyStatus = canApplyProviderStatus(message.status, event.status);
       const nextStatus = statusForProviderEvent(message.status, event.status);
       const shouldRecordDelivered =
@@ -272,7 +278,7 @@ export class WhatsAppProviderStatusService {
 
     // Never perform credit accounting inside provider-status convergence. Retry
     // even if the FAILED row was already persisted in an earlier job attempt.
-    if (event.status === "FAILED" && outcome !== "unknown-message") {
+    if (event.status === "FAILED" && ownedStatus) {
       const corrected = await this.runAfterCommit(event, "compensation", () => this.compensation.reconcile(event.providerMessageId), true);
       const reachability = await this.runAfterCommit(event, "failure_reachability", () => this.failureReachability.afterCorrection(
         { providerMessageId: event.providerMessageId }, corrected,
@@ -284,7 +290,7 @@ export class WhatsAppProviderStatusService {
         providerMessageId: event.providerMessageId, correction: corrected, outcome: reachability, notice,
       });
     } else if ((event.status === "DELIVERED" || event.status === "READ") &&
-      outcome !== "unknown-message") {
+      ownedStatus) {
       const reachability = await this.runAfterCommit(event, "positive_reachability", () => this.positiveReachability.fromProviderDelivery(event.providerMessageId));
       this.serviceLogger.info("whatsapp.reachability.positive_converged", {
         providerMessageId: event.providerMessageId, outcome: reachability,

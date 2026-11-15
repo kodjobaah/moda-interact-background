@@ -1,3 +1,8 @@
+vi.mock("../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+}));
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -44,6 +49,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
       test.providerMock.sendWhatsAppText,
     );
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: textInput.to,
       text: textInput.text,
     });
@@ -92,6 +98,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
 
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });

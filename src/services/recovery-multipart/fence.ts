@@ -1,3 +1,4 @@
+import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { currentCompositeMatches } from './composite.js';
 import { commitAdmittedProductContext } from "../../commerce/product-context-repository.js";
 import { currentCommonLayoutMatches } from './common-layout.js';
@@ -13,12 +14,12 @@ import { readFrozenMultipart, multipartPartIdentity, sha256 } from './frozen.js'
 
 /** Invoked only within the existing final fence after its current tenant,
  * control, window, STOP, entitlement/usage and HUMAN wrapper checks. */
-export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInput, context: RecoveryContext, now: Date): Promise<DispatchPermit> {
+export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInput, context: RecoveryContext, now: Date, sender: WhatsAppSenderIdentity): Promise<DispatchPermit> {
   const row = await first<{id:string;content:string;outboundPresentation:unknown;providerDispatchKey:string|null}>(tx,`
     SELECT "id","content","outboundPresentation","providerDispatchKey" FROM "whatsapp"."ConversationMessage"
     WHERE "id"=$1 AND "conversationId"=$2 AND "direction"='OUTBOUND' AND "senderType"=$3::"whatsapp"."MessageSenderType" FOR UPDATE`,input.messageId,context.id,input.senderType);
   const source = readFrozenMultipart(row?.outboundPresentation);
-  if (!row || !source || source.messageId !== row.id || source.body !== row.content || source.body !== input.expectedContent ||
+  if (!row || !source || source.sender.providerAccountId !== sender.providerAccountId || source.sender.providerPhoneNumberId !== sender.providerPhoneNumberId || source.messageId !== row.id || source.body !== row.content || source.body !== input.expectedContent ||
       source.actor !== input.senderType || source.receipt.shopId !== context.shopId || source.receipt.conversationId !== context.id ||
       source.recoveryId !== context.recoveryId || source.receipt.controlRevision !== context.revision || source.recipient !== input.recipient ||
       (source.actor === 'AGENT' && source.receipt.inboundVersion !== context.inboundVersion) ||
@@ -69,8 +70,8 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
   if (index === 0) {
     if (row.providerDispatchKey) return {kind:'suppressed',reason:'already-admitted-or-sent'};
     const root = await changed(tx,`UPDATE "whatsapp"."ConversationMessage" SET "providerDispatchKey"=$2,
-      "providerDispatchAdmittedAt"=$3,"providerDispatchControlRevision"=$4
-      WHERE "id"=$1 AND "status"='PENDING' AND "providerDispatchKey" IS NULL AND "providerMessageId" IS NULL`,row.id,rootKey,now,context.revision);
+      "providerDispatchAdmittedAt"=$3,"providerDispatchControlRevision"=$4,"dispatchProviderAccountId"=$5,"dispatchProviderPhoneNumberId"=$6
+      WHERE "id"=$1 AND "status"='PENDING' AND "providerDispatchKey" IS NULL AND "providerMessageId" IS NULL`,row.id,rootKey,now,context.revision,sender.providerAccountId,sender.providerPhoneNumberId);
     if (root !== 1) throw new Error('MULTIPART_ROOT_CAS_LOST');
     if (source.actor === 'HUMAN') {
       const count = await changed(tx,`UPDATE "whatsapp"."MerchantConversationSendCommand" SET "state"='DISPATCH_ADMITTED',"outboundMessageId"=$3,
@@ -85,5 +86,5 @@ export async function admitMultipartPart(tx: SqlTransaction, input: DispatchInpu
     "providerDispatchAdmittedAt"=$3,"updatedAt"=$3 WHERE "id"=$1 AND "state"='PREPARED' AND "providerDispatchKey" IS NULL`,part.id,key,now);
   if (admitted !== 1) throw new Error('MULTIPART_PART_CAS_LOST');
   if(index===0&&source.productContextUpdate)await commitAdmittedProductContext(tx,{shopId:context.shopId,conversationId:context.id,now,expectedInboundVersion:source.receipt.inboundVersion,context:source.productContextUpdate,messageId:row.id,body:source.body,dispatchKey:rootKey});
-  return {kind:'admitted',messageId:row.id,dispatchKey:key,admittedAt:now,messageContent:plan.body,deliveryPlan:plan};
+  return {kind:'admitted',sender,messageId:row.id,dispatchKey:key,admittedAt:now,messageContent:plan.body,deliveryPlan:plan};
 }

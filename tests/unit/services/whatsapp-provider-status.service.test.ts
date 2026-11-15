@@ -742,3 +742,12 @@ function lifecycleDataFor(status: "DELIVERED"): Record<string, unknown> {
     deliveredAt: new Date(baseEvent.occurredAt),
   };
 }
+
+describe.each(["providerAccountId","providerPhoneNumberId"] as const)("ARCH076 immutable dispatch %s ownership",field=>{
+ it.each(["FAILED","DELIVERED","READ"] as const)("foreign %s status has no lifecycle, billing or contact effects",async status=>{
+  const test=harness();Object.assign(test.message,{dispatchProviderAccountId:"account-1",dispatchProviderPhoneNumberId:"phone-1"});
+  expect(await test.service.process({...baseEvent,status,[field]:"foreign-identity"})).toBe("ignored");
+  expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+  expect(test.compensation.reconcile).not.toHaveBeenCalled();expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();expect(test.notification.notify).not.toHaveBeenCalled();
+ });
+});

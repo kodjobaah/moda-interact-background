@@ -1,3 +1,5 @@
+import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
+import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { sameConversationPlan, validConversationPlan, matchesConversationReceipt, type ConversationDeliveryReceipt } from "../conversation-delivery-plan.js";
 import type { ConversationDeliveryPlan } from "@modainteract/moda-interact-shared/commerce/presentation";
 import { customerWindow } from "../recovery-conversation/recovery-follow-up-policy.service.js";
@@ -6,7 +8,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 
 type GeneralSendDatabase = Pick<PrismaClient, "$transaction">;
-export type GeneralSendPermit = { kind: "admitted" } |
+export type GeneralSendPermit = { kind: "admitted"; sender: WhatsAppSenderIdentity } |
   { kind: "suppressed"; reason: "shop-inactive" | "invalid-scope" | "local-no-contact" | "already-admitted-or-sent" | "stale-inbound-version" };
 
 /** Final, durable admission for prepared NON-recovery text and template sends.
@@ -22,6 +24,7 @@ export class GeneralOutboundSendFenceService {
     expectedContent: string; expectedInboundVersion?: number; expectedControlRevision?: number;
     deliveryPlan?: ConversationDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
   }): Promise<GeneralSendPermit> {
+    const senderSnapshot = await readDispatchSenderSnapshot();
     return this.database.$transaction(async (tx): Promise<GeneralSendPermit> => {
       const shops = await tx.$queryRawUnsafe<Array<{ status: string }>>(`
         SELECT "status"::text FROM "commerce"."Shop"
@@ -70,17 +73,19 @@ export class GeneralOutboundSendFenceService {
 
       // The message is admitted at most once, including across retries. Store
       // the permit before the provider call, never during external I/O.
+      const sender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: input.conversationId, recipient: input.recipient, recovery: false});
+      if (!sender) return {kind: "suppressed", reason: "invalid-scope"};
       const dispatchKey = `arch045-general-${createHash("sha256").update(input.messageId).digest("hex")}`;
       const rows = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
         UPDATE "whatsapp"."ConversationMessage"
         SET "providerDispatchKey"=$2,"providerDispatchAdmittedAt"=statement_timestamp(),
-            "providerDispatchControlRevision"=$3
+            "providerDispatchControlRevision"=$3,"dispatchProviderAccountId"=$5,"dispatchProviderPhoneNumberId"=$6
         WHERE "id"=$1 AND "conversationId"=$4 AND "direction"='OUTBOUND'
           AND "senderType" IN ('AGENT','AUTOMATION') AND "status"='PENDING'
           AND "providerDispatchKey" IS NULL AND "providerDispatchAdmittedAt" IS NULL
         RETURNING "id"`, input.messageId, dispatchKey,
-        conversations[0]!.controlRevision, input.conversationId);
-      return rows.length === 1 ? { kind: "admitted" } :
+        conversations[0]!.controlRevision, input.conversationId, sender.providerAccountId, sender.providerPhoneNumberId);
+      return rows.length === 1 ? { kind: "admitted", sender } :
         { kind: "suppressed", reason: "already-admitted-or-sent" };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   }

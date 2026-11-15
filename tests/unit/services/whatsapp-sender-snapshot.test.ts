@@ -7,20 +7,20 @@ const sender = {providerAccountId: "account-a", providerPhoneNumberId: "phone-a"
 const configuration = {businessAccountId: sender.providerAccountId, phoneNumberId: sender.providerPhoneNumberId, accessToken: "token-a"};
 const rotated = {businessAccountId: "account-b", phoneNumberId: "phone-b", accessToken: "token-b"};
 afterEach(() => vi.unstubAllEnvs());
-type Kind = "TEXT" | "IMAGE";
+type Kind = "TEXT" | "IMAGE" | "TEMPLATE";
 function send(service: WhatsAppService, kind: Kind, expectedSender?: typeof sender) {
   return kind === "TEXT"
     ? service.sendWhatsAppText({to: "15551234567", text: "Answer", expectedSender})
-    : service.sendWhatsAppImage({to: "15551234567", link: "https://media.example/product.jpg", caption: "Answer", expectedSender});
+    : kind === "IMAGE" ? service.sendWhatsAppImage({to: "15551234567", link: "https://media.example/product.jpg", caption: "Answer", expectedSender})
+    : service.sendWhatsAppTemplate({to:"15551234567",templateName:"fixture_template",languageCode:"en",expectedSender});
 }
 function transport() {
   return vi.fn<typeof fetch>(async () => new Response(JSON.stringify({messages: [{id: "provider-receipt"}]}), {status: 200}));
 }
-describe.each<Kind>(["TEXT", "IMAGE"])("%s frozen sender identity", kind => {
+describe.each<Kind>(["TEXT", "IMAGE", "TEMPLATE"])("%s frozen sender identity", kind => {
   beforeEach(() => {vi.clearAllMocks(); read.mockReset(); vi.stubEnv("WHATSAPP_API_BASE_URL", "https://graph.example/v1");});
   it.each([
     {providerAccountId: "different-account", providerPhoneNumberId: sender.providerPhoneNumberId},
-    {providerAccountId: sender.providerAccountId, providerPhoneNumberId: "different-phone"},
     {providerAccountId: "", providerPhoneNumberId: sender.providerPhoneNumberId},
   ])("refuses mismatched identity before any HTTP request: %j", async expected => {
     read.mockResolvedValue({value: configuration}); const fetch = transport();
@@ -41,7 +41,12 @@ describe.each<Kind>(["TEXT", "IMAGE"])("%s frozen sender identity", kind => {
     await expect(send(new WhatsAppService(fetch), kind, sender)).rejects.toMatchObject({code: "sender-mismatch"});
     expect(fetch).not.toHaveBeenCalled();
   });
-  it("preserves legacy sends without a frozen sender", async () => {
+  it("uses the permitted pool phone with current same-WABA credentials", async () => {
+    read.mockResolvedValue({value: configuration}); const fetch = transport();
+    await send(new WhatsAppService(fetch), kind, {...sender,providerPhoneNumberId:"pool-phone"});
+    expect(fetch.mock.calls[0]![0]).toBe("https://graph.example/v1/pool-phone/messages");
+  });
+  it("supports standalone transport without a frozen pool sender", async () => {
     read.mockResolvedValue({value: rotated}); const fetch = transport();
     await expect(send(new WhatsAppService(fetch), kind)).resolves.toEqual({providerMessageId: "provider-receipt"});
     expect(fetch.mock.calls[0]![0]).toBe("https://graph.example/v1/phone-b/messages");

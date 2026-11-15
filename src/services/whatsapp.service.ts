@@ -50,7 +50,7 @@ function assertExpectedSender(expected: WhatsAppSenderIdentity | undefined,
   if (expected === undefined) return;
   if (typeof expected.providerAccountId !== "string" || !expected.providerAccountId.trim() ||
       typeof expected.providerPhoneNumberId !== "string" || !expected.providerPhoneNumberId.trim() ||
-      expected.providerAccountId !== actual.providerAccountId || expected.providerPhoneNumberId !== actual.providerPhoneNumberId) {
+      expected.providerAccountId !== actual.providerAccountId) {
     throw new WhatsAppServiceError("sender-mismatch", "WhatsApp sender changed before dispatch");
   }
 }
@@ -93,7 +93,7 @@ export class WhatsAppService {
   }: SendTextInput, signal?: AbortSignal): Promise<SendMessageResult> {
     const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
     const accessToken = senderConfig.accessToken;
-    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: expectedSender?.providerPhoneNumberId ?? senderConfig.phoneNumberId };
     if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
@@ -179,7 +179,7 @@ export class WhatsAppService {
   }: SendImageInput, signal?: AbortSignal): Promise<SendMessageResult> {
     const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
     const accessToken = senderConfig.accessToken;
-    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: expectedSender?.providerPhoneNumberId ?? senderConfig.phoneNumberId };
     if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
@@ -262,10 +262,11 @@ export class WhatsAppService {
     imageHeader,
     dynamicUrlButton,
     dynamicUrlButtons,
+    expectedSender,
   }: SendTemplateInput): Promise<SendMessageResult> {
     const { value: senderConfig } = await platformConsumerConfiguration.read("messaging.sender");
     const accessToken = senderConfig.accessToken;
-    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: senderConfig.phoneNumberId };
+    const sender = { providerAccountId: senderConfig.businessAccountId, providerPhoneNumberId: expectedSender?.providerPhoneNumberId ?? senderConfig.phoneNumberId };
     if (!accessToken?.trim()) {
       throw new WhatsAppServiceError(
         "configuration-missing",
@@ -273,6 +274,7 @@ export class WhatsAppService {
       );
     }
 
+    assertExpectedSender(expectedSender, sender);
     const apiBaseUrl = (
       process.env.WHATSAPP_API_BASE_URL?.trim() ||
       DEFAULT_WHATSAPP_API_BASE_URL
