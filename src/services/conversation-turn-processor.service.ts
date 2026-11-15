@@ -569,9 +569,20 @@ export class ConversationTurnProcessor<TContext, TResult> {
           if(owned.processingInboundVersion!==observedVersion ||
               owned.processingStartedAt?.getTime()!==now.getTime())return undefined;
           this.logger.warn("whatsapp.turn.agent_generation_failed", {conversationId,observedVersion,error});
-          const fallback=await this.dependencies.prepareFailureFallback({conversationId,shopId:loaded.shopId,
-            checkoutRecoveryId:loaded.checkoutRecoveryId,deadlineAt:now.getTime()+PROCESSING_LEASE_MS});
-          if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS) return undefined;
+          let fallback:AiFailureFallback|null;
+          try {
+            fallback=await this.dependencies.prepareFailureFallback({conversationId,shopId:loaded.shopId,
+              checkoutRecoveryId:loaded.checkoutRecoveryId,deadlineAt:now.getTime()+PROCESSING_LEASE_MS});
+          } catch(preparationError) {
+            this.logger.error("whatsapp.turn.fallback_preparation_failed",{conversationId,observedVersion,
+              reason:"preparation-error",errorType:preparationError instanceof Error?preparationError.name:"unknown"});
+            throw preparationError;
+          }
+          if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS) {
+            this.logger.warn("whatsapp.turn.fallback_refused",{conversationId,observedVersion,
+              reason:fallback?"original-budget-exhausted":"saved-context-or-template-unavailable"});
+            return undefined;
+          }
           return {kind:"fallback",fallback};
         },
         sendPreparedText,
@@ -659,6 +670,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       }
       if (result.kind === "fallback" && (composed.kind !== "ready" || !composed.commonLayout ||
           canonicalJson(composed.commonLayout.commonRef)!==canonicalJson(result.fallback.commonRef))) {
+        this.logger.warn("whatsapp.turn.fallback_refused",{conversationId,observedVersion,reason:"common-reference-changed-or-unwrapped"});
         await failPrepared(reserved.messageId);
         await this.finishSuppressedTurn(conversationId,observedVersion);
         return;

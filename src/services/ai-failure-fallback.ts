@@ -72,7 +72,7 @@ export class AiFailureFallbackService {
    private readonly now:()=>number = Date.now) {}
  async prepare(input:AiFailureFallbackInput):Promise<AiFailureFallback|null>{
   // Leave a real delivery budget within the ORIGINAL claim. No renewed lease.
-  if(!input.checkoutRecoveryId || input.deadlineAt-this.now()<AI_FAILURE_MIN_PREPARATION_SEND_MS)return null;
+  if(!Number.isSafeInteger(input.deadlineAt)||!input.checkoutRecoveryId || input.deadlineAt-this.now()<AI_FAILURE_MIN_PREPARATION_SEND_MS)return null;
   const context=await this.wrappers.loadContext(input.conversationId);
   if(!context||context==='TENANT_MISMATCH'||context.shopId!==input.shopId||!context.checkoutAvailable)return null;
   const selected=selectedCommonLayout(await this.wrappers.loadSlots(),context);
