@@ -12,12 +12,16 @@ export const BRIEF_PRODUCT_COPY: Readonly<Record<ModaSupportedLanguageTag, reado
  pl:['Krótka lista produktów','Cena','Kategoria'],'pt-BR':['Resumo dos produtos','Preço','Categoria'],'pt-PT':['Resumo dos produtos','Preço','Categoria'],
  es:['Resumen de productos','Precio','Categoría'],sv:['Kort produktöversikt','Pris','Kategori'],th:['รายการสินค้าฉบับย่อ','ราคา','หมวดหมู่'],tr:['Kısa ürün listesi','Fiyat','Kategori'],
 };
+/** Concise product-level label; variant scope keeps the existing precise copy. */
+export const SHORT_PRODUCT_STOCK: Readonly<Record<ModaSupportedLanguageTag,string>> = {
+ 'zh-Hans':'库存','zh-Hant':'庫存',cs:'Sklad',da:'Lager',nl:'Voorraad',en:'Stock',fi:'Varasto',fr:'Stock',de:'Bestand',it:'Scorte',ja:'在庫',ko:'재고',nb:'Lager',pl:'Stan','pt-BR':'Estoque','pt-PT':'Stock',es:'Existencias',sv:'Lager',th:'สต็อก',tr:'Stok',
+};
 const key = (p:{productId:string;variantId:string|null}) => JSON.stringify([p.productId,p.variantId]);
-/** Called only by the overflowing AI caption path. Original cardinality, not a
- * reduced prefix or inferred customer intent, controls list-summary eligibility. */
-export function briefProductDetailCandidates(input:CommercePresentationInput): {body:string;pairs:{productId:string;variantId:string|null}[]}[] | undefined {
+/** Only explicit concise mode may summarize a single selected product. Full
+ * independently verified facts remain unchanged in the proof and receipt. */
+export function briefProductDetailCandidates(input:CommercePresentationInput,options:{concise?:boolean}={}): {body:string;pairs:{productId:string;variantId:string|null}[]}[] | undefined {
  const p=CommerceVerifiedPresentationSchema.parse(input.verified),facts=p.productFacts;
- if(input.envelope.answerKind!=='ANSWER'||p.disposition!=='PRODUCT_DETAILS'||new Set(facts.map(f=>f.productId)).size<2)return undefined;
+ if(input.envelope.answerKind!=='ANSWER'||p.disposition!=='PRODUCT_DETAILS'||!facts.length||(!options.concise&&new Set(facts.map(f=>f.productId)).size<2))return undefined;
  const pairs=facts.map(({productId,variantId})=>({productId,variantId}));
  const proof=input.verifiedProducts?.products??[];
  const verified=verifyCommerceProductFacts(pairs,proof);
@@ -29,13 +33,15 @@ export function briefProductDetailCandidates(input:CommercePresentationInput): {
   const lines=[fact.title];
   if(product.data.unitPrice!==null&&product.data.currency!==null){
    const money=formatObservedMoney(product.data.unitPrice,product.data.currency,runtime);if(money===null)return [];
-   lines.push(`${copy[1]}: ${money} ${product.data.currency}`);
+   if(options.concise)lines[0]+=` — ${money} ${product.data.currency}`;
+   else lines.push(`${copy[1]}: ${money} ${product.data.currency}`);
   }
-  lines.push(fact.stock.status==='KNOWN'?`${fact.stock.scope==='VARIANT'?stock[1]:stock[0]}: ${runtime.formatNumber(fact.stock.quantity)}`:fact.stock.status==='NOT_TRACKED'?stock[2]:stock[3]);
-  if(product.data.productType?.trim())lines.push(`${copy[2]}: ${product.data.productType}`);
+  lines.push(fact.stock.status==='KNOWN'?`${fact.stock.scope==='VARIANT'?stock[1]:options.concise?SHORT_PRODUCT_STOCK[locale]:stock[0]}: ${runtime.formatNumber(fact.stock.quantity)}`:fact.stock.status==='NOT_TRACKED'?stock[2]:stock[3]);
+  if(options.concise&&product.data.selectedOptions?.length)lines.push(product.data.selectedOptions.map(option=>`${option.name}: ${option.value}`).join('; '));
+  if(!options.concise&&product.data.productType?.trim())lines.push(`${copy[2]}: ${product.data.productType}`);
   entries.push(lines.join('\n'));
  }
  return Array.from({length:entries.length},(_,index)=>{
-  const count=entries.length-index;return {body:copy[0]+'\n\n'+entries.slice(0,count).join('\n\n'),pairs:pairs.slice(0,count)};
+  const count=entries.length-index;return {body:(options.concise?'':copy[0]+'\n\n')+entries.slice(0,count).join('\n\n'),pairs:pairs.slice(0,count)};
  });
 }
