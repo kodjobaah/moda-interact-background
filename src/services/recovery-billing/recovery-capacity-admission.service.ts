@@ -84,9 +84,7 @@ export class RecoveryCapacityAdmissionService {
       policy.subscriptionStatus !== "FROZEN"
     ) {
       const paid = await this.paidIncludedReservationService.reserve(
-        input.outreachAttemptId
-          ? { shopId, sourceKey }
-          : { shopId, recoveryId: input.recoveryId },
+        { shopId, sourceKey },
       );
       if (isPaidIncludedAdmission(paid)) {
         return {

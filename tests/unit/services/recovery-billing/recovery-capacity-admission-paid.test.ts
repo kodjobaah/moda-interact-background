@@ -38,7 +38,7 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
     expect(harness.promotional.reserve).toHaveBeenCalledOnce();
     expect(harness.paid.reserve).toHaveBeenCalledWith({
       shopId: "shop-1",
-      recoveryId: "recovery-1",
+      sourceKey: "recovery:shop-1:recovery-1",
     });
     expect(harness.purchased.reserve).not.toHaveBeenCalled();
   });
@@ -58,6 +58,13 @@ describe("RecoveryCapacityAdmissionService Paid routing", () => {
       shopId: "shop-1",
       sourceKey: "recovery:shop-1:recovery-outreach:attempt-1",
     });
+  });
+
+  it("preserves explicit continuation funding identity without a fake outreach attempt", async () => {
+    const harness=capacityHarness();
+    const sourceKey="recovery:shop-1:recovery-continuation:block-7";
+    await harness.service.admit(normalInput(paidPolicy(),{sourceKey}));
+    expect(harness.paid.reserve).toHaveBeenCalledExactlyOnceWith({shopId:"shop-1",sourceKey});
   });
 
   it("does not infer Paid included exhaustion from recovery-pack policy", async () => {

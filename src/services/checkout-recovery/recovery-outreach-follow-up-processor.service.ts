@@ -1,3 +1,4 @@
+import { recoveryAllowanceService, type RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import prisma from "../../lib/db.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
@@ -29,6 +30,7 @@ export class RecoveryOutreachFollowUpProcessorService {
     private readonly followUpPolicy = new RecoveryFollowUpPolicyService(),
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly storedConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
+    private readonly allowance: Pick<RecoveryAllowanceService,"limits"|"beginFollowUp"|"attachFollowUp"> = recoveryAllowanceService,
   ) {}
 
   async process(recoveryId: string) {
@@ -146,6 +148,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             attempt.initiationKey !== initiationKey || attempt.outboundMessageId ||
             attempt.status !== "PENDING")
           return { kind: "suppressed", reason: "already-claimed" } as const;
+        const allowanceBlockId=await this.allowance.beginFollowUp({shopId:recovery.shopId,recoveryId,attemptId:attempt.id,limits:await this.allowance.limits(recovery.shopId)});
         let billing = await this.billingService.admit({ shopId: recovery.shopId, recoveryId, outreachAttemptId: attempt.id });
         if (billing.kind === "blocked") {
           await this.followUpPolicy.releaseScheduledClaim({ recoveryId, attemptId: attempt.id, initiationKey });
@@ -163,6 +166,7 @@ export class RecoveryOutreachFollowUpProcessorService {
           return { kind: "capacity-blocked", reason: revalidated.reason } as const;
         }
         billing = revalidated;
+        await this.allowance.attachFollowUp(allowanceBlockId,billing.admission.sourceKey);
         const content = conversationMessageService.buildRecoveryTemplateDescriptor({
           purpose: selected.prepared.purpose,
           templateName: selected.prepared.providerTemplateName,

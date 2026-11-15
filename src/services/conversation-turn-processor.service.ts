@@ -104,6 +104,8 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       idempotencyKey: string;
       senderType: "AGENT" | "AUTOMATION";
       content?: string;
+      clarification?: true;
+      continuation?: { expectedControlRevision: number; expectedInboundVersion: number };
     }) => Promise<OutboundAdmissionResult>;
     sendPreparedText: (
       input: Admitted & {
@@ -475,6 +477,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
           idempotencyKey: `clarification:${conversationId}:${observedVersion}`,
           senderType: "AUTOMATION",
           content: loaded.clarificationText,
+          clarification: true,
         });
         if (clarification.kind !== "admitted") {
           await completeOwnedTurn();
@@ -526,8 +529,14 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         idempotencyKey: `agent:${conversationId}:${observedVersion}`,
         senderType: "AGENT",
+        ...(loaded.checkoutRecoveryId && controlRevision!==undefined ? {continuation:{expectedControlRevision:controlRevision,expectedInboundVersion:observedVersion}} : {}),
       });
       if (reserved.kind !== "admitted") {
+        if(reserved.reason==="allowance-funding-held"){
+          await this.dependencies.conversation.releaseTurn(conversationId,observedVersion);
+          await this.schedule(conversationId,observedVersion,30_000,activeJob);
+          return;
+        }
         await completeOwnedTurn();
         this.logger.debug("whatsapp.turn.completed", {
           conversationId,
@@ -729,6 +738,11 @@ export class ConversationTurnProcessor<TContext, TResult> {
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
       });
+      if(deliveryResult.kind==="suppressed"&&deliveryResult.reason==="allowance-capacity-reopened"){
+        await this.dependencies.conversation.releaseTurn(conversationId,observedVersion);
+        await this.schedule(conversationId,observedVersion,0,activeJob);
+        return;
+      }
       await completeOwnedTurn();
       this.logger.debug("whatsapp.turn.completed", {
         conversationId,

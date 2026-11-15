@@ -1,0 +1,160 @@
+import { releaseReservedSource } from "../recovery-delivery-compensation/reserved.js";
+import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
+import { randomUUID } from "node:crypto";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import type { ConversationAllowanceBlock, Prisma } from "@prisma/client";
+import { lockRecoveryContext, readRecoveryWindowEvidence, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
+import { customerWindow, CUSTOMER_WINDOW_MS } from "../recovery-conversation/recovery-follow-up-policy.service.js";
+import { findExactRecoveryReservationSource, findExactReservationSource } from "../recovery-delivery-compensation/lineage.js";
+import { readCommittedCorrectionReplay, readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
+import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
+type Tx = Prisma.TransactionClient;
+export type AllowanceLimits = {
+    outboundHardLimit: number;
+    terminalMessageReservedSlots: number;
+};
+export const continuationSourceId = (blockId: string) => `recovery-continuation:${blockId}`;
+export const allowanceSourceKey = (shopId: string, blockId: string) => createRecoveryIdempotencyKey(shopId, continuationSourceId(blockId));
+export class AllowanceHeld extends Error {
+    constructor(readonly reason: string) { super(`Recovery allowance held: ${reason}`); }
+}
+/** Same owner and original funding, without retagging or resetting historical rows. */
+export async function adoptInitial(tx: Tx, conversationId: string, limits: AllowanceLimits): Promise<ConversationAllowanceBlock> {
+    const existing = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, fundingKind: "INITIAL" } });
+    if (existing)
+        return existing;
+    const context = await lockRecoveryContext(tx, conversationId);
+    if (!context)
+        throw new AllowanceHeld("owner-unavailable");
+    const initial = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: context.recoveryId, sequence: 1 } } });
+    if (!initial?.outboundMessageId || !initial.sentAt)
+        throw new AllowanceHeld("original-funding-unproven");
+    const message = await tx.conversationMessage.findUnique({ where: { id: initial.outboundMessageId } });
+    if (!message || message.conversationId !== conversationId || !message.providerMessageId || !message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status) || message.failedAt)
+        throw new AllowanceHeld("original-receipt-unproven");
+    const source = await findExactRecoveryReservationSource(tx, context.shopId, initial.id);
+    if (!source || source.reservation.status !== "COMMITTED" || source.reservation.compensationUsageEventId)
+        throw new AllowanceHeld("original-funding-unproven");
+    await readCommittedRecoveryUsage(tx, source);
+    return tx.conversationAllowanceBlock.create({ data: { id: randomUUID(), shopId: context.shopId, conversationId, ordinal: 0, fundingKind: "INITIAL", state: "ACTIVE", creditReservationId: source.reservation.id, hardMessageLimit: limits.outboundHardLimit, terminalReservedSlots: limits.terminalMessageReservedSlots } });
+}
+export async function currentAllowance(tx: Tx, conversationId: string, limits: AllowanceLimits) {
+    await lockRecoveryContext(tx, conversationId);
+    await adoptInitial(tx, conversationId, limits);
+    const open = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, state: { in: ["PENDING", "ACTIVE"] } }, orderBy: { ordinal: "desc" } });
+    if (open)
+        return open;
+    const cancelled = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, state: "CANCELLED" }, orderBy: { ordinal: "desc" } });
+    if (!cancelled)
+        throw new AllowanceHeld("funded-current-block-unavailable");
+    return cancelled;
+}
+export async function allowanceUsage(tx: Tx, block: ConversationAllowanceBlock): Promise<number> {
+    const value = await tx.usageEvent.aggregate({ where: { shopId: block.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", sourceType: { in: ["OUTBOUND_AUTOMATED_MESSAGE", "OUTBOUND_AUTOMATED_TERMINAL"] }, sourceId: { in: (await tx.conversationMessage.findMany({ where: { conversationId: block.conversationId, direction: "OUTBOUND", ...(block.ordinal === 0 ? { OR: [{ allowanceBlockId: block.id }, { allowanceBlockId: null, senderType: { in: ["AGENT", "AUTOMATION"] } }] } : { allowanceBlockId: block.id }) }, select: { id: true } })).map(m => m.id) } }, _sum: { quantity: true } });
+    return Number(value._sum.quantity ?? 0);
+}
+export async function notifyAllowanceBoundary(tx: Tx, block: ConversationAllowanceBlock, now: Date) {
+    const thread = await tx.merchantSupportThread.upsert({ where: { shopId: block.shopId }, create: { shopId: block.shopId }, update: {} });
+    await tx.merchantSupportMessage.upsert({ where: { sourceKey: `recovery-allowance:${block.conversationId}:${block.ordinal}:exhausted` }, create: { threadId: thread.id, kind: "SYSTEM", state: "AVAILABLE", originalBody: "This checkout conversation has used its current automated message allowance. If the allowance remains full, the next eligible customer continuation will use one new recovery credit and continue this same conversation. No credit is charged merely for reaching this limit.", sourceLanguageTag: "en-GB", systemCode: "RECOVERY_CONVERSATION_ALLOWANCE_EXHAUSTED", systemVersion: "1", sourceKey: `recovery-allowance:${block.conversationId}:${block.ordinal}:exhausted`, availableAt: now }, update: {} });
+}
+export async function hasCurrentContinuation(tx: Tx, conversationId: string, version: number) {
+    const state = await tx.conversation.findUnique({ where: { id: conversationId }, select: { inboundVersion: true, pendingTurnStartedAt: true, lastProcessedVersion: true } });
+    return !!state && state.inboundVersion === version && state.pendingTurnStartedAt !== null && state.lastProcessedVersion < version;
+}
+/** Must be called under the owner lock before reservation I/O. */
+export async function createSuccessor(tx: Tx, input: {
+    conversationId: string;
+    limits: AllowanceLimits;
+    kind: "CONTINUATION" | "FOLLOW_UP";
+    now: Date;
+    expectedControlRevision?: number;
+    expectedInboundVersion?: number;
+}) {
+    const context = await lockRecoveryContext(tx, input.conversationId);
+    if (!context || terminalRecovery(context.recoveryStatus))
+        throw new AllowanceHeld("owner-closed");
+    const evidence = await readRecoveryWindowEvidence(tx, { recoveryId: context.recoveryId, conversationId: context.id, now: input.now });
+    if (!evidence || await hasLocalNoContact(tx, { shopId: context.shopId, recipient: evidence.recipient }))
+        throw new AllowanceHeld("contact-blocked");
+    if (input.kind === "CONTINUATION" && (!await hasCurrentContinuation(tx, context.id, input.expectedInboundVersion ?? -1) || context.mode !== "AI" || context.revision !== input.expectedControlRevision || context.inboundVersion !== input.expectedInboundVersion || !customerWindow(evidence.verifiedInboundAt, input.now).open))
+        throw new AllowanceHeld("continuation-not-current");
+    const current = await currentAllowance(tx, context.id, input.limits);
+    if (current.state === "PENDING") {
+        if (current.fundingKind !== input.kind)
+            throw new AllowanceHeld("another-funding-intent");
+        return { block: current, context };
+    }
+    let predecessor = current;
+    if (current.state === "CANCELLED") {
+        const lineage = await readBlockSource(tx, current);
+        const source = lineage?.reservation;
+        const opening = await tx.conversationMessage.findFirst({ where: { allowanceBlockId: current.id, direction: "OUTBOUND" }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+        const other = opening ? await tx.conversationMessage.count({ where: { allowanceBlockId: current.id, id: { not: opening.id }, OR: [{ providerDispatchKey: { not: null } }, { providerDispatchAdmittedAt: { not: null } }, { providerMessageId: { not: null } }, { sentAt: { not: null } }] } }) : 0;
+        if (!current.predecessorId || !opening || opening.status !== "FAILED" || other || !source || source.shopId !== context.shopId || !(source.status === "RELEASED" || source.status === "COMMITTED" && source.compensationUsageEventId))
+            throw new AllowanceHeld("cancelled-retry-lineage-unproven");
+        if (source.status === "COMMITTED")
+            await readCommittedCorrectionReplay(tx, lineage!);
+        else if (source.committedUsageEventId || source.compensationUsageEventId)
+            throw new AllowanceHeld("cancelled-release-lineage-unproven");
+        predecessor = await tx.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: current.predecessorId } });
+    }
+    if (input.kind === "CONTINUATION" && (predecessor.state === "ACTIVE" ? await allowanceUsage(tx, predecessor) < predecessor.hardMessageLimit - predecessor.terminalReservedSlots : current.state !== "CANCELLED" || !["EXHAUSTED", "CLOSED"].includes(predecessor.state)))
+        throw new AllowanceHeld("predecessor-capacity-available");
+    const last = await tx.conversationAllowanceBlock.aggregate({ where: { conversationId: context.id }, _max: { ordinal: true } });
+    // The same Meta window bounds continuation repair. No lease expiry permits resend.
+    const deadline = input.kind === "CONTINUATION" ? customerWindow(evidence.verifiedInboundAt, input.now).closesAt! : new Date(input.now.getTime() + CUSTOMER_WINDOW_MS);
+    const block = await tx.conversationAllowanceBlock.create({ data: { id: randomUUID(), shopId: context.shopId, conversationId: context.id, ordinal: (last._max.ordinal ?? -1) + 1, fundingKind: input.kind, state: "PENDING", predecessorId: predecessor.id, hardMessageLimit: input.limits.outboundHardLimit, terminalReservedSlots: input.limits.terminalMessageReservedSlots, repairDeadlineAt: deadline, repairAt: input.now } });
+    return { block, context };
+}
+export async function readBlockSource(tx: Tx, block: ConversationAllowanceBlock) {
+    if (!block.creditReservationId)
+        return null;
+    const source = await tx.usageReservation.findUnique({ where: { id: block.creditReservationId } });
+    if (!source || source.shopId !== block.shopId)
+        return null;
+    const conversation = await tx.conversation.findUnique({ where: { id: block.conversationId }, select: { checkoutRecoveryId: true } });
+    if (!conversation?.checkoutRecoveryId)
+        return null;
+    const attempt = block.fundingKind !== "CONTINUATION" ? await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: conversation.checkoutRecoveryId, sequence: block.fundingKind === "INITIAL" ? 1 : 2 } } }) : null;
+    const logical = block.fundingKind === "CONTINUATION" ? allowanceSourceKey(block.shopId, block.id) : attempt ? createRecoveryIdempotencyKey(block.shopId, `recovery-outreach:${attempt.id}`) : null;
+    if (!logical)
+        return null;
+    const found = await findExactReservationSource(tx, block.shopId, logical);
+    if (!found || found.reservation.id !== block.creditReservationId)
+        return null;
+    return found;
+}
+export async function exactBlockSource(tx: Tx, block: ConversationAllowanceBlock) {
+    const source = await readBlockSource(tx, block);
+    return source?.reservation.compensationUsageEventId ? null : source;
+}
+/** Last reversible funding decision, while the caller holds the owner lock. */
+export async function cancelReopenedContinuation(tx: Tx, blockId: string, messageId: string): Promise<boolean> {
+    const pointer = await tx.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: blockId } });
+    const owner = await lockRecoveryContext(tx, pointer.conversationId);
+    if (!owner || owner.shopId !== pointer.shopId)
+        throw new AllowanceHeld("reopened-owner-unavailable");
+    const block = await tx.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: blockId } });
+    if (block.state !== "PENDING" || block.fundingKind !== "CONTINUATION")
+        return false;
+    const opening = await tx.conversationMessage.findFirst({ where: { allowanceBlockId: block.id, direction: "OUTBOUND" }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { id: true, conversationId: true } });
+    if (!opening || opening.id !== messageId || opening.conversationId !== block.conversationId || await tx.conversationMessage.count({ where: { allowanceBlockId: block.id, direction: "OUTBOUND" } }) !== 1)
+        throw new AllowanceHeld("reopened-opening-identity");
+    const admitted = await tx.conversationMessage.count({ where: { allowanceBlockId: block.id, OR: [{ providerDispatchKey: { not: null } }, { providerDispatchAdmittedAt: { not: null } }, { providerMessageId: { not: null } }, { sentAt: { not: null } }] } });
+    if (admitted)
+        return false; // Provider permit freezes the action, even if its outcome is unknown.
+    const predecessor = await tx.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: block.predecessorId! } });
+    if (predecessor.state !== "ACTIVE")
+        return false; // Exact cancelled-lineage retry after an already frozen prior cycle.
+    if (await allowanceUsage(tx, predecessor) >= predecessor.hardMessageLimit - predecessor.terminalReservedSlots)
+        return false;
+    const source = await exactBlockSource(tx, block);
+    if (!source || source.reservation.status !== "RESERVED")
+        throw new AllowanceHeld("reopened-funding-lineage");
+    await releaseReservedSource(tx, source);
+    const usage = await readExactAutomatedUsage(tx, block.shopId, messageId);
+    await removeExactAutomatedUsage(tx, block.shopId, messageId, usage);
+    await tx.conversationMessage.updateMany({ where: { id: messageId, allowanceBlockId: block.id, status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null, providerMessageId: null, sentAt: null }, data: { status: "FAILED" } });
+    await tx.conversationAllowanceBlock.update({ where: { id: block.id }, data: { state: "CANCELLED", repairAt: null, repairLeaseToken: null, repairLeaseUntil: null } });
+    return true;
+}

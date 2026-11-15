@@ -1,3 +1,5 @@
+import { AllowanceHeld, currentAllowance, allowanceUsage, notifyAllowanceBoundary, exactBlockSource } from "../recovery-allowance/storage.js";
+import { RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
@@ -37,6 +39,7 @@ type Transaction = Prisma.TransactionClient;
 
 export class OutboundAdmissionReservationService {
   private readonly policy: OutboundAdmissionPolicyService;
+  private readonly allowance: RecoveryAllowanceService;
 
   constructor(
     private readonly database: AdmissionDatabase = prisma,
@@ -46,6 +49,7 @@ export class OutboundAdmissionReservationService {
     createPostContractPolicyResolver: PostContractPolicyResolverFactory =
       (client) => new PostContractRecoveryPolicyResolver(client),
   ) {
+    this.allowance = new RecoveryAllowanceService(database as PrismaClient);
     this.policy = new OutboundAdmissionPolicyService(
       createPolicyResolver,
       createPostContractPolicyResolver,
@@ -166,12 +170,18 @@ export class OutboundAdmissionReservationService {
 
   async reserve(input: OutboundAdmissionInput): Promise<OutboundAdmissionResult> {
     validateInput(input);
-    return this.withRetry(() =>
-      this.database.$transaction(
-        (transaction) => this.reserveInTransaction(transaction, input),
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-      ),
-    );
+    try {
+      const reserve = () => this.withRetry(() => this.database.$transaction(
+        tx => this.reserveInTransaction(tx, input), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+      if (input.continuation) await this.allowance.reconcileConversation(input.conversationId);
+      let result=await reserve();
+      if(result.kind==="suppressed"&&result.reason==="allowance-exhausted"&&input.continuation&&!input.clarification){
+        const funded=await this.allowance.fundContinuation({...input,...input.continuation},await this.allowance.limits(input.shopId));
+        if(funded)result=await reserve();
+        else return {kind:"suppressed",reason:"allowance-funding-held"};
+      }
+      return result;
+    } catch(error){ if(error instanceof AllowanceHeld)return {kind:"suppressed",reason:"allowance-funding-held"}; throw error; }
   }
 
   private async reserveInTransaction(
@@ -227,6 +237,24 @@ export class OutboundAdmissionReservationService {
       return { kind: "suppressed", reason: "paused" };
     }
 
+    let allowanceBlockId: string | undefined;
+    let isTerminal = false;
+    if(conversation.checkoutRecovery && !input.initialOutreach){
+      const block=await currentAllowance(transaction,input.conversationId,policy);
+      if(block.state==="EXHAUSTED"||block.state==="CANCELLED")return {kind:"suppressed",reason:"allowance-exhausted"};
+      if(block.state==="PENDING"){
+        const source=await exactBlockSource(transaction,block);
+        if(!source||source.reservation.status!=="RESERVED"||await transaction.conversationMessage.count({where:{allowanceBlockId:block.id}})>0)
+          return {kind:"suppressed",reason:"allowance-funding-held"};
+        if(input.clarification)return {kind:"suppressed",reason:"allowance-funding-held"};
+      }
+      const count=await allowanceUsage(transaction,block);
+      if(count>=block.hardMessageLimit-block.terminalReservedSlots){
+        await notifyAllowanceBoundary(transaction,block,new Date());
+        return {kind:"suppressed",reason:"allowance-exhausted"};
+      }
+      allowanceBlockId=block.id;
+    } else {
     const outboundMessages = await transaction.conversationMessage.findMany({
       where: {
         conversationId: input.conversationId,
@@ -250,13 +278,15 @@ export class OutboundAdmissionReservationService {
     const terminal = quantityFor(counts, "OUTBOUND_AUTOMATED_TERMINAL") > 0;
     const normalLimit =
       policy.outboundHardLimit - policy.terminalMessageReservedSlots;
-    let isTerminal = false;
+
     if (total >= normalLimit) {
       if (input.initialOutreach) return { kind: "suppressed", reason: "normal-cap-reached" };
       if (terminal) {
         return { kind: "suppressed", reason: "terminal-already-used" };
       }
       isTerminal = true;
+    }
+
     }
 
     const message = await transaction.conversationMessage.create({
@@ -266,6 +296,7 @@ export class OutboundAdmissionReservationService {
         senderType: input.senderType,
         status: MessageStatus.PENDING,
         content: isTerminal ? TERMINAL_MESSAGE : input.content ?? PENDING_CONTENT,
+        ...(allowanceBlockId ? {allowanceBlockId} : {}),
       },
       select: { id: true },
     });
@@ -283,6 +314,11 @@ export class OutboundAdmissionReservationService {
       },
     });
 
+    if(allowanceBlockId){
+      const block=await transaction.conversationAllowanceBlock.findUniqueOrThrow({where:{id:allowanceBlockId}});
+      if(block.state==="ACTIVE"&&await allowanceUsage(transaction,block)>=block.hardMessageLimit-block.terminalReservedSlots)
+        await notifyAllowanceBoundary(transaction,block,new Date());
+    }
     return {
       kind: "admitted",
       shopId: input.shopId,

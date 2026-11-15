@@ -8,6 +8,9 @@ export type OutboundAdmissionInput = {
   content?: string;
   recoveryCreditSourceKey?: string;
   initialOutreach?: InitialOutreachAdmissionScope;
+  /** Only the authenticated current settled AI turn can request renewal. */
+  continuation?: { expectedControlRevision: number; expectedInboundVersion: number };
+  clarification?: true;
 };
 
 export type OutboundAdmissionResult =
@@ -23,6 +26,9 @@ export type OutboundAdmissionResult =
   | { kind: "suppressed"; reason: OutboundSuppressionReason };
 
 export type OutboundSuppressionReason =
+  | "allowance-capacity-reopened"
+  | "allowance-funding-held"
+  | "allowance-exhausted"
   | "paused"
   | "normal-cap-reached"
   | "terminal-already-used"

@@ -1,3 +1,5 @@
+import { cancelReopenedContinuation } from "../recovery-allowance/storage.js";
+import type { Prisma } from "@prisma/client";
 import { readFrozenCommonText } from "../conversation-delivery-plan.js";
 import { admitMultipartPart } from "../recovery-multipart/fence.js";
 import { readFrozenBrandMedia, asMessageDeliveryReceipt } from "../conversation-delivery-plan.js";
@@ -307,6 +309,40 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
+      // Every newly admitted recovery action is pinned to its immutable funded
+      // block. Historical initial messages are deliberately not rewritten.
+      let followUpBlockId: string | null = null;
+      if (!initial) {
+        const block = command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE"
+          ? await first<{id:string;state:string;fundingKind:string;sourceKey:string;creditReservationId:string;logicalSource:string;reservationStatus:string;compensated:string|null}>(tx, `
+            SELECT b."id",b."state"::text,b."fundingKind"::text,r."sourceKey",r."status"::text AS "reservationStatus",r."compensationUsageEventId" AS "compensated",b."creditReservationId", $3::text AS "logicalSource"
+            FROM "billing"."ConversationAllowanceBlock" b JOIN "billing"."UsageReservation" r ON r."id"=b."creditReservationId"
+            WHERE b."conversationId"=$1 AND b."shopId"=$2 AND b."state"='PENDING' AND b."fundingKind"='FOLLOW_UP'`,
+            context.id,context.shopId,`recovery-outreach:${command.recoveryOutreachAttemptId}`)
+          : input.senderType === "HUMAN" ? null
+          : await first<{id:string;state:string;fundingKind:string;sourceKey:string;creditReservationId:string;logicalSource:string;reservationStatus:string;compensated:string|null}>(tx, `
+            SELECT b."id",b."state"::text,b."fundingKind"::text,r."sourceKey",r."status"::text AS "reservationStatus",r."compensationUsageEventId" AS "compensated",b."creditReservationId",
+              CASE WHEN b."fundingKind"='CONTINUATION' THEN 'recovery-continuation:'||b."id" WHEN b."fundingKind"='FOLLOW_UP' THEN 'recovery-outreach:'||(SELECT a."id" FROM "commerce"."RecoveryOutreachAttempt" a WHERE a."checkoutRecoveryId"=$4 AND a."sequence"=2) ELSE NULL END AS "logicalSource"
+            FROM "whatsapp"."ConversationMessage" m JOIN "billing"."ConversationAllowanceBlock" b ON b."id"=m."allowanceBlockId"
+            JOIN "billing"."UsageReservation" r ON r."id"=b."creditReservationId"
+            WHERE m."id"=$1 AND b."conversationId"=$2 AND b."shopId"=$3`,input.messageId,context.id,context.shopId,context.recoveryId);
+        if (input.senderType !== "HUMAN" || command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+          if (!block || block.compensated || !["PENDING","ACTIVE","EXHAUSTED"].includes(block.state) ||
+              (block.state!=="PENDING"&&block.reservationStatus!=="COMMITTED"))
+            return {kind:"suppressed",reason:"allowance-funding-unavailable"} as const;
+          if (block.state === "PENDING") {
+            if(input.messageId && await cancelReopenedContinuation(tx as Prisma.TransactionClient,block.id,input.messageId))
+              return {kind:"suppressed",reason:"allowance-capacity-reopened"} as const;
+            const other = await first<{id:string}>(tx, `SELECT "id" FROM "whatsapp"."ConversationMessage"
+              WHERE "allowanceBlockId"=$1 AND "id"<>$2 LIMIT 1`,block.id,input.messageId ?? "");
+            if (other || !block.logicalSource || !(await hasExactInitialCredit(tx,{shopId:context.shopId,
+                idempotencyKey:block.logicalSource,sourceKey:block.sourceKey,allowPaid:true,clock:this.clock})))
+              return {kind:"suppressed",reason:"allowance-opening-unavailable"} as const;
+          }
+          followUpBlockId=command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? block.id : null;
+        }
+      }
+
       if (input.multipartPartId) {
         if (!input.messageId || input.initialOutreach || input.proactive || input.deliveryKind === "TEMPLATE" || input.senderType === "AUTOMATION")
           return {kind: "suppressed",reason: "multipart-invalid-scope"} as const;
@@ -335,12 +371,18 @@ export class OutboundSendFenceService {
         const admittedMessage = await rows<{ content: string; outboundPresentation: unknown }>(tx, `
           INSERT INTO "whatsapp"."ConversationMessage"
             ("id","conversationId","direction","senderType","status","content",
-              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision","outboundPresentation")
-          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5,$6::jsonb)
+              "providerDispatchKey","providerDispatchAdmittedAt","providerDispatchControlRevision","outboundPresentation","allowanceBlockId")
+          VALUES ($1,$2,'OUTBOUND','HUMAN','PENDING',$3,$4,statement_timestamp(),$5,$6::jsonb,$7)
           RETURNING "content","outboundPresentation"`,
-          messageId, context.id, content, dispatchKey, context.revision, JSON.stringify(evidence?.mediaPreparation ?? null));
+          messageId, context.id, content, dispatchKey, context.revision, JSON.stringify(evidence?.mediaPreparation ?? null),followUpBlockId);
         if (admittedMessage.length !== 1 || admittedMessage[0]?.content !== content || canonicalJson(admittedMessage[0]?.outboundPresentation ?? null) !== canonicalJson(evidence?.mediaPreparation ?? null)) {
           throw new Error("ARCH047 admitted content mismatch");
+        }
+        if (followUpBlockId) {
+          await rows(tx, `INSERT INTO "billing"."UsageEvent"
+            ("id","shopId","metric","quantity","sourceType","sourceId","idempotencyKey","occurredAt","createdAt")
+            VALUES ($1,$2,'OUTBOUND_AUTOMATED_MESSAGE',1,'OUTBOUND_AUTOMATED_MESSAGE',$3,$4,$5,$5)`,
+            randomUUID(),context.shopId,messageId,`recovery-outreach:${command!.recoveryOutreachAttemptId}`,permitNow);
         }
         const cmd = await rows<{ providerDispatchAdmittedAt: Date }>(tx, `
           UPDATE "whatsapp"."MerchantConversationSendCommand"
@@ -419,7 +461,8 @@ export class OutboundSendFenceService {
   }
 }
 
-// Called only after the initial attempt and prepared message have been locked.
+// Database-only source eligibility after owner/prepared-message locking.
+// Initial outreach, genuine follow-up and continuation openings share this proof.
 export async function hasExactInitialCredit(tx: SqlTransaction, input: {
   shopId: string; idempotencyKey: string; sourceKey: string; allowPaid: boolean;
   clock: () => Date;

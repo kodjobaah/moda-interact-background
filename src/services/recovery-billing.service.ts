@@ -119,12 +119,14 @@ export class RecoveryBillingService {
     shopId: string;
     recoveryId: string;
     outreachAttemptId?: string;
+    /** Exact application-owned action identity, including allowance continuation. */
+    fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,
-      input.outreachAttemptId
+      input.fundingSourceId ?? (input.outreachAttemptId
         ? `recovery-outreach:${input.outreachAttemptId}`
-        : input.recoveryId,
+        : input.recoveryId),
     );
 
     let policy: EffectiveBillingPolicy;
@@ -197,6 +199,7 @@ export class RecoveryBillingService {
     admission: RecoveryBillingAdmission;
     recoveryId: string;
     outreachAttemptId?: string;
+    fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
     let current: EffectiveBillingPolicy;
     try {
@@ -293,6 +296,7 @@ export class RecoveryBillingService {
       ...(input.outreachAttemptId
         ? { outreachAttemptId: input.outreachAttemptId }
         : {}),
+      ...(input.fundingSourceId ? { fundingSourceId: input.fundingSourceId } : {}),
     });
   }
 
