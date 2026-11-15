@@ -668,7 +668,7 @@ describe("OutboundMessageDeliveryService", () => {
 
       expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
         where: { id: "message-1" },
-        data: { status: "FAILED" },
+        data: { status: "FAILED",failedAt:expect.any(Date),providerFailureCode:code === "provider-rejected" ? "PROVIDER_REJECTED" : "CONFIGURATION_MISSING" },
       });
       expect(test.database.usageEvent.deleteMany).toHaveBeenCalledOnce();
     },

@@ -47,9 +47,12 @@ export function admissionHarness({
   const messages = new Map<string, { id: string; content: string; status: string }>();
   const usage = [...usageRows];
   let messageNumber = 0;
+  const allowanceBlock={id:"allowance-1",conversationId:"conversation-1",shopId:"shop-1",ordinal:0,state:"ACTIVE",fundingKind:"INITIAL",hardMessageLimit:20,terminalReservedSlots:1};
   const transaction = {
+    conversationAllowanceBlock:{findFirst:vi.fn(async()=>allowanceBlock),findFirstOrThrow:vi.fn(async()=>allowanceBlock),findUniqueOrThrow:vi.fn(async()=>allowanceBlock)},
     usageEvent: {
       findUnique: vi.fn().mockResolvedValue(existing),
+      aggregate:vi.fn(async()=>({_sum:{quantity:usage.reduce((sum,row)=>sum+row.quantity,0)}})),
       groupBy: vi.fn().mockImplementation(
         async ({ where }: { where?: { sourceId?: { in: string[] } } }) =>
           [

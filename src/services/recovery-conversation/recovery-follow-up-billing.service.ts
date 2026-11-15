@@ -1,3 +1,4 @@
+import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { freeRecoveryReservationService } from "../free-recovery-reservation.service.js";
 import { purchasedRecoveryReservationService } from "../purchased-recovery-reservation.service.js";
@@ -158,15 +159,21 @@ export class RecoveryFollowUpBillingService {
   async admitAndRevalidate(input: {
     shopId: string; recoveryId: string; sequenceTwoAttemptId: string;
   }): Promise<RecoveryBillingAdmissionResult> {
+    const blockId = await recoveryAllowanceService.beginFollowUp({shopId:input.shopId,recoveryId:input.recoveryId,attemptId:input.sequenceTwoAttemptId,limits:await recoveryAllowanceService.limits(input.shopId)});
     const admitted = await this.billing.admit({shopId: input.shopId,
       recoveryId: input.recoveryId, outreachAttemptId: input.sequenceTwoAttemptId});
     if (admitted.kind !== "admitted") return admitted;
-    return this.billing.revalidateBeforeProvider({admission: admitted.admission,
+    const checked = await this.billing.revalidateBeforeProvider({admission: admitted.admission,
       recoveryId: input.recoveryId, outreachAttemptId: input.sequenceTwoAttemptId});
+    if(checked.kind === "admitted") await recoveryAllowanceService.attachFollowUp(blockId,checked.admission.sourceKey);
+    return checked;
   }
 
   async onConfirmedProviderSend(input: {admission: RecoveryBillingAdmission; recoveryId: string; occurredAt: Date}) {
     await this.billing.commitSuccessfulInitiation(input);
+    const {default:prisma}=await import("../../lib/db.js");
+    const owner=await prisma.conversation.findUnique({where:{checkoutRecoveryId:input.recoveryId},select:{id:true}});
+    if(owner)await recoveryAllowanceService.reconcileConversation(owner.id);
   }
 
   async onDefinitiveProviderFailure(input: {admission: RecoveryBillingAdmission; error: unknown}) {

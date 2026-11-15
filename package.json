@@ -13,6 +13,7 @@
     "test:arch035-woo-order-capture:unit": "vitest run tests/unit/events/woo-order-capture.test.ts tests/unit/workers/woo-order-capture.worker.test.ts tests/unit/runtime/entrypoint-isolation.test.ts",
     "test:arch035-woo-order-capture:redis": "node scripts/test-integration.mjs tests/integration/woo-order-capture.integration.test.ts",
     "test:integration": "node scripts/test-integration.mjs",
+    "test:arch076-allowance:postgres": "node scripts/test-integration.mjs tests/integration/arch076-allowance-renewal.integration.test.ts",
     "test:commerce-recommendations": "vitest run tests/unit/commerce/recommendations tests/unit/commerce/host-diagnostics.test.ts tests/unit/commerce/mcp-client.test.ts tests/unit/commerce/evidence.test.ts tests/unit/agents/initial-outreach-offer.eligibility.test.ts tests/unit/agents/initial-outreach-offer.combinations.test.ts tests/unit/agents/initial-outreach-offer.agent.test.ts tests/unit/agents/initial-outreach-offer.graph.test.ts tests/unit/services/recovery-offers/current-outreach-offer-revalidation.service.test.ts tests/unit/services/recovery-template-integration/automated-recovery-template.service.test.ts",
     "test:commerce-host": "vitest run --config vitest.commerce-host.config.ts",
     "test:arch036-woo-coupon-catalogue:postgres": "node scripts/test-integration.mjs tests/integration/woo-coupon-catalogue-reconciliation.integration.test.ts",

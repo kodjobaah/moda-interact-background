@@ -1,3 +1,10 @@
+import { HumanPreparedCommandService } from "../../src/services/recovery-conversation/human-prepared-command.service.js";
+import { HumanWrapperPreparationService } from "../../src/services/recovery-conversation/human-wrapper-preparation.service.js";
+import { ConversationWrapperService } from "../../src/services/conversation-wrappers/service.js";
+import { PrismaConversationWrapperReadRepository } from "../../src/services/conversation-wrappers/repository.js";
+import { digest, stableJson } from "../../src/services/conversation-wrappers/projection.js";
+import { PostgresModerationAssessmentService } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
+import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import "dotenv/config";
 import { randomUUID, createHash } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
@@ -60,7 +67,44 @@ async function fixture(db: PrismaClient, label: string) {
       attemptId ?? null);
     return id;
   }
-  return { shopId,recoveryId,conversationId, addCommand, async cleanup(){ await db.shop.delete({ where: {id:shopId} }); } };
+  let wrapper: { definitionId: string; adminId: string } | undefined;
+  async function prepareHuman(commandId: string, leaseToken: string) {
+    if (!wrapper) {
+      const adminId = randomUUID();
+      await db.platformAdmin.create({data:{id:adminId,email:`arch040-wrapper-${adminId}@example.test`,role:"SUPER_ADMIN"}});
+      const prepared = {schemaVersion:1,family:"MODA_CONVERSATION_WRAPPER",responseSlot:"response.body",
+        header:[],body:[{kind:"responseSlot",name:"response.body"}],footer:[],conditionals:[]};
+      const definition = await db.whatsAppTemplateDefinition.create({data:{kind:"MODA_CONVERSATION_WRAPPER",
+        audience:"HUMAN",sourceLanguageTag:"en",astSchemaVersion:1,sourceHash:digest(`arch040-${adminId}`),
+        status:"PUBLISHED",publishedAt:new Date(),createdByAdminId:adminId}});
+      wrapper = {definitionId:definition.id,adminId};
+      await db.whatsAppTemplateLocale.create({data:{definitionId:definition.id,languageTag:"en",status:"SOURCE_SAVED",
+        contentHash:digest(stableJson(prepared)),localeAst:{schemaVersion:1,prepared}}});
+      await db.whatsAppConversationWrapperActiveSlot.create({data:{audience:"HUMAN",definitionId:definition.id,
+        editVersion:1,updatedByAdminId:adminId}});
+    }
+    const command = await db.merchantConversationSendCommand.findUniqueOrThrow({where:{id:commandId}});
+    const preparation = new HumanPreparedCommandService(db, new HumanWrapperPreparationService(
+      new ConversationWrapperService({repository:new PrismaConversationWrapperReadRepository(db),platformFallbackLanguageTag:"en"})));
+    const frozen = await preparation.freeze({id:commandId,conversationId,shopId,kind:"HUMAN_TEXT",textBody:command.textBody},leaseToken);
+    expect(frozen.kind).toBe("frozen");
+    if (frozen.kind !== "frozen") throw new Error(`Human fixture preparation refused: ${frozen.reason}`);
+    const moderation = new PostgresModerationAssessmentService(db,async()=>({flagged:false,categories:{harassment:false},
+      categoryScores:{harassment:0.01},returnedModel:"omni-moderation-latest"}),undefined,async()=>({
+        moderation:{key:"omini.moderation",version:1,value:{baseUrl:"http://127.0.0.1:1/v1/moderations",modelId:"omni-moderation-latest"}},
+        providerVersion:1,openAiApiKey:"arch040-disposable-test-only"}));
+    expect((await moderation.assessText({subject:{kind:"HUMAN_COMMAND",commandId},shopId,conversationId,
+      effectiveText:frozen.body,inputKind:"TEXT",policyVersion:moderationConfig().policyVersion,now:new Date()})).kind).toBe("allow");
+  }
+  return { shopId,recoveryId,conversationId, addCommand, prepareHuman, async cleanup(){
+    await db.shop.delete({ where: {id:shopId} });
+    if (wrapper) {
+      await db.whatsAppConversationWrapperActiveSlot.deleteMany({where:{definitionId:wrapper.definitionId}});
+      await db.whatsAppTemplateLocale.deleteMany({where:{definitionId:wrapper.definitionId}});
+      await db.whatsAppTemplateDefinition.delete({where:{id:wrapper.definitionId}});
+      await db.platformAdmin.delete({where:{id:wrapper.adminId}});
+    }
+  } };
 }
 
 /** Seed a sent initial outreach; waiting state requires a real sent message. */
@@ -108,6 +152,7 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
       const commandService = new MerchantSendCommandService(db);
       const claim = (await commandService.claimDueHumanCommands({limit:1,now:new Date()})).find(row => row.id===cmdId);
       expect(claim).toBeDefined();
+      await f.prepareHuman(cmdId, claim!.leaseToken);
       const provider = async () => "wa:accepted"; // Only called after transaction commits
       const fence = new OutboundSendFenceService(db,async()=>null);
       const permit = await fence.admitFinalSend({senderType:"HUMAN",conversationId:f.conversationId,
@@ -434,6 +479,7 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
       const commandId = await f.addCommand();
       const commandService = new MerchantSendCommandService(db);
       const claim = (await commandService.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      await f.prepareHuman(commandId, claim.leaseToken);
       const permit = await new OutboundSendFenceService(db, async () => null).admitFinalSend({
         senderType: "HUMAN", conversationId: f.conversationId, recoveryId: f.recoveryId,
         shopId: f.shopId, commandId, leaseToken: claim.leaseToken,
@@ -476,6 +522,7 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
     try {
       const commandId = await f.addCommand();
       const claim = (await new MerchantSendCommandService(db).claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
+      await f.prepareHuman(commandId, claim.leaseToken);
       const permit = await new OutboundSendFenceService(db, async () => null).admitFinalSend({
         senderType: "HUMAN", conversationId: f.conversationId, recoveryId: f.recoveryId,
         shopId: f.shopId, commandId, leaseToken: claim.leaseToken,
@@ -514,6 +561,8 @@ suite("ARCH-040 BACKGROUND-001 real PostgreSQL service semantics", () => {
       const secondLease = leases.find((lease) => lease.id === secondId);
       expect(firstLease).toBeDefined();
       expect(secondLease).toBeDefined();
+      await f.prepareHuman(firstId, firstLease!.leaseToken);
+      await f.prepareHuman(secondId, secondLease!.leaseToken);
       const policy = new HumanSendPolicyService(db, redis, {
         maxTextCharacters: 4000, shopPerMinute: 1,
         recipientPerHour: 100, repeatedIdenticalPerTenMinutes: 100,
