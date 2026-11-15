@@ -9,6 +9,7 @@ import { selectedCommonLayout } from './recovery-multipart/composition.js';
 import { formatWholeCheckoutItemsSummary } from './recovery-template-preparation/recovery-template-items-summary.js';
 
 export const AI_FAILURE_DELIVERY_RESERVE_MS = 15_000;
+export const AI_FAILURE_MIN_PREPARATION_SEND_MS = 10_000;
 export class GenerationBudgetTimeout extends Error {
  constructor(cause?:unknown){super("AI generation budget exhausted",{cause});this.name="GenerationBudgetTimeout";}
 }
@@ -71,20 +72,20 @@ export class AiFailureFallbackService {
    private readonly now:()=>number = Date.now) {}
  async prepare(input:AiFailureFallbackInput):Promise<AiFailureFallback|null>{
   // Leave a real delivery budget within the ORIGINAL claim. No renewed lease.
-  if(!input.checkoutRecoveryId || input.deadlineAt-this.now()<5000)return null;
+  if(!input.checkoutRecoveryId || input.deadlineAt-this.now()<AI_FAILURE_MIN_PREPARATION_SEND_MS)return null;
   const context=await this.wrappers.loadContext(input.conversationId);
   if(!context||context==='TENANT_MISMATCH'||context.shopId!==input.shopId||!context.checkoutAvailable)return null;
   const selected=selectedCommonLayout(await this.wrappers.loadSlots(),context);
   if(!selected)return null;
   const row=await this.db.conversation.findUnique({where:{id:input.conversationId},select:{shopId:true,customerId:true,checkoutRecoveryId:true,checkoutRecovery:{select:{id:true,shopId:true,customerId:true,status:true,lineItems:true}}}});
   const recovery=row?.checkoutRecovery;
-  if(!row||!row.customerId||row.shopId!==input.shopId||row.checkoutRecoveryId!==input.checkoutRecoveryId||!recovery||recovery.id!==input.checkoutRecoveryId||recovery.shopId!==input.shopId||row.customerId!==recovery.customerId||!['DETECTED','MESSAGE_SENT','ENGAGED'].includes(recovery.status))return null;
+  if(!row||(row.shopId!==null&&row.shopId!==input.shopId)||row.checkoutRecoveryId!==input.checkoutRecoveryId||!recovery||recovery.id!==input.checkoutRecoveryId||recovery.shopId!==input.shopId||!recovery.customerId||(row.customerId!==null&&row.customerId!==recovery.customerId)||!['DETECTED','MESSAGE_SENT','ENGAGED'].includes(recovery.status))return null;
   const copy=FAILURE_COPY[selected.reference.languageTag as ModaSupportedLanguageTag];if(!copy)return null;
   const hasBasket=recovery.lineItems!==null;
   const items=hasBasket?formatWholeCheckoutItemsSummary(recovery.lineItems,selected.reference.languageTag):null;
   // Missing/unsafe snapshot facts produce inability-only; identity and checkout
   // authority above remain mandatory. No invented item can enter the body.
-  if(input.deadlineAt-this.now()<5000)return null;
+  if(input.deadlineAt-this.now()<AI_FAILURE_MIN_PREPARATION_SEND_MS)return null;
   return {replyText:items?`${copy[0]} ${copy[1]}\n\n${copy[2]}\n${items}`:copy[0],commonRef:selected.reference};
  }
 }

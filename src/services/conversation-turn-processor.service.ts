@@ -1,4 +1,4 @@
-import { AI_FAILURE_DELIVERY_RESERVE_MS, GenerationBudgetTimeout, eligibleGenerationFailure, type AiFailureFallback, type AiFailureFallbackInput } from './ai-failure-fallback.js';
+import { AI_FAILURE_DELIVERY_RESERVE_MS, AI_FAILURE_MIN_PREPARATION_SEND_MS, GenerationBudgetTimeout, eligibleGenerationFailure, type AiFailureFallback, type AiFailureFallbackInput } from './ai-failure-fallback.js';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import type { RecoveryShopHeaderReceipt } from "./conversation-wrappers/recovery-shop-header.js";
 import { presentedProductContext } from "../commerce/product-context-write.js";
@@ -562,7 +562,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         },
         recoverGenerationFailure: async error => {
           if (!eligibleGenerationFailure(error) || !this.dependencies.prepareFailureFallback ||
-              now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<5000 ||
+              now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS ||
               !(await checkControl("after-await",loaded.shopId)) ||
               await this.dependencies.conversation.hasChanged(conversationId,observedVersion)) return undefined;
           const owned=await this.dependencies.conversation.getTurnState(conversationId);
@@ -571,7 +571,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
           this.logger.warn("whatsapp.turn.agent_generation_failed", {conversationId,observedVersion,error});
           const fallback=await this.dependencies.prepareFailureFallback({conversationId,shopId:loaded.shopId,
             checkoutRecoveryId:loaded.checkoutRecoveryId,deadlineAt:now.getTime()+PROCESSING_LEASE_MS});
-          if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<5000) return undefined;
+          if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS) return undefined;
           return {kind:"fallback",fallback};
         },
         sendPreparedText,
@@ -594,9 +594,9 @@ export class ConversationTurnProcessor<TContext, TResult> {
       }
 
       const isFallback=result.kind === "fallback";
-      const agentResult = result.kind === "agent" ? this.dependencies.getResult(result.result) : {
+      const agentResult: ReturnType<ConversationTurnProcessorDependencies<TContext,TResult>["getResult"]> = result.kind === "agent" ? this.dependencies.getResult(result.result) : {
         replyText:result.fallback.replyText,detectedLanguageTag:null,detectedLanguageConfidence:null,
-      } as ReturnType<ConversationTurnProcessorDependencies<TContext,TResult>["getResult"]>;
+      };
 
       this.logger.debug(isFallback?"whatsapp.turn.fallback_prepared":"whatsapp.turn.agent_completed", {
         conversationId,
