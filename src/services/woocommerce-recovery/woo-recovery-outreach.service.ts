@@ -116,6 +116,7 @@ export interface WooOutreachDependencies {
     validateAdmission(token: CurrentOutreachOfferAdmissionToken, signal: AbortSignal): Promise<boolean>;
   };
   conversations: { getOrCreate(recoveryId: string): Promise<{ id: string }> };
+  senders: { allocate(input: { conversationId: string; canonicalRecipient: string; initialAttemptId: string }): Promise<{ kind: "assigned" | "held" | "unavailable" }> };
   billing: Pick<RecoveryBillingService,
     "admit" | "revalidateBeforeProvider" | "releaseBeforeProvider" | "commitSuccessfulInitiation" |
     "settleConfirmedInitialOutreach">;
@@ -402,6 +403,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
           return this.dispatchOutcome(state, "suppressed", "marketing-template-unavailable");
         state.stage = "resolve-conversation";
         const conversation = await this.deps.conversations.getOrCreate(recoveryId);
+        state.stage = "allocate-sender";
+        const sender = await this.deps.senders.allocate({ conversationId: conversation.id, canonicalRecipient: attempt.recipient, initialAttemptId: attempt.id });
+        if (sender.kind !== "assigned") return this.dispatchOutcome(state, "deferred", "sender-inventory-unavailable");
         state.stage = "reserve-recovery-credit";
         let billing = await this.deps.billing.admit({
           shopId: fresh.shopId, recoveryId, outreachAttemptId: attempt.id,

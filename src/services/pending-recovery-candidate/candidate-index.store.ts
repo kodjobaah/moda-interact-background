@@ -6,7 +6,6 @@ import {
 } from "../../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../../lib/redis.js";
 import type { RecoveryExecutionPolicy } from "../platform-configuration/contracts.js";
-import { readRecoveryExecutionPolicy } from "../platform-configuration/consumers.js";
 
 /** Identity-only storage: Woo and Shopify share the index keys but not their
  * candidate payloads. The Woo source is retained in its BullMQ job data. */

@@ -53,7 +53,8 @@
     "test:arch040-moderation:postgres": "node scripts/test-integration.mjs tests/integration/conversation-moderation.integration.test.ts",
     "meta:sample:provision": "node dist-cli/scripts/provision-meta-template-sample.js",
     "test:meta-sample:artifact": "node scripts/smoke-meta-template-sample.mjs",
-    "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs"
+    "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs",
+    "test:arch076-sender-pool:postgres": "node scripts/test-integration.mjs tests/integration/arch076-sender-pool.integration.test.ts"
   },
   "keywords": [],
   "author": "",

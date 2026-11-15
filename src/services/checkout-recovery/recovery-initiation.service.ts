@@ -1,3 +1,4 @@
+import { recoverySenderPoolService } from "../recovery-sender-pool/sender-pool.service.js";
 import { Prisma } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
@@ -487,6 +488,11 @@ export class RecoveryInitiationService {
     if (admissionProgress.kind === "failed") {
       return recovery;
     }
+
+    const sender = await recoverySenderPoolService.allocate({
+      conversationId: conversation.id, canonicalRecipient: attempt.recipient, initialAttemptId: attempt.id,
+    });
+    if (sender.kind !== "assigned") return recovery;
 
     const retainedCredit = await this.billingService.revalidateExistingInitialOutreach({
       ...initialScope,
