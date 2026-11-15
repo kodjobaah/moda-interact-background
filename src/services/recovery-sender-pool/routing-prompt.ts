@@ -1,4 +1,7 @@
 import type { Prisma, PrismaClient, RecoveryBasketRoutingTurn } from '@prisma/client';
+import { createLogger, type StructuredLogger } from '@modainteract/moda-interact-shared/logging';
+import { sourceFailureFields } from '../../commerce/production-model.js';
+import { resolveDeploymentEnvironmentName } from '../../runtime/deployment-environment.js';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import { readPreparedWrapper, digest, stableJson } from '../conversation-wrappers/projection.js';
 import { renderPreparedWrapper } from '../conversation-wrappers/render.js';
@@ -95,6 +98,7 @@ export type RoutingPromptOutcome =
 type PromptDependencies = {
   provider?: Pick<typeof whatsAppService, 'sendWhatsAppText'>;
   noContact?: typeof hasLocalNoContact;
+  logger?: Pick<StructuredLogger, 'warn'>;
 };
 
 export type RoutingPromptInput = {
@@ -206,7 +210,17 @@ export async function sendRoutingPrompt(
     });
     if (settlement.count !== 1) return { kind: 'unknown' };
     return { kind: 'sent', providerMessageId: result.providerMessageId };
-  } catch {
+  } catch (error) {
+    // Preserve the original provider/SDK or settlement error with redaction.
+    // Logging never changes the durable no-resend outcome.
+    try {
+      (dependencies.logger ?? createLogger({ serviceName: 'moda-messaging-worker', environment: resolveDeploymentEnvironmentName() })).warn(
+        'recovery.routing.prompt_dispatch_unknown', {
+          routingTurnId: input.turnId, stage: 'provider_or_receipt_settlement',
+          ...sourceFailureFields(error, 'whatsapp', 'ROUTER_PROMPT_DISPATCH_UNKNOWN', [input.prompt.body], 'sdk_exception'),
+          operation: 'routing.prompt.dispatch',
+        });
+    } catch { /* Diagnostic sink failure must not retry an uncertain dispatch. */ }
     // Includes failure persisting a successful receipt. The durable permit is
     // never erased, even when a network timeout makes the result unknowable.
     await database.recoveryBasketRoutingTurn.updateMany({

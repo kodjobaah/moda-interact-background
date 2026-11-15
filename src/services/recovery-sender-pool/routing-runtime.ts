@@ -185,7 +185,7 @@ export class RoutingRuntime {
             const shopLabels = new Map(candidates.map(c => [c.shopId, (c.facts as {
                     shopLabel?: string;
                 } | null)?.shopLabel ?? c.shopId]));
-            const body = overLimit ? row.inboundProviderMessageId : chosenRoute || route ? promptCandidates.map((c, index) => `${index + 1}. ${row.inboundProviderMessageId}:${c.optionKey} ${JSON.stringify(c.facts)}`).join('\n') : [...new Set(candidates.map(c => c.routeId))].map((key, index) => `${row.inboundProviderMessageId}:${index + 1} ${shopLabels.get(candidates.find(c => c.routeId === key)!.shopId) ?? key}`).join('\n');
+            const body = overLimit ? 'I cannot safely identify the basket from all the available choices. Please reply with the shop name and the items in the basket you mean.' : chosenRoute || route ? promptCandidates.map((c, index) => `${index + 1}. ${row.inboundProviderMessageId}:${c.optionKey} ${JSON.stringify(c.facts)}`).join('\n') : [...new Set(candidates.map(c => c.routeId))].map((key, index) => `${row.inboundProviderMessageId}:${index + 1} ${shopLabels.get(candidates.find(c => c.routeId === key)!.shopId) ?? key}`).join('\n');
             const frozenCandidates = candidates;
             const activeSlot = await this.db.whatsAppConversationWrapperActiveSlot.findUnique({ where: { audience: 'ROUTER' }, select: { definition: { select: { sourceLanguageTag: true } } } });
             if (!activeSlot)
@@ -249,8 +249,26 @@ export class RoutingRuntime {
     private async confirmedPrompts(row: RecoveryBasketRoutingTurn, text: string) {
         const input = row.inputJson as unknown as WhatsAppInboundEvent;
         const prompts = await this.db.recoveryBasketRoutingTurn.findMany({ where: { threadId: row.threadId, resolvedAt: null, state: 'PROMPT_ADMITTED', promptSentAt: { not: null }, promptProviderMessageId: { not: null }, expiresAt: { gt: this.now() }, ...(input.contextMessageId ? { promptProviderMessageId: input.contextMessageId } : row.routeId ? { promptScopeRouteId: row.routeId } : {}) }, orderBy: { inboundProviderMessageId: 'asc' } });
-        const explicit = prompts.filter(p => text.includes(p.inboundProviderMessageId + ':'));
-        return explicit.length ? explicit : prompts;
+        // A quoted provider ID proves neither the merchant nor the original request's owner.
+        // Scope *before* constructing model history, including on the quoted-ID path.
+        const scoped: RecoveryBasketRoutingTurn[] = [];
+        for (const prompt of prompts) {
+            if (row.routeId) {
+                if (prompt.routeId !== row.routeId ||
+                    (prompt.promptScopeRouteId !== row.routeId && prompt.promptScopeRouteId !== null)) continue;
+            } else if (prompt.routeId !== null || prompt.promptScopeRouteId !== null) continue;
+            const originalId = prompt.parentProviderMessageId ?? prompt.inboundProviderMessageId;
+            const original = await this.db.recoveryBasketRoutingTurn.findUnique({ where: { inboundProviderMessageId: originalId } });
+            // The original Q1 may be neutral even after its direct child Q2
+            // becomes shop-bound. Never accept a parent owned by another shop.
+            if (!original || original.threadId !== row.threadId ||
+                (original.routeId !== null && original.routeId !== row.routeId)) continue;
+            if (original.routeId === null && prompt.parentProviderMessageId !== null &&
+                prompt.promptScopeRouteId !== row.routeId) continue;
+            scoped.push(prompt);
+        }
+        const explicit = scoped.filter(p => text.includes(p.inboundProviderMessageId + ':'));
+        return explicit.length ? explicit : scoped;
     }
     async expire(id: string, now = this.now()) {
         return this.db.recoveryBasketRoutingTurn.updateMany({ where: { inboundProviderMessageId: id, state: { in: ['RECEIVED', 'PROMPT_ADMITTED', 'PROMPT_UNKNOWN'] }, expiresAt: { lte: now } }, data: { ...scrubRoutingPayload, state: 'EXPIRED' } });

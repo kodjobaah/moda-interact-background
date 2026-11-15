@@ -117,6 +117,15 @@ describe('durable router prompt provider permit', () => {
     expect(await sendRoutingPrompt(f.db, f.input, f)).toEqual({ kind: 'unknown' });
     expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(1);
   });
+  it('records the original sanitized provider failure without retrying uncertain dispatch', async () => {
+    const f = await sendFixture();
+    const logger = { warn: vi.fn() };
+    f.provider.sendWhatsAppText.mockRejectedValueOnce(new Error('provider timeout'));
+    expect(await sendRoutingPrompt(f.db, f.input, { ...f, logger })).toEqual({ kind: 'unknown' });
+    expect(logger.warn).toHaveBeenCalledWith('recovery.routing.prompt_dispatch_unknown',
+      expect.objectContaining({ sdkError: expect.objectContaining({ message: 'provider timeout' }) }));
+    expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(1);
+  });
   it('retains uncertainty and never automatically retries an ambiguous send', async () => {
     const f = await sendFixture();
     f.provider.sendWhatsAppText.mockRejectedValueOnce(new Error('timeout'));

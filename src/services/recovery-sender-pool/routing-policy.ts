@@ -1,4 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { createLogger, type StructuredLogger } from '@modainteract/moda-interact-shared/logging';
+import { sourceFailureFields } from '../../commerce/production-model.js';
 import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import {
   CommerceEnvironmentSchema, ResolvedCommerceModelSchema,
@@ -72,7 +74,7 @@ export function decodeRoutingAgentPolicy(value: unknown): RoutingAgentPolicy {
 }
 
 /** Credentials stay in the existing protected resolver; this snapshot contains only public revision/parameter evidence. */
-export async function readRoutingPolicy(db: PrismaClient, input: { environment: string; verifiedShopId?: string }): Promise<RoutingPolicySnapshot | null> {
+export async function readRoutingPolicy(db: PrismaClient, input: { environment: string; verifiedShopId?: string }, logger?: Pick<StructuredLogger, 'warn'>): Promise<RoutingPolicySnapshot | null> {
   try {
     const commerceEnvironment = CommerceEnvironmentSchema.parse(input.environment.toUpperCase());
     const row = await db.platformConfiguration.findUnique({ where: { environment_key: { environment: input.environment, key: 'recovery.routingAgent' } } });
@@ -109,7 +111,17 @@ export async function readRoutingPolicy(db: PrismaClient, input: { environment: 
     return { rowId: row.id, version: row.version, environment: row.environment, decisionTTLms: policy.decisionTTLms, retentionMs: policy.retentionMs,
       policy, prompt: { revisionId: prompt.id, contentHash: prompt.contentHash!, promptText: prompt.promptText }, model,
       verifiedShopId: input.verifiedShopId ?? null, commerceEnvironment, configurationSnapshot };
-  } catch { return null; }
+  } catch (error) {
+    try {
+      (logger ?? createLogger({ serviceName: 'moda-messaging-worker', environment: input.environment })).warn(
+        'recovery.routing.policy_read_failed', {
+          environment: input.environment, stage: 'readRoutingPolicy',
+          ...sourceFailureFields(error, 'routing-policy', 'ROUTING_POLICY_READ_FAILED', [], 'internal'),
+          operation: 'routing.policy.read',
+        });
+    } catch { /* Diagnostic sink failure must not affect the fail-closed policy decision. */ }
+    return null;
+  }
 }
 
 /** SQL-only use inside the final short transaction. Compare the complete saved revision evidence under row share locks. */

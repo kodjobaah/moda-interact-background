@@ -29,6 +29,15 @@ describe('explicit routing policy decoder',()=>{
   it('accepts zero tools/history as explicit safe-disable budgets',()=>expect(decodeRoutingAgentPolicy({...policy,budget:{...policy.budget,toolCalls:0},input:{...policy.input,maxHistoryMessages:0}}).budget.toolCalls).toBe(0));
 });
 describe('saved routing model and prompt references',()=>{
+  it('logs the original sanitized database failure while holding the routing policy', async () => {
+    const {db,raw}=fixture();
+    raw.platformConfiguration.findUnique.mockRejectedValueOnce(new Error('database connection refused'));
+    const logger={warn:vi.fn()};
+    expect(await readRoutingPolicy(client(db),{environment:'test'},logger)).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith('recovery.routing.policy_read_failed',
+      expect.objectContaining({internalError:expect.objectContaining({message:'database connection refused'})}));
+  });
+
   it('reads fixed platform model and only safe immutable evidence',async()=>{
     const {db}=fixture();const snapshot=await readRoutingPolicy(client(db),{environment:'test',verifiedShopId:'shop-a'});
     expect(snapshot?.model?.catalogueEditVersion).toBe(4);expect(snapshot?.commerceEnvironment).toBe('TEST');
