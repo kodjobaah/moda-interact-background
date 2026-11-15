@@ -1,3 +1,4 @@
+import { recoverySenderPoolService } from "../recovery-sender-pool/sender-pool.service.js";
 import prisma from "../../lib/db.js";
 import { recoveryRecipientResolverService } from "../checkout-recovery/recovery-recipient-resolver.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
@@ -114,6 +115,7 @@ export function createWooRecoveryOutreachService(input: {
         return conversationService.getOrCreateRecoveryConversation(recoveryId);
       },
     },
+    senders: recoverySenderPoolService,
     billing: recoveryBillingService,
     providerFailure: {
       async compensate(admission, error) {

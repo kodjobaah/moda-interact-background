@@ -1,3 +1,4 @@
+import { recoverySenderPoolService } from "./recovery-sender-pool/sender-pool.service.js";
 import prisma from "../lib/db.js";
 import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runtime-config.js";
 
@@ -25,7 +26,10 @@ export class CheckoutRecoveryExpiryService {
     now = new Date(),
   ): Promise<number> {
     const cutoff = expiryCutoff(now, runtimeConfig.checkoutRecoveryLifetimeDays);
-    if (cutoff === null) return 0;
+    if (cutoff === null) {
+      await recoverySenderPoolService.releaseTerminalAssignments(PAGE_SIZE);
+      return 0;
+    }
     let expired = 0;
 
     for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -80,6 +84,7 @@ export class CheckoutRecoveryExpiryService {
       if (candidates.length < PAGE_SIZE) break;
     }
 
+    await recoverySenderPoolService.releaseTerminalAssignments(PAGE_SIZE);
     return expired;
   }
 }
