@@ -1,5 +1,6 @@
 import { readRecoveryDispatchSender } from "../recovery-sender-pool/dispatch-sender.js";
 import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
+import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { freezeCommonText } from "../conversation-delivery-plan.js";
 import { selectedCommonLayout } from "../recovery-multipart/composition.js";
 import { commonLayoutVariables,renderCommonLayoutBoundaries,commonLayoutBody,type RecoveryLayoutReceipt } from "../recovery-multipart/common-layout.js";
@@ -730,6 +731,7 @@ export class OutboundMessageDeliveryService {
       ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
     });
     if (permit.kind === "admitted") return {kind: "sender", sender: permit.sender};
+    if(permit.reason === "allowance-capacity-reopened")return {kind:"suppressed",reason:"allowance-capacity-reopened"};
     if (permit.reason !== "already-admitted-or-sent") {
       await this.failPrepared(input.messageId);
     }
@@ -769,14 +771,14 @@ export class OutboundMessageDeliveryService {
     providerMessageId: string,
   ): Promise<void> {
     const receivedAt = new Date();
-    await this.database.$transaction(async (transaction) => {
+    const allowanceBlockId = await this.database.$transaction(async (transaction) => {
       // Lock the parent first, matching the final permit transaction.
       // A failed receipt update rolls back the parent timestamp as well.
       await transaction.conversation.update({
         where: { id: conversationId },
         data: { lastMessageAt: receivedAt },
       });
-      await transaction.conversationMessage.update({
+      const sent=await transaction.conversationMessage.update({
         where: {
           id: messageId,
           AND: {
@@ -796,7 +798,9 @@ export class OutboundMessageDeliveryService {
         },
         data: { providerMessageId, status: MessageStatus.SENT, sentAt: receivedAt },
       });
+      return sent.allowanceBlockId;
     });
+    if(allowanceBlockId)await recoveryAllowanceService.reconcileConversation(conversationId);
   }
 }
 

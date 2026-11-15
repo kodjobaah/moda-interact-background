@@ -84,8 +84,14 @@ function createProcessor(billingOverrides: Partial<RecoveryBillingService> = {})
   // This suite exercises follow-up behavior after durable ownership/claim checks.
   // Inject those collaborators; their SQL and locks have separate tests.
   const ownership = { readTurnOwnership: vi.fn(async () => ({ mode: "AI", shopId: "shop-1" })) };
+  const allowance={
+    limits:vi.fn(async()=>({outboundHardLimit:20,terminalMessageReservedSlots:1})),
+    beginFollowUp:vi.fn(async()=>({id:"allowance-2",token:"lease-2"})),
+    attachFollowUp:vi.fn(async()=>{}),
+  };
   return {
-    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never),
+    allowance,
+    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never,allowance),
     billing,
   };
 }

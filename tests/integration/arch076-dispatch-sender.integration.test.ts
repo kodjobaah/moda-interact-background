@@ -1,3 +1,6 @@
+import { FreeRecoveryReservationService } from "../../src/services/free-recovery-reservation.service.js";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { OutboundAdmissionReservationService } from "../../src/services/outbound-whatsapp-admission/outbound-admission-reservation.service.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { sha256 } from "../../src/services/recovery-multipart/frozen.js";
 import { randomUUID } from "node:crypto";
@@ -73,7 +76,14 @@ suite('ARCH076 dispatch identity and enrollment serialization',()=>{
    await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:randomUUID(),providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:initial.sentAt!,providerDispatchControlRevision:2,dispatchProviderAccountId:account,dispatchProviderPhoneNumberId:phone}});
    const fence=new OutboundSendFenceService(f.db,async()=>null);let result;
    if(actor==='AGENT'){
-    const message=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'OUTBOUND',senderType:'AGENT',status:'PENDING',content:'A verified existing recovery reply'}});
+    const plan=await f.db.billingPlan.create({data:{shopifyPlanHandle:`free-${randomUUID()}`,name:'Free sender fixture',kind:'FREE'}});
+    await f.db.subscription.create({data:{shopId:f.shopId,planId:plan.id,status:'ACTIVE',observedShopifyPlanHandle:plan.shopifyPlanHandle}});
+    await f.db.shopEntitlementCounter.create({data:{shopId:f.shopId,counter:'LIFETIME_FREE_RECOVERY_CREDITS',grantedQuantity:5,committedQuantity:0,reservedQuantity:0}});
+    const credit=new FreeRecoveryReservationService(f.db),sourceKey=createRecoveryIdempotencyKey(f.shopId,`recovery-outreach:${initial.id}`);
+    expect((await credit.reserve({shopId:f.shopId,sourceKey,quantity:1})).kind).toBe('reserved');expect((await credit.commit({shopId:f.shopId,sourceKey,quantity:1})).kind).toBe('committed');
+    const admission=await new OutboundAdmissionReservationService(f.db).reserve({shopId:f.shopId,conversationId:f.conversationId,idempotencyKey:randomUUID(),senderType:'AGENT'});
+    expect(admission.kind).toBe('admitted');if(admission.kind!=='admitted')throw new Error('funded fixture admission refused');
+    const message=await f.db.conversationMessage.update({where:{id:admission.messageId},data:{content:'A verified existing recovery reply'}});
     const request={senderType:'AGENT' as const,shopId:f.shopId,conversationId:f.conversationId,recoveryId:f.recoveryId,messageId:message.id,recipient:f.recipient,expectedControlRevision:2,deliveryKind:'TEXT' as const,expectedContent:message.content,now:new Date()};
     result=await fence.admitFinalSend(request);expect((await fence.admitFinalSend(request)).kind).toBe('suppressed');
    }else{

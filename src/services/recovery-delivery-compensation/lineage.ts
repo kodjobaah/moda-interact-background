@@ -30,6 +30,22 @@ export async function resolveExactRecoverySource(
   if (!recovery) return null;
   requireLineage(recovery.shopId === shopId, "conversation/recovery shop mismatch");
 
+  const pinned = await tx.conversationMessage.findUnique({where:{id:message.id},select:{allowanceBlockId:true}});
+  if(pinned?.allowanceBlockId){
+    const block=await tx.conversationAllowanceBlock.findUnique({where:{id:pinned.allowanceBlockId}});
+    requireLineage(block && block.shopId===shopId && block.conversationId===message.conversationId,"allowance owner mismatch");
+    const opening=await tx.conversationMessage.findFirst({where:{allowanceBlockId:block!.id,direction:"OUTBOUND"},orderBy:[{createdAt:"asc"},{id:"asc"}],select:{id:true}});
+    if(opening?.id!==message.id)return null;
+    // A late opener failure cannot undo credit already funding another permit.
+    const consumed=await tx.conversationMessage.findFirst({where:{allowanceBlockId:block!.id,id:{not:message.id},OR:[{providerDispatchKey:{not:null}},{providerDispatchAdmittedAt:{not:null}},{providerMessageId:{not:null}},{sentAt:{not:null}}]},select:{id:true}});
+    requireLineage(!consumed,"late allowance opening failure after other provider-admitted consumption");
+    if(block!.fundingKind==="CONTINUATION"){
+      const source=await findExactReservationSource(tx,shopId,createRecoveryIdempotencyKey(shopId,`recovery-continuation:${block!.id}`));
+      requireLineage(source&&source.reservation.id===block!.creditReservationId,"continuation reservation mismatch");
+      return source;
+    }
+  }
+
   const command = await tx.merchantConversationSendCommand.findUnique({
     where: { outboundMessageId: message.id },
     select: { kind: true, shopId: true, conversationId: true, recoveryOutreachAttemptId: true },
@@ -92,7 +108,11 @@ export async function findExactRecoveryReservationSource(
   shopId: string,
   outreachAttemptId: string,
 ): Promise<RecoverySource | null> {
-  const logicalSource = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${outreachAttemptId}`);
+  return findExactReservationSource(tx, shopId, createRecoveryIdempotencyKey(shopId, `recovery-outreach:${outreachAttemptId}`));
+}
+
+/** One canonical source reader for every funded recovery action; never infer from today's plan. */
+export async function findExactReservationSource(tx: CompensationTransaction, shopId: string, logicalSource: string): Promise<RecoverySource | null> {
   const reservations = await tx.usageReservation.findMany({
     where: { OR: [
       { sourceKey: logicalSource },

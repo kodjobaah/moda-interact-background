@@ -1,3 +1,5 @@
+import { FreeRecoveryReservationService } from "../../src/services/free-recovery-reservation.service.js";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import {AiFailureFallbackService} from '../../src/services/ai-failure-fallback.js';
 import {CommerceHostError} from '../../src/commerce/mcp-client.js';
 import {hostDiagnostic} from '../../src/commerce/host-diagnostics.js';
@@ -67,6 +69,12 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=tr
   const variables=commonLayoutVariables(f.shopId,domain,'  Common Shop Name  ',url)!;const boundaries=renderCommonLayoutBoundaries(commonRef,variables,answer,f.shopId,f.conversationId)!;
   const common:CommonLayoutReceipt={schemaVersion:2,kind:'RECOVERY_COMMON_LAYOUT',shopId:f.shopId,commonRef,variables,boundaries};const body=commonLayoutBody(common);
   const commandId=await f.addCommand({textBody:answer});const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:`initial-${randomUUID()}`}});
+  // The ongoing recovery is funded by its exact, confirmed initial outreach.
+  // Exercise the real Free ledger lifecycle rather than fabricate an allowance.
+  const initialCredit = new FreeRecoveryReservationService(f.db);
+  const initialSourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${initial.id}`);
+  expect((await initialCredit.reserve({shopId:f.shopId,sourceKey:initialSourceKey,quantity:1})).kind).toBe('reserved');
+  expect((await initialCredit.commit({shopId:f.shopId,sourceKey:initialSourceKey,quantity:1})).kind).toBe('committed');
   let command:FrozenMultipart['command']=null,messageId:string,revision:number;
   if(actor==='HUMAN'){
    const claim=(await f.commands.claimDueHumanCommands({limit:100,now:new Date(),leaseMs})).find(x=>x.id===commandId)!;command={id:commandId,leaseToken:claim.leaseToken};messageId=humanMultipartMessageId(commandId);revision=1;

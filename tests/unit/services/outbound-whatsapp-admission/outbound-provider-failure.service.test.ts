@@ -7,6 +7,7 @@ const rejection = (code: string, providerCode?: string) => Object.assign(new Err
 
 function fixture() {
   const tx = {
+    $queryRawUnsafe:vi.fn(async()=>[{id:"conversation",shopId:"shop",recoveryId:"recovery",checkoutToken:"checkout",recoveryStatus:"MESSAGE_SENT",mode:"AI",revision:0,inboundVersion:1}]),
     $queryRaw: vi.fn(async () => [{ id: "row", recipient: "447700900001" }]),
     conversationMessage: {
       update: vi.fn(async () => ({})), updateMany: vi.fn(async () => ({ count: 1 })),
@@ -66,7 +67,7 @@ describe("ARCH-028-BACKGROUND-006 provider rejection adapter", () => {
     const x = fixture();
     await x.subject.afterProviderError("m-3", "447700900001", rejection("provider-rejected"));
     expect(x.database.conversationMessage.update).toHaveBeenCalledWith({
-      where: { id: "m-3" }, data: { status: "FAILED" },
+      where: { id: "m-3" }, data: { status: "FAILED", failedAt:expect.any(Date),providerFailureCode:"PROVIDER_REJECTED" },
     });
     expect(x.database.usageEvent.deleteMany).toHaveBeenCalledOnce();
   });

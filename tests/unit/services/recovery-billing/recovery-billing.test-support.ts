@@ -76,13 +76,13 @@ export function paidIncludedReservationService(
   outcome: "reserved" | "allowance-exhausted" = "reserved",
 ) {
   return {
-    reserve: vi.fn(async ({ recoveryId }: { recoveryId: string }) =>
+    reserve: vi.fn(async ({ sourceKey }: { sourceKey: string }) =>
       outcome === "reserved"
         ? {
             kind: "reserved" as const,
             reservation: {},
             counter: "INCLUDED_RECOVERY_CREDITS" as const,
-            sourceKey: `paid-included:${paidPolicy().billingPeriod?.id}:${recoveryId}`,
+            sourceKey: `paid-included:${paidPolicy().billingPeriod?.id}:${sourceKey}`,
             policy: paidPolicy(),
           }
         : {

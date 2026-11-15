@@ -84,7 +84,7 @@ export class RecoveryDeliveryCompensationService {
       where: { id: locked[0]!.id },
       select: {
         id: true, providerMessageId: true, conversationId: true, direction: true, senderType: true,
-        status: true, providerFailureCode: true,
+        status: true, providerFailureCode: true, allowanceBlockId:true,
         conversation: {
           select: {
             shopId: true, checkoutRecovery: { select: { id: true, shopId: true } },
@@ -129,6 +129,10 @@ export class RecoveryDeliveryCompensationService {
         default:
           requireLineage(false, "ambiguous recovery reservation");
       }
+    }
+    if(source&&message.allowanceBlockId){
+      const opening=await tx.conversationMessage.findFirst({where:{allowanceBlockId:message.allowanceBlockId,direction:"OUTBOUND"},orderBy:[{createdAt:"asc"},{id:"asc"}],select:{id:true}});
+      if(opening?.id===message.id)await tx.conversationAllowanceBlock.updateMany({where:{id:message.allowanceBlockId,creditReservationId:source.reservation.id,state:{in:["PENDING","ACTIVE"]}},data:{state:"CANCELLED",repairAt:null,repairLeaseToken:null,repairLeaseUntil:null}});
     }
     context.stage = "outbound_usage_cleanup";
     await removeExactAutomatedUsage(tx, shopId, message.id, automatedUsage);

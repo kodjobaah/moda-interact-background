@@ -1,3 +1,6 @@
+import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
+import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
+import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { PENDING_AUTOMATED_WHATSAPP_CONTENT, type UntouchedReservationIdentity } from "./outbound-whatsapp-admission.types.js";
 import { MessageStatus, UsageMetric, Prisma, type PrismaClient } from "@prisma/client";
 import prisma from "../../lib/db.js";
@@ -14,8 +17,14 @@ export class OutboundProviderFailureService {
 
   async failPrepared(messageId: string, expectedReservation?: UntouchedReservationIdentity): Promise<void> {
     await this.database.$transaction(async (tx) => {
-      const owned = await this.readOwnedUsage(tx, messageId);
+      let owned = await this.readOwnedUsage(tx, messageId);
       if (!owned) return;
+      if(owned.message.allowanceBlockId||owned.message.conversation.checkoutRecoveryId){
+        const owner=await lockRecoveryContext(tx,owned.message.conversationId);
+        if(!owner||owner.shopId!==owned.shopId)throw new Error("ALLOWANCE_FAILURE_OWNER_MISMATCH");
+        owned=await this.readOwnedUsage(tx,messageId);
+        if(!owned)return;
+      }
       if (expectedReservation && (owned.shopId !== expectedReservation.shopId ||
           owned.message.conversationId !== expectedReservation.conversationId ||
           owned.message.content !== PENDING_AUTOMATED_WHATSAPP_CONTENT || owned.message.outboundPresentation !== null)) return;
@@ -176,17 +185,29 @@ export class OutboundProviderFailureService {
         await this.removeUsage(messageId);
       } else {
         await this.database.conversationMessage.update({
-          where: { id: messageId }, data: { status: MessageStatus.FAILED },
+          where: { id: messageId }, data: { status: MessageStatus.FAILED, failedAt:new Date(), providerFailureCode:error.code === "provider-rejected" ? "PROVIDER_REJECTED" : "CONFIGURATION_MISSING" },
         });
         await this.removeUsage(messageId);
       }
+    }
+    if(isDefinitiveWhatsAppError(error)){
+      const message=await this.database.conversationMessage.findUnique({where:{id:messageId},select:{conversationId:true,allowanceBlockId:true}});
+      if(message?.allowanceBlockId)await recoveryAllowanceService.reconcileConversation(message.conversationId);
     }
     // No durable final disposition for timeout/unknown provider acceptance.
   }
 
   private async removeUsage(messageId: string): Promise<void> {
-    await this.database.usageEvent.deleteMany({
-      where: { sourceId: messageId, metric: UsageMetric.OUTBOUND_AUTOMATED_MESSAGE },
+    const message=await this.database.conversationMessage.findUnique({where:{id:messageId},select:{conversationId:true,allowanceBlockId:true,conversation:{select:{checkoutRecoveryId:true}}}});
+    if(!message?.allowanceBlockId&&!message?.conversation.checkoutRecoveryId){
+      await this.database.usageEvent.deleteMany({where:{sourceId:messageId,metric:UsageMetric.OUTBOUND_AUTOMATED_MESSAGE}});
+      return;
+    }
+    await this.database.$transaction(async tx=>{
+      const owner=await lockRecoveryContext(tx,message.conversationId);
+      if(!owner)throw new Error("ALLOWANCE_FAILURE_OWNER_UNAVAILABLE");
+      const usage=await readExactAutomatedUsage(tx,owner.shopId,messageId);
+      await removeExactAutomatedUsage(tx,owner.shopId,messageId,usage);
     });
   }
 }
