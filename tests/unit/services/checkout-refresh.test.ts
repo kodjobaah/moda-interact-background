@@ -643,7 +643,7 @@ describe("CheckoutRecoveryService clarification context", () => {
 });
 
 describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
-  it("orders equal-timestamp current fragments by ascending id separately from prior history", async () => {
+  it("uses only the latest equal-timestamp fragment as objective and retains the first as context", async () => {
     prismaMock.checkoutRecovery.findUnique.mockResolvedValue({
       id: "recovery-1",
       shop: { domain: "shop.myshopify.com" },
@@ -666,10 +666,10 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
       },
     } as any);
 
-    prismaMock.conversationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+    prismaMock.conversationMessage.findMany.mockResolvedValueOnce([
       { id: "message-1", direction: "INBOUND", senderType: "CUSTOMER", content: "first" },
       { id: "message-2", direction: "INBOUND", senderType: "CUSTOMER", content: "second" },
-    ]);
+    ]).mockResolvedValueOnce([]);
     const context = await service.getAgentContext({
       checkoutRecoveryId: "recovery-1",
       conversationId: "conversation-1",
@@ -677,10 +677,10 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
     });
 
     expect(context.conversation.messages).toEqual([
-      { role: "user", content: "first" },
       { role: "user", content: "second" },
     ]);
-    expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] }));
+    expect(context.conversation.history).toContainEqual({role:"user",content:"first"});
+    expect(prismaMock.conversationMessage.findMany.mock.calls.at(-2)?.[0]).toMatchObject({orderBy:[{createdAt:"asc"},{id:"asc"}]});
   });
 });
 
