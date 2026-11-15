@@ -9,8 +9,19 @@ export const commerceHistoryVisible: Prisma.ConversationMessageWhereInput = {
   ],
 };
 
-export function priorCommerceHistorySelection(conversationId:string,boundary:Date):{where:Prisma.ConversationMessageWhereInput;orderBy:Prisma.ConversationMessageOrderByWithRelationInput[];take:number}{
- return {where:{AND:[commerceHistoryVisible,{conversationId,OR:[{contentType:{not:'AUDIO'},createdAt:{lt:boundary}},{contentType:'AUDIO',transcriptionCompletedAt:{lt:boundary}}]}]},orderBy:[{createdAt:'desc'},{id:'desc'}],take:20};
+export function priorCommerceHistorySelection(conversationId:string,boundary:Date,anchor?:{id:string;createdAt:Date}):{where:Prisma.ConversationMessageWhereInput;orderBy:Prisma.ConversationMessageOrderByWithRelationInput[];take:number}{
+ const before:Prisma.ConversationMessageWhereInput[]=[
+  {contentType:{not:'AUDIO'},createdAt:{lt:boundary}},
+  {contentType:'AUDIO',transcriptionCompletedAt:{lt:boundary}},
+ ];
+ if(anchor){
+  // Include stable predecessors at equal readiness, including merchant replies.
+  if(anchor.createdAt.getTime()===boundary.getTime())before.push({contentType:{not:'AUDIO'},createdAt:boundary,id:{lt:anchor.id}});
+  before.push({contentType:'AUDIO',transcriptionCompletedAt:boundary,OR:[
+   {createdAt:{lt:anchor.createdAt}},{createdAt:anchor.createdAt,id:{lt:anchor.id}},
+  ]});
+ }
+ return {where:{AND:[commerceHistoryVisible,{conversationId,OR:before}]},orderBy:[{createdAt:'desc'},{id:'desc'}],take:20};
 }
 
 /** The inbound version advances when an audio transcript becomes ready. Use the

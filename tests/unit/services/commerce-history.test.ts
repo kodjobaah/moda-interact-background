@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 const findMany = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 vi.mock("../../../src/lib/db.js", () => ({ default: {conversationMessage:{findMany}} }));
+import { priorCommerceHistorySelection } from "../../../src/commerce/history-selection.js";
 import { boundHistory, loadCommerceHistory } from "../../../src/commerce/history.js";
 const row = (
   id: string,
@@ -63,4 +64,11 @@ it("selects delayed audio by ready time and deterministically breaks timestamp t
  expect(boundHistory([],[audio,text]).currentMessages).toEqual([{role:'user',content:'completed audio question'}]);
  expect(boundHistory([],[{...text,id:'b',createdAt:later},{...text,id:'a',createdAt:later}]).currentMessages).toEqual([{role:'user',content:'old text question'}]);
  const tied=boundHistory([],[{...text,id:'b',content:'B',createdAt:later},{...text,id:'a',content:'A',createdAt:later}]);expect(tied.currentMessages[0]!.content).toBe('B');
+});
+
+it("includes stable same-timestamp merchant and audio predecessors in the bounded prior window",()=>{
+ const at=new Date('2026-11-15T01:02:03Z');
+ const selection=priorCommerceHistorySelection('c',at,{id:'latest',createdAt:at});
+ expect((selection.where.AND as any[])[1].OR).toContainEqual({contentType:{not:'AUDIO'},createdAt:at,id:{lt:'latest'}});
+ expect(selection.take).toBe(20);
 });

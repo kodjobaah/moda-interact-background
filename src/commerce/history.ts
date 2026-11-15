@@ -75,7 +75,7 @@ export async function loadCommerceHistory(
   // Select identity BEFORE filtering moderation. A blocked newest message must
   // never promote an older allowed customer question into the objective.
   const prior = await prisma.conversationMessage.findMany({
-    ...priorCommerceHistorySelection(conversationId, latest ? commerceHistoryActivityAt(latest) ?? pendingTurnStartedAt : pendingTurnStartedAt),
+    ...priorCommerceHistorySelection(conversationId, latest ? commerceHistoryActivityAt(latest) ?? pendingTurnStartedAt : pendingTurnStartedAt, latest?.createdAt ? {id:latest.id,createdAt:latest.createdAt} : undefined),
     select,
   });
   const historyCandidates = orderCommerceHistory([...prior.reverse(), ...ordered.slice(0, -1)])

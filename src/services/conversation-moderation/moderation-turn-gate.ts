@@ -55,7 +55,7 @@ export class ModerationTurnGate {
     const leaseDeadline=processingLeaseExpiresAt?.getTime()??Infinity;
     if(Number.isNaN(leaseDeadline))return 'retry';
     const prior=await prisma.conversationMessage.findMany({
-      ...priorCommerceHistorySelection(conversationId,latest ? commerceHistoryActivityAt(latest)??pendingTurnStartedAt : pendingTurnStartedAt),
+      ...priorCommerceHistorySelection(conversationId,latest ? commerceHistoryActivityAt(latest)??pendingTurnStartedAt : pendingTurnStartedAt,latest?.createdAt?{id:latest.id,createdAt:latest.createdAt}:undefined),
       select:{id:true,content:true,contentType:true,transcriptionStatus:true,direction:true,senderType:true},
     });
     for(const message of prior){

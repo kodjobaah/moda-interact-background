@@ -327,12 +327,15 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       const boundary=new Date(Date.now()-8*60*60*1000),latestAt=new Date(Date.now()-1000);
       const old=await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content:'What categories do you sell?',createdAt:boundary}});
       const content=blocked?'moderation-fixture-block':'Tell me about The Videographer Snowboard';
-      await f.db.conversationMessage.create({data:{conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content,createdAt:latestAt}});
+      await f.db.conversationMessage.create({data:{id:'zz-latest-'+f.conversationId,conversationId:f.conversationId,direction:'INBOUND',senderType:'CUSTOMER',status:'DELIVERED',content,createdAt:latestAt}});
+      const sameTime=await f.db.conversationMessage.create({data:{id:'aa-previous-'+f.conversationId,conversationId:f.conversationId,direction:'OUTBOUND',senderType:'AGENT',status:'SENT',content:'Earlier same-timestamp answer',createdAt:latestAt,sentAt:latestAt}});
+      await new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation).assessText({subject:{kind:'AGENT_MESSAGE',messageId:sameTime.id},shopId:f.shopId,conversationId:f.conversationId,effectiveText:sameTime.content,inputKind:'TEXT',policyVersion:moderationConfig().policyVersion,now:new Date()});
       const gate=new ModerationTurnGate(new PostgresModerationAssessmentService(f.db,aimock.moderate,undefined,aimock.readOperation));
       expect(await gate.moderatePending(f.conversationId,boundary)).toBe(blocked?'suppressed':'allowed');
       const loaded=await loadCommerceHistory(f.conversationId,boundary);
       expect(loaded.currentMessages).toEqual(blocked?[]:[{role:'user',content}]);
       expect(loaded.history).toContainEqual({role:'user',content:old.content});
+      expect(loaded.history).toContainEqual({role:'assistant',content:'Earlier same-timestamp answer'});
       expect(f.whatsapp.messages).toHaveLength(0);
       expect(await f.db.conversationMessage.count({where:{conversationId:f.conversationId,direction:'INBOUND'}})).toBeGreaterThanOrEqual(2);
     }finally{operation.mockRestore();await close();}
