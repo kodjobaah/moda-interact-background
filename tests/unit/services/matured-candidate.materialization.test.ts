@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => {
   return {
+    senderPoolMock: { allocate: vi.fn(async () => ({ kind: "assigned" as const })) },
     redisMock: {
       set: vi.fn(async () => "OK"),
       get: vi.fn(async () => null),
@@ -145,6 +146,8 @@ const { outboundWhatsAppAdmissionServiceMock } = hoisted;
 const { automatedTemplateMock } = hoisted;
 const { recoveryBillingServiceMock } = hoisted;
 const { executionEligibilityMock } = hoisted;
+
+vi.mock("../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: hoisted.senderPoolMock }));
 
 vi.mock("../../../src/lib/db.js", () => ({
   default: hoisted.prismaMock,
