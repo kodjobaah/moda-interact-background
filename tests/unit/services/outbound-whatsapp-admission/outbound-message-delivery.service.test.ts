@@ -1,3 +1,9 @@
+// Isolate the existing policy fixture from the separately tested sender authority port.
+vi.mock("../../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+}));
 import {Prisma} from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
@@ -141,7 +147,7 @@ const wooScope = { recoveryId: "recovery-1", attemptId: "attempt-1" } as
   Parameters<OutboundMessageDeliveryService["sendPreparedWooInitialTemplate"]>[2];
 
 describe("scoped initial template diagnostics", () => {
-  const permit = () => ({ admitFinalSend: vi.fn().mockResolvedValue({ kind: "admitted" }) });
+  const permit = () => ({ admitFinalSend: vi.fn().mockResolvedValue({ kind: "admitted", sender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"} }) });
 
   it.each(["preparation", "moderation"] as const)("emits the original %s failure safely", async (stage) => {
     capture.records.length = 0;
@@ -249,6 +255,7 @@ describe("OutboundMessageDeliveryService", () => {
       effectiveText: composed,
     }));
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledExactlyOnceWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+14155552671", text: composed,
     });
   });
@@ -341,7 +348,7 @@ describe("OutboundMessageDeliveryService", () => {
   });
 
   it("forwards the original inbound version into the final general send permit", async () => {
-    const generalFence = { admitFinalSend: vi.fn(async () => ({ kind: "admitted" as const })) };
+    const generalFence = { admitFinalSend: vi.fn(async () => ({ kind: "admitted" as const, sender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"} })) };
     const test = harness({ generalFence });
 
     await test.service.sendPreparedText({
@@ -394,6 +401,7 @@ describe("OutboundMessageDeliveryService", () => {
       data: { content: "Hello" },
     });
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+15551234567",
       text: "Hello",
       previewUrl: true,
@@ -471,6 +479,7 @@ describe("OutboundMessageDeliveryService", () => {
     });
 
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
@@ -502,7 +511,7 @@ describe("OutboundMessageDeliveryService", () => {
       effectiveText, subject: { kind: "AGENT_MESSAGE", messageId: "message-1" },
     }));
     expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledOnce();
-    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledWith(input);
+    expect(test.providerMock.sendWhatsAppTemplate).toHaveBeenCalledWith({...input, expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}});
     expect(test.database.conversationMessage.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SENT" }),
     }));
@@ -592,6 +601,7 @@ describe("OutboundMessageDeliveryService", () => {
 
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
@@ -668,7 +678,7 @@ describe("OutboundMessageDeliveryService", () => {
 
       expect(test.database.conversationMessage.update).toHaveBeenCalledWith({
         where: { id: "message-1" },
-        data: { status: "FAILED" },
+        data: { status: "FAILED",failedAt:expect.any(Date),providerFailureCode:code === "provider-rejected" ? "PROVIDER_REJECTED" : "CONFIGURATION_MISSING" },
       });
       expect(test.database.usageEvent.deleteMany).toHaveBeenCalledOnce();
     },
@@ -730,7 +740,7 @@ describe("unified known-recovery service and limit notice bodies",()=>{
  const context={conversationId:"conversation-1",shopId:"shop-1",conversationLanguageTag:"en",merchantLanguageTag:"en",variables:{"checkout.url":checkoutUrl},checkoutAvailable:true};
  function noticeHarness(value:unknown=context) {
   const footerContext={loadContext:vi.fn(async()=>value)};
-  const recoveryFence={admitFinalSend:vi.fn(async()=>({kind:"admitted"}))};
+  const recoveryFence={admitFinalSend:vi.fn(async()=>({kind:"admitted",sender:{providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}}))};
   const ownership={readTurnOwnership:vi.fn(async()=>({conversationId:"conversation-1",shopId:"shop-1",mode:"AI",recoveryId:"recovery-1",revision:7}))};
   return {...harness({footerContext,recoveryFence,ownership}),footerContext,recoveryFence,ownership};
  }
@@ -743,7 +753,7 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   expect(test.database.conversationMessage.update.mock.calls[0]![0].data.content).toBe(expected);
   expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({effectiveText:expected}));
   expect(test.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({expectedContent:expected,deliveryKind:"TEXT"}));
-  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:expected});
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text:expected});
   expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
   expect(test.database.conversationMessage.update.mock.invocationCallOrder[0]).toBeLessThan(test.moderationMock.assessText.mock.invocationCallOrder[0]!);
   expect(test.moderationMock.assessText.mock.invocationCallOrder[0]).toBeLessThan(test.recoveryFence.admitFinalSend.mock.invocationCallOrder[0]!);
@@ -751,10 +761,10 @@ describe("unified known-recovery service and limit notice bodies",()=>{
  it("prepares explicit audio/clarification service text, not ordinary already-prepared text",async()=>{
   const test=noticeHarness();const text="Please send a shorter question.";
   await test.service.sendPreparedText({...admission,executionScope:"recovery",prepareRecoveryFooter:true,to:"15551234567",text});
-  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:text+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text:text+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
   const untouched=noticeHarness();await untouched.service.sendPreparedText({...admission,executionScope:"recovery",to:"15551234567",text});
   expect(untouched.footerContext.loadContext).not.toHaveBeenCalled();
-  expect(untouched.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text});
+  expect(untouched.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text});
  });
  it.each([null,"TENANT_MISMATCH",{...context,shopId:"other-shop"},{...context,variables:{"checkout.url":"http://shop.example/unsafe"}}])("refuses untrusted terminal context %#",async value=>{
   const test=noticeHarness(value);
@@ -764,7 +774,7 @@ describe("unified known-recovery service and limit notice bodies",()=>{
  it("does not fabricate URLs for expired context or resolve unbound general sends",async()=>{
   const expired=noticeHarness({...context,checkoutAvailable:false,variables:{}});
   await expired.service.sendPreparedText({...admission,executionScope:"recovery",terminal:true,to:"15551234567",text:"ignored"});
-  expect(expired.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:TERMINAL_MESSAGE});
+  expect(expired.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text:TERMINAL_MESSAGE});
   const general=noticeHarness();general.ownership.readTurnOwnership.mockResolvedValue(null as never);await general.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
   expect(general.footerContext.loadContext).not.toHaveBeenCalled();
  });
@@ -776,12 +786,12 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   await test.service.sendPreparedText({...admission,executionScope:"recovery",terminal:kind==="terminal",prepareRecoveryFooter:true,to:"15551234567",text});
   expect(test.moderationMock.assessText).toHaveBeenCalledWith(expect.objectContaining({effectiveText:expected}));
   expect(test.recoveryFence.admitFinalSend).toHaveBeenCalledWith(expect.objectContaining({expectedContent:expected,recoveryShopHeader}));
-  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:expected});
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text:expected});
  });
  it("decorates a durably recovery-linked normal-contract notice even with general billing scope",async()=>{
   const test=noticeHarness();await test.service.sendPreparedText({...admission,terminal:true,to:"15551234567",text:"ignored"});
   expect(test.footerContext.loadContext).toHaveBeenCalledWith("conversation-1");
-  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({to:"15551234567",text:TERMINAL_MESSAGE+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text:TERMINAL_MESSAGE+RECOVERY_CHECKOUT_SEPARATOR+checkoutUrl});
  });
  it("does not send when prepared-content final permit is refused after a race",async()=>{
   const test=noticeHarness();test.recoveryFence.admitFinalSend.mockResolvedValue({kind:"suppressed",reason:"already-admitted-or-sent"} as any);

@@ -237,7 +237,7 @@ describe("RecoveryBillingService", () => {
       expect(paidReservationService.commit).toHaveBeenCalledTimes(2);
       expect(paidReservationService.commit).toHaveBeenNthCalledWith(1, {
         shopId: "shop-1",
-        sourceKey: "paid-included:period-1:recovery-1",
+        sourceKey: "paid-included:period-1:recovery:shop-1:recovery-1",
         occurredAt,
       });
       expect(database.usageEvent.upsert).not.toHaveBeenCalled();

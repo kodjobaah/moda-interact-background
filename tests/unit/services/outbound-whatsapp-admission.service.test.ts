@@ -1,3 +1,8 @@
+vi.mock("../../../src/services/recovery-sender-pool/dispatch-sender.js", () => ({
+ readDispatchSenderSnapshot: async () => ({rowId:"fixture-config",version:1,environment:"test",providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ checkDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+ readRecoveryDispatchSender: async () => ({providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}),
+}));
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -44,6 +49,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
       test.providerMock.sendWhatsAppText,
     );
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: textInput.to,
       text: textInput.text,
     });
@@ -92,6 +98,7 @@ describe("OutboundWhatsAppAdmissionService", () => {
 
     expect(test.providerMock.sendWhatsAppTemplate).not.toHaveBeenCalled();
     expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledWith({
+      expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},
       to: "+15551234567",
       text: TERMINAL_MESSAGE,
     });
@@ -157,4 +164,10 @@ describe("OutboundWhatsAppAdmissionService", () => {
 
     expect(failPrepared).toHaveBeenCalledWith("message-1");
   });
+});
+
+describe("generation-only recovery before reservation cleanup",()=>{
+ const admission={kind:"admitted" as const,shopId:"shop",messageId:"same",conversationId:"conversation",terminal:false};
+ it("returns typed recovery on the same reservation without invoking a sender or cleanup",async()=>{const failure=Error("generation"),failPrepared=vi.fn(),sendPreparedText=vi.fn(),outcome={kind:"fallback",body:"trusted"};const recoverGenerationFailure=vi.fn(async()=>outcome);expect(await runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure,failPrepared,sendPreparedText})).toBe(outcome);expect(recoverGenerationFailure).toHaveBeenCalledWith(failure);expect(failPrepared).not.toHaveBeenCalled();expect(sendPreparedText).not.toHaveBeenCalled();});
+ it.each(["refused","failed"])("preserves original cleanup/error when recovery %s",async mode=>{const failure=Error("original"),failPrepared=vi.fn(),sendPreparedText=vi.fn();await expect(runCommerceAgentAfterAdmission({admission,to:"447400123456",context:{},runAgent:async()=>{throw failure;},recoverGenerationFailure:async()=>{if(mode==="failed")throw Error("snapshot unavailable");return undefined;},failPrepared,sendPreparedText})).rejects.toBe(failure);expect(failPrepared).toHaveBeenCalledExactlyOnceWith("same");expect(sendPreparedText).not.toHaveBeenCalled();});
 });

@@ -1,3 +1,5 @@
+import { persistVerifiedInbound } from "./recovery-sender-pool/inbound-writer.js";
+import { lockInboundProviderIdentity, assertNoRoutingTurn, canProcessConversation, resolveSenderInbound } from "./recovery-sender-pool/inbound-authority.js";
 import { Prisma } from "@prisma/client";
 import { parseBuffer } from "music-metadata";
 import type { NormalizedWhatsAppInboundMessage } from "@modainteract/moda-interact-shared/whatsapp";
@@ -21,17 +23,26 @@ export class InboundWhatsAppAudioService {
   ) {}
 
   async reserve(event: NormalizedWhatsAppInboundMessage, conversationId: string) {
-    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
-    if (existing) return existing;
-    return prisma.conversationMessage.create({ data: {
+    const existing = await prisma.conversationMessage.findUnique({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, dispatchProviderAccountId:true, dispatchProviderPhoneNumberId:true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
+    if (existing) {if(existing.conversationId!==conversationId||existing.dispatchProviderAccountId&& (existing.dispatchProviderAccountId!==event.providerAccountId||existing.dispatchProviderPhoneNumberId!==event.providerPhoneNumberId))throw new Error("Inbound message ownership mismatch");return existing;}
+    const owner=await resolveSenderInbound(prisma,event);
+    if(owner.kind==='owned'){
+      if(owner.evidence.conversationId!==conversationId)throw new Error('Inbound message ownership mismatch');
+      return (await persistVerifiedInbound(prisma,event,owner.evidence,owner.mode)).message;
+    }
+    if(owner.kind!=='legacy')throw new Error('Inbound audio routing unresolved');
+    return prisma.$transaction(async tx=>{
+      await lockInboundProviderIdentity(tx,event.providerMessageId);
+      await assertNoRoutingTurn(tx,event.providerMessageId);
+      return tx.conversationMessage.create({ data: {
       conversationId, providerMessageId: event.providerMessageId, inReplyToProviderId: event.contextMessageId,
       direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", content: "", createdAt: new Date(event.occurredAt),
       contentType: "AUDIO", providerMediaId: event.content.type === "audio" ? event.content.mediaId : null,
       providerMediaMimeType: event.content.type === "audio" ? event.content.mimeType : null,
       providerMediaSha256: event.content.type === "audio" ? event.content.sha256 : null,
       transcriptionStatus: "PENDING",
-    } }).catch((error: unknown) => {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } });
+    } });}).catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return prisma.conversationMessage.findUniqueOrThrow({ where: { providerMessageId: event.providerMessageId }, select: { id: true, conversationId: true, dispatchProviderAccountId:true, dispatchProviderPhoneNumberId:true, transcriptionStatus: true, transcriptionFailureCode: true, transcriptionCompletedAt: true, createdAt: true } }).then(winner=>{if(winner.conversationId!==conversationId||winner.dispatchProviderAccountId&&(winner.dispatchProviderAccountId!==event.providerAccountId||winner.dispatchProviderPhoneNumberId!==event.providerPhoneNumberId))throw new Error("Inbound message ownership mismatch");return winner;});
       throw error;
     });
   }
@@ -55,7 +66,7 @@ export class InboundWhatsAppAudioService {
       throw error;
     }
     if (reservation.conversationId !== conversationId) throw new Error("Inbound message ownership mismatch");
-    await this.persist(conversationId, event.providerMessageId, () =>
+    if(!reservation.dispatchProviderAccountId)await this.persist(conversationId, event.providerMessageId, () =>
       recoveryOutreachAttemptService.markEngagedForConversation(
         reservation.conversationId,
         new Date(event.occurredAt),
@@ -114,7 +125,7 @@ export class InboundWhatsAppAudioService {
         await this.persist(conversationId, event.providerMessageId, () => this.reject(reservation.id, "VOICE_UNREADABLE", durationMs));
         return { kind: "rejected", fallback: UNREADABLE };
       }
-      const completed = await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs, reservation.id, eventTime);
+      const completed = await this.complete(reservation.id, reservation.conversationId, transcript.text, transcript.provider, transcript.model, durationMs, reservation.id, eventTime, event.providerMessageId);
       if (!completed) return { kind: "ignored" };
       this.logger.info("whatsapp.inbound.transcription-completed", { providerMessageId: event.providerMessageId });
       return { kind: "completed" };
@@ -162,10 +173,12 @@ export class InboundWhatsAppAudioService {
       throw new InboundAudioPersistenceError(error);
     }
   }
-  private async complete(id: string, conversationId: string, text: string, provider: string, model: string, durationMs: number, messageId: string, eventTime: Date) {
+  private async complete(id: string, conversationId: string, text: string, provider: string, model: string, durationMs: number, messageId: string, eventTime: Date, providerMessageId:string) {
     const duplicate = new Error("transcription-already-completed");
     try {
       return await prisma.$transaction(async (tx) => {
+        await lockInboundProviderIdentity(tx,providerMessageId);
+        if(!await canProcessConversation(tx,conversationId))return false;
         const now = new Date();
         // Serialize completion against inbound and prior-turn state writes, then
         // recheck durable event order. Finishing a reply is not a newer message.

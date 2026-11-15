@@ -1,4 +1,4 @@
-import {priorCommerceHistorySelection} from '../../commerce/history-selection.js';
+import {priorCommerceHistorySelection,commerceHistoryActivityAt,orderCommerceHistory} from '../../commerce/history-selection.js';
 import prisma from "../../lib/db.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "./moderation-assessment.service.js";
 import { MODERATION_TIMEOUT_MS,moderationConfig } from "./moderation-policy.js";
@@ -26,12 +26,14 @@ export class ModerationTurnGate {
         ],
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      select: { id: true, content: true, contentType: true, transcriptionStatus: true },
+      select: { id: true, content: true, contentType: true, transcriptionStatus: true,createdAt:true,transcriptionCompletedAt:true },
     });
+    const ordered=orderCommerceHistory(candidates);
+    const latest=ordered.at(-1);
     let allowed = false;
     let retry = false;
     const seen=new Set<string>();
-    for (const message of candidates) {
+    for (const message of ordered) {
       if(seen.has(message.id))continue;seen.add(message.id);
       if (message.contentType !== "TEXT" && !(message.contentType === "AUDIO" && message.transcriptionStatus === "COMPLETED")) {
         // Unsupported images/media never become normal AI context.
@@ -43,7 +45,7 @@ export class ModerationTurnGate {
         inputKind: message.contentType === "AUDIO" ? "TRANSCRIPT" : "TEXT",
         policyVersion: moderationConfig().policyVersion, now: this.now(),
       });
-      if (result.kind === "allow") allowed = true;
+      if (message.id === latest?.id && result.kind === "allow") allowed = true;
       if (result.kind === "retry") retry = true;
     }
     // Historical outcomes cannot authorize a blocked/unsupported current turn.
@@ -53,7 +55,7 @@ export class ModerationTurnGate {
     const leaseDeadline=processingLeaseExpiresAt?.getTime()??Infinity;
     if(Number.isNaN(leaseDeadline))return 'retry';
     const prior=await prisma.conversationMessage.findMany({
-      ...priorCommerceHistorySelection(conversationId,pendingTurnStartedAt),
+      ...priorCommerceHistorySelection(conversationId,latest ? commerceHistoryActivityAt(latest)??pendingTurnStartedAt : pendingTurnStartedAt,latest?.createdAt?{id:latest.id,createdAt:latest.createdAt}:undefined),
       select:{id:true,content:true,contentType:true,transcriptionStatus:true,direction:true,senderType:true},
     });
     for(const message of prior){

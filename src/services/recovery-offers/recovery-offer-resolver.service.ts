@@ -20,9 +20,6 @@ export type { ResolveRecoveryOfferInput, RecoveryOfferDecision, RecoveryOfferPol
 const logger = createLogger({
   serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
 });
-const MAX_CANDIDATES = 8;
-const VERIFICATION_TIMEOUT_MS = 2_000;
-const AI_TIMEOUT_MS = 1_500;
 
 /** These failures must remain distinguishable from ordinary ineligibility.
  * Downstream BullMQ can retry rather than silently delivering an offer promise. */

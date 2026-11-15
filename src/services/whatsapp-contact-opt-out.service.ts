@@ -1,3 +1,4 @@
+import { receivingSenderKnown } from "./recovery-sender-pool/inbound-authority.js";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
@@ -28,8 +29,9 @@ export class WhatsAppContactOptOutService {
 
   async handleInbound(event: WhatsAppInboundEvent): Promise<boolean> {
     if (!isExplicitWhatsAppStop(event.content)) return false;
-    const sender = await this.resolveSender();
-    if (sender.providerAccountId !== event.providerAccountId ||
+    const pooled=await receivingSenderKnown(this.database,event);
+    const sender = pooled===null?await this.resolveSender():event;
+    if (pooled===false || sender.providerAccountId !== event.providerAccountId ||
         sender.providerPhoneNumberId !== event.providerPhoneNumberId) {
       this.log.warn("whatsapp.stop.ignored", { reasonCode: "UNRECOGNISED_PROVIDER_SENDER" });
       return true;
@@ -40,7 +42,7 @@ export class WhatsAppContactOptOutService {
       return true;
     }
     const quotedShop = event.contextMessageId
-      ? await resolveQuotedStopShop(this.database, event.contextMessageId, canonical)
+      ? await resolveQuotedStopShop(this.database, event.contextMessageId, canonical, event)
       : null;
     const scope = quotedShop ? "QUOTED_SHOP" as const : "ALL_REGISTERED_SHOPS" as const;
     const result = await writeLocalStop(this.database, {

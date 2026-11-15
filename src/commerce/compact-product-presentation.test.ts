@@ -3,7 +3,7 @@ import { CommerceProductSchema, exampleFinal } from '@modainteract/moda-interact
 import { verifyCommerceProductFacts } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { MODA_SUPPORTED_LANGUAGE_TAGS } from '@modainteract/moda-interact-shared/internationalization';
 import { presentationCandidates } from './presentation-receipt.js';
-import { fitVerifiedProductCaption, PRODUCT_SHOW_MORE } from './compact-product-presentation.js';
+import { fitVerifiedProductCaption, PRODUCT_SHOW_MORE, captionWithinDisplayTarget } from './compact-product-presentation.js';
 import type { CommercePresentationInput } from '../services/conversation-wrappers/contracts.js';
 const pairs=Array.from({length:3},(_,i)=>({productId:`p${i}`,variantId:`v${i}`}));
 function input(title='Product'):CommercePresentationInput{return {envelope:{...exampleFinal,answerKind:'ANSWER',referralReason:null,replyText:'Unverified fifteen-product lead. '.repeat(40)},productPairs:pairs,
@@ -25,9 +25,9 @@ describe('complete verified product caption fitting',()=>{
   expect(Array.from(fitted.boundaries.body+fitted.boundaries.footer).length).toBeLessThanOrEqual(1024);
   expect(source).toEqual(before);
  });
- it('includes a budgeted more-options invitation even when all three verified selections fit after replacing the fifteen-item lead',()=>{
+ it('preserves mandatory canonical terms when even the smallest entry cannot meet the display target',()=>{
   const source=input();const fitted=fitVerifiedProductCaption(source,body=>({header:'Saved header',body,footer}));
-  expect(fitted?.pairs).toEqual(pairs);expect(fitted?.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);
+  expect(fitted?.pairs).toEqual(pairs.slice(0,1));expect(fitted!.targetMet).toBe(false);expect(captionWithinDisplayTarget(fitted!.boundaries.body+fitted!.boundaries.footer)).toBe(false);expect(fitted?.boundaries.body).toContain(PRODUCT_SHOW_MORE.en);
   expect(fitted?.boundaries.body).not.toContain('Unverified fifteen-product lead');
  });
  it('chooses three then two then one complete entries, with no zero-product candidate',()=>{
@@ -39,13 +39,13 @@ describe('complete verified product caption fitting',()=>{
   const source=input(reason==='title'?'Long '.repeat(100):'Product');
   expect(fitVerifiedProductCaption(source,body=>({header:'',body,footer:reason==='footer'?footer+'😀'.repeat(1024):'f'.repeat(600)+footer}))).toBeNull();
  });
- it('keeps a complete verified long description or declines the compact form, never slices it',()=>{
+ it('omits an optional long description only in explicit brief mode and retains its complete proof',()=>{
   const source=input();const pair=pairs[0]!;const description='Exact description. '.repeat(90);
   const product=CommerceProductSchema.parse({...source.verifiedProducts!.products[0],description:{status:'AVAILABLE',text:description}});
   const facts=verifyCommerceProductFacts([pair],[product]);if(facts.kind!=='verified')throw Error('fixture');
-  const detail={...source,productPairs:[pair],verified:{...source.verified,disposition:'PRODUCT_DETAILS' as const,products:[],productFacts:facts.productFacts}};
+  const detail={...source,productPairs:[pair],verifiedProducts:{...source.verifiedProducts!,products:[product]},verified:{...source.verified,disposition:'PRODUCT_DETAILS' as const,products:[],productFacts:facts.productFacts}};
   const canonicalFacts=structuredClone(facts.productFacts);
-  expect(fitVerifiedProductCaption(detail,body=>({header:'',body,footer}))).toBeNull();
+  const fit=fitVerifiedProductCaption(detail,body=>({header:'',body,footer}))!;expect(fit.boundaries.body).not.toContain('Exact description');expect(fit.boundaries.body).toContain('Product');expect(fit.presentation.verified.productFacts).toEqual(canonicalFacts);
   expect(facts.productFacts).toEqual(canonicalFacts);
   expect(canonicalFacts[0]!.description.text!.length).toBeGreaterThan(1024);
  });
@@ -55,10 +55,11 @@ describe('complete verified product caption fitting',()=>{
  });
  it.each(['OUT_OF_SCOPE_REDIRECT','SHIPPING_INFORMATION_UNVERIFIED'] as const)('preserves Shared required limitation and exact discount facts for %s',disposition=>{
   const base=input();const source={...base,verified:{...base.verified,disposition}};
-  const expected=presentationCandidates(source,{completePrefixes:true})[0]!.body;
+  const candidates=presentationCandidates(source,{completePrefixes:true});
   const fitted=fitVerifiedProductCaption(source,body=>({header:'Saved',body,footer}));
+  const expected=candidates.find(candidate=>candidate.pairs.length===fitted?.pairs.length)!.body;
   expect(fitted?.boundaries.body).toBe(expected+'\n\n'+PRODUCT_SHOW_MORE.en);
-  expect(fitted?.presentation.verified.products).toEqual(source.verified.products);
+  expect(fitted?.presentation.verified.products).toEqual(source.verified.products.slice(0,fitted!.pairs.length));
  });
  it('has explicit application-owned copy for all twenty supported locales',()=>{
   expect(Object.keys(PRODUCT_SHOW_MORE).sort()).toEqual([...MODA_SUPPORTED_LANGUAGE_TAGS].sort());

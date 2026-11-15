@@ -54,6 +54,7 @@ function harness(
   const message = {
     id: "message-1",
     providerMessageId: "wamid-1",
+    dispatchProviderAccountId:"account-1",dispatchProviderPhoneNumberId:"phone-1",
     direction: "OUTBOUND",
     status,
     sentAt: new Date("2026-09-08T14:59:00.000Z"),
@@ -557,7 +558,7 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
   });
 
-  it("derives accounting from the durable message shop, not provider identities", async () => {
+  it("refuses foreign provider identities before accounting for the durable shop", async () => {
     const test = harness();
     test.message.conversation = {
       shopId: "durable-shop",
@@ -570,7 +571,38 @@ describe("WhatsAppProviderStatusService", () => {
       providerPhoneNumberId: "other-shop-phone",
     });
 
+    expect(test.usageEvents).toHaveLength(0);
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+    expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();
+    expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();
+    expect(test.notification.notify).not.toHaveBeenCalled();
+  });
+
+  it("derives matching-sender accounting from the durable message shop", async () => {
+    const test = harness();
+    test.message.conversation = {
+      shopId: "durable-shop",
+      checkoutRecovery: null,
+    };
+
+    await expect(test.service.process(baseEvent)).resolves.toBe("applied");
+
     expect(test.usageEvents[0]).toMatchObject({ shopId: "durable-shop" });
+  });
+
+  it.each(["FAILED", "DELIVERED", "READ"] as const)("does not infer ownership for a NULL-stamped %s receipt", async (status) => {
+    const test = harness();
+    Object.assign(test.message, { dispatchProviderAccountId: null, dispatchProviderPhoneNumberId: null });
+
+    await expect(test.service.process({ ...baseEvent, status })).resolves.toBe("ignored");
+
+    expect(test.usageEvents).toHaveLength(0);
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+    expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();
+    expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();
+    expect(test.notification.notify).not.toHaveBeenCalled();
   });
 
   it("finalizes an existing outbound message after its shop becomes inactive without an execution gate lookup", async () => {
@@ -742,3 +774,12 @@ function lifecycleDataFor(status: "DELIVERED"): Record<string, unknown> {
     deliveredAt: new Date(baseEvent.occurredAt),
   };
 }
+
+describe.each(["providerAccountId","providerPhoneNumberId"] as const)("ARCH076 immutable dispatch %s ownership",field=>{
+ it.each(["FAILED","DELIVERED","READ"] as const)("foreign %s status has no lifecycle, billing or contact effects",async status=>{
+  const test=harness();Object.assign(test.message,{dispatchProviderAccountId:"account-1",dispatchProviderPhoneNumberId:"phone-1"});
+  expect(await test.service.process({...baseEvent,status,[field]:"foreign-identity"})).toBe("ignored");
+  expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+  expect(test.compensation.reconcile).not.toHaveBeenCalled();expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();expect(test.notification.notify).not.toHaveBeenCalled();
+ });
+});

@@ -1,3 +1,5 @@
+// This suite owns scheduling/transcription fixtures; actual sender/identity SQL is covered by ARCH076 disposable PostgreSQL.
+vi.mock("../../../src/services/recovery-sender-pool/inbound-authority.js",()=>({lockInboundProviderIdentity:vi.fn(async()=>{}),assertNoRoutingTurn:vi.fn(async()=>{}),canProcessConversation:vi.fn(async()=>true)}));
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";

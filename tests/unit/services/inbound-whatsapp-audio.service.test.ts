@@ -1,8 +1,11 @@
+// This suite owns scheduling/transcription fixtures; actual sender/identity SQL is covered by ARCH076 disposable PostgreSQL.
+vi.mock("../../../src/services/recovery-sender-pool/inbound-authority.js",()=>({lockInboundProviderIdentity:vi.fn(async()=>{}),assertNoRoutingTurn:vi.fn(async()=>{}),canProcessConversation:vi.fn(async()=>true),resolveSenderInbound:vi.fn(async()=>({kind:"legacy"}))}));
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
 
 const mocks = vi.hoisted(() => ({
   database: {
-    conversationMessage: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+    conversationMessage: { findFirst: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     conversation: { findUniqueOrThrow: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     shopSettings: { findUnique: vi.fn() },
     $queryRaw: vi.fn(), $executeRaw: vi.fn(), $transaction: vi.fn(),
@@ -55,6 +58,59 @@ describe("InboundWhatsAppAudioService", () => {
     mocks.media.downloadAudio.mockResolvedValue({ bytes: new TextEncoder().encode("OggSfixture"), mimeType: "audio/ogg" });
     mocks.parseBuffer.mockResolvedValue({ format: { duration: 30 } });
     mocks.transcription.transcribe.mockResolvedValue({ text: "Keep the transcript unchanged", provider: "groq", model: "whisper-large-v3-turbo" });
+  });
+
+  it.each([
+    { conversationId: "other-conversation", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone" },
+    { conversationId: "conversation-1", dispatchProviderAccountId: "foreign-waba", dispatchProviderPhoneNumberId: "phone" },
+    { conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "foreign-phone" },
+  ])("reserve refuses an existing row owned by $conversationId / $dispatchProviderAccountId / $dispatchProviderPhoneNumberId", async (owner) => {
+    mocks.database.conversationMessage.findUnique.mockResolvedValue({ id: "foreign-row", transcriptionStatus: "PENDING", ...owner });
+
+    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
+      .rejects.toThrow("Inbound message ownership mismatch");
+
+    expect(mocks.database.$transaction).not.toHaveBeenCalled();
+    expect(mocks.database.conversationMessage.create).not.toHaveBeenCalled();
+    expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
+    expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
+  });
+
+  it("reserve reuses the exact existing sender and conversation without another write", async () => {
+    const existing = { id: "existing-row", conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone", transcriptionStatus: "PENDING" };
+    mocks.database.conversationMessage.findUnique.mockResolvedValue(existing);
+
+    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
+      .resolves.toEqual(existing);
+
+    expect(mocks.database.$transaction).not.toHaveBeenCalled();
+    expect(mocks.database.conversationMessage.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { conversationId: "other-conversation", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone" },
+    { conversationId: "conversation-1", dispatchProviderAccountId: "foreign-waba", dispatchProviderPhoneNumberId: "phone" },
+    { conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "foreign-phone" },
+  ])("reserve refuses a P2002 winner owned by $conversationId / $dispatchProviderAccountId / $dispatchProviderPhoneNumberId", async (owner) => {
+    mocks.database.conversationMessage.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("duplicate provider message", { code: "P2002", clientVersion: "fixture" }));
+    mocks.database.conversationMessage.findUniqueOrThrow.mockResolvedValue({ id: "foreign-winner", transcriptionStatus: "PENDING", ...owner });
+
+    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
+      .rejects.toThrow("Inbound message ownership mismatch");
+
+    expect(mocks.database.conversationMessage.findUniqueOrThrow).toHaveBeenCalledOnce();
+    expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
+    expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
+    expect(mocks.database.conversationMessage.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("reserve reuses only a matching P2002 winner", async () => {
+    const winner = { id: "same-winner", conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone", transcriptionStatus: "PENDING" };
+    mocks.database.conversationMessage.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("duplicate provider message", { code: "P2002", clientVersion: "fixture" }));
+    mocks.database.conversationMessage.findUniqueOrThrow.mockResolvedValue(winner);
+
+    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
+      .resolves.toEqual(winner);
   });
 
   it("reserves, transcribes and completes one logical turn", async () => {

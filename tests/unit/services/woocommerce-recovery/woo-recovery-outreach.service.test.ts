@@ -121,6 +121,7 @@ function makeFixture() {
     policies: { resolve: async () => policy },
     templates: { select, validateAdmission },
     conversations: { getOrCreate: async () => ({ id: "conversation" }) },
+    senders: { allocate: vi.fn(async () => ({ kind: "assigned" as const })) },
     billing: {
       admit, revalidateBeforeProvider, releaseBeforeProvider: release,
       commitSuccessfulInitiation: committed,
@@ -161,6 +162,15 @@ function sharedLogger(f: ReturnType<typeof makeFixture>) {
 
 describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
   beforeEach(() => { vi.restoreAllMocks(); });
+
+  it("holds an unassigned initial attempt before credits or Meta and retries its identity", async () => {
+    const f = makeFixture();
+    f.deps.senders.allocate = vi.fn(async () => ({ kind: "held" as const }));
+    expect(await f.service.processInitial("recovery")).toMatchObject({ kind: "deferred", reason: "sender-inventory-unavailable" });
+    expect(await f.service.processInitial("recovery")).toMatchObject({ kind: "deferred", reason: "sender-inventory-unavailable" });
+    expect(f.initialCreates).toBe(1);
+    expect(f.admit).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
+  });
 
   it("keeps enqueue and dispatch default-off before any attempt, queue or credit", async () => {
     const f = makeFixture(); f.disable();

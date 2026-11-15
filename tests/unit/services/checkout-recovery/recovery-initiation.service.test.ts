@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     },
     recoveryOutreachAttempt: { findUnique: vi.fn(), findFirst: vi.fn() },
   },
+  senderPool: { allocate: vi.fn() },
   customer: { resolveCustomer: vi.fn() },
   conversation: { getOrCreateRecoveryConversation: vi.fn() },
   message: { buildRecoveryTemplateDescriptor: vi.fn() },
@@ -38,6 +39,8 @@ const mocks = vi.hoisted(() => ({
     clearDetectedSuppression: vi.fn(),
   },
 }));
+
+vi.mock("../../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: mocks.senderPool }));
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
 vi.mock("../../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
@@ -131,6 +134,7 @@ function createInitiation(overrides: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.senderPool.allocate.mockResolvedValue({ kind: "assigned" });
   mocks.customer.resolveCustomer.mockResolvedValue(null);
   mocks.prisma.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop-1" });
   mocks.prisma.shop.findUnique.mockResolvedValue({ id: "shop-1", platform: "SHOPIFY" });
@@ -794,5 +798,18 @@ describe("RecoveryInitiationService", () => {
       { checkoutRecoveryId: recovery.id, sequence: 2 },
       dueAt,
     );
+  });
+});
+
+describe("sender inventory admission", () => {
+  it("holds before credit/template/provider without replacing the initial attempt", async () => {
+    mocks.senderPool.allocate.mockResolvedValue({ kind: "held", reason: "sender-inventory-unavailable" });
+    const { service, billing } = createInitiation();
+    const event = { shop: "store.myshopify.com", checkoutToken: "checkout-1", customer: { phone: "+15551234567" } };
+    await service.handleCheckoutCreated(event as never);
+    expect(mocks.senderPool.allocate).toHaveBeenCalledWith({ conversationId: "conversation-1", canonicalRecipient: attempt.recipient, initialAttemptId: attempt.id });
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.automated.prepare).not.toHaveBeenCalled();
+    expect(mocks.outbound.reserve).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,5 @@
+import { AI_FAILURE_DELIVERY_RESERVE_MS, AI_FAILURE_MIN_PREPARATION_SEND_MS, GenerationBudgetTimeout, eligibleGenerationFailure, type AiFailureFallback, type AiFailureFallbackInput } from './ai-failure-fallback.js';
+import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 import type { RecoveryShopHeaderReceipt } from "./conversation-wrappers/recovery-shop-header.js";
 import { presentedProductContext } from "../commerce/product-context-write.js";
 import { CommerceHostError } from "../commerce/mcp-client.js";
@@ -85,6 +87,7 @@ export type LoadedConversationTurn<TContext> = {
 
 export type ConversationTurnProcessorDependencies<TContext, TResult> = {
   queue: QueueLike;
+  currentRouteActive?: (conversationId:string)=>Promise<boolean>;
   conversation: Pick<
     ConversationService,
     | "getTurnState"
@@ -102,6 +105,8 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
       idempotencyKey: string;
       senderType: "AGENT" | "AUTOMATION";
       content?: string;
+      clarification?: true;
+      continuation?: { expectedControlRevision: number; expectedInboundVersion: number };
     }) => Promise<OutboundAdmissionResult>;
     sendPreparedText: (
       input: Admitted & {
@@ -147,7 +152,8 @@ export type ConversationTurnProcessorDependencies<TContext, TResult> = {
     conversationId: string,
     pendingTurnStartedAt: Date,
   ) => Promise<LoadedConversationTurn<TContext>>;
-  runAgent: (context: TContext) => Promise<TResult>;
+  runAgent: (context: TContext, options?:Readonly<{deadlineAt:number}>) => Promise<TResult>;
+  prepareFailureFallback?: (input: AiFailureFallbackInput) => Promise<AiFailureFallback | null>;
   /** BG005 prepared wrapper; required even when no active slot is configured. */
   aiWrapper: AiConversationWrapper;
   getResult: (result: TResult) => {
@@ -223,6 +229,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
       observedVersion,
       jobId: activeJob?.id ?? null,
     });
+    if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId))return;
     const state =
       await this.dependencies.conversation.getTurnState(conversationId);
     const staleReason = turnStaleReason(state, observedVersion);
@@ -312,6 +319,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
     // after a delay or HUMAN -> AI cycle.
     const controlRevision = state.pendingAiControlRevision ?? undefined;
     const checkControl = async (phase: "before-agent" | "after-await" | "before-provider", shopId?: string) => {
+      if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId))return false;
       if (controlRevision === undefined || !this.dependencies.ownership) return true;
       const result = await this.dependencies.ownership.checkAutomatedTurn({
         conversationId, expectedRevision: controlRevision, phase,
@@ -372,6 +380,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
     };
 
     try {
+      if(this.dependencies.currentRouteActive&&!await this.dependencies.currentRouteActive(conversationId)){await this.finishSuppressedTurn(conversationId,observedVersion,controlRevision);return;}
       if (this.dependencies.moderation) {
         const gate = await this.dependencies.moderation.moderatePending(
           conversationId, state.pendingTurnStartedAt as Date, new Date(now.getTime()+PROCESSING_LEASE_MS),
@@ -472,6 +481,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
           idempotencyKey: `clarification:${conversationId}:${observedVersion}`,
           senderType: "AUTOMATION",
           content: loaded.clarificationText,
+          clarification: true,
         });
         if (clarification.kind !== "admitted") {
           await completeOwnedTurn();
@@ -523,8 +533,14 @@ export class ConversationTurnProcessor<TContext, TResult> {
         conversationId,
         idempotencyKey: `agent:${conversationId}:${observedVersion}`,
         senderType: "AGENT",
+        ...(loaded.checkoutRecoveryId && controlRevision!==undefined ? {continuation:{expectedControlRevision:controlRevision,expectedInboundVersion:observedVersion}} : {}),
       });
       if (reserved.kind !== "admitted") {
+        if(reserved.reason==="allowance-funding-held"){
+          await this.dependencies.conversation.releaseTurn(conversationId,observedVersion);
+          await this.schedule(conversationId,observedVersion,30_000,activeJob);
+          return;
+        }
         await completeOwnedTurn();
         this.logger.debug("whatsapp.turn.completed", {
           conversationId,
@@ -546,11 +562,44 @@ export class ConversationTurnProcessor<TContext, TResult> {
         observedVersion,
       });
 
-      const result = await runCommerceAgentAfterAdmission({
+      type GenerationOutcome = {kind:"agent";result:TResult} | {kind:"fallback";fallback:AiFailureFallback};
+      const result = await runCommerceAgentAfterAdmission<TContext, GenerationOutcome>({
         admission: reserved,
         to: loaded.to,
         context: loaded.context as TContext,
-        runAgent: this.dependencies.runAgent,
+        runAgent: async context => {
+          const deadlineAt=now.getTime()+PROCESSING_LEASE_MS-AI_FAILURE_DELIVERY_RESERVE_MS;
+          if(this.dependencies.prepareFailureFallback && this.now().getTime()>=deadlineAt)throw new GenerationBudgetTimeout();
+          return {kind:"agent",result:await (this.dependencies.prepareFailureFallback
+            ? this.dependencies.runAgent(context,{deadlineAt}) : this.dependencies.runAgent(context))};
+        },
+        recoverGenerationFailure: async error => {
+          if (!eligibleGenerationFailure(error) || !this.dependencies.prepareFailureFallback ||
+              now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS ||
+              !(await checkControl("after-await",loaded.shopId)) ||
+              await this.dependencies.conversation.hasChanged(conversationId,observedVersion)) return undefined;
+          const owned=await this.dependencies.conversation.getTurnState(conversationId);
+          if(owned.processingInboundVersion!==observedVersion ||
+              owned.processingStartedAt?.getTime()!==now.getTime())return undefined;
+          this.logger.warn("whatsapp.turn.agent_generation_failed", {conversationId,observedVersion,
+            failureKind:error instanceof GenerationBudgetTimeout?"generation-child-timeout":"commerce-host-generation-failure",
+            errorCode:error instanceof CommerceHostError && ["INVALID_FINAL","BUDGET_EXHAUSTED","UNAVAILABLE","DEADLINE","TOOL_ERROR","MODEL_ERROR"].includes(error.code)?error.code:"OTHER_GENERATION_FAILURE"});
+          let fallback:AiFailureFallback|null;
+          try {
+            fallback=await this.dependencies.prepareFailureFallback({conversationId,shopId:loaded.shopId,
+              checkoutRecoveryId:loaded.checkoutRecoveryId,deadlineAt:now.getTime()+PROCESSING_LEASE_MS});
+          } catch(preparationError) {
+            this.logger.error("whatsapp.turn.fallback_preparation_failed",{conversationId,observedVersion,
+              reason:"preparation-error",errorKind:preparationError instanceof Error?"error":"non-error"});
+            throw preparationError;
+          }
+          if (!fallback || now.getTime()+PROCESSING_LEASE_MS-this.now().getTime()<AI_FAILURE_MIN_PREPARATION_SEND_MS) {
+            this.logger.warn("whatsapp.turn.fallback_refused",{conversationId,observedVersion,
+              reason:fallback?"original-budget-exhausted":"saved-context-or-template-unavailable"});
+            return undefined;
+          }
+          return {kind:"fallback",fallback};
+        },
         sendPreparedText,
         failPrepared,
       });
@@ -570,9 +619,12 @@ export class ConversationTurnProcessor<TContext, TResult> {
         return;
       }
 
-      const agentResult = this.dependencies.getResult(result);
+      const isFallback=result.kind === "fallback";
+      const agentResult: ReturnType<ConversationTurnProcessorDependencies<TContext,TResult>["getResult"]> = result.kind === "agent" ? this.dependencies.getResult(result.result) : {
+        replyText:result.fallback.replyText,detectedLanguageTag:null,detectedLanguageConfidence:null,
+      };
 
-      this.logger.debug("whatsapp.turn.agent_completed", {
+      this.logger.debug(isFallback?"whatsapp.turn.fallback_prepared":"whatsapp.turn.agent_completed", {
         conversationId,
         observedVersion,
       });
@@ -599,7 +651,7 @@ export class ConversationTurnProcessor<TContext, TResult> {
         return;
       }
 
-      await this.dependencies.conversation.applyDetectedLanguage({
+      if (!isFallback) await this.dependencies.conversation.applyDetectedLanguage({
         conversationId,
         version: observedVersion,
         message: loaded.languageMessage,
@@ -629,6 +681,13 @@ export class ConversationTurnProcessor<TContext, TResult> {
       if (agentResult.commercePresentation?.signal?.aborted) {
         await failPrepared(reserved.messageId);
         await this.finishSuppressedTurn(conversationId, observedVersion);
+        return;
+      }
+      if (result.kind === "fallback" && (composed.kind !== "ready" || !composed.commonLayout ||
+          canonicalJson(composed.commonLayout.commonRef)!==canonicalJson(result.fallback.commonRef))) {
+        this.logger.warn("whatsapp.turn.fallback_refused",{conversationId,observedVersion,reason:"common-reference-changed-or-unwrapped"});
+        await failPrepared(reserved.messageId);
+        await this.finishSuppressedTurn(conversationId,observedVersion);
         return;
       }
       if (composed.kind === "refused") {
@@ -683,11 +742,16 @@ export class ConversationTurnProcessor<TContext, TResult> {
           presentationReceipt: {shopId: loaded.shopId, conversationId, messageId: reserved.messageId, inboundVersion: observedVersion, controlRevision: controlRevision ?? -1, firstPair: composed.presentedPairs?.[0] ?? null}} : {}),
         ...(productContextUpdate ? { productContextUpdate } : {}),
       });
+      if(deliveryResult.kind==="suppressed"&&deliveryResult.reason==="allowance-capacity-reopened"){
+        await this.dependencies.conversation.releaseTurn(conversationId,observedVersion);
+        await this.schedule(conversationId,observedVersion,0,activeJob);
+        return;
+      }
       await completeOwnedTurn();
       this.logger.debug("whatsapp.turn.completed", {
         conversationId,
         observedVersion,
-        outcome: deliveryResult.kind === "suppressed" ? "agent-response-suppressed" : deliveryResult.deliveryState === "pending" ? "agent-response-pending" : "agent-response-sent",
+        outcome: `${isFallback?"fallback":"agent"}-response-${deliveryResult.kind === "suppressed" ? "suppressed" : deliveryResult.deliveryState === "pending" ? "pending" : "sent"}`,
         ...(deliveryResult.kind === "suppressed" ? {reason: deliveryResult.reason} : {}),
       });
     } catch (error) {

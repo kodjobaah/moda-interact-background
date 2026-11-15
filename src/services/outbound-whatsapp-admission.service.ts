@@ -199,6 +199,7 @@ export async function runCommerceAgentAfterAdmission<TContext, TResult>({
   to,
   context,
   runAgent,
+  recoverGenerationFailure,
   sendPreparedText,
   failPrepared,
 }: {
@@ -206,6 +207,7 @@ export async function runCommerceAgentAfterAdmission<TContext, TResult>({
   to: string;
   context: TContext;
   runAgent: (context: TContext) => Promise<TResult>;
+  recoverGenerationFailure?: (error: unknown) => Promise<TResult | undefined>;
   sendPreparedText: (
     input: Extract<OutboundAdmissionResult, { kind: "admitted" }> & {
       to: string;
@@ -226,6 +228,13 @@ export async function runCommerceAgentAfterAdmission<TContext, TResult>({
   try {
     return await runAgent(context);
   } catch (error) {
+    try {
+      const recovered = await recoverGenerationFailure?.(error);
+      if (recovered !== undefined) return recovered;
+    } catch {
+      // Recovery cannot turn an unsafe/missing authority into a send or hide
+      // the original generation failure. Cleanup remains the same boundary.
+    }
     await failPrepared(admission.messageId);
     throw error;
   }

@@ -14,6 +14,8 @@ const prismaMock = vi.hoisted(() => ({
   $transaction: vi.fn(),
 }));
 
+vi.mock("../../../src/services/recovery-sender-pool/sender-pool.service.js", () => ({ recoverySenderPoolService: { releaseTerminalAssignments: vi.fn(async () => 0) } }));
+
 vi.mock("../../../src/lib/db.js", () => ({ default: prismaMock }));
 
 import { CheckoutRecoveryExpiryService } from "../../../src/services/checkout-recovery-expiry.service.js";

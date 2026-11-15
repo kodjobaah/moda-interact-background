@@ -1,0 +1,181 @@
+{
+  "version": "response.v1",
+  "instructions": "Synthetic fixture preserving only the published response schema structure; no customer data or private prompts.",
+  "detailsSchema": {
+    "type": "object",
+    "properties": {
+      "responseDisposition": {
+        "enum": [
+          "STANDARD",
+          "OUT_OF_SCOPE_REDIRECT",
+          "SHIPPING_INFORMATION_UNVERIFIED",
+          "PRODUCT_OPTIONS",
+          "PRODUCT_DETAILS"
+        ],
+        "type": "string",
+        "maxLength": 31
+      },
+      "productRecommendations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "scope",
+            "basketLineId",
+            "productId",
+            "variantId",
+            "quantity",
+            "promotionKind",
+            "offerIds"
+          ],
+          "properties": {
+            "scope": {
+              "enum": [
+                "PRODUCT_ONLY",
+                "ADD_TO_BASKET",
+                "REPLACE_BASKET_LINE"
+              ],
+              "type": "string",
+              "maxLength": 19
+            },
+            "offerIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              "maxItems": 3
+            },
+            "quantity": {
+              "type": "integer",
+              "maximum": 99,
+              "minimum": 1
+            },
+            "productId": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "variantId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "basketLineId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "promotionKind": {
+              "enum": [
+                "NONE",
+                "NATIVE_SALE",
+                "DISCOUNT"
+              ],
+              "type": "string",
+              "maxLength": 11
+            }
+          },
+          "additionalProperties": false
+        },
+        "maxItems": 3,
+        "minItems": 1
+      },
+      "productDetailSelections": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "productId",
+            "variantId"
+          ],
+          "properties": {
+            "productId": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "variantId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "maxItems": 3
+      },
+      "productOptionSelections": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "productId",
+            "variantId"
+          ],
+          "properties": {
+            "productId": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "variantId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "maxItems": 3
+      },
+      "productRecommendationVersion": {
+        "enum": [
+          "1"
+        ],
+        "type": "string",
+        "maxLength": 1
+      },
+      "shippingInformationSelection": {
+        "type": "object",
+        "required": [
+          "productId",
+          "variantId"
+        ],
+        "properties": {
+          "productId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "variantId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}

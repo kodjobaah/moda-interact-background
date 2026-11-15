@@ -41,6 +41,7 @@ export interface WhatsAppTemplateUrlButton {
 }
 
 export interface SendTemplateInput {
+  expectedSender?: WhatsAppSenderIdentity;
   to: string;
   templateName: string;
   languageCode: string;

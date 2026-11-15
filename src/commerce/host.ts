@@ -1,3 +1,7 @@
+import { captureRecoveryIdentityDecision, renderRefreshedRecoveryIdentityDecision, type RecoveryIdentityDecisionReceipt } from "./identity-terminal-presentation.js";
+import { recoveryTerminalModelRequest } from "./terminal-phase-instructions.js";
+import { isCatalogueDiscoveryTool, shouldReferAfterUngroundedDiscovery } from "./discovery-factuality.js";
+import { makeRecoveryTerminalFinalizer } from "./recovery-terminal-finalizer.js";
 import { structuredFinalizationInstructions } from "./structured-finalization-instructions.js";
 import { logFinalSelectionShape, projectFinalSelectionShape } from "./final-selection-shape.js";
 import {planCommerceVerificationBudget} from '@modainteract/moda-interact-shared/commerce';
@@ -289,6 +293,7 @@ async function execute(
     releaseId: grant.releaseId,
   });
   const extractEvidence = deps.extractEvidence ?? extractTrustedEvidence;
+  let currentDiscoveryAttempted = false;
   try {
     await client.connect();
     const manifest = await client.manifest();
@@ -435,7 +440,18 @@ async function execute(
     const finalizationInstructions = structuredFinalizationInstructions(verifyResponseContract(
       manifest.responseContract, manifest.responseContractHash, digest,
     ));
+    const identityDecisionState: { receipt: RecoveryIdentityDecisionReceipt | null } = { receipt: null };
+    const rawTerminalFinalizer = makeRecoveryTerminalFinalizer({ responseContract: manifest.responseContract,
+      responseContractHash: manifest.responseContractHash, digest, platform: recommendationContext.provider,
+      locale: resolveModaConfigurationLocale(language.tag),
+      hasEligibleEvidence: ids => evidence.hasEligibleEvidence(ids, Date.now()) });
+    const terminalFinalizer = rawTerminalFinalizer ? { ...rawTerminalFinalizer, project: (input: Parameters<typeof rawTerminalFinalizer.project>[0]) => {
+      const decision = rawTerminalFinalizer.project(input);
+      identityDecisionState.receipt = captureRecoveryIdentityDecision(input, decision, digest);
+      return decision;
+    } } : null;
     const result = await runCommerceTurn({
+      toolProtocol: "native",
       turn,
       productContext,
       platform: recommendationContext.provider,
@@ -468,6 +484,7 @@ async function execute(
       language: current.languageSource === "CUSTOMER_EXPLICIT" ? { tag: null, source: null } : language,
       budgets: { deadlineMs: budget.deadlineMs, outputTokens: budget.outputTokens, remoteCalls: planCommerceVerificationBudget(10).discoveryCalls },
       dependencies: {
+        ...(terminalFinalizer ? { finalizeTerminal: terminalFinalizer } : {}),
         model: {
           invoke: async (request, modelSignal) => preserveRunnerFailure(async () => {
             logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "turn_state_check");
@@ -477,9 +494,9 @@ async function execute(
             logCommerceModelBridgeMilestone(logger, modelBridgeIdentifiers, "production_model_invoke");
             const step = await observeCommerceModelBridgePhase(
               logger, modelBridgeIdentifiers, "production_model_invoke",
-              () => deps.model.invoke(request, modelSignal),
+              () => deps.model.invoke(recoveryTerminalModelRequest(request, manifest.responseContract), modelSignal),
             );
-            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse", manifest.responseContractHash);
+            logFinalSelectionShape(logger, modelBridgeIdentifiers, step, request.requiredToolName === "finalResponse" || request.requireToolCall === true, manifest.responseContractHash);
             return observeCommerceModelBridgePhase(
               logger, modelBridgeIdentifiers, "response_postprocess", async () => {
                 if (step.calls.length !== 1 || step.calls[0]?.name !== "finalResponse")
@@ -502,6 +519,7 @@ async function execute(
                     ...step,
                     calls: [
                       {
+                        ...step.calls[0],
                         name: "finalResponse",
                         arguments: {
                           ...parsed.data,
@@ -568,6 +586,9 @@ async function execute(
                     hostDiagnostic("host.authorization", "HOST_TOOL_NOT_GRANTED")));
               }
             }
+            // Shared validated arguments and authorization before execute; the
+            // host has just rechecked current scope and tool availability.
+            if (isCatalogueDiscoveryTool(descriptor.name)) currentDiscoveryAttempted = true;
             const result = await observeMcp(() => client.call(descriptor.name, args, toolSignal));
             if (isDiscount) await refreshRecommendationPolicy({
               context: recommendationContext, db: prisma, signal: toolSignal, assertCurrent,
@@ -698,6 +719,7 @@ async function execute(
         });
       }
     }
+    let currentShippingPresentationVerified = false;
     let commerceVerifiedPresentation: CommerceVerifiedPresentation = CommerceVerifiedPresentationSchema.parse({
       schemaVersion: 1, brandName: recovery.shop.brand?.brandName ?? null,
       locale: resolveModaConfigurationLocale(languageEvaluation.languageTag), storeUrl: recommendationContext.storeUrl,
@@ -1085,6 +1107,7 @@ async function execute(
         imageProducts.push(...retained.map(item => item.product));
         presentedRecommendationPairs = retained.map(({ proposal }) => ({ productId: proposal.productId, variantId: proposal.variantId }));
         const renderedProducts: RenderRecommendationProduct[] = retained.map(({ renderFacts }) => renderFacts);
+        currentShippingPresentationVerified = Boolean(shippingPresentation);
         compositionDiagnostic({ stage: 'SHIPPING_SELECTION_EVIDENCE', selected: Boolean(shippingSelection), verified: Boolean(shippingPresentation) });
         const hasObservedProducts = initialProductObservations.some(observation => {
           const output = observation.output as { products?: Product[]; product?: Product | null };
@@ -1107,6 +1130,19 @@ async function execute(
         });
 
       }
+    }
+    if (identityDecisionState.receipt && envelope.answerKind === "ANSWER") {
+      try {
+        envelope = { ...envelope, replyText: renderRefreshedRecoveryIdentityDecision({ receipt: identityDecisionState.receipt,
+          original: result.result, turn, responseContractHash: manifest.responseContractHash,
+          presentation: commerceVerifiedPresentation, currentProducts: imageProducts, digest }) };
+      } catch {
+        throw new CommerceHostError("INVALID_FINAL", false, hostDiagnostic("host.runner_result", "HOST_RUNNER_FAILURE"));
+      }
+    }
+    if (shouldReferAfterUngroundedDiscovery({ attempted: currentDiscoveryAttempted, answerKind: envelope.answerKind,
+      presentation: commerceVerifiedPresentation, shippingVerified: currentShippingPresentationVerified })) {
+      envelope = { ...envelope, answerKind: "REFER_TO_STORE", referralReason: "UNVERIFIABLE_FACTS", evidenceIds: [], details: {} };
     }
     compositionDiagnostic({ stage: 'VERIFIED_PROJECTION', disposition: commerceVerifiedPresentation.disposition, productCount: commerceVerifiedPresentation.products.length, optionCount: commerceVerifiedPresentation.optionFacts.length, detailCount: (commerceVerifiedPresentation.productFacts?.length ?? 0) });
     // Referrals retain the trusted contact/language grounding boundary. Only

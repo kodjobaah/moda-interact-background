@@ -1,0 +1,85 @@
+import {describe,it,expect,vi,afterEach} from 'vitest';
+import {createLogger} from '@modainteract/moda-interact-shared/logging';
+vi.mock('../../../src/lib/db.js',()=>({default:{}}));
+import {AiFailureFallbackService,eligibleGenerationFailure,FAILURE_COPY,withGenerationBudget,GenerationBudgetTimeout} from '../../../src/services/ai-failure-fallback.js';
+import {CommerceModelInvocationFailure} from '@modainteract/moda-interact-shared/commerce/runner';
+import {CommerceHostError} from '../../../src/commerce/mcp-client.js';
+import {hostDiagnostic} from '../../../src/commerce/host-diagnostics.js';
+import {formatWholeCheckoutItemsSummary} from '../../../src/services/recovery-template-preparation/recovery-template-items-summary.js';
+import {digest,stableJson} from '../../../src/services/conversation-wrappers/projection.js';
+import {profiles,templateProfile} from './recovery-multipart/composite-profile.fixture.js';
+import {ConversationTurnProcessor} from '../../../src/services/conversation-turn-processor.service.js';
+import {ConversationWrapperService} from '../../../src/services/conversation-wrappers/service.js';
+import {composeAiOutbound} from '../../../src/services/conversation-wrappers/compose-ai-outbound.js';
+
+function fixture(){
+ const prepared={schemaVersion:1,family:'MODA_CONVERSATION_WRAPPER',responseSlot:'response.body',header:[{kind:'text',value:'Shop: '},{kind:'variable',name:'shop.name'}],body:[{kind:'responseSlot',name:'response.body'}],footer:[],conditionals:[{when:'checkout.available',tokens:[{kind:'text',value:'Website: '},{kind:'variable',name:'shop.websiteUrl'},{kind:'text',value:'\nCheckout:\n'},{kind:'variable',name:'checkout.url'}]}],...templateProfile(profiles[0])};
+ const slot={audience:'SHARED',definitionId:'definition',editVersion:1,definition:{id:'definition',kind:'MODA_CONVERSATION_WRAPPER',audience:'SHARED',status:'PUBLISHED',sourceLanguageTag:'en',astSchemaVersion:1,sourceHash:digest('source'),publishedAt:new Date(),retiredAt:null,createdByAdminId:'admin',locales:[{id:'locale',languageTag:'en',providerLanguageCode:null,status:'SOURCE_SAVED',localeAst:{schemaVersion:1,prepared},contentHash:digest(stableJson(prepared)),reviewedAt:null,reviewedByAdminId:null}]}};
+ const context={conversationId:'conversation',shopId:'shop',conversationLanguageTag:'en',merchantLanguageTag:'en',checkoutAvailable:true,variables:{'shop.name':'Shop','shop.websiteUrl':'https://shop.example','checkout.url':'https://shop.example/checkouts/current'},recoveryShopHeader:{schemaVersion:1,shopId:'shop',name:'Shop',websiteUrl:'https://shop.example'}};
+ const row={shopId:'shop',customerId:'customer',checkoutRecoveryId:'recovery',checkoutRecovery:{id:'recovery',shopId:'shop',customerId:'customer',status:'ENGAGED',lineItems:[{title:'Saved board',quantity:2,price:'12345',stock:999}]}};
+ const db={conversation:{findUnique:vi.fn(async()=>row)}};
+ const wrappers={loadContext:vi.fn(async()=>context),loadSlots:vi.fn(async()=>[slot])};
+ const service=new AiFailureFallbackService(db as never,wrappers as never,()=>1000);
+ return {service,db,wrappers,row,slot,context,input:{conversationId:'conversation',shopId:'shop',checkoutRecoveryId:'recovery',deadlineAt:20000}};
+}
+afterEach(()=>{vi.useRealTimers();vi.unstubAllEnvs();});
+describe('technical-generation failure recovery',()=>{
+ it.each(['INVALID_FINAL','BUDGET_EXHAUSTED','UNAVAILABLE'])('accepts typed runner %s',code=>expect(eligibleGenerationFailure(new CommerceHostError(code,false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE')))).toBe(true));
+ it.each(['DENIED','CANCELLED','INVALID_INPUT','CONFIGURATION','INCOMPATIBLE_VERSION'])('refuses %s',code=>expect(eligibleGenerationFailure(new CommerceHostError(code,false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE')))).toBe(false));
+ it.each(['host.authorization','host.turn_state','host.grant','host.release','presentation.verify'] as const)('refuses %s',stage=>expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE',true,hostDiagnostic(stage,'HOST_CANCELLED')))).toBe(false));
+ it.each([401,403])('accepts model-account HTTP %s in the actual nested model diagnostic domain',statusCode=>{
+  // production-model creates this typed model failure; the runner preserves it
+  // as UNAVAILABLE and host.ts nests it without copying its status to MCP fields.
+  const model=new CommerceModelInvocationFailure({stage:'model.invoke',reasonCode:'PROVIDER_AUTH_FAILED',statusCode});
+  const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE',{runnerDiagnostic:model.diagnostic}),model);
+  expect(host.diagnostic!.statusCode).toBeUndefined();expect(host.sourceFailure).toBeUndefined();expect(eligibleGenerationFailure(host)).toBe(true);
+ });
+ it.each([401,403])('refuses MCP-account HTTP %s in the actual source-failure domain',httpStatus=>{
+  const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('mcp.tool_call','MCP_TOOL_CALL_FAILED'),undefined,{origin:'mcp_response',provider:'commerce-mcp',operation:'call_tool',httpStatus,redactionApplied:true,truncated:false});
+  expect(eligibleGenerationFailure(host)).toBe(false);
+ });
+ it('refuses nested tool authorization and stale-turn failures despite unavailable transport classification',()=>{
+  for(const [stage,reasonCode] of [['tool.authorize','TOOL_AUTHORIZATION_FAILED'],['tool.execute','TOOL_STALE_TURN']] as const){const host=new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE',{runnerDiagnostic:{stage,reasonCode}}));expect(eligibleGenerationFailure(host)).toBe(false);}
+ });
+ it('refuses actual tool HTTP authentication errors even if wrapped as unavailable',()=>{expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE',true,hostDiagnostic('mcp.tool_call','MCP_HTTP_FORBIDDEN',{statusCode:403})))).toBe(false);});
+ it('derives authority from the real recovery when optional conversation links are absent',async()=>{const f=fixture();f.row.shopId=null as never;f.row.customerId=null as never;expect(await f.service.prepare(f.input)).not.toBeNull();});
+ it('does not classify arbitrary errors or missing diagnostic as generation',()=>{expect(eligibleGenerationFailure(Error('no'))).toBe(false);expect(eligibleGenerationFailure(new CommerceHostError('UNAVAILABLE'))).toBe(false);});
+ it('has complete application copy for twenty locales',()=>{expect(Object.keys(FAILURE_COPY)).toHaveLength(20);for(const copy of Object.values(FAILURE_COPY))expect(copy.every(text=>text.length>0)).toBe(true);});
+ it('renders snapshot quantities only through the same saved common and text media fallback',async()=>{
+  vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=fixture(),fallback=await f.service.prepare(f.input);
+  expect(fallback!.replyText).toContain('Saved basket snapshot\n2 × Saved board');expect(fallback!.replyText).not.toMatch(/12345|999/);
+  const wrapper=new ConversationWrapperService({repository:f.wrappers as never,logoResolver:async()=>null});
+  const composed=await composeAiOutbound(wrapper,{conversationId:'conversation',messageId:'message',generatedResponse:fallback!.replyText,mediaDeadlineAt:Date.now()+15000});
+  expect(composed.kind).toBe('ready');if(composed.kind!=='ready')return;
+  expect(composed.commonLayout!.commonRef).toEqual(fallback!.commonRef);expect(composed.text.endsWith('https://shop.example/checkouts/current')).toBe(true);expect(composed.multipartPlan!.parts).toHaveLength(1);expect(composed.multipartPlan!.parts[0]!.plan.kind).toBe('TEXT');
+ });
+ it.each([null,[],[{title:'bad\u0000',quantity:1}],[{title:'Good',quantity:1},{title:'bad',quantity:0}]])('uses inability only for absent/unsafe basket %j',async items=>{const f=fixture();f.row.checkoutRecovery.lineItems=items as never;const result=await f.service.prepare(f.input);expect(result!.replyText).toBe(FAILURE_COPY.en[0]);});
+ it.each(['shop','customer','recovery','completed','context','common','deadline'])('fails closed on missing authority %s',async kind=>{const f=fixture();if(kind==='shop')f.row.shopId='foreign';if(kind==='customer')f.row.checkoutRecovery.customerId='foreign';if(kind==='recovery')f.row.checkoutRecovery.id='foreign';if(kind==='completed')f.row.checkoutRecovery.status='COMPLETED';if(kind==='context')f.context.checkoutAvailable=false;if(kind==='common')f.wrappers.loadSlots.mockResolvedValue([]);if(kind==='deadline')f.input.deadlineAt=5999;expect(await f.service.prepare(f.input)).toBeNull();});
+ it.each([NaN,Infinity,-Infinity])('refuses nonfinite deadline %s',async deadlineAt=>{const f=fixture();expect(await f.service.prepare({...f.input,deadlineAt})).toBeNull();});
+ it('summarizes whole saved entries with honest omitted count, never slices long titles',()=>{const title='x'.repeat(150),items=Array.from({length:15},()=>({title,quantity:1}));const result=formatWholeCheckoutItemsSummary(items,'en')!;expect(result).toContain(title);expect(result).toContain('+13');expect(result).not.toContain('…');expect(Array.from(result).length).toBeLessThanOrEqual(400);});
+ it('distinguishes own child timeout from parent cancellation and denies',async()=>{const pending=withGenerationBudget(Date.now()+20,signal=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(new CommerceHostError('CANCELLED',false,hostDiagnostic('host.lifecycle','HOST_CANCELLED'))))));const assertion=expect(pending).rejects.toBeInstanceOf(GenerationBudgetTimeout);await assertion;},1000);
+ it('does not convert independent cancellation or denied host outcomes',async()=>{for(const code of ['CANCELLED','DENIED']){const failure=new CommerceHostError(code,false,hostDiagnostic('host.lifecycle','HOST_CANCELLED'));await expect(withGenerationBudget(Date.now()+1000,async()=>{throw failure;})).rejects.toBe(failure);}});
+});
+
+describe('actual processor generation recovery path',()=>{
+ function harness(){
+  const f=fixture();let clock=Date.now();const original=clock;
+  const conversation={getTurnState:vi.fn(async()=>({inboundVersion:1,lastProcessedVersion:0,lastInboundAt:new Date(original-30000),pendingTurnStartedAt:new Date(original-30000),processingInboundVersion:null,processingStartedAt:null,pendingAiControlRevision:2})),claimTurn:vi.fn(async()=>true),completeTurn:vi.fn(async()=>true),releaseTurn:vi.fn(),suppressStaleTurn:vi.fn(),hasChanged:vi.fn(async()=>false),applyDetectedLanguage:vi.fn()};
+  conversation.claimTurn.mockImplementation(async()=>{conversation.getTurnState.mockResolvedValue({inboundVersion:1,lastProcessedVersion:0,lastInboundAt:new Date(original-30000),pendingTurnStartedAt:new Date(original-30000),processingInboundVersion:1,processingStartedAt:new Date(original),pendingAiControlRevision:2} as never);return true;});
+  const admitted={kind:'admitted' as const,shopId:'shop',conversationId:'conversation',messageId:'message',terminal:false};
+  const admission={reserve:vi.fn(async()=>admitted),sendPreparedText:vi.fn(async()=>admitted),sendPreparedConversation:vi.fn(async()=>admitted),failPrepared:vi.fn()};
+  const runAgent=vi.fn(async(_context:unknown,_options?:{deadlineAt:number}):Promise<never>=>{throw new CommerceHostError('INVALID_FINAL',false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE'));});
+  const getResult=vi.fn(()=>{throw Error('fallback must not use model-result extraction');});
+  const prepareFailureFallback=vi.fn(async()=>({replyText:FAILURE_COPY.en[0],commonRef:(await f.service.prepare(f.input))!.commonRef}));
+  const wrapper=new ConversationWrapperService({repository:f.wrappers as never,logoResolver:async()=>null});
+  const records:unknown[]=[];const logger=createLogger({serviceName:'fallback-test',environment:'test',sink:record=>{records.push(record);}});
+  const processor=new ConversationTurnProcessor({logger,conversation,admission,runAgent,getResult,prepareFailureFallback,aiWrapper:wrapper,queue:{add:vi.fn()},abuseAdmission:{admitSettledTurn:async()=>({kind:'allowed'})},loadTurn:async()=>({shopId:'shop',to:'447400123456',customerPhone:'447400123456',conversationType:'RECOVERY',checkoutRecoveryId:'recovery',hasReplyContext:true,context:{},languageMessage:'Question'}),now:()=>new Date(clock),runtimeConfig:{current:()=>({conversationQuietWindowMs:0,conversationMaxSettleWindowMs:0})} as never});
+  return {f,processor,conversation,admission,runAgent,getResult,prepareFailureFallback,records,original,setClock:(value:number)=>{clock=value;}};
+ }
+ it('keeps one admitted identity, exact common and footer and skips model success writes',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=harness();await f.processor.process({conversationId:'conversation',observedVersion:1});expect(f.admission.reserve).toHaveBeenCalledOnce();expect(f.admission.sendPreparedConversation).toHaveBeenCalledOnce();expect(f.admission.sendPreparedConversation.mock.calls[0]![0]).toMatchObject({messageId:'message',text:expect.stringContaining(FAILURE_COPY.en[0])});expect(f.getResult).not.toHaveBeenCalled();expect(f.conversation.applyDetectedLanguage).not.toHaveBeenCalled();expect(f.admission.failPrepared).not.toHaveBeenCalled();});
+ it('reserves fallback time before the original claim expires',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=harness();f.runAgent.mockImplementation(async(_context,options)=>{expect(options!.deadlineAt).toBe(f.original+105000);f.setClock(options!.deadlineAt);throw new GenerationBudgetTimeout();});await f.processor.process({conversationId:'conversation',observedVersion:1});expect(f.admission.sendPreparedConversation).toHaveBeenCalledOnce();expect(f.prepareFailureFallback).toHaveBeenCalledWith(expect.objectContaining({deadlineAt:f.original+120000}));});
+ it('does not recover expired claims, independent cancellation or denied generation',async()=>{for(const mode of ['expired','cancelled','denied','stale','lease-lost']){const f=harness();f.runAgent.mockImplementation(async()=>{if(mode==='expired')f.setClock(f.original+120000);if(mode==='stale')f.conversation.hasChanged.mockResolvedValue(true);if(mode==='lease-lost')f.conversation.getTurnState.mockResolvedValue({processingInboundVersion:1,processingStartedAt:new Date(f.original+1)} as never);throw mode==='expired'||mode==='stale'||mode==='lease-lost'?new GenerationBudgetTimeout():new CommerceHostError(mode==='denied'?'DENIED':'CANCELLED',false,hostDiagnostic('host.lifecycle','HOST_CANCELLED'));});await f.processor.process({conversationId:'conversation',observedVersion:1}).catch(()=>{});expect(f.admission.sendPreparedConversation).not.toHaveBeenCalled();expect(f.prepareFailureFallback).not.toHaveBeenCalled();expect(f.admission.failPrepared).toHaveBeenCalled();}});
+ it('projects original typed generation diagnostics without arbitrary names/messages/source payloads',async()=>{vi.stubEnv('RECOVERY_COMPOSITE_REPLY_ENABLED','true');const f=harness(),error=new CommerceHostError('INVALID_FINAL',false,hostDiagnostic('host.runner_result','HOST_RUNNER_FAILURE'),Error('PRIVATE_MODEL_PAYLOAD'));error.name='PRIVATE_MODEL_NAME';f.runAgent.mockRejectedValue(error);await f.processor.process({conversationId:'conversation',observedVersion:1});const logs=JSON.stringify(f.records);expect(logs).toContain('INVALID_FINAL');expect(logs).toContain('whatsapp.turn.agent_generation_failed');expect(logs).not.toMatch(/PRIVATE_MODEL_/);});
+ it('records failed fallback preparation without exposing its error contents or claiming agent success',async()=>{const f=harness();const failure=Error('PRIVATE_CHECKOUT_CANARY');failure.name='PRIVATE_ERROR_NAME_CANARY';f.prepareFailureFallback.mockRejectedValue(failure);await f.processor.process({conversationId:'conversation',observedVersion:1});const logs=JSON.stringify(f.records);expect(logs).toContain('whatsapp.turn.fallback_preparation_failed');expect(logs).not.toContain('PRIVATE_CHECKOUT_CANARY');expect(logs).not.toContain('PRIVATE_ERROR_NAME_CANARY');expect(logs).not.toContain('whatsapp.turn.agent_completed');expect(f.admission.failPrepared).toHaveBeenCalled();expect(f.admission.sendPreparedConversation).not.toHaveBeenCalled();});
+ it('refuses template changes after snapshot without sending raw fallback',async()=>{const f=harness();f.prepareFailureFallback.mockImplementation(async()=>{const prepared=await f.f.service.prepare(f.f.input);f.f.wrappers.loadSlots.mockResolvedValue([]);return {replyText:FAILURE_COPY.en[0],commonRef:prepared!.commonRef};});await f.processor.process({conversationId:'conversation',observedVersion:1});expect(f.admission.sendPreparedConversation).not.toHaveBeenCalled();expect(f.admission.sendPreparedText).not.toHaveBeenCalled();});
+});

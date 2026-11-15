@@ -1,3 +1,6 @@
+import { readRecoveryDispatchSender } from "../recovery-sender-pool/dispatch-sender.js";
+import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
+import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { freezeCommonText } from "../conversation-delivery-plan.js";
 import { selectedCommonLayout } from "../recovery-multipart/composition.js";
 import { commonLayoutVariables,renderCommonLayoutBoundaries,commonLayoutBody,type RecoveryLayoutReceipt } from "../recovery-multipart/common-layout.js";
@@ -201,7 +204,7 @@ export class OutboundMessageDeliveryService {
       // never recompose a prepared group or acquire a newer ownership snapshot.
       if(await this.hasCompletedPreparation(messageId))return {kind:"admitted",shopId,messageId,conversationId,terminal,executionScope,deliveryState:"pending"};
       const suppression=await this.revalidateBeforeProvider({kind:"admitted",shopId,messageId,conversationId,terminal,executionScope});if(suppression)return suppression;
-      const source=prepareFrozenCommonReply({preparation:{plan:multipartPlan,policyRef:brandMediaPolicy??null,receipt:messageBrandReceipt(presentationReceipt!),...(compositeReceipt?{compositeReceipt}:{})},common,messageId,recoveryId:owner.recoveryId,recipient:to,sender:await this.provider.resolveSender(),command:null,now:new Date(),...(productContextUpdate?{productContextUpdate}:{})});
+      const source=prepareFrozenCommonReply({preparation:{plan:multipartPlan,policyRef:brandMediaPolicy??null,receipt:messageBrandReceipt(presentationReceipt!),...(compositeReceipt?{compositeReceipt}:{})},common,messageId,recoveryId:owner.recoveryId,recipient:to,sender:await readRecoveryDispatchSender(conversationId,to),command:null,now:new Date(),...(productContextUpdate?{productContextUpdate}:{})});
       if(!(await this.prepareUnadmittedContent(messageId,text,undefined,{shopId,conversationId})))return {kind:"suppressed",reason:"duplicate"};
       await engine.freeze(source);
       if(!(await this.approvePreparedOutbound({shopId,conversationId,messageId,outboundText:text})))return {kind:"suppressed",reason:"conversation-invalid"};
@@ -282,13 +285,13 @@ export class OutboundMessageDeliveryService {
       ...(expectedControlRevision === undefined ? {} : { expectedControlRevision }),
       ...(expectedInboundVersion === undefined ? {} : { expectedInboundVersion }),
     });
-    if (fenced) return fenced;
+    if (fenced.kind === "suppressed") return fenced;
 
     let result: {providerMessageId: string; providerStatus?: string};
     try {
       result = plan && plan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to, link: plan.image.publicUrl,
-        caption: plan.body, ...(replyToProviderMessageId ? {replyToProviderMessageId} : {})}) : await this.provider.sendWhatsAppText({
-        to,
+        caption: plan.body, expectedSender: fenced.sender, ...(replyToProviderMessageId ? {replyToProviderMessageId} : {})}) : await this.provider.sendWhatsAppText({
+        to, expectedSender: fenced.sender,
         text: outboundText,
         ...(previewUrl !== undefined ? { previewUrl } : {}),
         ...(replyToProviderMessageId
@@ -459,6 +462,7 @@ export class OutboundMessageDeliveryService {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
+    let dispatchSender: WhatsAppSenderIdentity;
     if (wooScope) {
       // BG001 compilation already established immutable Marketing purpose.
       // The *actual* registration approval and latest Meta observation are
@@ -482,6 +486,7 @@ export class OutboundMessageDeliveryService {
           ? permit.reason as "TEMPLATE_REGISTRATION_UNAVAILABLE" | "TEMPLATE_PROVIDER_STATUS_UNRESOLVED" | "TEMPLATE_PROVIDER_STATUS_STALE"
           : "conversation-invalid" };
       }
+      dispatchSender = permit.sender;
     } else {
       const fenced = await this.fenceProviderSend({
         shopId: admission.shopId, conversationId: admission.conversationId,
@@ -502,14 +507,15 @@ export class OutboundMessageDeliveryService {
           ...(input.templateRegistration?.commonLayout?{parameters:{header:input.textHeader?[input.textHeader]:[],body:input.bodyParameters??[]}}:{}),
           ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
       });
-      if (fenced) return fenced;
+      if (fenced.kind === "suppressed") return fenced;
+      dispatchSender = fenced.sender;
     }
 
     let result: {providerMessageId: string; providerStatus?: string};
     try {
       result = prepared
-        ? await this.provider.sendWhatsAppTemplate(prepared.providerInput)
-        : noticePlan && noticePlan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to: input.to, link: noticePlan.image.publicUrl, caption: outboundText}) : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText });
+        ? await this.provider.sendWhatsAppTemplate({...prepared.providerInput, expectedSender: dispatchSender!})
+        : noticePlan && noticePlan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to: input.to, link: noticePlan.image.publicUrl, caption: outboundText, expectedSender: dispatchSender!}) : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText, expectedSender: dispatchSender! });
     } catch (error) {
       if (initial) deliveryLogger.error("outbound.initial.send.failed", {
         ...identity, stage: "provider_http", sourceError: initialOutreachDiagnostic(error),
@@ -649,7 +655,7 @@ export class OutboundMessageDeliveryService {
     deliveryKind: "TEXT" | "IMAGE" | "TEMPLATE";
     brandMediaPolicy?: import("../conversation-brand-media.js").BrandMediaPolicyRef; deliveryPlan?: ConversationMediaDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
     initialOutreach?: NonNullable<DispatchInput["initialOutreach"]> & { recoveryId: string };
-  }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | null> {
+  }): Promise<Extract<OutboundAdmissionResult, { kind: "suppressed" }> | {kind: "sender"; sender: WhatsAppSenderIdentity}> {
     const ownership = await this.ownership.readTurnOwnership(input.conversationId);
     if (input.initialOutreach && ownership?.recoveryId !== input.initialOutreach.recoveryId)
       return { kind: "suppressed", reason: "conversation-invalid" };
@@ -672,7 +678,7 @@ export class OutboundMessageDeliveryService {
         ...(input.deliveryPlan ? {deliveryPlan: input.deliveryPlan, presentationReceipt: input.presentationReceipt, expectedControlRevision: input.expectedControlRevision} : {}),
         ...(input.expectedInboundVersion === undefined ? {} : { expectedInboundVersion: input.expectedInboundVersion }),
       });
-      if (permit.kind === "admitted") return null;
+      if (permit.kind === "admitted") return {kind: "sender", sender: permit.sender};
       if (permit.reason === "already-admitted-or-sent")
         return { kind: "suppressed", reason: "duplicate" };
       await this.failPrepared(input.messageId);
@@ -724,7 +730,8 @@ export class OutboundMessageDeliveryService {
       ...(input.deliveryPlan ? {deliveryPlan: input.deliveryPlan, presentationReceipt: input.presentationReceipt, expectedContent: input.expectedContent} : {}),
       ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
     });
-    if (permit.kind === "admitted") return null;
+    if (permit.kind === "admitted") return {kind: "sender", sender: permit.sender};
+    if(permit.reason === "allowance-capacity-reopened")return {kind:"suppressed",reason:"allowance-capacity-reopened"};
     if (permit.reason !== "already-admitted-or-sent") {
       await this.failPrepared(input.messageId);
     }
@@ -764,14 +771,14 @@ export class OutboundMessageDeliveryService {
     providerMessageId: string,
   ): Promise<void> {
     const receivedAt = new Date();
-    await this.database.$transaction(async (transaction) => {
+    const allowanceBlockId = await this.database.$transaction(async (transaction) => {
       // Lock the parent first, matching the final permit transaction.
       // A failed receipt update rolls back the parent timestamp as well.
       await transaction.conversation.update({
         where: { id: conversationId },
         data: { lastMessageAt: receivedAt },
       });
-      await transaction.conversationMessage.update({
+      const sent=await transaction.conversationMessage.update({
         where: {
           id: messageId,
           AND: {
@@ -791,7 +798,9 @@ export class OutboundMessageDeliveryService {
         },
         data: { providerMessageId, status: MessageStatus.SENT, sentAt: receivedAt },
       });
+      return sent.allowanceBlockId;
     });
+    if(allowanceBlockId)await recoveryAllowanceService.reconcileConversation(conversationId);
   }
 }
 

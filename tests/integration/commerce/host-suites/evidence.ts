@@ -129,7 +129,14 @@ it.each(["unknown", "expired"])(
         renderedText: "expired evidence",
       };
     }
+    let modelCalls = 0;
+    const originalFinal = { calls: [{ id: "raw-evidence-final", name: "recovery_complete_answer", arguments: {
+      replyText: f.exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null, evidenceIds: [evidenceId],
+    } }], outputTokens: 1 };
+    const originalSnapshot = structuredClone(originalFinal);
     const result = await f.run(async () => {
+      modelCalls++;
+      if (modelCalls > (kind === "expired" ? 3 : 2)) throw new Error("Referral rewrite must be terminal; never re-present modified provider arguments");
       if (kind === "expired" && step++ === 0)
         return {
           calls: [
@@ -140,12 +147,11 @@ it.each(["unknown", "expired"])(
           ],
           outputTokens: 10,
         };
-      return f.final({
-        answerKind: "ANSWER",
-        referralReason: null,
-        evidenceIds: [evidenceId],
-      });
+      if (modelCalls === (kind === "expired" ? 2 : 1)) return f.final({ replyText: 42, evidenceIds: [] });
+      return originalFinal;
     });
+    expect(modelCalls).toBe(kind === "expired" ? 3 : 2);
+    expect(originalFinal).toEqual(originalSnapshot);
     expect(result).toMatchObject({
       answerKind: "REFER_TO_STORE",
       referralReason: "UNVERIFIABLE_FACTS",
@@ -168,3 +174,23 @@ it("still rejects a structurally malformed final envelope", async () => {
 });
   });
 }
+
+
+it("preserves invalid original provider arguments through native schema repair without evidence rewriting", async () => {
+  const original = f.final({ replyText: 42, evidenceIds: ["f".repeat(64)] });
+  const snapshot = structuredClone(original);
+  let calls = 0;
+  await f.run(async request => {
+    calls++;
+    if (calls === 1) return original;
+    expect(calls).toBe(2);
+    expect(request.requiredToolName).toBeUndefined(); expect(request.requireToolCall).toBe(true);
+    const assistant = request.toolTranscript?.find(row => row.role === "assistant");
+    expect(assistant && assistant.role === "assistant" ? assistant.calls[0]?.arguments : null).toEqual(snapshot.calls[0]!.arguments);
+    return { calls: [{ id: "corrected-final", name: "recovery_complete_referral", arguments: {
+      replyText: f.exampleFinal.replyText, detectedLanguageTag: null, detectedLanguageConfidence: null,
+      referralReason: "UNVERIFIABLE_FACTS",
+    } }], outputTokens: 1 };
+  });
+  expect(calls).toBe(2); expect(original).toEqual(snapshot);
+});

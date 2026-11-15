@@ -1,3 +1,4 @@
+import { readRecoveryDispatchSender } from "../recovery-sender-pool/dispatch-sender.js";
 import { prepareFrozenCommonReply } from "../recovery-multipart/preparation.js";
 import { humanMultipartMessageId } from "../recovery-multipart/frozen.js";
 import type { RecoveryMultipartDeliveryEngine } from "../recovery-multipart/engine.js";
@@ -323,7 +324,7 @@ export class HumanCommandDispatcherService {
       const engine=this.deps.multipart ?? (await import("../recovery-multipart/runtime.js")).recoveryMultipartEngine;
       let outcome=await engine.continue(humanMultipartMessageId(commandId));
       if(outcome==="absent" && commonPreparation && commonReceipt && engine.freeze){
-        const source=prepareFrozenCommonReply({preparation:commonPreparation,common:commonReceipt,messageId:humanMultipartMessageId(commandId),recoveryId:context.recoveryId,recipient:command.recipientSnapshot,sender:await (this.deps.senderIdentity??(()=>whatsAppService.resolveSender()))(),command:{id:commandId,leaseToken},now:this.deps.now()});
+        const source=prepareFrozenCommonReply({preparation:commonPreparation,common:commonReceipt,messageId:humanMultipartMessageId(commandId),recoveryId:context.recoveryId,recipient:command.recipientSnapshot,sender:await (this.deps.senderIdentity??(()=>readRecoveryDispatchSender(command.conversationId,command.recipientSnapshot)))(),command:{id:commandId,leaseToken},now:this.deps.now()});
         await engine.freeze(source);outcome=await engine.continue(source.messageId);
       }
       if(outcome==="absent")await this.deps.commands.deferCommand(commandId,leaseToken,"multipart_root_not_prepared",new Date(this.deps.now().getTime()+5_000));
@@ -457,12 +458,12 @@ export class HumanCommandDispatcherService {
     // crashes before receiving an HTTP reply. Reconciliation owns UNKNOWN.
     try {
       const response = command.kind === "HUMAN_TEXT"
-        ? permit.deliveryPlan?.kind === "BRAND_IMAGE" ? await this.deps.provider.sendWhatsAppImage!({to: command.recipientSnapshot, link: permit.deliveryPlan.image.publicUrl, caption: permit.messageContent!}) : await this.deps.provider.sendWhatsAppText({
-            to: command.recipientSnapshot, text: permit.messageContent!,
+        ? permit.deliveryPlan?.kind === "BRAND_IMAGE" ? await this.deps.provider.sendWhatsAppImage!({to: command.recipientSnapshot, link: permit.deliveryPlan.image.publicUrl, caption: permit.messageContent!, expectedSender: permit.sender}) : await this.deps.provider.sendWhatsAppText({
+            to: command.recipientSnapshot, text: permit.messageContent!, expectedSender: permit.sender,
           })
         : await this.deps.provider.sendWhatsAppTemplate({
             to: command.recipientSnapshot,
-            ...preparedSend!,
+            ...preparedSend!, expectedSender: permit.sender,
           });
       const recorded = await this.deps.reconciliation.recordProviderAccepted({
         commandId, leaseToken, providerMessageId: response.providerMessageId, providerVerified: true,

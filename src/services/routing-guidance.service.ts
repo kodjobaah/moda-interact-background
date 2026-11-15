@@ -1,3 +1,4 @@
+import { checkDispatchSender, readDispatchSenderSnapshot, type DispatchSenderSnapshot } from "./recovery-sender-pool/dispatch-sender.js";
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
@@ -150,8 +151,10 @@ export async function sendRoutingGuidance(
   }
 
   let sender: Awaited<ReturnType<typeof provider.resolveSender>>;
+  let senderSnapshot: DispatchSenderSnapshot;
   try {
     sender = await provider.resolveSender();
+    senderSnapshot = await readDispatchSenderSnapshot();
   } catch (error) {
     logFailure(log, event, "sender-resolution", "PROVIDER_SEND_FAILED", error);
     return { kind: "failed", reason: "PROVIDER_SEND_FAILED" };
@@ -186,6 +189,8 @@ export async function sendRoutingGuidance(
     // There is no merchant conversation/Shop to use as a final fence. A short
     // PostgreSQL transaction acquires the same canonical recipient lock as STOP.
     admitted = await database.$transaction(async (tx) => {
+      const permittedSender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: "", recipient: event.customerPhone, recovery: false, expectedSender: sender});
+      if (!permittedSender) return false;
       await lockWhatsAppStopRecipient(tx, canonical);
       return !(await hasLocalNoContact(tx, { recipient: event.customerPhone }));
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
@@ -200,7 +205,7 @@ export async function sendRoutingGuidance(
 
   try {
     await provider.sendWhatsAppText(
-      { to: event.customerPhone, text: routingGuidanceText[reason] },
+      { to: event.customerPhone, text: routingGuidanceText[reason], expectedSender: sender },
       AbortSignal.timeout(10_000),
     );
     return { kind: "sent" };

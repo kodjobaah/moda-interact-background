@@ -13,6 +13,7 @@
     "test:arch035-woo-order-capture:unit": "vitest run tests/unit/events/woo-order-capture.test.ts tests/unit/workers/woo-order-capture.worker.test.ts tests/unit/runtime/entrypoint-isolation.test.ts",
     "test:arch035-woo-order-capture:redis": "node scripts/test-integration.mjs tests/integration/woo-order-capture.integration.test.ts",
     "test:integration": "node scripts/test-integration.mjs",
+    "test:arch076-allowance:postgres": "node scripts/test-integration.mjs tests/integration/arch076-allowance-renewal.integration.test.ts",
     "test:commerce-recommendations": "vitest run tests/unit/commerce/recommendations tests/unit/commerce/host-diagnostics.test.ts tests/unit/commerce/mcp-client.test.ts tests/unit/commerce/evidence.test.ts tests/unit/agents/initial-outreach-offer.eligibility.test.ts tests/unit/agents/initial-outreach-offer.combinations.test.ts tests/unit/agents/initial-outreach-offer.agent.test.ts tests/unit/agents/initial-outreach-offer.graph.test.ts tests/unit/services/recovery-offers/current-outreach-offer-revalidation.service.test.ts tests/unit/services/recovery-template-integration/automated-recovery-template.service.test.ts",
     "test:commerce-host": "vitest run --config vitest.commerce-host.config.ts",
     "test:arch036-woo-coupon-catalogue:postgres": "node scripts/test-integration.mjs tests/integration/woo-coupon-catalogue-reconciliation.integration.test.ts",
@@ -53,7 +54,10 @@
     "test:arch040-moderation:postgres": "node scripts/test-integration.mjs tests/integration/conversation-moderation.integration.test.ts",
     "meta:sample:provision": "node dist-cli/scripts/provision-meta-template-sample.js",
     "test:meta-sample:artifact": "node scripts/smoke-meta-template-sample.mjs",
-    "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs"
+    "test:arch066-product-context:postgres": "node scripts/test-arch066-product-context-postgres.mjs",
+    "test:arch076-sender-dispatch:postgres": "node scripts/test-integration.mjs tests/integration/arch076-dispatch-sender.integration.test.ts",
+    "test:arch076-sender-pool:postgres": "node scripts/test-integration.mjs tests/integration/arch076-sender-pool.integration.test.ts",
+    "test:arch076-inbound-routing:postgres": "node scripts/test-integration.mjs tests/integration/arch076-inbound-routing.integration.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -62,7 +66,7 @@
     "@ai-sdk/openai": "^4.0.46",
     "@aws-sdk/client-s3": "^3.1143.0",
     "@langchain/langgraph": "1.4.15",
-    "@modainteract/moda-interact-shared": "6.0.1",
+    "@modainteract/moda-interact-shared": "6.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
     "@prisma/client": "^6.19.3",

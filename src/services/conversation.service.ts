@@ -1,3 +1,6 @@
+import { persistVerifiedInbound } from "./recovery-sender-pool/inbound-writer.js";
+import { lockInboundProviderIdentity, assertNoRoutingTurn, type InboundOwnerEvidence } from "./recovery-sender-pool/inbound-authority.js";
+import type { WhatsAppInboundEvent } from "../integration/whatsapp/types.js";
 import prisma from "../lib/db.js";
 import { allowedHistoryCandidates } from "./conversation-moderation/moderation-history.js";
 
@@ -74,6 +77,8 @@ export interface ResolvedIncomingMessage {
   occurredAt: Date;
 
   explicitLanguageTag?: string | null;
+  senderEvidence?: InboundOwnerEvidence;
+  routeMode?: "active"|"historical";
 }
 
 export interface ConversationTurnState {
@@ -139,6 +144,12 @@ export class ConversationService {
     version: number;
     duplicate: boolean;
   }> {
+    if(message.senderEvidence){
+      const e=message.senderEvidence;
+      const event:WhatsAppInboundEvent={schemaVersion:1,provider:'whatsapp',providerAccountId:e.providerAccountId,providerPhoneNumberId:e.providerPhoneNumberId,providerMessageId:message.providerMessageId,customerPhone:e.canonicalRecipient,contextMessageId:message.inReplyToProviderId,occurredAt:message.occurredAt.toISOString(),content:{type:'text',text:message.content}};
+      const saved=await persistVerifiedInbound(prisma,event,e,message.routeMode??'active');
+      return {conversationId:message.conversationId,version:saved.version,duplicate:saved.duplicate};
+    }
     const receivedAt = new Date();
     const occurredAt = message.occurredAt ?? receivedAt;
     /*
@@ -207,6 +218,8 @@ export class ConversationService {
      * conversation version together.
      */
     const result = await prisma.$transaction(async (tx) => {
+        await lockInboundProviderIdentity(tx,message.providerMessageId);
+        await assertNoRoutingTurn(tx,message.providerMessageId);
         const recorded = await recordProcessableInbound(
           tx,
           message.conversationId,
