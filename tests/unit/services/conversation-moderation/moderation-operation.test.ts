@@ -39,6 +39,7 @@ describe("ARCH-040 moderation ARCH-043 configuration admission", () => {
   });
   it("rejects an old-model ALLOW after the configured moderation model changes", async () => {
     const db = {
+      recoveryBasketRoutingTurn: { findMany: vi.fn().mockResolvedValue([]) },
       conversationMessage: { findUnique: vi.fn().mockResolvedValue({
         conversationId: "conversation", direction: "INBOUND", senderType: "CUSTOMER",
         content: "hello", contentType: "TEXT", transcriptionStatus: "NOT_REQUIRED",

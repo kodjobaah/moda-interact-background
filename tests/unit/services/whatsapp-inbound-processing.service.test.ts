@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   route: vi.fn(),
   current: vi.fn(),
   guidance: vi.fn(),
+  routingAccept: vi.fn(),
+  receivingScope: vi.fn(),
   activity: vi.fn(),
   audioReserve: vi.fn(),
   audioProcess: vi.fn(),
@@ -24,6 +26,7 @@ vi.mock("../../../src/lib/db.js", () => ({ default: { conversationMessage: { upd
 vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({ whatsAppContactOptOutService: { handleInbound: h.optOut } }));
 vi.mock("../../../src/services/inbound-whatsapp-abuse-admission.service.js", () => ({ inboundWhatsAppAbuseAdmissionService: { admitRaw: h.abuse } }));
 vi.mock("../../../src/services/recovery-routing.service.js", () => ({ recoveryRoutingService: { resolveInboundMessage: h.route, isCurrentActiveRoute: h.current } }));
+vi.mock("../../../src/services/recovery-sender-pool/routing-runtime.js", () => ({ routingRuntime: { accept: h.routingAccept, receivingScope: h.receivingScope } }));
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: h.guidance }));
 vi.mock("../../../src/services/checkout-recovery.service.js", () => ({ checkoutRecoveryService: { recordExternalActivity: h.activity } }));
 vi.mock("../../../src/services/inbound-whatsapp-audio.service.js", () => ({ inboundWhatsAppAudioService: { reserve: h.audioReserve, process: h.audioProcess } }));
@@ -67,6 +70,8 @@ beforeEach(() => {
   h.route.mockResolvedValue(activeRoute);
   h.current.mockResolvedValue(true);
   h.guidance.mockResolvedValue({ kind: "sent" });
+  h.routingAccept.mockResolvedValue({ kind: "held" });
+  h.receivingScope.mockResolvedValue(null);
   h.activity.mockResolvedValue(undefined);
   h.audioReserve.mockResolvedValue({ conversationId: activeRoute.conversationId });
   h.audioProcess.mockResolvedValue({ kind: "completed" });
@@ -81,6 +86,28 @@ beforeEach(() => {
 });
 
 describe("processRoutedInboundMessage generation safety", () => {
+  it("hands unresolved pooled input to the durable router without merchant effects", async () => {
+    const scope = { threadId: "thread", routeId: "route", canonicalRecipient: "447700900123", providerAccountId: "account", providerPhoneNumberId: "sender" };
+    h.route.mockResolvedValue({ kind: "routing", scope });
+    const enqueue = vi.fn();
+    await processRoutedInboundMessage(event, {}, logger, enqueue);
+    expect(h.routingAccept).toHaveBeenCalledWith(event, scope, enqueue);
+    expect(h.guidance).not.toHaveBeenCalled();
+    expect(h.receive).not.toHaveBeenCalled();
+    expect(h.activity).not.toHaveBeenCalled();
+  });
+
+  it("uses durable neutral routing for pooled guidance instead of the legacy sender", async () => {
+    const scope = { threadId: "thread", routeId: null, canonicalRecipient: "447700900123", providerAccountId: "account", providerPhoneNumberId: "sender" };
+    h.route.mockResolvedValue({ kind: "guidance", reason: "ambiguous" });
+    h.receivingScope.mockResolvedValue(scope);
+    const enqueue = vi.fn();
+    await processRoutedInboundMessage(event, {}, logger, enqueue);
+    expect(h.routingAccept).toHaveBeenCalledWith(event, scope, enqueue);
+    expect(h.guidance).not.toHaveBeenCalled();
+    expect(h.receive).not.toHaveBeenCalled();
+  });
+
   it("persists a historical text reply without activity or a turn", async () => {
     h.route.mockResolvedValue(historicalRoute);
     const enqueue = vi.fn();
@@ -183,6 +210,8 @@ describe("processRoutedInboundMessage generation safety", () => {
   it("logs guidance as sent only after confirmed delivery and never downloads ambiguous audio", async () => {
     h.route.mockResolvedValue({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
     h.guidance.mockResolvedValue({ kind: "sent" });
+  h.routingAccept.mockResolvedValue({ kind: "held" });
+  h.receivingScope.mockResolvedValue(null);
     const enqueue = vi.fn();
     await processRoutedInboundMessage({
       ...event,

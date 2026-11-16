@@ -30,6 +30,10 @@ const hoisted = vi.hoisted(() => {
           ...create,
         })),
       },
+      // This history-ordering fixture has no resolved routing associations.
+      recoveryBasketRoutingTurn: {
+        findMany: vi.fn(async () => []),
+      },
       conversationMessage: {
         findMany: vi.fn(),
         create: vi.fn(),
@@ -682,6 +686,9 @@ describe("CheckoutRecoveryService.getAgentContext turn ordering", () => {
     expect(context.conversation.messages).toEqual([
       { role: "user", content: "second" },
     ]);
+    expect(prismaMock.recoveryBasketRoutingTurn.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { selectedConversationId: "conversation-1", state: "RESOLVED" } }),
+    );
     expect(context.conversation.history).toContainEqual({role:"user",content:"first"});
     expect(prismaMock.conversationMessage.findMany.mock.calls.at(-2)?.[0]).toMatchObject({orderBy:[{createdAt:"asc"},{id:"asc"}]});
   });

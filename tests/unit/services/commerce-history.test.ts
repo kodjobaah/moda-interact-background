@@ -1,3 +1,7 @@
+vi.mock("../../../src/services/recovery-sender-pool/routing-projection.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../src/services/recovery-sender-pool/routing-projection.js")>(),
+  readRoutingHistoryProjection: vi.fn(async () => ({ bindings: [], excludedMessageIds: [] })),
+}));
 import { expect, it, vi } from "vitest";
 const findMany = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 vi.mock("../../../src/lib/db.js", () => ({ default: {conversationMessage:{findMany}} }));
@@ -71,4 +75,14 @@ it("includes stable same-timestamp merchant and audio predecessors in the bounde
  const selection=priorCommerceHistorySelection('c',at,{id:'latest',createdAt:at});
  expect((selection.where.AND as any[])[1].OR).toContainEqual({contentType:{not:'AUDIO'},createdAt:at,id:{lt:'latest'}});
  expect(selection.take).toBe(20);
+});
+
+it("keeps a resolved original and exact additional clause as one current objective", () => {
+ const at = new Date(5000);
+ const result = boundHistory([], [
+  {...row('original','Can it arrive Friday?'),createdAt:at,routingObjectiveGroup:'selection',routingObjectiveOrder:0},
+  {...row('clause','Can I collect on Saturday?'),createdAt:at,routingObjectiveGroup:'selection',routingObjectiveOrder:1},
+ ]);
+ expect(result.currentMessages).toEqual([{role:'user',content:'Can it arrive Friday?'},{role:'user',content:'Can I collect on Saturday?'}]);
+ expect(result.history).toEqual([]);
 });

@@ -1,0 +1,19 @@
+# Configured checkout-routing runtime
+
+The saved `recovery.routingAgent` policy and published `ROUTER` wrapper are independent of the normal Commerce model/prompt and shop message wrapper. A missing, disabled, stale or invalid snapshot holds the routing request. No model, confidence, retry or input-bound defaults are supplied by Background.
+
+`RoutingRuntime.accept` first persists the original normalized input in `RecoveryBasketRoutingTurn`. Known-shop candidate snapshots include every eligible basket and every saved safe item; unknown-shop snapshots include only immutable route/shop identity. No credit or message-cap filter participates in ownership. Complete input overflow produces clarification, never a truncated semantic selection.
+
+Unknown-shop matching accepts only an exact offered shop option, authenticated prompt quote or explicit request token. Only after shop proof does the configured model receive complete same-shop basket facts. Decisions contain four structural roles, source IDs, hashes and UTF-16 clause offsets; they contain no copied customer text or model reasoning. Each independently pending substantive question remains a separate original.
+
+The required star relation is Q1 substantive original, Q2 shop-selection child with Q1 parent and its own basket prompt, then Q3 basket-selection child also with Q1 parent. Q3 names Q2's exact confirmed prompt. Original admission freezes Q1's owner and Q3 resolution witness atomically; it preserves Q1/Q2's earlier CLARIFY decisions. Independent NEW_QUESTION resolves only itself.
+
+The admission transaction rechecks sender/recipient/thread/route generation, all offered candidate facts, current control revision, STOP, service window, policy/model/prompt/template revisions and moderation proof. It creates authentic original and selection records, records full-current and independently moderated clause canonical assessments through the existing PENDING→CHECKING→ALLOW lease protocol, schedules one logical AI turn and scrubs ephemeral routing payloads. It does not create another Conversation or change allowance funding. Final provider/funding fences remain authoritative.
+
+Commerce history and moderation project role evidence before latest-question selection or history bounds. SELECT_ONLY never becomes the next customer question. SELECT_AND_QUESTION uses the saved original plus the exact independently moderated clause while retaining the full authentic customer reply in the transcript. Terminal role evidence remains while its owning Conversation exists. Expiry destroys pending payloads; explicit physical retention deletion requires an entire eligible unowned parent/witness cohort and cannot orphan a live child.
+
+Neutral prompts use the separately activated ROUTER selector and only its reviewed prepared content. Admission is durable before provider I/O; a crash or uncertain result never authorizes resend. A confirmed prompt receipt stays tied to the actual receiving WABA/phone/recipient generation. Router statuses never create merchant usage, compensation or reachability effects.
+
+Owner PostgreSQL/unit/provider-fixture checks belong to this repository task. They do not execute the user-deferred SYSTEM-TEST task and do not authorize live activation. The coordinator controls test-first rollout and production holds.
+
+Verified voice inputs keep the raw normalized event immutable. The existing configured media and speech adapters run under the routing lease, with exact receiving WABA and configuration checks around external calls. A single captured transcript and full moderation proof precede classification. Its source hash comes from the Database-owned versioned JSONB hash function on the durable input; retries and admission recompute that proof. Admission materializes authentic AUDIO/COMPLETED records with canonical TRANSCRIPT assessments. Terminal scrubbing removes the pending transcript, retaining only bounded nonplaintext provenance.

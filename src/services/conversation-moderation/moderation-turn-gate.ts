@@ -1,4 +1,5 @@
-import {priorCommerceHistorySelection,commerceHistoryActivityAt,orderCommerceHistory} from '../../commerce/history-selection.js';
+import { readRoutingHistoryProjection, projectRoutingHistory, latestRoutingObjective } from '../recovery-sender-pool/routing-projection.js';
+import {priorCommerceHistorySelection,commerceHistoryActivityAt} from '../../commerce/history-selection.js';
 import prisma from "../../lib/db.js";
 import { moderationAssessmentService, type ModerationAssessmentService } from "./moderation-assessment.service.js";
 import { MODERATION_TIMEOUT_MS,moderationConfig } from "./moderation-policy.js";
@@ -18,6 +19,7 @@ export class ModerationTurnGate {
     });
     const shopId = conversation.checkoutRecovery?.shopId ?? conversation.shopId;
     if (!shopId) throw new Error("moderation_tenant_unavailable");
+    const projection = await readRoutingHistoryProjection(conversationId);
     const candidates = await prisma.conversationMessage.findMany({
       where: { conversationId, direction: "INBOUND", senderType: "CUSTOMER",
         OR: [
@@ -26,11 +28,13 @@ export class ModerationTurnGate {
         ],
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      select: { id: true, content: true, contentType: true, transcriptionStatus: true,createdAt:true,transcriptionCompletedAt:true },
+      select: { id: true, direction: true, senderType: true, content: true, contentType: true, transcriptionStatus: true,createdAt:true,transcriptionCompletedAt:true },
     });
-    const ordered=orderCommerceHistory(candidates);
-    const latest=ordered.at(-1);
-    let allowed = false;
+    const ordered = projectRoutingHistory(candidates, projection, pendingTurnStartedAt);
+    const objective = latestRoutingObjective(ordered);
+    const objectiveIds = new Set(objective.map(row => row.id));
+    const latest = objective.at(-1);
+    const allowedIds = new Set<string>();
     let retry = false;
     const seen=new Set<string>();
     for (const message of ordered) {
@@ -45,20 +49,22 @@ export class ModerationTurnGate {
         inputKind: message.contentType === "AUDIO" ? "TRANSCRIPT" : "TEXT",
         policyVersion: moderationConfig().policyVersion, now: this.now(),
       });
-      if (message.id === latest?.id && result.kind === "allow") allowed = true;
+      if (objectiveIds.has(message.id) && result.kind === "allow") allowedIds.add(message.id);
       if (result.kind === "retry") retry = true;
     }
     // Historical outcomes cannot authorize a blocked/unsupported current turn.
     if(retry)return 'retry';
-    if(!allowed)return 'suppressed';
+    if(!objective.length || objective.some(row => !allowedIds.has(row.id)))return 'suppressed';
     const historicalDeadline=this.now().getTime()+2*MODERATION_TIMEOUT_MS;
     const leaseDeadline=processingLeaseExpiresAt?.getTime()??Infinity;
     if(Number.isNaN(leaseDeadline))return 'retry';
+    const priorSelection = priorCommerceHistorySelection(conversationId,latest ? commerceHistoryActivityAt(latest)??pendingTurnStartedAt : pendingTurnStartedAt,latest?.createdAt?{id:latest.id,createdAt:latest.createdAt}:undefined);
     const prior=await prisma.conversationMessage.findMany({
-      ...priorCommerceHistorySelection(conversationId,latest ? commerceHistoryActivityAt(latest)??pendingTurnStartedAt : pendingTurnStartedAt,latest?.createdAt?{id:latest.id,createdAt:latest.createdAt}:undefined),
+      ...priorSelection,
+      where: projection.excludedMessageIds.length ? { AND: [priorSelection.where, { id: { notIn: projection.excludedMessageIds } }] } : priorSelection.where,
       select:{id:true,content:true,contentType:true,transcriptionStatus:true,direction:true,senderType:true},
     });
-    for(const message of prior){
+    for(const message of projectRoutingHistory(prior, projection).slice(-20)){
       if(seen.has(message.id))continue;seen.add(message.id);
       if(message.direction!=='INBOUND'||message.senderType!=='CUSTOMER'||
         !(message.contentType==='TEXT'||message.contentType==='AUDIO'&&message.transcriptionStatus==='COMPLETED'))continue;

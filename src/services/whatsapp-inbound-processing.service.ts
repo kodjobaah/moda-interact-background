@@ -9,10 +9,8 @@ import { recoveryRoutingService } from "./recovery-routing.service.js";
 import { sendRoutingGuidance } from "./routing-guidance.service.js";
 import { checkoutRecoveryService } from "./checkout-recovery.service.js";
 import { persistVerifiedInbound } from "./recovery-sender-pool/inbound-writer.js";
-import { persistRoutingHandoff, type RoutingPersistencePolicy } from "./recovery-sender-pool/routing-handoff.js";
 
-/** BG004 installs the validated application policy/prompt consumer. Missing policy holds. */
-export const routingHandoffPolicy:{read:()=>Promise<RoutingPersistencePolicy|null>}={read:async()=>null};
+import { routingRuntime } from "./recovery-sender-pool/routing-runtime.js";
 import { inboundWhatsAppAudioService } from "./inbound-whatsapp-audio.service.js";
 import { conversationService } from "./conversation.service.js";
 import { outboundWhatsAppAdmissionService } from "./outbound-whatsapp-admission.service.js";
@@ -20,6 +18,7 @@ import { AiTurnOwnershipService } from "./recovery-conversation/ai-turn-ownershi
 import { recipientReachabilityPositiveService } from "./recipient-reachability-positive.service.js";
 
 export type RoutedInboundDependencies={
+  routing:Pick<typeof routingRuntime,'accept'|'receivingScope'>;
   stop:Pick<typeof whatsAppContactOptOutService,'handleInbound'>;
   abuse:Pick<typeof inboundWhatsAppAbuseAdmissionService,'admitRaw'>;
   router:Pick<typeof recoveryRoutingService,'resolveInboundMessage'|'isCurrentActiveRoute'>;
@@ -35,7 +34,7 @@ export async function processRoutedInboundMessage(
 ) {
   const messageDigest = createHash("sha256").update(event.providerMessageId).digest("hex").slice(0, 16);
   try {
-    return await processRoutedInboundMessageInternal(event, audioOptions, log, enqueueTurn, messageDigest,{stop:whatsAppContactOptOutService,abuse:inboundWhatsAppAbuseAdmissionService,router:recoveryRoutingService,conversation:conversationService,reachability:recipientReachabilityPositiveService,...overrides});
+    return await processRoutedInboundMessageInternal(event, audioOptions, log, enqueueTurn, messageDigest,{routing:routingRuntime,stop:whatsAppContactOptOutService,abuse:inboundWhatsAppAbuseAdmissionService,router:recoveryRoutingService,conversation:conversationService,reachability:recipientReachabilityPositiveService,...overrides});
   } catch (error) {
     log.error("whatsapp.inbound.processing_failed", {
       messageDigest, stage: "processing", error,
@@ -99,10 +98,13 @@ async function processRoutedInboundMessageInternal(
     return;
   }
   if(route.kind==='routing'){
-    await persistRoutingHandoff(prisma,event,route.scope,await routingHandoffPolicy.read());
+    const outcome=await dependencies.routing.accept(event,route.scope,enqueueTurn);
+    log.info("whatsapp.routing.turn_processed",{messageDigest,kind:outcome.kind});
     return;
   }
   if (route.kind === "guidance") {
+    const pooledScope=await dependencies.routing.receivingScope(event);
+    if(pooledScope){await dependencies.routing.accept(event,pooledScope,enqueueTurn);return;}
     const outcome = await sendRoutingGuidance(event, route.reason);
     if (outcome.kind === "sent") {
       log.info("whatsapp.inbound.guidance_sent", {
