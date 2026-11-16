@@ -209,6 +209,10 @@ describe("pending recovery candidate worker", () => {
       retrySuppressionAdmission: false,
     });
     expect(hoisted.cleanup).toHaveBeenCalledWith(job.data, job.id);
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event: "recovery.pending_candidate.materialization_completed",
+      data: expect.objectContaining({shopId: "shop_1", jobId: job.id, outcome: "discarded-shop-unavailable", candidateIndexCleanup: "completed"}),
+    }));
   });
 
   it("processes a manually retried job after BullMQ clears its failure reason", async () => {

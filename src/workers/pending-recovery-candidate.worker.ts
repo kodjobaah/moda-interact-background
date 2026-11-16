@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { checkoutDigest } from "../services/checkout-recovery/checkout-event-outcome-fields.js";
 import { Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -150,6 +151,8 @@ export function createPendingRecoveryCandidateWorker(
       switch (job.name) {
         case EVALUATE_PENDING_RECOVERY_JOB: {
           const shopifyCandidate = job.data as PendingRecoveryCandidate;
+          let materializationOutcome: string | undefined;
+          let materializationRecoveryId: string | undefined;
           let materializationFailed = false;
           let materializationError: unknown;
           try {
@@ -162,6 +165,8 @@ export function createPendingRecoveryCandidateWorker(
                 job.attemptsMade > 0 &&
                 isSuppressionResumeEnqueueFailure(job.failedReason),
             });
+            materializationOutcome = result.outcome;
+            materializationRecoveryId = "recoveryId" in result ? result.recoveryId : undefined;
             if (result.outcome === "deferred-lookup-unavailable") {
               logger.warn("recovery.pending_candidate.lookup_unavailable", {
                 jobId: typeof job.id === "string" ? job.id.slice(0, 192) : job.id ?? null,
@@ -214,6 +219,15 @@ export function createPendingRecoveryCandidateWorker(
           }
           if (cleanupFailed) throw cleanupError;
           if (materializationFailed) throw materializationError;
+          logger.info("recovery.pending_candidate.materialization_completed", {
+            shopId: shopifyCandidate.shopId,
+            checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
+            jobId: typeof job.id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(job.id)
+              ? job.id : null,
+            ...(materializationRecoveryId ? { recoveryId: materializationRecoveryId } : {}),
+            outcome: materializationOutcome ?? "unclassified",
+            candidateIndexCleanup: "completed",
+          });
           return;
         }
         default:

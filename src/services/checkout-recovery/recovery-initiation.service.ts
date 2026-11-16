@@ -492,7 +492,20 @@ export class RecoveryInitiationService {
     const sender = await recoverySenderPoolService.allocate({
       conversationId: conversation.id, canonicalRecipient: attempt.recipient, initialAttemptId: attempt.id,
     });
-    if (sender.kind !== "assigned") return recovery;
+    if (sender.kind !== "assigned") {
+      progressLogger.info("whatsapp.sender_pool.allocation_outcome", {
+        shopId: recovery.shopId, recoveryId: recovery.id, conversationId: conversation.id,
+        outreachAttemptId: attempt.id, kind: sender.kind, reason: sender.reason,
+      });
+      return recovery;
+    }
+    progressLogger.info("whatsapp.sender_pool.allocation_outcome", {
+      shopId: recovery.shopId, recoveryId: recovery.id, conversationId: conversation.id,
+      outreachAttemptId: attempt.id, kind: sender.kind,
+      routeId: sender.sender.routeId, threadId: sender.sender.threadId,
+      providerPhoneNumberId: sender.sender.providerPhoneNumberId,
+      providerAccountId: sender.sender.providerAccountId,
+    });
 
     const retainedCredit = await this.billingService.revalidateExistingInitialOutreach({
       ...initialScope,

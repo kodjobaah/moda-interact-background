@@ -10,8 +10,8 @@ import type { RecoveryRecipientResolverService } from "./recovery-recipient-reso
 import { InitialOutreachHeldError, type InitialOutreachProgress } from "./recovery-initiation.service.js";
 
 export type MaturedCandidateMaterializationResult =
-  | { outcome: "recovery-created"; checkoutToken: string }
-  | { outcome: "recovery-reentered"; checkoutToken: string }
+  | { outcome: "recovery-created"; checkoutToken: string; recoveryId?: string }
+  | { outcome: "recovery-reentered"; checkoutToken: string; recoveryId?: string }
   | { outcome: "recovery-reconciled"; checkoutToken: string; recoveryId: string }
   | { outcome: "deferred-initial-outreach"; checkoutToken: string; recoveryId: string; reason: "pre-permit-refused" | "provider-rejected" | "recipient-unreachable" }
   | { outcome: "deferred-no-recipient"; checkoutToken: string }
@@ -178,10 +178,17 @@ export class RecoveryMaterializationService {
           return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken } as const;
         }
 
+        // The initiation port already has the persisted recovery. Reuse its
+        // identity for diagnostics; never issue another SELECT only for logging.
+        const recoveryId = typeof initiated === "object" && initiated !== null
+          && "id" in initiated && typeof initiated.id === "string"
+          ? initiated.id : undefined;
         if (reenterSuppressionRetry || continueExistingGeneration) {
-          return { outcome: "recovery-reentered", checkoutToken: seed.checkoutToken } as const;
+          return { outcome: "recovery-reentered", checkoutToken: seed.checkoutToken,
+            ...(recoveryId ? { recoveryId } : {}) } as const;
         }
-        return { outcome: "recovery-created", checkoutToken: seed.checkoutToken } as const;
+        return { outcome: "recovery-created", checkoutToken: seed.checkoutToken,
+          ...(recoveryId ? { recoveryId } : {}) } as const;
       },
     );
   }

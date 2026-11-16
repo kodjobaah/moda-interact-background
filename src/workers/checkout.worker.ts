@@ -5,6 +5,7 @@ import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observ
 import { connectionRedis } from "../lib/redis.js";
 import { observeWorkerJob } from "../observability/worker-metrics.js";
 import { dispatchCheckoutQueueJob } from "../events/checkout-worker-dispatch.js";
+import { checkoutEventOutcomeFields } from "../services/checkout-recovery/checkout-event-outcome-fields.js";
 import { ShopifyWhatsAppConsentService } from "../services/shopify-whatsapp-consent.service.js";
 import { processShopifyWhatsAppConsentSyncJob } from "../services/shopify-whatsapp-consent-sync-job.service.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
@@ -46,7 +47,29 @@ export function createCheckoutWorker() {
   };
   const worker = new Worker<unknown>(
     SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.queueName,
-    async (job) => observeWorkerJob(workerMetricDefinition, job, () => dispatchCheckoutQueueJob(job, handlers)),
+    async (job) => observeWorkerJob(workerMetricDefinition, job, async () => {
+      try {
+        await dispatchCheckoutQueueJob(job, handlers, (result) => {
+          logger.info("shopify.checkout_event.outcome", checkoutEventOutcomeFields(
+            result.eventType,
+            {
+              shopId: result.shopId,
+              ...(result.checkoutToken !== undefined ? { checkoutToken: result.checkoutToken } : {}),
+              ...(job.id !== undefined ? { jobId: job.id } : {}),
+            },
+            result.result,
+          ));
+        });
+      } catch (error) {
+        logger.error("shopify.checkout_event.processing_failed", {
+          jobName: job.name,
+          jobId: typeof job.id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(job.id)
+            ? job.id : null,
+          error,
+        });
+        throw error;
+      }
+    }),
 
     {
       connection: connectionRedis,

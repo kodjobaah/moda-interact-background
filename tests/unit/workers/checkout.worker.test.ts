@@ -7,7 +7,7 @@ const mock = vi.hoisted(() => ({
   metrics: undefined as undefined | { jobNames: readonly string[] },
   createTelemetry: vi.fn(() => ({})),
   created: vi.fn(), updated: vi.fn(), cart: vi.fn(), sync: vi.fn(),
-  bindConcurrency: vi.fn(), info: vi.fn(), warn: vi.fn(),
+  bindConcurrency: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
 }));
 
 vi.mock("bullmq", () => ({
@@ -23,7 +23,7 @@ vi.mock("@modainteract/moda-interact-shared/observability/bullmq", () => ({
   createBullMQTelemetry: mock.createTelemetry,
 }));
 vi.mock("@modainteract/moda-interact-shared/logging", () => ({
-  createLogger: () => ({ info: mock.info, warn: mock.warn }),
+  createLogger: () => ({ info: mock.info, warn: mock.warn, error: mock.error }),
 }));
 vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: {} }));
 vi.mock("../../../src/observability/worker-metrics.js", () => ({
@@ -57,7 +57,7 @@ const consent = { schemaVersion: 1, shopId: "shop-a", shopifyCustomerId: "12345"
 
 beforeEach(() => {
   mock.created.mockReset(); mock.updated.mockReset(); mock.cart.mockReset(); mock.sync.mockReset();
-  mock.info.mockReset(); mock.warn.mockReset();
+  mock.info.mockReset(); mock.warn.mockReset(); mock.error.mockReset();
   mock.metrics = undefined;
   mock.bindConcurrency.mockClear();
   createCheckoutWorker();
@@ -79,6 +79,23 @@ describe("live checkout worker consent dispatch", () => {
     expect(mock.created).not.toHaveBeenCalled();
     expect(mock.updated).not.toHaveBeenCalled();
     expect(mock.cart).not.toHaveBeenCalled();
+  });
+
+  it("logs a structured scheduling outcome without checkout URL or token", async () => {
+    mock.created.mockResolvedValueOnce({ kind: "scheduled", outcome: "enqueued", delayMinutes: 30 });
+    const checkout = {
+      schemaVersion: 2, receiptId: "receipt-1", deliveryId: "delivery-2", eventId: "event-1", source: "shopify",
+      providerTopic: "CHECKOUTS_CREATE", tenant: { shopId: "shop-a", shopDomain: "a.myshopify.com" },
+      occurredAt: "2026-10-23T10:00:00.000Z", receivedAt: "2026-10-23T10:00:01.000Z",
+      traceId: "trace-a", orderingKey: "shop-a:private-token", eventType: "checkout.created",
+      payload: { checkoutToken: "private-token", cartToken: null,
+        abandonedCheckoutUrl: "https://a.myshopify.com/private-recover", checkoutCreatedAt: "2026-10-23T09:00:00Z" },
+    };
+    await mock.processor?.({ name: SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName, id: "shop-a--shopify-event-1", data: checkout });
+    expect(mock.info).toHaveBeenCalledWith("shopify.checkout_event.outcome", expect.objectContaining({
+      eventType: "checkout-created", shopId: "shop-a", jobId: "shop-a--shopify-event-1", kind: "scheduled", outcome: "enqueued", delayMinutes: 30,
+    }));
+    expect(JSON.stringify(mock.info.mock.calls)).not.toMatch(/private-token|private-recover/);
   });
 
   it("retains BullMQ retry behaviour for provider unavailability", async () => {

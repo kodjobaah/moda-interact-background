@@ -14,9 +14,17 @@ export interface CheckoutQueueHandlers {
   consentSync(data: unknown): Promise<unknown>;
 }
 
+export type CheckoutDispatchResult = {
+  eventType: "checkout-created" | "checkout-updated" | "cart-activity";
+  shopId: string;
+  checkoutToken?: string;
+  result: unknown;
+};
+
 export async function dispatchCheckoutQueueJob(
   job: { name: string; data: unknown },
   handlers: CheckoutQueueHandlers,
+  onOutcome?: (outcome: CheckoutDispatchResult) => void,
 ): Promise<void> {
   switch (job.name) {
     case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.WHATSAPP_CONSENT_SYNC.jobName:
@@ -25,17 +33,32 @@ export async function dispatchCheckoutQueueJob(
       await handlers.consentSync(job.data);
       return;
 
-    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName:
-      await handlers.checkoutCreated(mapCheckoutCreatedContractInput(parseRuntimeShopifyEvent(job.data)));
+    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_EVENTS.jobName: {
+      const event = parseRuntimeShopifyEvent(job.data);
+      const result = await handlers.checkoutCreated(mapCheckoutCreatedContractInput(event));
+      onOutcome?.({ eventType: "checkout-created", shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
       return;
+    }
 
-    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName:
-      await handlers.checkoutUpdated(mapCheckoutUpdatedContractInput(parseRuntimeShopifyEvent(job.data)));
+    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CHECKOUT_UPDATED_EVENTS.jobName: {
+      const event = parseRuntimeShopifyEvent(job.data);
+      const result = await handlers.checkoutUpdated(mapCheckoutUpdatedContractInput(event));
+      onOutcome?.({ eventType: "checkout-updated", shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
       return;
+    }
 
-    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName:
-      await handlers.cartActivity(mapCartActivityContractInput(parseRuntimeShopifyEvent(job.data)));
+    case SHOPIFY_WEBHOOK_QUEUE_CONTRACTS.CART_ACTIVITY_EVENTS.jobName: {
+      const event = parseRuntimeShopifyEvent(job.data);
+      const result = await handlers.cartActivity(mapCartActivityContractInput(event));
+      onOutcome?.({ eventType: "cart-activity", shopId: event.tenant.shopId,
+        ...("checkoutToken" in event.payload && typeof event.payload.checkoutToken === "string"
+          ? { checkoutToken: event.payload.checkoutToken } : {}), result });
       return;
+    }
 
     default:
       // Never include unknown job names or data in error/log output.
