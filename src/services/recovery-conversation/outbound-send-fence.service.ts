@@ -313,7 +313,7 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
-      const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: input.expectedSender, allowLegacyContinuation: freeText && (input.senderType === "AGENT" || input.senderType === "HUMAN") && !input.proactive && !input.initialOutreach });
+      const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: input.expectedSender });
       if (!sender || (input.proactive?.templateRegistration && input.proactive.templateRegistration.senderWabaId !== sender.providerAccountId)) return {kind: "suppressed", reason: "sender-assignment-unavailable"} as const;
       // Every newly admitted recovery action is pinned to its immutable funded
       // block. Historical initial messages are deliberately not rewritten.

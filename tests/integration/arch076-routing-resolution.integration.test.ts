@@ -32,6 +32,9 @@ const suite = process.env.MODA_DISPOSABLE_INTEGRATION === '1' && process.env.TES
   ? describe : describe.skip;
 
 suite('ARCH076 R15 frozen routing association', () => {
+  // Disposable PostgreSQL cases perform multiple sequential ownership and moderation writes.
+  // Keep a finite per-test limit; the default 5s interrupts valid multi-stage scenarios.
+  vi.setConfig({ testTimeout: 20_000 });
   const db = new PrismaClient({ datasourceUrl: process.env.TEST_DATABASE_URL! });
   const providerAccountId = '92001', providerPhoneNumberId = '82001';
   let senderConfigurationId: string, policy: RoutingPersistencePolicy;

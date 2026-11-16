@@ -7,7 +7,7 @@ import { canonicalJson } from '@modainteract/moda-interact-shared/commerce';
 type Reader = Pick<Prisma.TransactionClient, '$queryRawUnsafe'>;
 export type InboundOwnerEvidence = WhatsAppSenderIdentity & {
     canonicalRecipient: string;
-    threadId: string | null;
+    threadId: string;
     routeId: string | null;
     conversationId: string;
     checkoutRecoveryId: string;
@@ -28,8 +28,6 @@ export type SenderResolution = {
     scope: SenderHandoff;
 } | {
     kind: 'invalid';
-} | {
-    kind: 'legacy';
 };
 export const recipientDigits = (value: string) => /^\+?[1-9][0-9]{0,14}$/.test(value.trim()) ? value.trim().replace(/^\+/, '') : null;
 export async function lockInboundProviderIdentity(tx: Reader, id: string) {
@@ -238,7 +236,7 @@ export async function resolveSenderInbound(db: Reader, event: WhatsAppInboundEve
     }>>(`SELECT "providerAccountId","providerPhoneNumberId","verifiedAt" FROM whatsapp."WhatsAppPoolSender"
  WHERE "providerPhoneNumberId"=$1`, event.providerPhoneNumberId);
     if (!sender)
-        return { kind: 'legacy' };
+        return { kind: 'invalid' };
     if (sender.verifiedAt > now || sender.providerAccountId !== event.providerAccountId)
         return { kind: 'invalid' };
     const [pending] = await db.$queryRawUnsafe<Array<{
@@ -353,31 +351,10 @@ export async function verifyInboundOwner(tx: Prisma.TransactionClient, e: Inboun
  AND r."shopId"=$3 FOR UPDATE OF s,c,r`, e.conversationId, e.checkoutRecoveryId, e.shopId);
     if (!owner)
         throw new Error('INBOUND_OWNER_CHANGED');
-    if (e.threadId === null) {
-        await tx.$queryRawUnsafe(`WITH locked AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended('whatsapp-pool-membership:'||$1::text,0))) SELECT COUNT(*)::integer FROM locked`, e.providerPhoneNumberId);
-        if ((await tx.$queryRawUnsafe<Array<{
-            id: string;
-        }>>(`SELECT "providerPhoneNumberId" AS id FROM whatsapp."WhatsAppPoolSender"
- WHERE "providerPhoneNumberId"=$1`, e.providerPhoneNumberId)).length)
-            throw new Error('LEGACY_SENDER_ENROLLED');
-        const prior = await tx.conversationMessage.findUnique({ where: { providerMessageId: id } });
-        if (await tx.recoverySenderAssignment.findUnique({ where: { conversationId: e.conversationId } }))
-            throw new Error('LEGACY_CONVERSATION_NOW_ASSIGNED');
-        if (!prior) {
-            const event: WhatsAppInboundEvent = { schemaVersion: 1, provider: 'whatsapp', providerAccountId: e.providerAccountId, providerPhoneNumberId: e.providerPhoneNumberId, providerMessageId: id, customerPhone: e.canonicalRecipient, contextMessageId: e.referenceProviderMessageId ?? null, occurredAt: activityAt.toISOString(), content: { type: 'text', text: '' } };
-            if (!e.referenceProviderMessageId || await quotedOwner(tx, e.referenceProviderMessageId, event) !== e.conversationId)
-                throw new Error('LEGACY_INBOUND_PROOF_CHANGED');
-        }
-        if (requireActive &&
-            !await isLegacyConversationActive(tx, e.conversationId, now, Boolean(prior || e.referenceProviderMessageId)))
-            throw new Error('LEGACY_INBOUND_RECOVERY_CLOSED');
-    }
-    else {
-        const row = await readAssignedOwner(tx, e.conversationId);
-        if (!row || row.routeId !== e.routeId || row.threadId !== e.threadId || row.canonicalRecipient !== e.canonicalRecipient || row.providerAccountId !== e.providerAccountId || row.providerPhoneNumberId !== e.providerPhoneNumberId || requireActive &&
-            !await active(tx, row, now, e.referenceProviderMessageId))
-            throw new Error('INBOUND_SENDER_OWNER_CHANGED');
-    }
+    const row = await readAssignedOwner(tx, e.conversationId);
+    if (!row || row.routeId !== e.routeId || row.threadId !== e.threadId || row.canonicalRecipient !== e.canonicalRecipient || row.providerAccountId !== e.providerAccountId || row.providerPhoneNumberId !== e.providerPhoneNumberId || requireActive &&
+        !await active(tx, row, now, e.referenceProviderMessageId))
+        throw new Error('INBOUND_SENDER_OWNER_CHANGED');
     const message = await tx.conversationMessage.findUnique({ where: { providerMessageId: id } });
     if (message &&
         (message.conversationId !== e.conversationId || message.direction !== 'INBOUND' || message.dispatchProviderAccountId !== e.providerAccountId || message.dispatchProviderPhoneNumberId !== e.providerPhoneNumberId))
@@ -391,61 +368,12 @@ export async function isAssignedConversationActive(db: Reader, id: string, now =
     return row ? active(db, row, now, quoteId) : null;
 }
 export type SenderInboundDatabase = Pick<PrismaClient, '$queryRawUnsafe'>;
-export async function isLegacyConversationActive(db: Reader, id: string, now = new Date(), directReference = false) {
-    const [r] = await db.$queryRawUnsafe<Array<{
-        lastExternalActivityAt: Date;
-        expiredAt: Date | null;
-        completedAt: Date | null;
-        status: string;
-        isLatest: boolean;
-        contacted: boolean;
-        initialAccepted: boolean;
-    }>>(`SELECT r."lastExternalActivityAt",r."expiredAt",r."completedAt",r.status::text,
- NOT EXISTS(SELECT 1 FROM commerce."CheckoutRecovery" n
- WHERE n."shopId"=r."shopId"
- AND n."checkoutToken"=r."checkoutToken"
- AND n.generation>r.generation
- AND s.platform='WOOCOMMERCE') AS "isLatest",
- EXISTS(SELECT 1 FROM commerce."RecoveryOutreachAttempt" i
- JOIN whatsapp."ConversationMessage" m ON m.id=i."outboundMessageId"
- WHERE i."checkoutRecoveryId"=r.id
- AND i.sequence=1
- AND i."sentAt" IS NOT NULL
- AND m."sentAt" IS NOT NULL
- AND m."providerMessageId" IS NOT NULL
- AND m.status IN('SENT','DELIVERED','READ')
- AND m."failedAt" IS NULL) AS contacted
- FROM whatsapp."Conversation" c
- JOIN commerce."CheckoutRecovery" r ON r.id=c."checkoutRecoveryId"
- JOIN commerce."Shop" s ON s.id=r."shopId"
- WHERE c.id=$1
- AND NOT EXISTS(SELECT 1 FROM whatsapp."RecoverySenderAssignment" a
- WHERE a."conversationId"=c.id)`, id);
-    if (!directReference) {
-        const [proof] = await db.$queryRawUnsafe<Array<{
-            id: string;
-        }>>(`SELECT m.id FROM whatsapp."ConversationMessage" m WHERE m."conversationId"=$1 AND ((m.direction='OUTBOUND' AND (m."deliveredAt" IS NOT NULL OR m."readAt" IS NOT NULL)) OR (m.direction='INBOUND' AND m."dispatchProviderAccountId" IS NOT NULL AND m."dispatchProviderPhoneNumberId" IS NOT NULL)) LIMIT 1`, id);
-        directReference = !!proof;
-    }
-    if (!r || !directReference || !r.contacted || !r.isLatest || !['MESSAGE_SENT', 'ENGAGED'].includes(r.status) || r.completedAt || r.expiredAt &&
-        r.expiredAt <= now)
-        return false;
-    const [policy] = await db.$queryRawUnsafe<Array<{
-        checkoutRecoveryLifetimeDays: number;
-    }>>(`SELECT "checkoutRecoveryLifetimeDays" FROM public."BackgroundRuntimeConfig"
- WHERE id='default' FOR SHARE`);
-    return !!policy &&
-        isCheckoutRecoveryWithinLifetime({ lastExternalActivityAt: r.lastExternalActivityAt, now, checkoutRecoveryLifetimeDays: parseCheckoutRecoveryLifetimeDays(policy.checkoutRecoveryLifetimeDays) });
-}
+/** Unassigned recoveries cannot be admitted into a pooled conversation. */
 export async function canProcessConversation(db: Reader, id: string, now = new Date()) {
     const assigned = await isAssignedConversationActive(db, id, now);
-    if (assigned !== null)
-        return assigned;
-    const [c] = await db.$queryRawUnsafe<Array<{
-        type: string;
-    }>>(`SELECT type::text FROM whatsapp."Conversation"
- WHERE id=$1`, id);
-    return c?.type === 'RECOVERY' ? isLegacyConversationActive(db, id, now) : true;
+    if (assigned !== null) return assigned;
+    const [conversation] = await db.$queryRawUnsafe<Array<{ type: string }>>(`SELECT type::text FROM whatsapp."Conversation" WHERE id=$1`, id);
+    return !!conversation && conversation.type !== 'RECOVERY';
 }
 export async function receivingSenderKnown(db: Reader, sender: WhatsAppSenderIdentity): Promise<boolean | null> {
     const [pool] = await db.$queryRawUnsafe<Array<{

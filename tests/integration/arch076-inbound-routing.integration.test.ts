@@ -215,24 +215,20 @@ suite('ARCH076 exact incoming sender generations', () => {
         expect(await service.process({ ...callback, providerAccountId: account, providerMessageId: nullRoot.providerMessageId! })).toBe('ignored');
         expect(effects).toBe(0);
     });
-    it('actual legacy router and atomic writer preserve only exact confirmed quote/replay without backfill', async () => {
-        const to = '14155550102', legacyPhone = '81002', shop = await db.shop.create({ data: { domain: `${randomUUID()}.test` } }), customer = await db.customer.create({ data: { shopId: shop.id, phone: '+' + to } });
-        const recovery = await db.checkoutRecovery.create({ data: { shopId: shop.id, customerId: customer.id, checkoutToken: randomUUID(), status: 'MESSAGE_SENT', lastExternalActivityAt: past } }), conversation = await db.conversation.create({ data: { shopId: shop.id, customerId: customer.id, checkoutRecoveryId: recovery.id, type: 'RECOVERY' } });
-        const root = await db.conversationMessage.create({ data: { conversationId: conversation.id, direction: 'OUTBOUND', senderType: 'AUTOMATION', status: 'SENT', content: 'confirmed legacy reminder', providerMessageId: randomUUID(), sentAt: past, providerDispatchKey: randomUUID(), providerDispatchAdmittedAt: past, providerDispatchControlRevision: 0, dispatchProviderAccountId: account, dispatchProviderPhoneNumberId: legacyPhone } });
-        await db.recoveryOutreachAttempt.create({ data: { checkoutRecoveryId: recovery.id, recipient: to, sequence: 1, trigger: 'INITIAL', configuredOfferMode: 'NONE', status: 'WAITING_FOR_RESPONSE', sentAt: past, outboundMessageId: root.id } });
-        const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, { resolveSender: async () => ({ providerAccountId: account, providerPhoneNumberId: legacyPhone }) });
-        const incoming = { ...event(to, root.providerMessageId), providerPhoneNumberId: legacyPhone };
-        const resolved = await service.resolveInboundMessage(incoming);
-        expect(resolved).toMatchObject({ kind: 'resolved', mode: 'active', conversationId: conversation.id });
-        if (resolved.kind !== 'resolved' || !resolved.senderEvidence)
-            throw Error('legacy proof');
-        const saved = await persistVerifiedInbound(db, incoming, resolved.senderEvidence, 'active');
-        expect(saved.duplicate).toBe(false);
-        expect((await service.resolveInboundMessage({ ...incoming, contextMessageId: randomUUID() })).kind).toBe('resolved');
+    it('never converts historical unassigned sender proof into a pooled conversation', async () => {
+        const to = '14155550102', phoneId = '81002';
+        const shop = await db.shop.create({ data: { domain: `${randomUUID()}.test` } });
+        const customer = await db.customer.create({ data: { shopId: shop.id, phone: '+' + to } });
+        const recovery = await db.checkoutRecovery.create({ data: { shopId: shop.id, customerId: customer.id, checkoutToken: randomUUID(), status: 'MESSAGE_SENT', lastExternalActivityAt: past } });
+        const conversation = await db.conversation.create({ data: { shopId: shop.id, customerId: customer.id, checkoutRecoveryId: recovery.id, type: 'RECOVERY' } });
+        const root = await db.conversationMessage.create({ data: { conversationId: conversation.id, direction: 'OUTBOUND', senderType: 'AUTOMATION', status: 'SENT', content: 'old test message', providerMessageId: randomUUID(), sentAt: past, dispatchProviderAccountId: account, dispatchProviderPhoneNumberId: phoneId } });
+        const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true });
+        const incoming = { ...event(to, root.providerMessageId), providerPhoneNumberId: phoneId };
+        expect(await service.resolveInboundMessage(incoming)).toEqual({ kind: 'ignored' });
+        await db.whatsAppPoolSender.create({ data: { providerAccountId: account, providerPhoneNumberId: phoneId, verifiedAt: past, allocationEnabled: false } });
+        expect(await service.resolveInboundMessage(incoming)).toEqual({ kind: 'ignored' });
+        expect(await canProcessConversation(db, conversation.id)).toBe(false);
         expect(await db.recoverySenderAssignment.count({ where: { conversationId: conversation.id } })).toBe(0);
-        expect(await service.resolveInboundMessage({ ...incoming, providerMessageId: randomUUID(), contextMessageId: null })).toEqual({ kind: 'guidance', reason: 'NO_RECOVERY' });
-        await db.whatsAppPoolSender.create({ data: { providerAccountId: account, providerPhoneNumberId: legacyPhone, verifiedAt: past, allocationEnabled: false } });
-        await expect(persistVerifiedInbound(db, { ...incoming, providerMessageId: randomUUID() }, resolved.senderEvidence, 'active')).rejects.toThrow('LEGACY_SENDER_ENROLLED');
     });
     it('confirmed child quote follows frozen actual root/shop/sender instead of current presentation geometry', async () => {
         const f = await fixture('447700900018');

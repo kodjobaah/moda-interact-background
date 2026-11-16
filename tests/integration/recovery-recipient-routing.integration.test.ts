@@ -15,9 +15,7 @@ function event(contextMessageId: string | null = null, recipient = phone, provid
     content: { type: "text", text: "Can you tell me about this snowboard?" } };
 }
 function router(db: PrismaClient) {
-  return new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
-    resolveSender: async () => ({ providerAccountId: "account", providerPhoneNumberId: "sender" }),
-  });
+  return new RecoveryRoutingService(db, { isShopExecutionActive: async () => true });
 }
 async function fixture(db: PrismaClient) {
   const shopId = randomUUID();
@@ -44,29 +42,24 @@ async function fixture(db: PrismaClient) {
 }
 
 integration("current recipient recovery reply routing", () => {
-  it("routes quoted and ordinary replies with a null legacy phone, keeps multi-store replies ambiguous and pins replays", async () => {
+  it("unassigned recovery replies cannot acquire a shop from historical phone or quote evidence", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const shops: string[] = [];
     try {
       const a = await fixture(db); shops.push(a.shopId);
       const service = router(db);
       const first = event();
-      await expect(service.resolveInboundMessage(first)).resolves.toMatchObject({ kind: "resolved",
-        conversationId: a.conversation.id, checkoutRecoveryId: a.recovery.id, shopId: a.shopId });
-      await expect(service.resolveInboundMessage(event(a.outbound.providerMessageId))).resolves.toMatchObject({
-        kind: "resolved", conversationId: a.conversation.id,
-      });
+      await expect(service.resolveInboundMessage(first)).resolves.toEqual({ kind: "ignored" });
+      await expect(service.resolveInboundMessage(event(a.outbound.providerMessageId))).resolves.toEqual({ kind: "ignored" });
       await db.conversationMessage.create({ data: {
         conversationId: a.conversation.id, providerMessageId: first.providerMessageId,
         direction: "INBOUND", senderType: "CUSTOMER", content: "Snowboard question", status: "SENT",
       } });
       const b = await fixture(db); shops.push(b.shopId);
-      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
-      await expect(service.resolveInboundMessage(event(b.outbound.providerMessageId))).resolves.toMatchObject({
-        kind: "resolved", conversationId: b.conversation.id, shopId: b.shopId,
-      });
+      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "ignored" });
+      await expect(service.resolveInboundMessage(event(b.outbound.providerMessageId))).resolves.toEqual({ kind: "ignored" });
       await expect(service.resolveInboundMessage({ ...first, contextMessageId: b.outbound.providerMessageId }))
-        .resolves.toMatchObject({ kind: "resolved", conversationId: a.conversation.id, shopId: a.shopId });
+        .resolves.toEqual({ kind: "ignored" });
     } finally { await db.shop.deleteMany({ where: { id: { in: shops } } }); await db.$disconnect(); }
   });
 
@@ -80,12 +73,12 @@ integration("current recipient recovery reply routing", () => {
       await db.customerPhone.create({ data: { customerId: f.customer.id, phone: `+${otherPhone}`, whatsappCanonicalPhone: otherPhone } });
       const service = router(db);
       for (const recipient of [phone, otherPhone]) {
-        await expect(service.resolveInboundMessage(event(null, recipient))).resolves.toEqual({ kind: "guidance", reason: "NO_RECOVERY" });
+        await expect(service.resolveInboundMessage(event(null, recipient))).resolves.toEqual({ kind: "ignored" });
         await expect(service.resolveInboundMessage(event(f.outbound.providerMessageId, recipient)))
-          .resolves.toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
+          .resolves.toEqual({ kind: "ignored" });
       }
       await db.customerPhone.updateMany({ where: { customerId: f.customer.id }, data: { endedAt: new Date() } });
-      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "guidance", reason: "NO_RECOVERY" });
+      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "ignored" });
     } finally { if (shopId) await db.shop.delete({ where: { id: shopId } }); await db.$disconnect(); }
   });
 
@@ -100,11 +93,11 @@ integration("current recipient recovery reply routing", () => {
         whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactAt: new Date(),
         whatsappNoContactRevision: { increment: 1 },
       } });
-      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "guidance", reason: "NO_RECOVERY" });
+      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "ignored" });
       await expect(service.resolveInboundMessage(event(f.outbound.providerMessageId)))
-        .resolves.toEqual({ kind: "guidance", reason: "INVALID_REFERENCE" });
+        .resolves.toEqual({ kind: "ignored" });
       await db.customerPhone.create({ data: { customerId: f.customer.id, phone: `+${phone}` } });
-      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "guidance", reason: "NO_RECOVERY" });
+      await expect(service.resolveInboundMessage(event())).resolves.toEqual({ kind: "ignored" });
     } finally { if (shopId) await db.shop.delete({ where: { id: shopId } }); await db.$disconnect(); }
   });
 });

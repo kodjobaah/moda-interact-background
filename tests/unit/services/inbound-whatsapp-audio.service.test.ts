@@ -1,7 +1,13 @@
 // This suite owns scheduling/transcription fixtures; actual sender/identity SQL is covered by ARCH076 disposable PostgreSQL.
-vi.mock("../../../src/services/recovery-sender-pool/inbound-authority.js",()=>({lockInboundProviderIdentity:vi.fn(async()=>{}),assertNoRoutingTurn:vi.fn(async()=>{}),canProcessConversation:vi.fn(async()=>true),resolveSenderInbound:vi.fn(async()=>({kind:"legacy"}))}));
+vi.mock("../../../src/services/recovery-sender-pool/inbound-authority.js",()=>({
+  lockInboundProviderIdentity:vi.fn(async()=>{}),canProcessConversation:vi.fn(async()=>true),
+  resolveSenderInbound:vi.fn(async()=>({kind:"owned",mode:"active",evidence:{
+    conversationId:"conversation-1",checkoutRecoveryId:"recovery-1",shopId:"shop-1",
+    threadId:"thread-1",routeId:"route-1",canonicalRecipient:"1",
+    providerAccountId:"waba",providerPhoneNumberId:"phone",
+  }})),
+}));
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Prisma } from "@prisma/client";
 
 const mocks = vi.hoisted(() => ({
   database: {
@@ -16,6 +22,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/lib/db.js", () => ({ default: mocks.database }));
+vi.mock("../../../src/services/recovery-sender-pool/inbound-writer.js",()=>({
+  persistVerifiedInbound:vi.fn(async(_db:unknown,event:{providerMessageId:string,providerAccountId:string,providerPhoneNumberId:string},evidence:{conversationId:string})=>{
+    const message=await mocks.database.conversationMessage.create({data:{
+      conversationId:evidence.conversationId,providerMessageId:event.providerMessageId,
+      dispatchProviderAccountId:event.providerAccountId,dispatchProviderPhoneNumberId:event.providerPhoneNumberId,
+    }});
+    return {message,duplicate:false};
+  }),
+}));
 vi.mock("../../../src/services/whatsapp-media.service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../src/services/whatsapp-media.service.js")>()),
   whatsappMediaService: mocks.media,
@@ -87,30 +102,12 @@ describe("InboundWhatsAppAudioService", () => {
     expect(mocks.database.conversationMessage.create).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { conversationId: "other-conversation", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone" },
-    { conversationId: "conversation-1", dispatchProviderAccountId: "foreign-waba", dispatchProviderPhoneNumberId: "phone" },
-    { conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "foreign-phone" },
-  ])("reserve refuses a P2002 winner owned by $conversationId / $dispatchProviderAccountId / $dispatchProviderPhoneNumberId", async (owner) => {
-    mocks.database.conversationMessage.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("duplicate provider message", { code: "P2002", clientVersion: "fixture" }));
-    mocks.database.conversationMessage.findUniqueOrThrow.mockResolvedValue({ id: "foreign-winner", transcriptionStatus: "PENDING", ...owner });
-
-    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
-      .rejects.toThrow("Inbound message ownership mismatch");
-
-    expect(mocks.database.conversationMessage.findUniqueOrThrow).toHaveBeenCalledOnce();
-    expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
-    expect(mocks.transcription.transcribe).not.toHaveBeenCalled();
-    expect(mocks.database.conversationMessage.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("reserve reuses only a matching P2002 winner", async () => {
-    const winner = { id: "same-winner", conversationId: "conversation-1", dispatchProviderAccountId: "waba", dispatchProviderPhoneNumberId: "phone", transcriptionStatus: "PENDING" };
-    mocks.database.conversationMessage.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("duplicate provider message", { code: "P2002", clientVersion: "fixture" }));
-    mocks.database.conversationMessage.findUniqueOrThrow.mockResolvedValue(winner);
-
-    await expect(new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event, "conversation-1"))
-      .resolves.toEqual(winner);
+  it("reserves through verified assigned owner and stamps its exact provider identity", async () => {
+    const result = await new InboundWhatsAppAudioService(mocks.media, mocks.transcription).reserve(event,"conversation-1");
+    expect(result.conversationId).toBe("conversation-1");
+    expect(mocks.database.conversationMessage.create).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({
+      providerMessageId:event.providerMessageId,dispatchProviderAccountId:event.providerAccountId,dispatchProviderPhoneNumberId:event.providerPhoneNumberId,
+    })}));
   });
 
   it("reserves, transcribes and completes one logical turn", async () => {

@@ -1,6 +1,3 @@
-import { FreeRecoveryReservationService } from "../../src/services/free-recovery-reservation.service.js";
-import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
-import { OutboundAdmissionReservationService } from "../../src/services/outbound-whatsapp-admission/outbound-admission-reservation.service.js";
 import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
 import { sha256 } from "../../src/services/recovery-multipart/frozen.js";
 import { randomUUID } from "node:crypto";
@@ -8,13 +5,9 @@ import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 const config = vi.hoisted(() => ({ rowId:"", version:1, account:"9001", phone:"8001" }));
 vi.mock("../../src/services/platform-configuration/consumers.js", async (importOriginal) => ({...await importOriginal<Record<string,unknown>>(),platformConsumerConfiguration:{read:async()=>({rowId:config.rowId,version:config.version,value:{businessAccountId:config.account,phoneNumberId:config.phone,accessToken:"fixture-token"}})}}));
-import { humanDispatchFixture } from "./fixtures/recovery-human-dispatch.fixture.js";
-import { OutboundSendFenceService } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
-import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import { seedWooInitialPermit } from "./fixtures/woo-initial-send-fence.fixture.js";
 import { WooInitialSendFenceService } from "../../src/services/woocommerce-recovery/woo-initial-send-fence.service.js";
 vi.mock("../../src/runtime/deployment-environment.js", () => ({resolveDeploymentEnvironmentName:()=>"test"}));
-import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
 import { GeneralOutboundSendFenceService } from "../../src/services/outbound-whatsapp-admission/general-outbound-send-fence.service.js";
 import { checkDispatchSender, readDispatchSenderSnapshot } from "../../src/services/recovery-sender-pool/dispatch-sender.js";
 import { RecoverySenderPoolService } from "../../src/services/recovery-sender-pool/sender-pool.service.js";
@@ -33,17 +26,13 @@ suite('ARCH076 dispatch identity and enrollment serialization',()=>{
  it('first disabled enrollment wins the membership lock and blocks actual standalone permit',async()=>{const racePhone='8005';config.phone=racePhone;const f=await fixture();let release!:()=>void;let locked!:()=>void;const ready=new Promise<void>(r=>locked=r);const gate=new Promise<void>(r=>release=r);const enrollment=db.$transaction(async tx=>{await tx.$queryRawUnsafe(`WITH locked AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtextextended('whatsapp-pool-membership:'||$1::text,0))) SELECT COUNT(*)::integer FROM locked`,racePhone);await tx.whatsAppPoolSender.create({data:{providerPhoneNumberId:racePhone,providerAccountId:account,verifiedAt:now,allocationEnabled:false}});locked();await gate;},{timeout:15000});await ready;const permit=new GeneralOutboundSendFenceService(db).admitFinalSend(input(f));release();await enrollment;expect((await permit).kind).toBe('suppressed');await db.whatsAppPoolSender.delete({where:{providerPhoneNumberId:racePhone}});config.phone=phone;});
  it('pooled assignment pins exact phone despite drain; current singleton is never selected',async()=>{await db.whatsAppPoolSender.create({data:{providerPhoneNumberId:'8002',providerAccountId:account,verifiedAt:now,allocationEnabled:true}});const f=await fixture(true);const to='447700900002';recipients.push(to);const pool=new RecoverySenderPoolService(db,()=>now,async()=>({accountId:account,rowId:config.rowId,version:1,environment:'test'}));expect((await pool.allocate({conversationId:f.c.id,canonicalRecipient:to})).kind).toBe('assigned');const second=await fixture(true);const secondTo='447700900003';recipients.push(secondTo);expect((await pool.allocate({conversationId:second.c.id,canonicalRecipient:secondTo})).kind).toBe('assigned');await db.whatsAppPoolSender.update({where:{providerPhoneNumberId:'8002'},data:{allocationEnabled:false}});const snapshot=await readDispatchSenderSnapshot();const check=(recipient=to,snap=snapshot)=>db.$transaction(tx=>checkDispatchSender(tx,{snapshot:snap,conversationId:f.c.id,recipient,recovery:true}));expect(await check()).toEqual({providerAccountId:account,providerPhoneNumberId:'8002'});expect(await check('447700900003')).toBeNull();expect(await check(to,{...snapshot,providerAccountId:'9999'})).toBeNull();const requests:RequestInfo[]=[];const provider=new WhatsAppService((async(url)=>{requests.push(url as RequestInfo);return new Response(JSON.stringify({messages:[{id:'wamid-fixture'}]}),{status:200});}) as typeof fetch,{error:()=>{}});await provider.sendWhatsAppText({to,text:'fixture answer',expectedSender:(await check())!});expect(String(requests[0])).toContain('/8002/messages');});
  it('unassigned new recovery never falls back, and stale credential snapshot refuses',async()=>{const f=await fixture(true);const snapshot=await readDispatchSenderSnapshot();expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:f.c.id,recipient:'447700900001',recovery:true}))).toBeNull();const g=await fixture();expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot:{...snapshot,version:999},conversationId:g.c.id,recipient:'447700900001',recovery:false}))).toBeNull();});
- it('permits only proved old singleton continuation; no recipient/account/NULL-proof inference',async()=>{
-  const f=await fixture(true), to='447700900004';const past=new Date(Date.now()-1000);
+ it('historical singleton receipts never authorise unassigned recovery dispatch',async()=>{
+  const f=await fixture(true),to='447700900004',past=new Date(Date.now()-1000);
   const root=await db.conversationMessage.create({data:{conversationId:f.c.id,direction:'OUTBOUND',senderType:'AUTOMATION',status:'SENT',content:'old reminder',sentAt:past,providerMessageId:randomUUID(),providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerDispatchControlRevision:0,dispatchProviderAccountId:account,dispatchProviderPhoneNumberId:phone}});
   await db.recoveryOutreachAttempt.create({data:{checkoutRecoveryId:f.r!.id,recipient:to,sequence:1,trigger:'INITIAL',configuredOfferMode:'NONE',status:'WAITING_FOR_RESPONSE',sentAt:past,outboundMessageId:root.id}});
   const snapshot=await readDispatchSenderSnapshot();
-  const check=(recipient=to,snap=snapshot,allow=true)=>db.$transaction(tx=>checkDispatchSender(tx,{snapshot:snap,conversationId:f.c.id,recipient,recovery:true,allowLegacyContinuation:allow}));
-  expect(await check()).toEqual({providerAccountId:account,providerPhoneNumberId:phone});
-  expect(await check('447700900005')).toBeNull();expect(await check(to,{...snapshot,providerAccountId:'9999'})).toBeNull();expect(await check(to,snapshot,false)).toBeNull();
-  await db.whatsAppPoolSender.create({data:{providerPhoneNumberId:phone,providerAccountId:account,verifiedAt:now,allocationEnabled:false}});expect(await check()).toBeNull();await db.whatsAppPoolSender.delete({where:{providerPhoneNumberId:phone}});
-  expect(await db.recoverySenderAssignment.count({where:{conversationId:f.c.id}})).toBe(0);
-  const g=await fixture(true);expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:g.c.id,recipient:to,recovery:true,allowLegacyContinuation:true}))).toBeNull();
+  const result=await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:f.c.id,recipient:to,recovery:true}));
+  expect(result).toBeNull();expect(await db.recoverySenderAssignment.count({where:{conversationId:f.c.id}})).toBe(0);
  });
 
  it('actual Woo initial permit freezes its assigned phone and duplicate restart cannot send twice',async()=>{
@@ -67,61 +56,14 @@ suite('ARCH076 dispatch identity and enrollment serialization',()=>{
  });
 
 
- it.each(['AGENT','HUMAN'] as const)('actual %s legacy continuation freezes proved sender without creating assignment',async actor=>{
-  const senderReader=platformConsumerConfiguration.read;const f=await humanDispatchFixture(`arch076-${actor}`,{recipient:'447400123456',checkoutLifetimeDays:30});platformConsumerConfiguration.read=senderReader;
-  try{
-   let commandId=await f.addCommand({textBody:'A verified existing recovery reply'});
-   await f.db.merchantConversationSendCommand.delete({where:{id:commandId}});await f.changeOwner('HUMAN','AI',1);
-   const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});
-   await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:randomUUID(),providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:initial.sentAt!,providerDispatchControlRevision:2,dispatchProviderAccountId:account,dispatchProviderPhoneNumberId:phone}});
-   const fence=new OutboundSendFenceService(f.db,async()=>null);let result;
-   if(actor==='AGENT'){
-    const plan=await f.db.billingPlan.create({data:{shopifyPlanHandle:`free-${randomUUID()}`,name:'Free sender fixture',kind:'FREE'}});
-    await f.db.subscription.create({data:{shopId:f.shopId,planId:plan.id,status:'ACTIVE',observedShopifyPlanHandle:plan.shopifyPlanHandle}});
-    await f.db.shopEntitlementCounter.create({data:{shopId:f.shopId,counter:'LIFETIME_FREE_RECOVERY_CREDITS',grantedQuantity:5,committedQuantity:0,reservedQuantity:0}});
-    const credit=new FreeRecoveryReservationService(f.db),sourceKey=createRecoveryIdempotencyKey(f.shopId,`recovery-outreach:${initial.id}`);
-    expect((await credit.reserve({shopId:f.shopId,sourceKey,quantity:1})).kind).toBe('reserved');expect((await credit.commit({shopId:f.shopId,sourceKey,quantity:1})).kind).toBe('committed');
-    const admission=await new OutboundAdmissionReservationService(f.db).reserve({shopId:f.shopId,conversationId:f.conversationId,idempotencyKey:randomUUID(),senderType:'AGENT'});
-    expect(admission.kind).toBe('admitted');if(admission.kind!=='admitted')throw new Error('funded fixture admission refused');
-    const message=await f.db.conversationMessage.update({where:{id:admission.messageId},data:{content:'A verified existing recovery reply'}});
-    const request={senderType:'AGENT' as const,shopId:f.shopId,conversationId:f.conversationId,recoveryId:f.recoveryId,messageId:message.id,recipient:f.recipient,expectedControlRevision:2,deliveryKind:'TEXT' as const,expectedContent:message.content,now:new Date()};
-    result=await fence.admitFinalSend(request);expect((await fence.admitFinalSend(request)).kind).toBe('suppressed');
-   }else{
-    await f.changeOwner('AI','HUMAN',2);commandId=randomUUID();await f.db.merchantConversationSendCommand.create({data:{id:commandId,shopId:f.shopId,conversationId:f.conversationId,idempotencyKey:commandId,payloadSha256:sha256(commandId),expectedControlRevision:3,kind:'HUMAN_TEXT',recipientSnapshot:f.recipient,textBody:'A verified existing recovery reply'}});
-    const claimed=(await f.commands.claimDueHumanCommands({limit:100,now:new Date()})).find(c=>c.id===commandId)!;const loaded=await f.commands.loadClaimedCommand(commandId,claimed.leaseToken);if(loaded.kind!=='claimed')throw new Error('fixture command not claimed');const prepared=await f.preparation.freeze(loaded.command,claimed.leaseToken);if(prepared.kind!=='frozen')throw new Error('fixture command not prepared');
-    await f.persistedAllowModeration().assessText({subject:{kind:'HUMAN_COMMAND',commandId},shopId:f.shopId,conversationId:f.conversationId,effectiveText:prepared.body,inputKind:'TEXT',policyVersion:moderationConfig().policyVersion,now:new Date()});
-    result=await fence.admitFinalSend({senderType:'HUMAN',shopId:f.shopId,conversationId:f.conversationId,recoveryId:f.recoveryId,commandId,leaseToken:claimed.leaseToken,recipient:f.recipient,expectedControlRevision:3,deliveryKind:'TEXT',expectedContent:prepared.body,now:new Date()});
-   }
-   expect(result).toMatchObject({kind:'admitted',sender:{providerAccountId:account,providerPhoneNumberId:phone}});if(result.kind!=='admitted')throw new Error('fixture permit refused');
-   expect(await f.db.conversationMessage.findUniqueOrThrow({where:{id:result.messageId}})).toMatchObject({dispatchProviderAccountId:account,dispatchProviderPhoneNumberId:phone});expect(await f.db.recoverySenderAssignment.count({where:{conversationId:f.conversationId}})).toBe(0);expect(f.providerHttpRequests).toHaveLength(0);
-  }finally{await f.close();}
- },30000);
-
- it.each(['AGENT','HUMAN'] as const)('retains exact confirmed historical multipart %s sender proof without layout reinterpretation',async actor=>{
+ it('multipart historical proof cannot bypass an absent sender assignment',async()=>{
   const f=await fixture(true),to='447400123456',past=new Date(Date.now()-1000);
-  const historical={schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId:f.m.id,body:f.m.content,recipient:to,sender:{providerAccountId:account,providerPhoneNumberId:phone},receipt:{shopId:f.shop,conversationId:f.c.id},actor,retiredPresentation:{geometry:'not re-rendered as sender authority'}};
-  await db.conversationMessage.update({where:{id:f.m.id},data:{outboundPresentation:historical,providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerDispatchControlRevision:0}});
-  const payload={kind:'TEXT',body:'historical part'};
-  await db.conversationDeliveryPart.create({data:{id:randomUUID(),messageId:f.m.id,ordinal:0,role:'HEADER',payload,payloadDigest:sha256(canonicalJson(payload)),sourceIdentity:{schemaVersion:1,sourceDigest:sha256(canonicalJson(historical)),shopId:f.shop,conversationId:f.c.id},deadlineAt:new Date(Date.now()+60000),providerAccountId:account,providerPhoneNumberId:phone,state:'ACKNOWLEDGED',providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerMessageId:randomUUID(),acknowledgedAt:past}});
-  const snapshot=await readDispatchSenderSnapshot();const check=(recipient=to)=>db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:f.c.id,recipient,recovery:true,allowLegacyContinuation:true}));
-  expect(await check()).toEqual({providerAccountId:account,providerPhoneNumberId:phone});expect(await check('447400123457')).toBeNull();
-  // Source attestation is immutable; a wrong source digest cannot grant authority.
-  const g=await fixture(true);await db.conversationMessage.update({where:{id:g.m.id},data:{outboundPresentation:{...historical,messageId:g.m.id,receipt:{shopId:g.shop,conversationId:g.c.id}}}});
-  await db.conversationDeliveryPart.create({data:{id:randomUUID(),messageId:g.m.id,ordinal:0,role:'HEADER',payload,payloadDigest:sha256(canonicalJson(payload)),sourceIdentity:{schemaVersion:1,sourceDigest:'f'.repeat(64),shopId:g.shop,conversationId:g.c.id},deadlineAt:new Date(Date.now()+60000),providerAccountId:account,providerPhoneNumberId:phone,state:'ACKNOWLEDGED',providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerMessageId:randomUUID(),acknowledgedAt:past}});
-  expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:g.c.id,recipient:to,recovery:true,allowLegacyContinuation:true}))).toBeNull();
-  const h=await fixture(true),foreignRoot={...historical,messageId:f.m.id,receipt:{shopId:h.shop,conversationId:h.c.id}};await db.conversationMessage.update({where:{id:h.m.id},data:{outboundPresentation:foreignRoot}});
-  await db.conversationDeliveryPart.create({data:{id:randomUUID(),messageId:h.m.id,ordinal:0,role:'HEADER',payload,payloadDigest:sha256(canonicalJson(payload)),sourceIdentity:{schemaVersion:1,sourceDigest:sha256(canonicalJson(foreignRoot)),shopId:h.shop,conversationId:h.c.id},deadlineAt:new Date(Date.now()+60000),providerAccountId:account,providerPhoneNumberId:phone,state:'ACKNOWLEDGED',providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerMessageId:randomUUID(),acknowledgedAt:past}});
-  expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:h.c.id,recipient:to,recovery:true,allowLegacyContinuation:true}))).toBeNull();
-  const j=await fixture(true),foreignOwner={...historical,messageId:j.m.id,receipt:{shopId:f.shop,conversationId:j.c.id}};await db.conversationMessage.update({where:{id:j.m.id},data:{outboundPresentation:foreignOwner}});
-  await db.conversationDeliveryPart.create({data:{id:randomUUID(),messageId:j.m.id,ordinal:0,role:'HEADER',payload,payloadDigest:sha256(canonicalJson(payload)),sourceIdentity:{schemaVersion:1,sourceDigest:sha256(canonicalJson(foreignOwner)),shopId:f.shop,conversationId:j.c.id},deadlineAt:new Date(Date.now()+60000),providerAccountId:account,providerPhoneNumberId:phone,state:'ACKNOWLEDGED',providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerMessageId:randomUUID(),acknowledgedAt:past}});
-  expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:j.c.id,recipient:to,recovery:true,allowLegacyContinuation:true}))).toBeNull();
- });
-
- it('refuses sent timestamps without a confirmed root provider receipt',async()=>{
-  const f=await fixture(true),past=new Date(Date.now()-1000),to='447400123456';
-  const root=await db.conversationMessage.create({data:{conversationId:f.c.id,direction:'OUTBOUND',senderType:'AUTOMATION',status:'SENT',content:'unconfirmed old reminder',sentAt:past,providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerDispatchControlRevision:0,dispatchProviderAccountId:account,dispatchProviderPhoneNumberId:phone}});
-  await db.recoveryOutreachAttempt.create({data:{checkoutRecoveryId:f.r!.id,recipient:to,sequence:1,trigger:'INITIAL',configuredOfferMode:'NONE',status:'WAITING_FOR_RESPONSE',sentAt:past,outboundMessageId:root.id}});
-  const snapshot=await readDispatchSenderSnapshot();expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:f.c.id,recipient:to,recovery:true,allowLegacyContinuation:true}))).toBeNull();
+  const source={schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId:f.m.id,body:f.m.content,recipient:to,sender:{providerAccountId:account,providerPhoneNumberId:phone},receipt:{shopId:f.shop,conversationId:f.c.id}};
+  await db.conversationMessage.update({where:{id:f.m.id},data:{outboundPresentation:source,providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerDispatchControlRevision:0}});
+  const payload={kind:'TEXT',body:'old part'};
+  await db.conversationDeliveryPart.create({data:{messageId:f.m.id,ordinal:0,role:'HEADER',payload,payloadDigest:sha256(canonicalJson(payload)),sourceIdentity:{schemaVersion:1,sourceDigest:sha256(canonicalJson(source)),shopId:f.shop,conversationId:f.c.id},deadlineAt:new Date(Date.now()+60000),providerAccountId:account,providerPhoneNumberId:phone,state:'ACKNOWLEDGED',providerDispatchKey:randomUUID(),providerDispatchAdmittedAt:past,providerMessageId:randomUUID(),acknowledgedAt:past}});
+  const snapshot=await readDispatchSenderSnapshot();
+  expect(await db.$transaction(tx=>checkDispatchSender(tx,{snapshot,conversationId:f.c.id,recipient:to,recovery:true}))).toBeNull();
  });
 
  it('retains uncertain provider admission and never repeats transport on restart',async()=>{

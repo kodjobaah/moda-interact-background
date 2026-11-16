@@ -16,7 +16,7 @@ const event = (providerMessageId: string, contextMessageId: string | null = null
 });
 
 integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () => {
-  it("routes an unreferenced reply to the latest sent generation while explicit old context stays historical", async () => {
+  it("does not infer historical WooCommerce generations without a pool sender assignment", async () => {
     const db = new PrismaClient({ datasourceUrl: databaseUrl! });
     const shopId = randomUUID();
     const token = `checkout-${randomUUID()}`;
@@ -48,24 +48,16 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
           senderType: "AUTOMATION", status: "SENT", content: "Current basket", sentAt: new Date() },
       ] });
 
-      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
-        resolveSender: async () => ({ providerAccountId: "account", providerPhoneNumberId: "sender" }),
-      });
-      expect(await service.resolveInboundMessage(event(`inbound-${randomUUID()}`))).toMatchObject({
-        kind: "resolved", conversationId: currentConversationId,
-        checkoutRecoveryId: currentRecoveryId, mode: "active",
-      });
-      expect(await service.resolveInboundMessage(event(`inbound-${randomUUID()}`, oldProviderId))).toMatchObject({
-        kind: "resolved", conversationId: oldConversationId,
-        checkoutRecoveryId: oldRecoveryId, mode: "historical",
-      });
+      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true });
+      expect(await service.resolveInboundMessage(event(`inbound-${randomUUID()}`))).toEqual({ kind: "ignored" });
+      expect(await service.resolveInboundMessage(event(`inbound-${randomUUID()}`, oldProviderId))).toEqual({ kind: "ignored" });
     } finally {
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();
     }
   }, 45_000);
 
-  it("keeps distinct eligible shop/checkout owners ambiguous and excludes an unsent latest generation", async () => {
+  it("does not infer multi-shop ownership from unassigned historical conversations", async () => {
     const db = new PrismaClient({ datasourceUrl: databaseUrl! });
     const shopIds = [randomUUID(), randomUUID()];
     const tokenA = `checkout-a-${randomUUID()}`;
@@ -92,21 +84,13 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
         conversationId, providerMessageId: outboundIds[index]!, direction: "OUTBOUND",
         senderType: "AUTOMATION", status: "SENT", content: "Basket", sentAt: new Date(),
       })) });
-      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
-        resolveSender: async () => ({ providerAccountId: "account", providerPhoneNumberId: "sender" }),
-      });
-      expect(await service.resolveInboundMessage(event(`ambiguous-${randomUUID()}`))).toEqual({
-        kind: "guidance", reason: "MULTIPLE_RECOVERIES",
-      });
-      expect(await service.resolveInboundMessage(event(`quoted-text-${randomUUID()}`, outboundIds[0]!))).toMatchObject({
-        kind: "resolved", conversationId: conversationIds[0], checkoutRecoveryId: recoveryIds[0],
-      });
+      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true });
+      expect(await service.resolveInboundMessage(event(`ambiguous-${randomUUID()}`))).toEqual({ kind: "ignored" });
+      expect(await service.resolveInboundMessage(event(`quoted-text-${randomUUID()}`, outboundIds[0]!))).toEqual({ kind: "ignored" });
       expect(await service.resolveInboundMessage({
         ...event(`quoted-audio-${randomUUID()}`, outboundIds[1]!),
         content: { type: "audio", mediaId: "voice-note", mimeType: "audio/ogg", sha256: null },
-      })).toMatchObject({
-        kind: "resolved", conversationId: conversationIds[1], checkoutRecoveryId: recoveryIds[1],
-      });
+      })).toEqual({ kind: "ignored" });
 
       await db.checkoutRecovery.updateMany({ where: { id: { in: recoveryIds } }, data: { status: "CANCELLED" } });
       await db.checkoutRecovery.create({ data: {
@@ -116,16 +100,14 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
       await db.conversation.create({ data: {
         id: unsentConversationId, type: "RECOVERY", checkoutRecoveryId: unsentRecoveryId,
       } });
-      expect(await service.resolveInboundMessage(event(`unsent-latest-${randomUUID()}`))).toEqual({
-        kind: "guidance", reason: "NO_RECOVERY",
-      });
+      expect(await service.resolveInboundMessage(event(`unsent-latest-${randomUUID()}`))).toEqual({ kind: "ignored" });
     } finally {
       await db.shop.deleteMany({ where: { id: { in: shopIds } } });
       await db.$disconnect();
     }
   }, 45_000);
 
-  it("preserves Shopify ambiguity across older generations and terminal statuses", async () => {
+  it("does not infer Shopify owners across historical unassigned generations", async () => {
     const db = new PrismaClient({ datasourceUrl: databaseUrl! });
     const shopId = randomUUID();
     const customerId = randomUUID();
@@ -149,12 +131,8 @@ integration("ARCH-048 BG010: PostgreSQL multi-generation inbound routing", () =>
         senderType: "AUTOMATION", status: "SENT", content: "Basket", sentAt: new Date(),
       })) });
 
-      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true }, {
-        resolveSender: async () => ({ providerAccountId: "account", providerPhoneNumberId: "sender" }),
-      });
-      expect(await service.resolveInboundMessage(event(`shopify-inbound-${randomUUID()}`))).toEqual({
-        kind: "guidance", reason: "MULTIPLE_RECOVERIES",
-      });
+      const service = new RecoveryRoutingService(db, { isShopExecutionActive: async () => true });
+      expect(await service.resolveInboundMessage(event(`shopify-inbound-${randomUUID()}`))).toEqual({ kind: "ignored" });
     } finally {
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();
