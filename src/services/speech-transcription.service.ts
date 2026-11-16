@@ -4,6 +4,8 @@ export interface SpeechTranscriptionService {
   transcribe(input: { bytes: Uint8Array; mimeType: string }): Promise<{ text: string; provider: string; model: string }>;
 }
 
+export const MAX_TRANSCRIPTION_CHARACTERS = 64_000;
+
 type FailureCode = "configuration-missing" | "configuration-invalid" | "unsupported-media" | "http" | "network" | "invalid-response";
 export class SpeechTranscriptionError extends Error {
   constructor(readonly code: FailureCode, readonly retryable: boolean) {
@@ -67,7 +69,7 @@ class ProviderSpeechTranscriptionService implements SpeechTranscriptionService {
       if (!response.ok) throw new SpeechTranscriptionError("http", response.status === 408 || response.status === 429 || response.status >= 500);
       let body: unknown;
       try { body = await response.json(); } catch { throw new SpeechTranscriptionError("invalid-response", false); }
-      if (!body || typeof body !== "object" || !("text" in body) || typeof body.text !== "string" || body.text.length > 64_000)
+      if (!body || typeof body !== "object" || !("text" in body) || typeof body.text !== "string" || body.text.length > MAX_TRANSCRIPTION_CHARACTERS)
         throw new SpeechTranscriptionError("invalid-response", false);
       return { text: body.text, provider: this.provider, model };
     } catch (error) {
@@ -96,3 +98,11 @@ export const speechTranscriptionService: SpeechTranscriptionService = {
       : openAISpeechTranscriptionService.transcribe(input, selected);
   },
 };
+
+/** A trusted operation snapshot selected and checked by the owning caller before I/O. */
+export type FrozenSpeechOperation = Awaited<ReturnType<typeof readSpeechOperation>>;
+export function transcribeWithSpeechOperation(input: { bytes: Uint8Array; mimeType: string }, selected: FrozenSpeechOperation) {
+  return selected.provider === "groq"
+    ? groqSpeechTranscriptionService.transcribe(input, selected)
+    : openAISpeechTranscriptionService.transcribe(input, selected);
+}

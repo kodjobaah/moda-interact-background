@@ -14,6 +14,7 @@ vi.mock("@prisma/client", () => ({
     READ: "READ",
   },
   Prisma: {
+    DbNull: null,
     ConversationMessageUpdateInput: class {},
     PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {
       code = "";
@@ -95,6 +96,7 @@ function harness(
           },
         ),
     },
+    recoveryBasketRoutingTurn: { findUnique: vi.fn(async () => null as Record<string, unknown> | null), update: vi.fn(async () => ({})) },
     recoveryOutreachAttempt: {
       updateMany: vi.fn().mockImplementation(async ({ where, data }: {
         where: { id: string; status: string };
@@ -782,4 +784,66 @@ describe.each(["providerAccountId","providerPhoneNumberId"] as const)("ARCH076 i
   expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
   expect(test.compensation.reconcile).not.toHaveBeenCalled();expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();expect(test.notification.notify).not.toHaveBeenCalled();
  });
+});
+
+
+describe("ARCH076 neutral router prompt receipts", () => {
+  function routerHarness(state = "PROMPT_ADMITTED") {
+    const test = harness();
+    test.transaction.conversationMessage.findUnique.mockResolvedValue(null);
+    const prompt = {
+      inboundProviderMessageId: "original-1", promptProviderMessageId: "wamid-1", state,
+      inputJson: { content: { type: "text", text: "private pending question" } },
+      candidatesJson: [{ conversationId: "candidate-1" }], moderationJson: { allowed: true },
+      promptText: "Which basket?", workToken: "lease", workLeaseUntil: new Date(), nextRepairAt: new Date(),
+      thread: { providerPhoneNumberId: "phone-1", sender: { providerAccountId: "account-1" } },
+    };
+    test.transaction.recoveryBasketRoutingTurn.findUnique.mockResolvedValue(prompt);
+    return { ...test, prompt };
+  }
+  function noMerchantEffects(test: ReturnType<typeof routerHarness>) {
+    expect(test.transaction.conversationMessage.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.merchantConversationSendCommand.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.usageEvent.upsert).not.toHaveBeenCalled();
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+    expect(test.failureReachability.afterCorrection).not.toHaveBeenCalled();
+    expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();
+    expect(test.notification.notify).not.toHaveBeenCalled();
+  }
+  it.each(["SENT", "DELIVERED", "READ"] as const)("accepts exact %s prompt receipt without merchant accounting", async status => {
+    const test = routerHarness();
+    expect(await test.service.process({ ...baseEvent, status })).toBe("applied");
+    expect(test.transaction.recoveryBasketRoutingTurn.findUnique).toHaveBeenCalledWith({
+      where: { promptProviderMessageId: "wamid-1" }, include: { thread: { include: { sender: true } } },
+    });
+    expect(test.transaction.recoveryBasketRoutingTurn.update).not.toHaveBeenCalled();
+    noMerchantEffects(test);
+  });
+  it.each(["providerAccountId", "providerPhoneNumberId"] as const)("ignores foreign %s on a known prompt", async field => {
+    const test = routerHarness();
+    expect(await test.service.process({ ...baseEvent, schemaVersion: 3, status: "FAILED",
+      failure: { providerCode: "131049" }, [field]: "foreign" })).toBe("ignored");
+    expect(test.transaction.recoveryBasketRoutingTurn.update).not.toHaveBeenCalled();
+    noMerchantEffects(test);
+  });
+  it.each(["RECEIVED", "PROMPT_ADMITTED", "PROMPT_UNKNOWN"])("expires and destructively scrubs a failed %s prompt", async state => {
+    const test = routerHarness(state);
+    expect(await test.service.process({ ...baseEvent, schemaVersion: 3, status: "FAILED",
+      failure: { providerCode: "131049" } })).toBe("applied");
+    expect(test.transaction.recoveryBasketRoutingTurn.update).toHaveBeenCalledWith({
+      where: { inboundProviderMessageId: "original-1" }, data: {
+        state: "EXPIRED", inputJson: null, candidatesJson: null, moderationJson: null,
+        promptText: null, workToken: null, workLeaseUntil: null, nextRepairAt: null,
+      },
+    });
+    noMerchantEffects(test);
+  });
+  it.each(["RESOLVED", "EXPIRED", "IGNORED"])("does not resurrect or rewrite terminal %s prompt history", async state => {
+    const test = routerHarness(state);
+    expect(await test.service.process({ ...baseEvent, schemaVersion: 3, status: "FAILED",
+      failure: { providerCode: "131049" } })).toBe("applied");
+    expect(test.transaction.recoveryBasketRoutingTurn.update).not.toHaveBeenCalled();
+    noMerchantEffects(test);
+  });
 });

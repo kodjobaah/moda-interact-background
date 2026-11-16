@@ -1,3 +1,4 @@
+import { readRoutingHistoryProjection, projectRoutingHistory } from '../recovery-sender-pool/routing-projection.js';
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
@@ -82,6 +83,7 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
     const message = await this.database.conversationMessage.findUnique({
       where: { id: subject.messageId },
       select: {
+        id: true, providerMessageId: true, createdAt: true, transcriptionCompletedAt: true,
         conversationId: true, direction: true, senderType: true, content: true,
         contentType: true, transcriptionStatus: true,
         conversation: { select: { shopId: true, checkoutRecovery: { select: { shopId: true } } } },
@@ -102,7 +104,13 @@ export class PostgresModerationAssessmentService implements ModerationAssessment
       throw new Error("moderation_media_unsupported");
     }
     if (message.contentType !== "TEXT" && !isAudio) throw new Error("moderation_media_unsupported");
-    return { shopId, conversationId: message.conversationId, content: message.content,
+    const content = subject.kind === "CUSTOMER_MESSAGE"
+      ? projectRoutingHistory([{ ...message, id: subject.messageId }],
+          await readRoutingHistoryProjection(message.conversationId, this.database))
+          .find(row => row.id === subject.messageId)?.content
+      : message.content;
+    if (content === undefined) throw new Error("moderation_selection_only");
+    return { shopId, conversationId: message.conversationId, content,
       inputKind: isAudio ? "TRANSCRIPT" : "TEXT" };
   }
 

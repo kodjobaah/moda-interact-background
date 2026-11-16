@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
     receiveMessage: vi.fn(),
     getTurnState: vi.fn(),
   },
+  routingRuntime: { accept: vi.fn(), receivingScope: vi.fn() },
   routing: { resolveInboundMessage: vi.fn(), isCurrentActiveRoute: vi.fn() },
   recovery: { recordExternalActivity: vi.fn(), getAgentContext: vi.fn() },
   processor: { enqueue: vi.fn() },
@@ -57,6 +58,7 @@ vi.mock("@modainteract/moda-interact-shared/logging", async () => {
 vi.mock("../../../src/runtime/deployment-environment.js", () => ({
   resolveDeploymentEnvironmentName: vi.fn(() => "test"),
 }));
+vi.mock("../../../src/services/recovery-sender-pool/routing-runtime.js", () => ({ routingRuntime: mocks.routingRuntime }));
 vi.mock("../../../src/services/routing-guidance.service.js", () => ({ sendRoutingGuidance: mocks.guidance }));
 vi.mock("../../../src/services/whatsapp-contact-opt-out.service.js", () => ({
   whatsAppContactOptOutService: { handleInbound: mocks.optOut },
@@ -157,6 +159,13 @@ const event = {
   content: { type: "text" as const, text: "Can you help?" },
 };
 
+// This suite isolates worker orchestration. Actual SQL sender ownership and
+// routing persistence are exercised by the task-local PostgreSQL suites.
+beforeEach(() => {
+  mocks.routingRuntime.receivingScope.mockResolvedValue(null);
+  mocks.routingRuntime.accept.mockResolvedValue({ kind: "held" });
+});
+
 describe("WhatsApp worker inbound execution gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -179,6 +188,34 @@ describe("WhatsApp worker inbound execution gate", () => {
     mocks.recovery.recordExternalActivity.mockResolvedValue({ count: 1 });
     mocks.eligibility.isShopExecutionActive.mockResolvedValue(true);
     mocks.routing.isCurrentActiveRoute.mockResolvedValue(true);
+  });
+
+  it("hands unresolved pooled input to the durable routing runtime without merchant effects", async () => {
+    const scope = { threadId: "thread-1", routeId: null, canonicalRecipient: "447700900000",
+      providerAccountId: event.providerAccountId, providerPhoneNumberId: event.providerPhoneNumberId };
+    mocks.routing.resolveInboundMessage.mockResolvedValue({ kind: "routing", scope });
+    await processInboundMessage(event);
+    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(event, scope, expect.any(Function));
+    expect(mocks.routingRuntime.receivingScope).not.toHaveBeenCalled();
+    expect(mocks.guidance).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+    expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled();
+    expect(mocks.processor.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("uses durable pooled guidance before any legacy neutral sender or audio download", async () => {
+    const scope = { threadId: "thread-1", routeId: null, canonicalRecipient: "447700900000",
+      providerAccountId: event.providerAccountId, providerPhoneNumberId: event.providerPhoneNumberId };
+    const audio = { ...event, content: { type: "audio" as const, mediaId: "media-1", mimeType: "audio/ogg", sha256: null, voice: true } };
+    mocks.routing.resolveInboundMessage.mockResolvedValue({ kind: "guidance", reason: "MULTIPLE_RECOVERIES" });
+    mocks.routingRuntime.receivingScope.mockResolvedValue(scope);
+    await processInboundMessage(audio);
+    expect(mocks.routingRuntime.receivingScope).toHaveBeenCalledWith(audio);
+    expect(mocks.routingRuntime.accept).toHaveBeenCalledWith(audio, scope, expect.any(Function));
+    expect(mocks.guidance).not.toHaveBeenCalled();
+    expect(mocks.audio).not.toHaveBeenCalled();
+    expect(mocks.conversation.receiveMessage).not.toHaveBeenCalled();
+    expect(mocks.recovery.recordExternalActivity).not.toHaveBeenCalled();
   });
 
   it("never sends guidance or enqueues a reply for a foreign-sender quote ignored by routing",async()=>{
