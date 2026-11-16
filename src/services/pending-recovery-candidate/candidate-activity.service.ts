@@ -180,6 +180,7 @@ export class PendingRecoveryCandidateActivityService {
       ),
       lastActivityAt: incomingActivityAt,
     };
+    delete candidate.shopifyVerification; // A new customer event restarts verification after the full merchant delay.
     if (matched.candidate.cartToken && matched.candidate.cartToken !== candidate.cartToken) {
       await this.dependencies.candidateIndexStore.removeCartAlias(
         input.shopId,

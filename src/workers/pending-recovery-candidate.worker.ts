@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { checkoutDigest } from "../services/checkout-recovery/checkout-event-outcome-fields.js";
-import { Worker } from "bullmq";
+import { DelayedError, Worker } from "bullmq";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -126,7 +126,7 @@ export function createPendingRecoveryCandidateWorker(
 ) {
   const worker = new Worker<PendingRecoveryJob>(
   PENDING_RECOVERY_CANDIDATE_QUEUE,
-  async (job) =>
+  async (job, token) =>
     observeWorkerJob(workerMetricDefinition, job, async () => {
       // An explicit Woo source marker is the *only* maturity discriminator.
       // The missing marker is legacy Shopify; an unknown marker is an error.
@@ -176,6 +176,45 @@ export function createPendingRecoveryCandidateWorker(
           } catch (error) {
             materializationFailed = true;
             materializationError = error;
+          }
+
+          // Shopify may publish the authoritative abandoned-checkout record
+          // after the merchant's configured inactivity delay. This is NOT an
+          // application error: do not use or alter normal BullMQ exception retries.
+          if (!materializationFailed && materializationOutcome === "discarded-not-found" && job.id) {
+            const deferred = await pendingRecoveryCandidateService.deferShopifyNotFound(
+              shopifyCandidate, job.id,
+              async (updated, dueAtMs) => {
+                await job.updateData(updated);
+                await job.moveToDelayed(dueAtMs, token);
+              },
+            );
+            if (deferred.kind === "deferred") {
+              logger.info("recovery.pending_candidate.shopify_verification_deferred", {
+                shopId: shopifyCandidate.shopId,
+                checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
+                jobId: job.id,
+                attempt: deferred.attempt,
+                nextDueAt: new Date(deferred.dueAtMs).toISOString(),
+                reason: "shopify-abandoned-checkout-not-found",
+              });
+              // BullMQ's special control signal avoids marking a deliberate
+              // delay as failed or consuming its three normal error attempts.
+              throw new DelayedError();
+            }
+            if (deferred.kind === "superseded") {
+              // The next generation owns the index. NEVER remove its aliases.
+              logger.info("recovery.pending_candidate.shopify_verification_superseded", {
+                shopId: shopifyCandidate.shopId, jobId: job.id,
+                checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
+              });
+              return;
+            }
+            logger.info("recovery.pending_candidate.shopify_verification_terminal", {
+              shopId: shopifyCandidate.shopId, jobId: job.id,
+              checkoutDigest: checkoutDigest(shopifyCandidate.checkoutToken),
+              reason: deferred.kind,
+            });
           }
 
           let cleanupFailed = false;

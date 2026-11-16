@@ -79,7 +79,8 @@ describe("PendingRecoveryCandidateIndexStore", () => {
       cartToken: "cart-1",
     })).resolves.toBe("job-1");
 
-    const ttlMs = domain.pendingCandidateIndexTtlMs(delayMinutes);
+    const ttlMs = Math.max(domain.pendingCandidateIndexTtlMs(delayMinutes),
+      (delayMinutes + 70) * 60_000);
     expect(redisMock.set).toHaveBeenCalledWith(
       domain.pendingCandidateCheckoutIndexKey({
         shopId: "shop-1",
@@ -101,6 +102,15 @@ describe("PendingRecoveryCandidateIndexStore", () => {
     expect(redisZsets.get(domain.pendingCandidateShopIndexKey("shop-1"))).toEqual(
       new Map([["job-1", dueAtMs]]),
     );
+  });
+
+  it("preserves Woo's explicit retention without applying Shopify's verification horizon", async () => {
+    const store = new PendingRecoveryCandidateIndexStore();
+    await store.upsert({candidate,jobId:"woo-job",delayMinutes:1,dueAtMs:Date.now()+60_000,
+      shouldIndexShop:true,retentionMs:2 * 60_000});
+    expect(redisMock.set).toHaveBeenCalledWith(
+      domain.pendingCandidateCheckoutIndexKey({shopId:"shop-1",checkoutToken:"checkout-1"}),
+      "woo-job","PX",2 * 60_000);
   });
 
   it("removes the shop member instead of re-indexing non-runnable work", async () => {

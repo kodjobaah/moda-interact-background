@@ -4,6 +4,7 @@ export const EVALUATE_PENDING_RECOVERY_JOB = "evaluate-pending-recovery";
 export const DEFAULT_RECOVERY_DELAY_MINUTES = 30;
 const RECOVERY_CANDIDATE_TTL_BUFFER_MS = 60 * 60 * 1000;
 
+import type { ShopifyVerificationState } from "./shopify-abandoned-verification-retry.js";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 
 export type PendingRecoveryCandidate = {
@@ -16,6 +17,8 @@ export type PendingRecoveryCandidate = {
   internationalContext?: InternationalContext;
   /** Optional for legacy jobs created before ARCH-004. */
   lastActivityAt?: string;
+  /** Provider visibility retry state; reset only by NEW checkout activity. */
+  shopifyVerification?: ShopifyVerificationState;
 };
 
 export function pendingCandidateCheckoutIndexKey(input: {

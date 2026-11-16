@@ -5,6 +5,7 @@ import {
   pendingCandidateShopIndexKey,
 } from "../../domain/pending-recovery-candidate.js";
 import { connectionRedis } from "../../lib/redis.js";
+import { shopifyCandidateIndexTtlMs } from "../../domain/shopify-abandoned-verification-retry.js";
 import type { RecoveryExecutionPolicy } from "../platform-configuration/contracts.js";
 
 /** Identity-only storage: Woo and Shopify share the index keys but not their
@@ -45,7 +46,10 @@ export class PendingRecoveryCandidateIndexStore {
     retentionMs?: number;
   }) {
     const retentionBufferMs = this.readPolicy ? (await this.readPolicy()).recoveryCandidateTtlBufferMs : undefined;
-    const ttlMs = input.retentionMs ?? pendingCandidateIndexTtlMs(input.delayMinutes, retentionBufferMs);
+    const ttlMs = input.retentionMs ?? shopifyCandidateIndexTtlMs(
+      input.delayMinutes, pendingCandidateIndexTtlMs(input.delayMinutes, retentionBufferMs),
+      Date.now(), input.dueAtMs,
+    );
 
     await connectionRedis.set(
       pendingCandidateCheckoutIndexKey({
@@ -139,7 +143,10 @@ export class PendingRecoveryCandidateIndexStore {
       pendingCandidateCartIndexKey({ shopId, cartToken }),
       jobId,
       "PX",
-      pendingCandidateIndexTtlMs(delayMinutes, retentionBufferMs),
+      shopifyCandidateIndexTtlMs(
+        delayMinutes, pendingCandidateIndexTtlMs(delayMinutes, retentionBufferMs),
+        Date.now(), Date.now() + delayMinutes * 60_000,
+      ),
     );
   }
 }

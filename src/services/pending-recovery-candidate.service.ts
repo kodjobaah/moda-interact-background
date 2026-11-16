@@ -5,6 +5,7 @@ import {
 } from "../domain/pending-recovery-candidate.js";
 
 import { Queue } from "bullmq";
+import { nextShopifyVerificationRetry, SHOPIFY_VERIFICATION_HORIZON_MS, SHOPIFY_VERIFICATION_INDEX_CUSHION_MS } from "../domain/shopify-abandoned-verification-retry.js";
 import { createBullMQTelemetry } from "@modainteract/moda-interact-shared/observability/bullmq";
 
 import { connectionRedis } from "../lib/redis.js";
@@ -172,6 +173,15 @@ export class PendingRecoveryCandidateService {
         existingJob.data.lastActivityAt ?? existingJob.data.checkoutCreatedAt,
         candidate.lastActivityAt,
       );
+      // A duplicate or stale checkout-created webhook must not reset the
+      // bounded Shopify verification clock or promote a delayed retry early.
+      // Only genuinely newer activity may restart the merchant inactivity delay.
+      const previousActivityAt = existingJob.data.lastActivityAt ?? existingJob.data.checkoutCreatedAt;
+      if (existingJob.data.shopifyVerification && previousActivityAt &&
+          Date.parse(candidate.lastActivityAt ?? "") <= Date.parse(previousActivityAt)) {
+        return { outcome: "refreshed", jobId: activeJobId, delayMinutes,
+          candidate: existingJob.data };
+      }
       const effectiveCandidate = {
         ...candidate,
         ...optionalCandidateInternationalContext(
@@ -378,6 +388,43 @@ export class PendingRecoveryCandidateService {
     return this.checkoutOrderGuard.hasOrderProcessed(shopId, checkoutToken);
   }
 
+
+  /** Reschedule the SAME active Shopify BullMQ job only for absent provider
+   * confirmation. The checkout mutex serialises this transition with order
+   * completion and checkout updates. The callback must update the job payload
+   * and move it to delayed while the worker still owns its BullMQ lock.
+   */
+  async deferShopifyNotFound(
+    candidate: PendingRecoveryCandidate,
+    jobId: string,
+    move: (updated: PendingRecoveryCandidate, dueAtMs: number) => Promise<void>,
+    now = Date.now(),
+  ): Promise<{ kind: "deferred"; dueAtMs: number; attempt: number } |
+      { kind: "exhausted" | "superseded" | "order-completed" }> {
+    return this.checkoutOrderGuard.withCheckoutLock(candidate.shopId, candidate.checkoutToken, async () => {
+      const indexed = await this.candidateIndexStore.findByCheckout({
+        shopId: candidate.shopId, checkoutToken: candidate.checkoutToken,
+      });
+      if (indexed !== jobId) return { kind: "superseded" } as const;
+      if (await this.checkoutOrderGuard.hasOrderProcessed(candidate.shopId, candidate.checkoutToken)) {
+        return { kind: "order-completed" } as const;
+      }
+      const next = nextShopifyVerificationRetry(candidate.shopifyVerification, now);
+      if (!next) return { kind: "exhausted" } as const;
+      const updated: PendingRecoveryCandidate = {
+        ...candidate, shopifyVerification: next.state,
+      };
+      // Keep identity discoverable for the delayed attempt. The maturity worker
+      // will perform the normal authorisation + completion checks on each retry.
+      await this.candidateIndexStore.upsert({
+        candidate: updated, jobId, delayMinutes: 0, dueAtMs: next.dueAtMs,
+        shouldIndexShop: true,
+        retentionMs: SHOPIFY_VERIFICATION_HORIZON_MS + SHOPIFY_VERIFICATION_INDEX_CUSHION_MS,
+      });
+      await move(updated, next.dueAtMs);
+      return { kind: "deferred", dueAtMs: next.dueAtMs, attempt: next.state.deferrals + 1 } as const;
+    });
+  }
 
   async handleCandidateMatured(
     candidate: PendingRecoveryCandidate,

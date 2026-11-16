@@ -112,6 +112,16 @@ describe("PendingRecoveryCandidateActivityService", () => {
     }));
   });
 
+  it("resets Shopify visibility attempts only when activity advances", async () => {
+    const harness = createHarness();
+    const source = { ...baseCandidate, shopifyVerification:{firstAttemptAtMs:100,deferrals:3} };
+    harness.resolveCandidate.mockResolvedValue({jobId:"job-1",candidate:source});
+    await harness.service.refresh({shopId:"shop-1",checkoutToken:"checkout-1",cartToken:"cart-1",
+      activityAt:"2026-08-28T01:00:00.000Z",isEmpty:false});
+    const updated = harness.job.updateData.mock.calls[0]?.[0];
+    expect(updated?.shopifyVerification).toBeUndefined();
+  });
+
   it("enriches lookup context without erasing existing values or regressing activity", async () => {
     const harness = createHarness();
 

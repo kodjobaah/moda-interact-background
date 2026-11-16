@@ -9,6 +9,7 @@ const hoisted = vi.hoisted(() => ({
     checkoutToken: "checkout_1",
   })),
   cleanup: vi.fn(async () => undefined),
+  deferNotFound: vi.fn(async (_candidate: unknown, _jobId: string, _move: unknown) => ({kind: "exhausted" as const})),
   durableRecovery: null as Record<string, unknown> | null,
   createRecovery: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     hoisted.durableRecovery ??= {
@@ -62,6 +63,7 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 vi.mock("bullmq", () => ({
+  DelayedError: class DelayedError extends Error {},
   Worker: class {
     constructor(_queue: string, processor: typeof hoisted.processor) {
       hoisted.processor = processor ?? undefined;
@@ -135,6 +137,7 @@ vi.mock("../../../src/services/checkout-recovery.service.js", () => ({
 vi.mock("../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: {
     handleCandidateMatured: hoisted.cleanup,
+    deferShopifyNotFound: hoisted.deferNotFound,
   },
 }));
 vi.mock("../../../src/runtime/background-runtime-config.js", () => ({
@@ -191,6 +194,7 @@ describe("pending recovery candidate worker", () => {
       checkoutToken: "checkout_1",
     });
     hoisted.cleanup.mockClear();
+    hoisted.deferNotFound.mockReset().mockResolvedValue({kind: "exhausted"});
   });
 
   it("cleans up an inactive matured candidate in finally", async () => {
@@ -212,6 +216,48 @@ describe("pending recovery candidate worker", () => {
     expect(hoisted.records).toContainEqual(expect.objectContaining({
       event: "recovery.pending_candidate.materialization_completed",
       data: expect.objectContaining({shopId: "shop_1", jobId: job.id, outcome: "discarded-shop-unavailable", candidateIndexCleanup: "completed"}),
+    }));
+  });
+
+  it("defers only Shopify not-found without cleanup or consuming normal error attempts", async () => {
+    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found", checkoutToken:"checkout_1"});
+    const move = vi.fn(async () => undefined);
+    const save = vi.fn(async () => undefined);
+    const job = {name:EVALUATE_PENDING_RECOVERY_JOB,id:"job-visible-later",
+      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0,
+      opts:{attempts:3},updateData:save,moveToDelayed:move};
+    hoisted.deferNotFound.mockImplementationOnce(async (_candidate, _id, action) => {
+      await (action as (c:unknown, t:number)=>Promise<void>)(job.data, 12345);
+      return {kind:"deferred",attempt:2,dueAtMs:12345};
+    });
+    await expect(hoisted.processor?.(job)).rejects.toThrow();
+    expect(save).toHaveBeenCalledOnce();
+    expect(move).toHaveBeenCalledWith(12345, undefined);
+    expect(hoisted.cleanup).not.toHaveBeenCalled();
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event:"recovery.pending_candidate.shopify_verification_deferred",
+      data:expect.objectContaining({jobId:job.id,attempt:2}),
+    }));
+    expect(job.opts.attempts).toBe(3);
+  });
+
+  it("does not remove the new checkout owner's indexes after supersession", async () => {
+    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found",checkoutToken:"checkout_1"});
+    hoisted.deferNotFound.mockResolvedValueOnce({kind:"superseded"});
+    await hoisted.processor?.({name:EVALUATE_PENDING_RECOVERY_JOB,id:"old-job",
+      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0});
+    expect(hoisted.cleanup).not.toHaveBeenCalled();
+  });
+
+  it("cleans up only after provider verification horizon is exhausted", async () => {
+    hoisted.materialize.mockResolvedValueOnce({outcome:"discarded-not-found",checkoutToken:"checkout_1"});
+    const job = {name:EVALUATE_PENDING_RECOVERY_JOB,id:"final-job",
+      data:{shopId:"shop_1",checkoutToken:"checkout_1"},attemptsMade:0};
+    await hoisted.processor?.(job);
+    expect(hoisted.cleanup).toHaveBeenCalledWith(job.data,job.id);
+    expect(hoisted.records).toContainEqual(expect.objectContaining({
+      event:"recovery.pending_candidate.shopify_verification_terminal",
+      data:expect.objectContaining({reason:"exhausted"}),
     }));
   });
 
@@ -437,6 +483,7 @@ describe("pending recovery candidate worker", () => {
     hoisted.durableRecovery = null;
     hoisted.scheduleResume.mockReset().mockResolvedValue("resume-job");
     hoisted.cleanup.mockClear();
+    hoisted.deferNotFound.mockReset().mockResolvedValue({kind: "exhausted"});
     hoisted.createRecovery.mockClear();
     hoisted.updateRecoveryMany.mockClear();
     const versionReadError = new Error("database version read unavailable");

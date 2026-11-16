@@ -16,6 +16,13 @@
 // remain retryable rather than silently discarding a potential recovery.
 
 import prisma from "../lib/db.js";
+import { createHash } from "node:crypto";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
+const lookupLogger = createLogger({
+  serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName(),
+});
+const urlDigest = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
 import {
   ABANDONED_CHECKOUT_API_VERSION,
   ABANDONED_CHECKOUT_LOOKUP_WINDOW_MS,
@@ -113,12 +120,20 @@ export class AbandonedCheckoutLookupService {
     // Exact URL matching is the recovery identity. Without it the lookup cannot
     // be completed deterministically.
     if (!input.abandonedCheckoutUrl) {
+      lookupLogger.info("shopify.abandoned_checkout.lookup_outcome", {
+        shopId: input.shopId, checkoutDigest: urlDigest(input.checkoutToken),
+        outcome: "not-found", reason: "missing-recovery-url",
+      });
       return { kind: "not-found" };
     }
 
     // The time scope is required to keep the query narrow and bounded.
     const timeRange = this.buildCreatedAtFilter(input.checkoutCreatedAt, lookupWindowMs);
     if (!timeRange) {
+      lookupLogger.info("shopify.abandoned_checkout.lookup_outcome", {
+        shopId: input.shopId, checkoutDigest: urlDigest(input.checkoutToken),
+        outcome: "not-found", reason: "invalid-checkout-created-at",
+      });
       return { kind: "not-found" };
     }
 
@@ -147,7 +162,11 @@ export class AbandonedCheckoutLookupService {
     }
 
     if (count === 0) {
-      // No abandoned checkout in the bounded window, so there cannot be a match.
+      lookupLogger.info("shopify.abandoned_checkout.lookup_outcome", {
+        shopId: input.shopId, checkoutDigest: urlDigest(input.checkoutToken),
+        outcome: "not-found", reason: "zero-candidates", candidateCount: 0,
+        windowFrom: timeRange.fromIso, windowTo: timeRange.toIso,
+      });
       return { kind: "not-found" };
     }
 
@@ -171,6 +190,13 @@ export class AbandonedCheckoutLookupService {
     );
 
     if (matches.length === 0) {
+      lookupLogger.info("shopify.abandoned_checkout.lookup_outcome", {
+        shopId: input.shopId, checkoutDigest: urlDigest(input.checkoutToken),
+        outcome: "not-found", reason: "url-mismatch", candidateCount: candidates.length,
+        windowFrom: timeRange.fromIso, windowTo: timeRange.toIso,
+        expectedUrlDigest: urlDigest(input.abandonedCheckoutUrl),
+        returnedUrlDigests: candidates.map(c => urlDigest(c.abandonedCheckoutUrl)),
+      });
       return { kind: "not-found" };
     }
 
@@ -180,6 +206,10 @@ export class AbandonedCheckoutLookupService {
 
     // Exactly one exact URL match remains (0 and >1 are handled above).
     const match = matches[0] as NormalizedAbandonedCheckout;
+    lookupLogger.info("shopify.abandoned_checkout.lookup_outcome", {
+      shopId: input.shopId, checkoutDigest: urlDigest(input.checkoutToken),
+      outcome: "found", candidateCount: candidates.length,
+    });
     return { kind: "found", checkout: match };
   }
 

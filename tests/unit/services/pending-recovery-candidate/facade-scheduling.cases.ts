@@ -50,6 +50,75 @@ export function registerSchedulingCases(context: CandidateFacadeContext) {
     }));
   });
 
+  it("keeps a one-minute merchant policy while retaining the original BullMQ exception policy", async () => {
+    recoveryPolicyMocks.resolve.mockResolvedValueOnce({
+      recoveryDelayMinutes:1,recoveryOfferMode:"NONE",fixedShopifyDiscountId:null,
+      followUpEnabled:false,followUpDelayMinutes:null,source:"MERCHANT",offerSnapshot:null,
+    });
+    const result = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain:"shop.myshopify.com",checkoutToken:"checkout-fast",cartToken:null,
+      abandonedCheckoutUrl:"https://shop.example/recover",checkoutCreatedAt:"2026-11-16T17:00:00Z",
+    });
+    expect(result.delayMinutes).toBe(1);
+    expect(queueInstance.addCalls[0].opts.delay).toBe(60_000);
+    expect(getQueueOptions()).toMatchObject({defaultJobOptions:{attempts:3,
+      backoff:{type:"exponential",delay:1000}}});
+    expect(queueInstance.addCalls[0].opts).not.toHaveProperty("attempts");
+  });
+
+  it("defers a missing Shopify checkout under the existing checkout lock, not via error retries", async () => {
+    const created = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain:"shop.myshopify.com",checkoutToken:"checkout-provider-visibility",
+      cartToken:"cart-provider-visibility",abandonedCheckoutUrl:"https://shop.example/recover",
+      checkoutCreatedAt:"2026-11-16T17:00:00Z",
+    });
+    if (created.outcome !== "enqueued") throw new Error("Fixture expected a scheduled checkout");
+    const now = Date.parse("2026-11-16T18:00:00Z");
+    const move = vi.fn(async (updated, dueAtMs) => {
+      expect(dueAtMs).toBe(now + 2 * 60_000);
+      expect(updated.shopifyVerification).toEqual({firstAttemptAtMs:now,deferrals:1});
+    });
+    const result = await serviceModule.pendingRecoveryCandidateService.deferShopifyNotFound(
+      created.candidate, created.jobId, move, now);
+    expect(result).toMatchObject({kind:"deferred",attempt:2,dueAtMs:now+2*60_000});
+    expect(move).toHaveBeenCalledOnce();
+    expect(redisZsets.get(domainModule.pendingCandidateShopIndexKey("shop_1"))?.get(created.jobId)).toBe(now+2*60_000);
+    // An order completion already recorded under the checkout mutex stops any retry.
+    await redisMock.set(domainModule.checkoutOrderCompletedKey({shopId:"shop_1",
+      checkoutToken:created.candidate.checkoutToken}),"1");
+    await expect(serviceModule.pendingRecoveryCandidateService.deferShopifyNotFound(
+      created.candidate,created.jobId,move,now)).resolves.toEqual({kind:"order-completed"});
+    expect(move).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to requeue after a newer checkout job replaces the identity index", async () => {
+    const created = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated({
+      shopDomain:"shop.myshopify.com",checkoutToken:"checkout-superseded",
+      cartToken:null,abandonedCheckoutUrl:null,checkoutCreatedAt:null,
+    });
+    if (created.outcome !== "enqueued") throw new Error("Fixture expected scheduled checkout");
+    await redisMock.set(domainModule.pendingCandidateCheckoutIndexKey({shopId:"shop_1",
+      checkoutToken:created.candidate.checkoutToken}),"newer-owner-job");
+    const move = vi.fn(async()=>undefined);
+    await expect(serviceModule.pendingRecoveryCandidateService.deferShopifyNotFound(
+      created.candidate,created.jobId,move)).resolves.toEqual({kind:"superseded"});
+    expect(move).not.toHaveBeenCalled();
+  });
+
+  it("does not restart an in-progress provider verification when checkout.created is replayed", async () => {
+    const fields = {shopDomain:"shop.myshopify.com",checkoutToken:"checkout-repeat",
+      cartToken:null,abandonedCheckoutUrl:"https://shop.example/recover",
+      checkoutCreatedAt:"2026-11-16T16:00:00Z",
+      activityAt:"2026-11-16T16:01:00Z"};
+    const first = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated(fields);
+    if (first.outcome !== "enqueued") throw new Error("Expected a pending candidate");
+    const job = queueInstance.jobs.get(first.jobId)!;
+    job.data = {...job.data, shopifyVerification:{firstAttemptAtMs:1000,deferrals:2}};
+    const replay = await serviceModule.pendingRecoveryCandidateService.scheduleFromCheckoutCreated(fields);
+    expect(replay.candidate.shopifyVerification).toEqual({firstAttemptAtMs:1000,deferrals:2});
+    expect(job.delayChanges).toHaveLength(0);
+  });
+
   it("uses an active Admin override delay for initial scheduling", async () => {
     recoveryPolicyMocks.resolve.mockResolvedValueOnce({
       recoveryDelayMinutes: 120,

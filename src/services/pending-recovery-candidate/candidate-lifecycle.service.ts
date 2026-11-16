@@ -288,7 +288,7 @@ export class PendingRecoveryCandidateLifecycleService {
     incoming: PendingRecoveryCandidate,
     existing?: PendingRecoveryCandidate,
   ): PendingRecoveryCandidate {
-    return {
+    const merged: PendingRecoveryCandidate = {
       ...existing,
       ...incoming,
       cartToken: incoming.cartToken ?? existing?.cartToken ?? null,
@@ -309,5 +309,12 @@ export class PendingRecoveryCandidateLifecycleService {
         incoming.lastActivityAt,
       ),
     };
+    // Only new activity resets the visibility deadline. Stale webhook delivery
+    // cannot extend an existing verification retry indefinitely.
+    if (!existing || Date.parse(incoming.lastActivityAt ?? "") >
+        Date.parse(existing.lastActivityAt ?? existing.checkoutCreatedAt ?? "")) {
+      delete merged.shopifyVerification;
+    }
+    return merged;
   }
 }
