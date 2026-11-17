@@ -69,6 +69,15 @@ export interface NormalizedAbandonedCheckoutLineItem {
   price: string | null;
 }
 
+export interface ShopifyCheckoutAttribute {
+  key: string;
+  value: string;
+}
+
+export type AuthoritativeCheckoutAttributes =
+  | { kind: "available"; values: ShopifyCheckoutAttribute[] }
+  | { kind: "malformed" };
+
 export interface NormalizedAbandonedCheckout {
   // Diagnostic only. Not durably persisted by ARCH-001.
   shopifyAbandonedCheckoutId: string | null;
@@ -86,4 +95,5 @@ export interface NormalizedAbandonedCheckout {
 
   customer: NormalizedAbandonedCheckoutCustomer | null;
   lineItems: NormalizedAbandonedCheckoutLineItem[];
+  authoritativeCheckoutAttributes: AuthoritativeCheckoutAttributes;
 }

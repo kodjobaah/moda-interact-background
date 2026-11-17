@@ -54,6 +54,7 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
       firstName: "Ada",
       lastName: "Lovelace",
     },
+    customAttributes: [],
     billingAddress: {
       countryCodeV2: "US",
       timeZone: "America/New_York",
@@ -126,6 +127,76 @@ describe("abandoned checkout lookup service", () => {
       expect(result.checkout.lineItems).toHaveLength(1);
       expect(result.checkout.lineItems[0].sku).toBe("SKU-1");
       expect(result.checkout.completedAt).toBeNull();
+      expect(result.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [],
+      });
+    }
+  });
+
+  it("returns authoritative consent attributes from the matching checkout query without another lookup", async () => {
+    const receipt = "v1.key-1.nonce.ciphertext.auth-tag";
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, {
+        customAttributes: [
+          { key: "unrelated", value: "ignored-by-consent-verifier" },
+          { key: "moda_wa_consent_v1", value: receipt },
+        ],
+      }),
+    ]);
+
+    const result = await service.lookup(candidate);
+
+    expect(result.kind).toBe("found");
+    if (result.kind === "found") {
+      expect(result.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [
+          { key: "unrelated", value: "ignored-by-consent-verifier" },
+          { key: "moda_wa_consent_v1", value: receipt },
+        ],
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const listQuery = JSON.parse(fetchMock.mock.calls[1][1].body as string).query as string;
+    expect(listQuery).toContain("customAttributes {");
+    expect(listQuery).toContain("key");
+    expect(listQuery).toContain("value");
+  });
+
+  it("preserves duplicate consent attributes and marks malformed provider shapes", async () => {
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, {
+        customAttributes: [
+          { key: "moda_wa_consent_v1", value: "receipt-a" },
+          { key: "moda_wa_consent_v1", value: "receipt-b" },
+        ],
+      }),
+    ]);
+    const duplicateResult = await service.lookup(candidate);
+    expect(duplicateResult.kind).toBe("found");
+    if (duplicateResult.kind === "found") {
+      expect(duplicateResult.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [
+          { key: "moda_wa_consent_v1", value: "receipt-a" },
+          { key: "moda_wa_consent_v1", value: "receipt-b" },
+        ],
+      });
+    }
+
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, { customAttributes: [{ key: "moda_wa_consent_v1" }] }),
+    ]);
+    const malformedResult = await service.lookup(candidate);
+    expect(malformedResult.kind).toBe("found");
+    if (malformedResult.kind === "found") {
+      expect(malformedResult.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "malformed",
+      });
     }
   });
 
@@ -319,6 +390,7 @@ describe("abandoned checkout lookup service", () => {
     expect(query).toContain("presentmentMoney");
     expect(query).toContain("billingAddress");
     expect(query).toContain("locale");
+    expect(query).toContain("customAttributes");
     expect(query).toContain("sku");
     expect(query).toContain("originalUnitPriceSet");
     expect(query).not.toContain("shippingAddress");
