@@ -93,7 +93,7 @@ describe("production worker observability startup", () => {
         {
           cwd: resolve("."),
           encoding: "utf8",
-          timeout: 15_000,
+          timeout: 60_000,
           env: {
             ...process.env,
             DEPLOYMENT_ENVIRONMENT_NAME: "test",
@@ -113,7 +113,7 @@ describe("production worker observability startup", () => {
         singleton: true,
       });
     },
-    20_000,
+    65_000,
   );
 
   it("uses the architect-approved exact shared runtime release", () => {

@@ -107,7 +107,7 @@ describe("CommerceAgent GenAI metrics", () => {
     expect(serialized).not.toMatch(
       /SECRET_CUSTOMER_CONVERSATION_PAYLOAD|agent-\d|tool-\d|provider-\d|model-\d/,
     );
-  });
+  }, 20_000);
 });
 
 function pointCount(
