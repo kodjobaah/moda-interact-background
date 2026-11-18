@@ -27,6 +27,8 @@ vi.mock("../../../src/services/recovery-sender-pool/inbound-writer.js",()=>({
     const message=await mocks.database.conversationMessage.create({data:{
       conversationId:evidence.conversationId,providerMessageId:event.providerMessageId,
       dispatchProviderAccountId:event.providerAccountId,dispatchProviderPhoneNumberId:event.providerPhoneNumberId,
+      direction:"INBOUND",senderType:"CUSTOMER",status:"DELIVERED",content:"",
+      contentType:"AUDIO",transcriptionStatus:"PENDING",createdAt:new Date(event.occurredAt),
     }});
     return {message,duplicate:false};
   }),
@@ -41,6 +43,7 @@ vi.mock("@modainteract/moda-interact-shared/logging", () => ({ createLogger: () 
 
 import { InboundWhatsAppAudioService } from "../../../src/services/inbound-whatsapp-audio.service.js";
 import { WhatsAppMediaError } from "../../../src/services/whatsapp-media.service.js";
+import { canProcessConversation } from "../../../src/services/recovery-sender-pool/inbound-authority.js";
 
 const event = {
   schemaVersion: 1 as const, provider: "whatsapp" as const, providerAccountId: "waba",
@@ -132,7 +135,13 @@ describe("InboundWhatsAppAudioService", () => {
   });
 
   it("does not call STT when a completed reservation is replayed", async () => {
-    mocks.database.conversationMessage.findUnique.mockResolvedValue({ id: "message-row", conversationId: "conversation-1", transcriptionStatus: "COMPLETED" });
+    mocks.database.conversationMessage.findUnique.mockResolvedValue({
+      id: "message-row",
+      conversationId: "conversation-1",
+      dispatchProviderAccountId: "waba",
+      dispatchProviderPhoneNumberId: "phone",
+      transcriptionStatus: "COMPLETED",
+    });
     const result = await new InboundWhatsAppAudioService(mocks.media, mocks.transcription).process(event, "conversation-1");
     expect(result).toEqual({ kind: "ignored" });
     expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
@@ -185,7 +194,11 @@ it("rejects a stored inbound ownership race before media download",async()=>{
   expect(mocks.database.conversationMessage.updateMany).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({data:{transcriptionStatus:"REJECTED",transcriptionFailureCode:"STALE_TRANSCRIPTION"}}));
  });
  it("V07 retries do not revive a stale transcript", async () => {
-  mocks.database.conversationMessage.findUnique.mockResolvedValue({id:"message-row",conversationId:"conversation-1",transcriptionStatus:"REJECTED",transcriptionFailureCode:"STALE_TRANSCRIPTION"});
+  mocks.database.conversationMessage.findUnique.mockResolvedValue({
+   id:"message-row",conversationId:"conversation-1",dispatchProviderAccountId:"waba",
+   dispatchProviderPhoneNumberId:"phone",transcriptionStatus:"REJECTED",
+   transcriptionFailureCode:"STALE_TRANSCRIPTION",
+  });
   expect(await new InboundWhatsAppAudioService(mocks.media,mocks.transcription).process(event,"conversation-1")).toEqual({kind:"ignored"});
   expect(mocks.media.downloadAudio).not.toHaveBeenCalled();
  });
@@ -244,6 +257,7 @@ describe("review R1/R2 event ordering", () => {
 describe("R1 overlapping notes retain durable event order",()=>{
  it.each(["older-first","newer-first"])("%s provider completion admits the newer note once",async(order)=>{
   vi.resetAllMocks();
+  vi.mocked(canProcessConversation).mockResolvedValue(true);
   const rows:any[]=[];const state={inboundVersion:2,lastProcessedVersion:2};
   mocks.database.conversationMessage.findUnique.mockImplementation(async({where})=>rows.find(r=>r.providerMessageId===where.providerMessageId)??null);
   mocks.database.conversationMessage.create.mockImplementation(async({data})=>{const row={...data,id:data.providerMessageId};rows.push(row);return row;});
