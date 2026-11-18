@@ -62,6 +62,7 @@ const checkout: NormalizedAbandonedCheckout = {
     firstName: "Current",
     lastName: "Customer",
   },
+  authoritativeCheckoutAttributes: { kind: "available", values: [] },
   lineItems: [
     {
       productId: "product-current",

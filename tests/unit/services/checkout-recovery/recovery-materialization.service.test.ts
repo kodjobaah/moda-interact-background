@@ -34,6 +34,7 @@ const checkout: NormalizedAbandonedCheckout = {
   },
   customer: null,
   lineItems: [],
+  authoritativeCheckoutAttributes: { kind: "available", values: [] },
 };
 
 function createHarness(options: {
@@ -174,6 +175,11 @@ describe("RecoveryMaterializationService", () => {
     });
     expect(harness.recipientResolver.resolve).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+    );
+    expect(harness.snapshotBuilder.build).toHaveBeenCalledExactlyOnceWith(
+      candidate,
+      candidate.shopDomain,
+      checkout,
     );
     expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ checkoutToken: candidate.checkoutToken }),

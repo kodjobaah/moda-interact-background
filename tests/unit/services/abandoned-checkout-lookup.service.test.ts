@@ -161,6 +161,10 @@ describe("abandoned checkout lookup service", () => {
       expect(result.checkout.shopifyPlus).toBe(false);
       expect(result.checkout.consentReceiptAttribute).toEqual({ kind: "MISSING" });
       expect(result.checkout.billingPhone).toBe("+15551234567");
+      expect(result.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [],
+      });
     }
   });
 
@@ -177,6 +181,10 @@ describe("abandoned checkout lookup service", () => {
       expect(single.checkout.consentReceiptAttribute).toEqual({ kind: "VALUE", value: "v1.receipt" });
       expect(single.checkout.billingPhone).toBe("+14155550123");
       expect(single.checkout.shippingPhone).toBe("+14155550999");
+      expect(single.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [{ key: "moda_wa_consent_v1", value: "v1.receipt" }],
+      });
     }
 
     mockCountResponse(1);
@@ -190,6 +198,13 @@ describe("abandoned checkout lookup service", () => {
     expect(duplicate.kind).toBe("found");
     if (duplicate.kind === "found") {
       expect(duplicate.checkout.consentReceiptAttribute).toEqual({ kind: "INVALID" });
+      expect(duplicate.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [
+          { key: "moda_wa_consent_v1", value: "v1.first" },
+          { key: "moda_wa_consent_v1", value: "v1.second" },
+        ],
+      });
     }
 
     mockCountResponse(1);
@@ -198,7 +213,54 @@ describe("abandoned checkout lookup service", () => {
     expect(absent.kind).toBe("found");
     if (absent.kind === "found") {
       expect(absent.checkout.consentReceiptAttribute).toEqual({ kind: "MISSING" });
+      expect(absent.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "malformed",
+      });
     }
+
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, { customAttributes: [{ key: "moda_wa_consent_v1" }] }),
+    ]);
+    const malformed = await service.lookup(candidate);
+    expect(malformed.kind).toBe("found");
+    if (malformed.kind === "found") {
+      expect(malformed.checkout.consentReceiptAttribute).toEqual({ kind: "INVALID" });
+      expect(malformed.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "malformed",
+      });
+    }
+  });
+
+  it("returns authoritative consent attributes from the matching checkout query without another lookup", async () => {
+    const receipt = "v1.key-1.nonce.ciphertext.auth-tag";
+    mockCountResponse(1);
+    mockListResponse([
+      makeNode(candidateUrl, {
+        customAttributes: [
+          { key: "unrelated", value: "ignored-by-consent-verifier" },
+          { key: "moda_wa_consent_v1", value: receipt },
+        ],
+      }),
+    ]);
+
+    const result = await service.lookup(candidate);
+
+    expect(result.kind).toBe("found");
+    if (result.kind === "found") {
+      expect(result.checkout.authoritativeCheckoutAttributes).toEqual({
+        kind: "available",
+        values: [
+          { key: "unrelated", value: "ignored-by-consent-verifier" },
+          { key: "moda_wa_consent_v1", value: receipt },
+        ],
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const listQuery = JSON.parse(fetchMock.mock.calls[1][1].body as string).query as string;
+    expect(listQuery).toContain("customAttributes {");
+    expect(listQuery).toContain("key");
+    expect(listQuery).toContain("value");
   });
 
   it("finds a checkout whose abandonment is recorded more than ten minutes after checkout creation", async () => {
@@ -400,10 +462,10 @@ describe("abandoned checkout lookup service", () => {
     expect(query).toContain("presentmentMoney");
     expect(query).toContain("billingAddress");
     expect(query).toContain("locale");
+    expect(query).toContain("customAttributes");
     expect(query).toContain("sku");
     expect(query).toContain("originalUnitPriceSet");
     expect(query).toContain("shippingAddress");
-    expect(query).toContain("customAttributes");
     expect(query).toContain("shopifyPlus");
     expect(query.indexOf("shop {")).toBeLessThan(query.indexOf("abandonedCheckouts("));
     expect(query).not.toMatch(/\n {14}currencyCode\s*\n/);
