@@ -212,6 +212,10 @@ const currentCheckout = {
   abandonedCheckoutUrl: "https://shop.myshopify.com/recover?key=abc",
   createdAt: "2026-08-28T12:00:00Z",
   completedAt: null,
+  shopifyPlus: false,
+  consentReceiptAttribute: { kind: "MISSING" as const },
+  billingPhone: null,
+  shippingPhone: null,
   currencyCode: "USD",
   totalPrice: "59.99",
   customer: {

@@ -59,6 +59,11 @@ export interface NormalizedAbandonedCheckoutCustomer {
   lastName: string | null;
 }
 
+export type ShopifyConsentReceiptAttribute =
+  | { kind: "MISSING" }
+  | { kind: "VALUE"; value: string }
+  | { kind: "INVALID" };
+
 export interface NormalizedAbandonedCheckoutLineItem {
   productId: string | null;
   variantId: string | null;
@@ -79,6 +84,12 @@ export interface NormalizedAbandonedCheckout {
   // null when the checkout is still recoverable; non-null once completed so the
   // recovery flow can treat it as not recoverable.
   completedAt: string | null;
+
+  /** Shopify's verified plan signal determines the exclusive receipt binding kind. */
+  shopifyPlus: boolean | null;
+  consentReceiptAttribute: ShopifyConsentReceiptAttribute;
+  billingPhone: string | null;
+  shippingPhone: string | null;
 
   currencyCode: string | null;
   totalPrice: string | null;

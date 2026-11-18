@@ -75,9 +75,14 @@ type ShopifyAbandonedCheckoutNode = {
     locale?: string | null;
   } | null;
   billingAddress?: {
+    phone?: string | null;
     countryCodeV2?: string | null;
     timeZone?: string | null;
   } | null;
+  shippingAddress?: {
+    phone?: string | null;
+  } | null;
+  customAttributes?: Array<{ key?: string | null; value?: string | null }> | null;
   lineItems?: {
     nodes?: ShopifyAbandonedCheckoutLineItem[] | null;
     pageInfo?: { hasNextPage?: boolean };
@@ -86,6 +91,7 @@ type ShopifyAbandonedCheckoutNode = {
 
 type AbandonedCheckoutGraphqlResponse = {
   data?: {
+    shop?: { plan?: { shopifyPlus?: boolean | null } | null } | null;
     abandonedCheckoutsCount?: { count?: number | null } | null;
     abandonedCheckouts?: { nodes?: ShopifyAbandonedCheckoutNode[] | null } | null;
   } | null;
@@ -288,6 +294,11 @@ export class AbandonedCheckoutLookupService {
     const body = {
       query: `
         query AbandonedCheckouts($query: String!, $first: Int!) {
+          shop {
+            plan {
+              shopifyPlus
+            }
+          }
           abandonedCheckouts(
             first: $first
             query: $query
@@ -298,6 +309,18 @@ export class AbandonedCheckoutLookupService {
               abandonedCheckoutUrl
               createdAt
               completedAt
+              customAttributes {
+                key
+                value
+              }
+              billingAddress {
+                phone
+                countryCodeV2
+                timeZone
+              }
+              shippingAddress {
+                phone
+              }
               totalPriceSet {
                 presentmentMoney {
                   amount
@@ -311,10 +334,6 @@ export class AbandonedCheckoutLookupService {
                 firstName
                 lastName
                 locale
-              }
-              billingAddress {
-                countryCodeV2
-                timeZone
               }
               lineItems(first: 100) {
                 pageInfo { hasNextPage }
@@ -362,16 +381,27 @@ export class AbandonedCheckoutLookupService {
     if (nodes.some((node) => node.lineItems?.pageInfo?.hasNextPage)) {
       throw new Error("Shopify abandoned checkout exceeds the 100 line-item lookup bound");
     }
-    return nodes.map((node) => this.normalize(node));
+    const shopifyPlus = result.data?.shop?.plan?.shopifyPlus;
+    return nodes.map((node) => this.normalize(
+      node,
+      typeof shopifyPlus === "boolean" ? shopifyPlus : null,
+    ));
   }
 
-  private normalize(node: ShopifyAbandonedCheckoutNode): NormalizedAbandonedCheckout {
+  private normalize(
+    node: ShopifyAbandonedCheckoutNode,
+    shopifyPlus: boolean | null,
+  ): NormalizedAbandonedCheckout {
     const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
     return {
       shopifyAbandonedCheckoutId: node?.id ?? null,
       abandonedCheckoutUrl: node?.abandonedCheckoutUrl ?? "",
       createdAt: node?.createdAt ?? "",
       completedAt: node?.completedAt ?? null,
+      shopifyPlus,
+      consentReceiptAttribute: this.normalizeConsentReceiptAttribute(node?.customAttributes),
+      billingPhone: node?.billingAddress?.phone ?? null,
+      shippingPhone: node?.shippingAddress?.phone ?? null,
       currencyCode: presentmentMoney?.currencyCode ?? null,
       totalPrice: presentmentMoney?.amount ?? null,
       internationalContext: normalizeInternationalContext(node),
@@ -396,6 +426,25 @@ export class AbandonedCheckoutLookupService {
           }))
         : [],
     };
+  }
+
+  private normalizeConsentReceiptAttribute(
+    attributes: ShopifyAbandonedCheckoutNode["customAttributes"],
+  ): NormalizedAbandonedCheckout["consentReceiptAttribute"] {
+    if (attributes == null) return { kind: "MISSING" };
+    if (!Array.isArray(attributes)) return { kind: "INVALID" };
+    if (attributes.some((attribute) =>
+      typeof attribute !== "object" || attribute === null ||
+      typeof attribute.key !== "string" || typeof attribute.value !== "string")) {
+      return { kind: "INVALID" };
+    }
+    const matching = attributes.filter((attribute) =>
+      attribute.key === "moda_wa_consent_v1");
+    if (matching.length === 0) return { kind: "MISSING" };
+    if (matching.length !== 1 || typeof matching[0]?.value !== "string") {
+      return { kind: "INVALID" };
+    }
+    return { kind: "VALUE", value: matching[0].value };
   }
 
   private async postGraphql(

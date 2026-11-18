@@ -17,6 +17,13 @@ export type ShopifyWhatsAppConsentSyncResult =
   | { status: "UPDATED" | "UNCHANGED"; customerPhoneId: string }
   | { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS"; reason: string };
 
+export type ShopifyConsentMaterializationResult =
+  | { status: "MATERIALISED_GRANTED" }
+  | { status: "MATERIALISED_REVOKED" }
+  | { status: "BLOCKED_STOP" }
+  | { status: "DEFER_IDENTITY_OR_RECIPIENT" }
+  | { status: "MATERIALISATION_FAILURE"; reason: string };
+
 export type Failure = Extract<ShopifyWhatsAppConsentEligibility, { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS" }>;
 export type Identity = ReturnType<typeof parseShopifyCustomerIdentity>;
 export type ScopedCustomer = {

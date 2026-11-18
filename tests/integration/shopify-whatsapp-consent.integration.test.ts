@@ -1,257 +1,333 @@
 import "dotenv/config";
-import { RecoveryConsentAdmissionService } from "../../src/services/checkout-recovery/recovery-consent-admission.service.js";
-import { RecoveryStoredConsentService } from "../../src/services/recovery-conversation/recovery-stored-consent.service.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import { encryptCredential, parseCredentialKeyring } from "@modainteract/moda-interact-shared/security/credentials/node";
+import type { NormalizedAbandonedCheckout } from "../../src/domain/abandoned-checkout.js";
+import type { PendingRecoveryCandidate } from "../../src/domain/pending-recovery-candidate.js";
+import type { RecoveryCheckoutSeed } from "../../src/events/checkout-events.js";
+import { RecoveryMaterializationService } from "../../src/services/checkout-recovery/recovery-materialization.service.js";
+import { RecoveryStoredConsentService } from "../../src/services/recovery-conversation/recovery-stored-consent.service.js";
+import { ShopifyCheckoutConsentMaterializationService } from "../../src/services/shopify-checkout-consent-materialization.service.js";
 import { ShopifyWhatsAppConsentService } from "../../src/services/shopify-whatsapp-consent.service.js";
-import type {
-  ShopifyWhatsAppConsentObservation,
-  ShopifyWhatsAppConsentReader,
-} from "../../src/providers/shopify-whatsapp-consent.provider.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 
-const gid = "gid://shopify/Customer/125678912345";
-const native = (state: "SUBSCRIBED" | "UNSUBSCRIBED", updatedAt: string,
-  phoneNumber = "+447400123456"): ShopifyWhatsAppConsentObservation => ({
-  kind: "OBSERVED", customerGid: gid, phoneNumber, state, updatedAt,
-});
-const t1 = "2026-10-20T08:00:00Z";
-const t2 = "2026-10-21T08:00:00Z";
-const t3 = "2026-10-22T08:00:00Z";
-
-function service(db: PrismaClient, outcome: ShopifyWhatsAppConsentObservation | ShopifyWhatsAppConsentReader) {
-  const reader: ShopifyWhatsAppConsentReader = "kind" in outcome
-    ? { readCurrent: vi.fn(async () => outcome) }
-    : outcome;
-  return new ShopifyWhatsAppConsentService(reader, db, () => new Date("2026-10-22T12:00:00Z"));
-}
-
-describeWithDatabase("ARCH-045 native Shopify consent PostgreSQL projection", () => {
-  it("admits a UK recovery recipient for a US shop across first, reentry and conversation checks, preserving STOP", async () => {
+describeWithDatabase("ARCH-077 signed checkout consent SQL materialisation", () => {
+  it("gates materialisation on completed-checkout state, applies recoverable revoke before outreach, and records the accepted late-A replay risk", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
-    const shopId = `consent-international-${suffix}`;
-    try {
-      await db.shop.create({ data: { id: shopId, domain: `${shopId}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "US" } });
-      const customer = await db.customer.create({ data: { shopId, shopifyCustomerId: "125678912345" } });
-      const phone = await db.customerPhone.create({ data: { customerId: customer.id, phone: "+447400123456" } });
-      const readCurrent = vi.fn(async () => native("SUBSCRIBED", t1));
-      const consent = service(db, { readCurrent });
-      const notices = { notify: vi.fn(async () => "created" as const) };
-      const admission = new RecoveryConsentAdmissionService(consent, notices);
-      const input = { shopId, checkoutToken: `checkout-${suffix}`, customerId: customer.id,
-        shopifyCustomerId: gid, recipient: "447400123456" };
-      expect(await admission.evaluateFirst(input)).toBe(true);
-      expect(await admission.evaluateReentry(input)).toBe(true);
-      const recovery = await db.checkoutRecovery.create({ data: {
-        shopId, customerId: customer.id, checkoutToken: input.checkoutToken, lastExternalActivityAt: new Date(t1),
-      } });
-      const stored = new RecoveryStoredConsentService(db, consent);
-      const proactive = { shopId, recoveryId: recovery.id, recipient: input.recipient };
-      await expect(stored.preflight(proactive)).resolves.toMatchObject({ kind: "allowed", snapshot: {
-        customerPhoneId: phone.id, canonicalRecipient: input.recipient, consentRevision: 1n,
-      } });
-      expect(readCurrent).toHaveBeenCalledTimes(1);
-      expect(notices.notify).not.toHaveBeenCalled();
+    const shopId = `c${suffix.slice(0, 24)}`;
+    const domain = `${shopId}.myshopify.com`;
+    const phoneNumber = "+447400123456";
+    const shopifyCustomerId = "125678912345";
+    const keyringJson = JSON.stringify({ "consent-test-key": Buffer.alloc(32, 7).toString("base64") });
+    const keyring = parseCredentialKeyring(keyringJson);
+    let timestamp = Date.now();
+    const consent = new ShopifyWhatsAppConsentService(db, () => {
+      timestamp += 1000;
+      return new Date(timestamp);
+    });
+    const materializer = new ShopifyCheckoutConsentMaterializationService(
+      consent,
+      undefined,
+      () => keyringJson,
+      () => new Date(timestamp),
+    );
+    const cartTokenA = `cart-a-${suffix}`;
+    const cartTokenB = `cart-b-${suffix}`;
+    const checkoutTokenA = `checkout-a-${suffix}`;
+    const checkoutTokenB = `checkout-b-${suffix}`;
+    const checkoutUrlA = `https://${domain}/checkouts/${suffix}/a`;
+    const checkoutUrlB = `https://${domain}/checkouts/${suffix}/b`;
+    const customerGid = `gid://shopify/Customer/${shopifyCustomerId}`;
 
-      await db.customerPhone.update({ where: { id: phone.id }, data: {
-        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactAt: new Date(t2),
-        whatsappNoContactRevision: { increment: 1 },
-      } });
-      expect(await admission.evaluateFirst(input)).toBe(false);
-      expect(await admission.evaluateReentry(input)).toBe(false);
-      await expect(stored.preflight(proactive)).resolves.toEqual({ kind: "denied", reason: "stored-consent-denied" });
-      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } })).whatsappNoContact).toBe(true);
+    const signedReceipt = (cartToken: string, decision: "G" | "R") => {
+      const bindingDigest = createHash("sha256")
+        .update(cartToken, "utf8")
+        .digest("base64url");
+      const plaintext = JSON.stringify([
+        1, shopId, "c", bindingDigest, decision, "1", "en-GB",
+        Math.floor(timestamp / 1000), shopifyCustomerId,
+      ]);
+      const aad = JSON.stringify([
+        "moda-shopify-wa-consent", 1, shopId, "c", bindingDigest,
+      ]);
+      const envelope = encryptCredential({
+        keyring,
+        activeKeyId: "consent-test-key",
+        plaintext,
+        aad,
+      });
+      return [
+        "v1",
+        envelope.keyId,
+        Buffer.from(envelope.nonce).toString("base64url"),
+        Buffer.from(envelope.ciphertext).toString("base64url"),
+        Buffer.from(envelope.authTag).toString("base64url"),
+      ].join(".");
+    };
+
+    const candidateFor = (
+      checkoutToken: string,
+      cartToken: string,
+      checkoutUrl: string,
+    ): PendingRecoveryCandidate => ({
+      shopId, shopDomain: domain, checkoutToken, cartToken: `${cartToken}?key=opaque`,
+      abandonedCheckoutUrl: checkoutUrl, checkoutCreatedAt: new Date(timestamp).toISOString(),
+    });
+    const seedFor = (candidate: PendingRecoveryCandidate): RecoveryCheckoutSeed => ({
+      shop: domain, checkoutToken: candidate.checkoutToken, cartToken: candidate.cartToken,
+      detectedAt: new Date(timestamp).toISOString(), currency: "GBP", totalPrice: "25.00",
+      checkoutUrl: candidate.abandonedCheckoutUrl, completedAt: null,
+      customer: {
+        shopifyCustomerId: customerGid, phone: phoneNumber, email: null,
+        firstName: "Taylor", lastName: null,
+      },
+      lineItems: [],
+    });
+    const checkoutFor = (
+      candidate: PendingRecoveryCandidate,
+      decision: "G" | "R",
+      completedAt: string | null = null,
+    ): NormalizedAbandonedCheckout => ({
+      shopifyAbandonedCheckoutId: `gid://shopify/AbandonedCheckout/${candidate.checkoutToken}`,
+      abandonedCheckoutUrl: candidate.abandonedCheckoutUrl!,
+      createdAt: candidate.checkoutCreatedAt!,
+      completedAt,
+      shopifyPlus: false,
+      consentReceiptAttribute: { kind: "VALUE", value: signedReceipt(cartTokenFor(candidate), decision) },
+      billingPhone: null,
+      shippingPhone: null,
+      currencyCode: "GBP",
+      totalPrice: "25.00",
+      internationalContext: {
+        languageTag: "en-GB", languageSource: null, countryCode: "GB",
+        currencyCode: "GBP", timeZone: null,
+      },
+      customer: {
+        shopifyCustomerId: customerGid, email: null, phone: phoneNumber,
+        firstName: "Taylor", lastName: null,
+      },
+      lineItems: [],
+    });
+    const cartTokenFor = (candidate: PendingRecoveryCandidate) =>
+      candidate.checkoutToken === checkoutTokenA ? cartTokenA : cartTokenB;
+
+    try {
+      await db.shop.create({
+        data: {
+          id: shopId, domain, platform: "SHOPIFY", status: "ACTIVE",
+          defaultCountryCode: "GB",
+        },
+      });
+      const customer = await db.customer.create({
+        data: { shopId, shopifyCustomerId },
+      });
+      const phone = await db.customerPhone.create({
+        data: { customerId: customer.id, phone: phoneNumber },
+      });
+
+      const checkoutByToken = new Map<string, NormalizedAbandonedCheckout>();
+      const attempts: string[] = [];
+      let crashAfterFirstConsentCommit = true;
+      const recovery = new RecoveryMaterializationService({
+        executionEligibility: { evaluate: async () => ({ allowed: true, shopId }) } as never,
+        abandonedCheckoutLookup: {
+          resolveShopDomain: async () => domain,
+          lookup: async (input) => ({
+            kind: "found" as const,
+            checkout: checkoutByToken.get(input.checkoutToken)!,
+          }),
+        } as never,
+        pendingRecoveryCandidate: {
+          withCheckoutLock: async (_shop: string, _token: string, callback: () => Promise<unknown>) =>
+            callback(),
+          hasOrderProcessed: async () => false,
+          findCandidateJobIdByCheckout: async () => null,
+        } as never,
+        findLatestRecovery: async (targetShopId, checkoutToken) =>
+          db.checkoutRecovery.findFirst({
+            where: { shopId: targetShopId, checkoutToken },
+            orderBy: { generation: "desc" },
+          }) as never,
+        snapshotBuilder: {
+          build: async (candidate: PendingRecoveryCandidate) => seedFor(candidate),
+        } as never,
+        recipientResolver: { resolve: async () => phoneNumber.slice(1) } as never,
+        consentReceipt: materializer,
+        initiate: async (seed, generation) => {
+          attempts.push(seed.checkoutToken);
+          if (seed.checkoutToken === checkoutTokenA && crashAfterFirstConsentCommit) {
+            crashAfterFirstConsentCommit = false;
+            throw new Error("simulated worker crash after consent commit");
+          }
+          return db.checkoutRecovery.create({
+            data: {
+              shopId, customerId: customer.id, checkoutToken: seed.checkoutToken,
+              cartToken: seed.cartToken, generation, status: "DETECTED",
+              lastExternalActivityAt: new Date(seed.detectedAt),
+            },
+          });
+        },
+      });
+
+      const candidateA = candidateFor(checkoutTokenA, cartTokenA, checkoutUrlA);
+      checkoutByToken.set(checkoutTokenA, checkoutFor(candidateA, "G"));
+      await expect(recovery.materialize(candidateA))
+        .rejects.toThrow("simulated worker crash after consent commit");
+      const afterInterruptedGrant = await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } });
+      expect(afterInterruptedGrant).toMatchObject({
+        whatsappConsentDecision: "GRANTED",
+        whatsappConsentRevision: 1n,
+      });
+      expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: checkoutTokenA } })).toBe(0);
+
+      // The retry has no per-checkout SQL evidence proving the prior write. It
+      // re-verifies and runs the normal transaction; the revision increment is
+      // intentionally not misreported as a proven no-op.
+      await expect(recovery.materialize(candidateA)).resolves.toMatchObject({
+        outcome: "recovery-created", checkoutToken: checkoutTokenA,
+      });
+      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } }))
+        .toMatchObject({ whatsappConsentDecision: "GRANTED", whatsappConsentRevision: 2n });
+      expect(attempts).toEqual([checkoutTokenA, checkoutTokenA]);
+
+      const candidateBPaid = candidateFor(checkoutTokenB, cartTokenB, checkoutUrlB);
+      checkoutByToken.set(checkoutTokenB, checkoutFor(candidateBPaid, "R", new Date().toISOString()));
+      const beforePaid = await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } });
+      await expect(recovery.materialize(candidateBPaid)).resolves.toMatchObject({
+        outcome: "discarded-not-recoverable", checkoutToken: checkoutTokenB,
+      });
+      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } }))
+        .toMatchObject({
+          whatsappConsentDecision: beforePaid.whatsappConsentDecision,
+          whatsappConsentRevision: beforePaid.whatsappConsentRevision,
+        });
+      expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: checkoutTokenB } })).toBe(0);
+
+      checkoutByToken.set(checkoutTokenB, checkoutFor(candidateBPaid, "R"));
+      await expect(recovery.materialize(candidateBPaid)).resolves.toMatchObject({
+        outcome: "discarded-consent-revoked", checkoutToken: checkoutTokenB,
+      });
+      const afterRevoke = await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } });
+      expect(afterRevoke).toMatchObject({
+        whatsappConsentDecision: "REVOKED",
+        whatsappConsentRevision: 3n,
+        whatsappConsentDecisionSequence: 3n,
+      });
+      expect(await db.checkoutRecovery.count({ where: { shopId, checkoutToken: checkoutTokenB } })).toBe(0);
+      const storedConsent = new RecoveryStoredConsentService(db, consent);
+      const recoveryA = await db.checkoutRecovery.findFirstOrThrow({
+        where: { shopId, checkoutToken: checkoutTokenA },
+      });
+      await expect(storedConsent.preflight({
+        shopId, recoveryId: recoveryA.id, recipient: phoneNumber,
+      })).resolves.toMatchObject({ kind: "denied", reason: "stored-consent-denied" });
+
+      // The architect-approved stateless contract deliberately accepts a
+      // late A decision replay because no current-schema record identifies its
+      // receipt. This test documents the risk instead of asserting ordering.
+      await expect(materializer.materialize({
+        candidate: candidateA,
+        checkout: checkoutFor(candidateA, "G"),
+        seed: seedFor(candidateA),
+      })).resolves.toMatchObject({ status: "MATERIALISED_GRANTED" });
+      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } }))
+        .toMatchObject({ whatsappConsentDecision: "GRANTED", whatsappConsentRevision: 4n });
     } finally {
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();
     }
   });
-  it("persists only the exact active CustomerPhone, keeps no-contact revisions independent and rejects out-of-order reads", async () => {
+
+  it("applies sequential Cart A grant and Cart B revoke under current CustomerPhone SQL constraints", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     const suffix = randomUUID().replaceAll("-", "");
-    const shop = `consent-a-${suffix}`;
-    const other = `consent-b-${suffix}`;
+    const shopId = `arch077-consent-${suffix}`;
+    let timestamp = Date.parse("2026-11-18T03:00:00.000Z");
+    const consent = new ShopifyWhatsAppConsentService(db, () => {
+      timestamp += 1000;
+      return new Date(timestamp);
+    });
     try {
-      await db.shop.createMany({ data: [
-        { id: shop, domain: `${shop}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "GB" },
-        { id: other, domain: `${other}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "GB" },
-      ] });
-      const a = await db.customer.create({ data: { shopId: shop, shopifyCustomerId: "125678912345" } });
-      const b = await db.customer.create({ data: { shopId: other, shopifyCustomerId: "125678912345" } });
-      const legacy = await db.customer.create({ data: { shopId: shop, phone: "+447400123456" } });
-      const ap = await db.customerPhone.create({ data: { customerId: a.id, phone: "07400 123456" } });
-      const bp = await db.customerPhone.create({ data: { customerId: b.id, phone: "+447400123456" } });
-      await db.customerPhone.create({ data: { customerId: legacy.id, phone: "+447700900456" } });
+      await db.shop.create({
+        data: {
+          id: shopId,
+          domain: `${shopId}.myshopify.com`,
+          platform: "SHOPIFY",
+          defaultCountryCode: "GB",
+        },
+      });
+      const customer = await db.customer.create({
+        data: { shopId, shopifyCustomerId: "125678912345" },
+      });
+      const phone = await db.customerPhone.create({
+        data: { customerId: customer.id, phone: "+447400123456" },
+      });
+      const recipient = {
+        shopId,
+        customerId: customer.id,
+        shopifyCustomerId: "gid://shopify/Customer/125678912345",
+        recipient: "+447400123456",
+      };
 
-      const identity = { shopId: shop, shopifyCustomerId: gid };
-      const admitted = { ...identity, customerId: a.id, recipient: "+447400123456" };
-      const granted = service(db, native("SUBSCRIBED", t1));
-      expect((await granted.evaluateRecipient(admitted)).status).toBe("ALLOWED");
-      const afterGrant = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
-      expect(afterGrant).toMatchObject({
-        whatsappCanonicalPhone: "447400123456", whatsappConsentSource: "SHOPIFY_NATIVE",
-        whatsappConsentDecision: "GRANTED", whatsappConsentRevision: 1n,
-        whatsappConsentDecisionSequence: 1n,
-      });
-      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).toMatchObject({
-        whatsappConsentDecision: "UNKNOWN", whatsappConsentRevision: 0n,
-      });
-      expect((await granted.syncCustomer(identity)).status).toBe("UNCHANGED");
-      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } })).whatsappConsentRevision).toBe(1n);
-      expect((await granted.evaluateRecipient({ ...admitted, customerId: legacy.id })).status).toBe("NOT_AUTHORISED");
-      expect((await db.customer.findUniqueOrThrow({ where: { id: legacy.id } })).shopifyCustomerId).toBeNull();
+      await expect(consent.materializeExplicitChoice({
+        ...recipient,
+        decision: "GRANTED",
+      })).resolves.toEqual({ status: "MATERIALISED_GRANTED" });
+      await expect(consent.evaluateStoredRecipient({
+        shopId,
+        customerId: customer.id,
+        recipient: recipient.recipient,
+      })).resolves.toMatchObject({ status: "ALLOWED", customerPhoneId: phone.id });
 
-      // A local STOP is independently committed. Neither a later Shopify grant
-      // nor a callback retry has authority to remove it.
-      await db.customerPhone.update({ where: { id: ap.id }, data: {
-        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
-        whatsappNoContactAt: new Date("2026-10-21T07:00:00Z"),
-        whatsappNoContactRevision: { increment: 1 },
-      } });
-      const renewed = service(db, native("SUBSCRIBED", t2));
-      expect((await renewed.syncCustomer(identity)).status).toBe("UPDATED");
-      expect((await renewed.evaluateStoredRecipient({ shopId: shop, customerId: a.id, recipient: admitted.recipient })).status)
-        .toBe("NOT_AUTHORISED");
-      const afterStopGrant = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
-      expect(afterStopGrant).toMatchObject({
-        whatsappConsentDecision: "GRANTED", whatsappConsentRevision: 2n,
-        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 1n,
+      // Cart B's recoverable revoke is committed before the caller declines
+      // recovery admission. The current schema intentionally has no durable
+      // per-checkout receipt checkpoint, so an exceptional late Cart A write
+      // remains an accepted residual risk rather than an absolute invariant.
+      await expect(consent.materializeExplicitChoice({
+        ...recipient,
+        decision: "REVOKED",
+      })).resolves.toEqual({ status: "MATERIALISED_REVOKED" });
+      const afterRevoke = await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } });
+      expect(afterRevoke).toMatchObject({
+        whatsappConsentDecision: "REVOKED",
+        whatsappConsentSource: "SHOPIFY_NATIVE",
+        whatsappConsentRevision: 2n,
+        whatsappConsentDecisionSequence: 2n,
       });
+      await expect(consent.evaluateStoredRecipient({
+        shopId,
+        customerId: customer.id,
+        recipient: recipient.recipient,
+      })).resolves.toEqual({ status: "NOT_AUTHORISED", reason: "NATIVE_CONSENT_NOT_GRANTED" });
 
-      // Two asynchronous provider responses finish out of order. The later
-      // Shopify observedAt must win, not the order the workers complete.
-      let finishOld!: () => void;
-      const blocked = new Promise<void>((resolve) => { finishOld = resolve; });
-      let oldStarted!: () => void;
-      const oldStartedPromise = new Promise<void>((resolve) => { oldStarted = resolve; });
-      const outdated = service(db, { readCurrent: async () => {
-        oldStarted();
-        await blocked;
-        return native("SUBSCRIBED", t1);
-      } });
-      const staleOperation = outdated.syncCustomer(identity);
-      await oldStartedPromise;
-      const revoke = service(db, native("UNSUBSCRIBED", t3));
-      expect((await revoke.syncCustomer(identity)).status).toBe("UPDATED");
-      finishOld();
-      expect((await staleOperation).status).toBe("UNAVAILABLE");
-      const final = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
-      expect(final).toMatchObject({
-        whatsappConsentDecision: "REVOKED", whatsappConsentRevision: 3n,
-        whatsappConsentDecisionSequence: 3n, whatsappNoContact: true, whatsappNoContactRevision: 1n,
+      await db.customerPhone.update({
+        where: { id: phone.id },
+        data: {
+          whatsappNoContact: true,
+          whatsappNoContactReason: "CUSTOMER_STOP",
+          whatsappNoContactAt: new Date("2026-11-18T03:10:00.000Z"),
+          whatsappNoContactRevision: { increment: 1 },
+        },
       });
-      expect((await revoke.evaluateStoredRecipient({ shopId: shop, customerId: a.id, recipient: admitted.recipient })).status)
-        .toBe("NOT_AUTHORISED");
-    } finally {
-      await db.shop.deleteMany({ where: { id: { in: [shop, other] } } });
-      await db.$disconnect();
-    }
-  });
-
-  it("invalidates a newer grant on a changed default with older updatedAt, without regranting or altering STOP", async () => {
-    const db = new PrismaClient({ datasourceUrl: url! });
-    const suffix = randomUUID().replaceAll("-", "");
-    const shopId = `consent-stale-default-${suffix}`;
-    try {
-      await db.shop.create({ data: {
-        id: shopId, domain: `${shopId}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "GB",
-      } });
-      const customer = await db.customer.create({ data: { shopId, shopifyCustomerId: "125678912345" } });
-      const a = await db.customerPhone.create({ data: {
-        customerId: customer.id, phone: "+447400123456",
-      } });
-      const b = await db.customerPhone.create({ data: {
-        customerId: customer.id, phone: "+447400123457",
-        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
-        whatsappNoContactAt: new Date("2026-10-21T09:00:00Z"),
-        whatsappNoContactRevision: 4n,
-      } });
-      const identity = { shopId, shopifyCustomerId: gid };
-      const recipientA = { shopId, customerId: customer.id, recipient: "+447400123456" };
-      const recipientB = { shopId, customerId: customer.id, recipient: "+447400123457" };
-      expect((await service(db, native("SUBSCRIBED", t3)).syncCustomer(identity)).status).toBe("UPDATED");
-      expect((await service(db, native("SUBSCRIBED", t3)).evaluateStoredRecipient(recipientA)).status)
-        .toBe("ALLOWED");
-
-      // The new default B reports an earlier *consent* timestamp (t1). It
-      // must invalidate A, but cannot override A's provider observation (t3)
-      // or turn B into an affirmative grant based on the older observation.
-      expect(await service(db, native("SUBSCRIBED", t1, "+447400123457")).syncCustomer(identity)).toEqual({
-        status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
+      await expect(consent.materializeExplicitChoice({
+        ...recipient,
+        decision: "GRANTED",
+      })).resolves.toEqual({ status: "BLOCKED_STOP" });
+      await expect(consent.materializeExplicitChoice({
+        ...recipient,
+        decision: "REVOKED",
+      })).resolves.toEqual({ status: "MATERIALISED_REVOKED" });
+      const afterStop = await db.customerPhone.findUniqueOrThrow({ where: { id: phone.id } });
+      expect(afterStop).toMatchObject({
+        whatsappConsentDecision: "REVOKED",
+        whatsappNoContact: true,
+        whatsappNoContactReason: "CUSTOMER_STOP",
+        whatsappNoContactRevision: 1n,
       });
-      const afterA = await db.customerPhone.findUniqueOrThrow({ where: { id: a.id } });
-      const afterB = await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } });
-      expect(afterA).toMatchObject({
-        // Identity invalidation is not a new provider consent observation.
-        whatsappConsentSource: null, whatsappConsentDecision: "UNKNOWN",
-        whatsappConsentProviderObservedAt: new Date(t3), whatsappConsentRevision: 2n,
-        whatsappConsentDecisionSequence: 2n, whatsappNoContact: false,
-      });
-      expect(afterB).toMatchObject({
-        whatsappConsentDecision: "UNKNOWN", whatsappConsentProviderObservedAt: null,
-        whatsappConsentRevision: 0n, whatsappNoContact: true,
-        whatsappNoContactReason: "CUSTOMER_STOP", whatsappNoContactRevision: 4n,
-        whatsappNoContactAt: new Date("2026-10-21T09:00:00Z"),
-      });
-      expect((await service(db, native("SUBSCRIBED", t1)).evaluateStoredRecipient(recipientA)).status)
-        .toBe("NOT_AUTHORISED");
-      expect((await service(db, native("SUBSCRIBED", t1)).evaluateStoredRecipient(recipientB)).status)
-        .toBe("NOT_AUTHORISED");
-      // Duplicate and slightly later-but-still-stale observations must not
-      // grant B now that A's source is null. Its stored timestamp remains an
-      // ordering fence even though its native grant is withdrawn.
-      expect(await service(db, native("SUBSCRIBED", t1, "+447400123457")).syncCustomer(identity)).toEqual({
-        status: "UNAVAILABLE", reason: "STALE_OR_CONFLICTING_OBSERVATION",
-      });
-      expect((await service(db, native("SUBSCRIBED", t2, "+447400123457")).syncCustomer(identity)).status)
-        .toBe("UNAVAILABLE");
-      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: a.id } })).whatsappConsentDecision)
-        .toBe("UNKNOWN");
-      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } })).whatsappConsentDecision)
-        .toBe("UNKNOWN");
-      // A truly newer observation can project B, but its independent local
-      // STOP continues to override that native grant for outbound eligibility.
-      const t4 = "2026-10-22T10:00:00Z";
-      expect((await service(db, native("SUBSCRIBED", t4, "+447400123457")).syncCustomer(identity)).status)
-        .toBe("UPDATED");
-      expect((await service(db, native("SUBSCRIBED", t4)).evaluateStoredRecipient(recipientB)).status)
-        .toBe("NOT_AUTHORISED");
-      expect(await db.customerPhone.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({
-        whatsappConsentDecision: "GRANTED", whatsappConsentSource: "SHOPIFY_NATIVE",
-        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
-        whatsappNoContactRevision: 4n,
-      });
-    } finally {
-      await db.shop.deleteMany({ where: { id: shopId } });
-      await db.$disconnect();
-    }
-  });
-
-  it("refuses a changed Shopify default recipient, and refuses cross-customer matching within one shop", async () => {
-    const db = new PrismaClient({ datasourceUrl: url! });
-    const suffix = randomUUID().replaceAll("-", "");
-    const shopId = `consent-c-${suffix}`;
-    try {
-      await db.shop.create({ data: { id: shopId, domain: `${shopId}.myshopify.com`, platform: "SHOPIFY", defaultCountryCode: "GB" } });
-      const customer = await db.customer.create({ data: { shopId, shopifyCustomerId: "125678912345" } });
-      const record = await db.customerPhone.create({ data: { customerId: customer.id, phone: "+447400123456" } });
-      const input = { shopId, customerId: customer.id, shopifyCustomerId: gid, recipient: "+447400123456" };
-      expect((await service(db, native("SUBSCRIBED", t1)).evaluateRecipient(input)).status).toBe("ALLOWED");
-      expect((await service(db, native("SUBSCRIBED", t2, "+447400123457")).evaluateRecipient(input)).status)
-        .toBe("NOT_AUTHORISED");
-      expect((await db.customerPhone.findUniqueOrThrow({ where: { id: record.id } })).whatsappConsentDecision).toBe("UNKNOWN");
-      expect((await service(db, native("SUBSCRIBED", t3)).evaluateStoredRecipient({ shopId, customerId: customer.id, recipient: input.recipient })).status)
-        .toBe("NOT_AUTHORISED");
-
-      const other = await db.customer.create({ data: { shopId, shopifyCustomerId: "123456789" } });
-      await db.customerPhone.create({ data: {
-        customerId: other.id, phone: "+447400123456", whatsappCanonicalPhone: "447400123456",
-      } });
-      expect((await service(db, native("SUBSCRIBED", t3)).evaluateRecipient(input)).status).toBe("AMBIGUOUS");
     } finally {
       await db.shop.deleteMany({ where: { id: shopId } });
       await db.$disconnect();

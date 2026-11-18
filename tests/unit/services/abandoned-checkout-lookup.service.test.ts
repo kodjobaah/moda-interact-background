@@ -44,6 +44,7 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
     abandonedCheckoutUrl: url,
     createdAt: "2026-08-28T12:00:00Z",
     completedAt: null,
+    customAttributes: [],
     totalPriceSet: {
       presentmentMoney: { amount: "49.99", currencyCode: "USD" },
     },
@@ -55,9 +56,11 @@ function makeNode(url: string, overrides: Record<string, unknown> = {}) {
       lastName: "Lovelace",
     },
     billingAddress: {
+      phone: "+15551234567",
       countryCodeV2: "US",
       timeZone: "America/New_York",
     },
+    shippingAddress: { phone: null },
     lineItems: {
       pageInfo: { hasNextPage: false },
       nodes: [
@@ -94,7 +97,10 @@ function mockListResponse(nodes: unknown[]) {
     ok: true,
     status: 200,
     json: async () => ({
-      data: { abandonedCheckouts: { nodes } },
+      data: {
+        abandonedCheckouts: { nodes },
+        shop: { plan: { shopifyPlus: false } },
+      },
     }),
   }));
 }
@@ -126,6 +132,46 @@ describe("abandoned checkout lookup service", () => {
       expect(result.checkout.lineItems).toHaveLength(1);
       expect(result.checkout.lineItems[0].sku).toBe("SKU-1");
       expect(result.checkout.completedAt).toBeNull();
+      expect(result.checkout.shopifyPlus).toBe(false);
+      expect(result.checkout.consentReceiptAttribute).toEqual({ kind: "MISSING" });
+      expect(result.checkout.billingPhone).toBe("+15551234567");
+    }
+  });
+
+  it("extracts one consent receipt attribute and marks duplicates or malformed attributes invalid", async () => {
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl, {
+      customAttributes: [{ key: "moda_wa_consent_v1", value: "v1.receipt" }],
+      billingAddress: { phone: "+14155550123", countryCodeV2: "US", timeZone: null },
+      shippingAddress: { phone: "+14155550999" },
+    })]);
+    const single = await service.lookup(candidate);
+    expect(single.kind).toBe("found");
+    if (single.kind === "found") {
+      expect(single.checkout.consentReceiptAttribute).toEqual({ kind: "VALUE", value: "v1.receipt" });
+      expect(single.checkout.billingPhone).toBe("+14155550123");
+      expect(single.checkout.shippingPhone).toBe("+14155550999");
+    }
+
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl, {
+      customAttributes: [
+        { key: "moda_wa_consent_v1", value: "v1.first" },
+        { key: "moda_wa_consent_v1", value: "v1.second" },
+      ],
+    })]);
+    const duplicate = await service.lookup(candidate);
+    expect(duplicate.kind).toBe("found");
+    if (duplicate.kind === "found") {
+      expect(duplicate.checkout.consentReceiptAttribute).toEqual({ kind: "INVALID" });
+    }
+
+    mockCountResponse(1);
+    mockListResponse([makeNode(candidateUrl, { customAttributes: null })]);
+    const absent = await service.lookup(candidate);
+    expect(absent.kind).toBe("found");
+    if (absent.kind === "found") {
+      expect(absent.checkout.consentReceiptAttribute).toEqual({ kind: "MISSING" });
     }
   });
 
@@ -321,7 +367,10 @@ describe("abandoned checkout lookup service", () => {
     expect(query).toContain("locale");
     expect(query).toContain("sku");
     expect(query).toContain("originalUnitPriceSet");
-    expect(query).not.toContain("shippingAddress");
+    expect(query).toContain("shippingAddress");
+    expect(query).toContain("customAttributes");
+    expect(query).toContain("shopifyPlus");
+    expect(query.indexOf("shop {")).toBeLessThan(query.indexOf("abandonedCheckouts("));
     expect(query).not.toMatch(/\n {14}currencyCode\s*\n/);
     expect(query).not.toContain("totalPrice {");
     expect(query).not.toContain("originalUnitPrice {");

@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { randomInt, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { WhatsAppContactOptOutService } from "../../src/services/whatsapp-contact-opt-out.service.js";
 import { hasLocalNoContact } from "../../src/services/whatsapp-contact-opt-out/local-no-contact.js";
 import { publishStopNotices, writeLocalStop } from "../../src/services/whatsapp-contact-opt-out/stop-writer.js";
@@ -46,11 +46,10 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       const differentPhone = "+447409000000";
       const different = await db.customerPhone.create({ data: { customerId: b.id, phone: differentPhone } });
       const identity = { shopId: shopA, shopifyCustomerId: "gid://shopify/Customer/125678912345" };
-      const first = new ShopifyWhatsAppConsentService({ readCurrent: vi.fn(async () => ({
-        kind: "OBSERVED" as const, customerGid: identity.shopifyCustomerId, phoneNumber: phone,
-        state: "SUBSCRIBED" as const, updatedAt: "2026-10-21T10:00:00Z",
-      })) }, db, () => now);
-      expect((await first.syncCustomer(identity)).status).toBe("UPDATED");
+      const first = new ShopifyWhatsAppConsentService(db, () => now);
+      expect(await first.materializeExplicitChoice({
+        ...identity, customerId: a.id, recipient: phone, decision: "GRANTED",
+      })).toEqual({ status: "MATERIALISED_GRANTED" });
       // The legacy same-shop matching number is registered after the native
       // grant; positive consent never transfers to another Customer by phone.
       const ap2 = await db.customerPhone.create({ data: { customerId: a2.id, phone: `0${phone.slice(3, 7)} ${phone.slice(7)}` } });
@@ -71,11 +70,10 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       // End the deliberately ambiguous second CustomerPhone before independently
       // checking a later Shopify observation for the identified customer.
       await db.customerPhone.update({ where: { id: ap2.id }, data: { endedAt: now } });
-      const renew = new ShopifyWhatsAppConsentService({ readCurrent: vi.fn(async () => ({
-        kind: "OBSERVED" as const, customerGid: identity.shopifyCustomerId,
-        phoneNumber: phone, state: "SUBSCRIBED" as const, updatedAt: "2026-10-22T16:00:00Z",
-      })) }, db, () => now);
-      expect((await renew.syncCustomer(identity)).status).toBe("UPDATED");
+      const renew = new ShopifyWhatsAppConsentService(db, () => new Date(now.getTime() + 1000));
+      expect(await renew.materializeExplicitChoice({
+        ...identity, customerId: a.id, recipient: phone, decision: "GRANTED",
+      })).toEqual({ status: "BLOCKED_STOP" });
       expect((await renew.evaluateStoredRecipient({ shopId: shopA, customerId: a.id, recipient: phone })).status)
         .toBe("NOT_AUTHORISED");
       const final = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingRecoveryCandidate } from "../../../../src/domain/pending-recovery-candidate.js";
 import type { NormalizedAbandonedCheckout } from "../../../../src/domain/abandoned-checkout.js";
+import type { ShopifyCheckoutConsentMaterialization } from "../../../../src/services/shopify-checkout-consent-materialization.service.js";
 import { RecoveryMaterializationService } from "../../../../src/services/checkout-recovery/recovery-materialization.service.js";
 import { ShopExecutionEligibilityService } from "../../../../src/services/shop-execution-eligibility.service.js";
 
@@ -18,6 +19,10 @@ const checkout: NormalizedAbandonedCheckout = {
   abandonedCheckoutUrl: "https://shopify.example/recovery",
   createdAt: "2026-09-01T10:00:00.000Z",
   completedAt: null,
+  shopifyPlus: false,
+  consentReceiptAttribute: { kind: "MISSING" },
+  billingPhone: null,
+  shippingPhone: null,
   currencyCode: "GBP",
   totalPrice: "42.00",
   internationalContext: {
@@ -38,6 +43,7 @@ function createHarness(options: {
   latestRecovery?: { status: string; generation: number } | null;
   lookupOutcome?: unknown;
   continueProgress?: boolean;
+  consentOutcome?: ShopifyCheckoutConsentMaterialization;
   progress?: {
     kind: "needs-preparation" | "reconciled" | "blocked" | "held";
     recoveryId: string;
@@ -96,6 +102,12 @@ function createHarness(options: {
       return { shop: candidate.shopDomain, checkoutToken: candidate.checkoutToken } as never;
     }),
   };
+  const consentReceipt = {
+    materialize: vi.fn(async () => {
+      order.push("consent");
+      return options.consentOutcome ?? { status: "NO_EXPLICIT_CHOICE" as const };
+    }),
+  };
   const recipientResolver = {
     resolve: vi.fn(async () => {
       order.push("recipient");
@@ -112,6 +124,7 @@ function createHarness(options: {
     findLatestRecovery,
     snapshotBuilder,
     recipientResolver,
+    consentReceipt,
     ...(options.continueProgress ? { continueInitialOutreach } : {}),
     initiate,
   });
@@ -125,6 +138,7 @@ function createHarness(options: {
     continueInitialOutreach,
     snapshotBuilder,
     recipientResolver,
+    consentReceipt,
     initiate,
   };
 }
@@ -146,6 +160,7 @@ describe("RecoveryMaterializationService", () => {
       "resolve-domain",
       "provider-lookup",
       "snapshot",
+      "consent",
       "recipient",
       "initiate",
     ]);
@@ -240,7 +255,7 @@ describe("RecoveryMaterializationService", () => {
     expect(harness.abandonedCheckoutLookup.lookup).not.toHaveBeenCalled();
   });
 
-  it.each(["DETECTED", "MESSAGE_SENT", "ENGAGED"])("does not rematerialize active generation %s", async (status) => {
+  it.each(["DETECTED", "MESSAGE_SENT", "ENGAGED"])("does not re-initiate active generation %s", async (status) => {
     const harness = createHarness({ latestRecovery: { status, generation: 4 } });
 
     await expect(harness.service.materialize(candidate)).resolves.toEqual({
@@ -248,7 +263,7 @@ describe("RecoveryMaterializationService", () => {
       checkoutToken: candidate.checkoutToken,
       status,
     });
-    expect(harness.abandonedCheckoutLookup.lookup).not.toHaveBeenCalled();
+    expect(harness.abandonedCheckoutLookup.lookup).toHaveBeenCalledOnce();
     expect(harness.initiate).not.toHaveBeenCalled();
   });
 
@@ -265,13 +280,14 @@ describe("RecoveryMaterializationService", () => {
     expect(harness.order).toEqual([
       "checkout-lock",
       "latest-generation",
-      "continue-progress",
       "eligibility",
       "order-tombstone",
       "resolve-domain",
       "provider-lookup",
       "snapshot",
+      "consent",
       "recipient",
+      "continue-progress",
       "initiate",
     ]);
     expect(harness.continueInitialOutreach).toHaveBeenCalledExactlyOnceWith({
@@ -341,7 +357,53 @@ describe("RecoveryMaterializationService", () => {
       checkoutToken: candidate.checkoutToken,
     });
     expect(harness.snapshotBuilder.build).not.toHaveBeenCalled();
+    expect(harness.consentReceipt.materialize).not.toHaveBeenCalled();
     expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
+  it("persists a recoverable revoke before admission and creates no recovery record", async () => {
+    const harness = createHarness({
+      consentOutcome: { status: "MATERIALISED_REVOKED" },
+    });
+
+    await expect(harness.service.materialize(candidate)).resolves.toEqual({
+      outcome: "discarded-consent-revoked",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.consentReceipt.materialize).toHaveBeenCalledOnce();
+    expect(harness.initiate).not.toHaveBeenCalled();
+    expect(harness.order.at(-1)).toBe("consent");
+  });
+
+  it("denies proactive work for an invalid receipt without mutating consent or recovery", async () => {
+    const harness = createHarness({
+      latestRecovery: { status: "DETECTED", generation: 4 },
+      continueProgress: true,
+      consentOutcome: { status: "INVALID_OR_AMBIGUOUS_RECEIPT" },
+    });
+
+    await expect(harness.service.materialize(candidate)).resolves.toEqual({
+      outcome: "discarded-consent-invalid",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.continueInitialOutreach).not.toHaveBeenCalled();
+    expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
+  it("passes an already materialised grant into normal checkout admission", async () => {
+    const harness = createHarness({
+      consentOutcome: { status: "MATERIALISED_GRANTED", recipient: "15551234567" },
+    });
+
+    await expect(harness.service.materialize(candidate)).resolves.toEqual({
+      outcome: "recovery-created",
+      checkoutToken: candidate.checkoutToken,
+    });
+    expect(harness.initiate).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ customer: expect.objectContaining({ phone: "+15551234567" }) }),
+      1,
+      "15551234567",
+    );
   });
 
   it("advances an expired generation and passes that generation to canonical initiation", async () => {

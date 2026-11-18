@@ -144,6 +144,9 @@ export class ShopifyConsentProjectionWriter {
         } },
       });
       if (!phone) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
+      if (decision === "GRANTED" && phone.whatsappNoContact) {
+        return notAuthorised("LOCAL_NO_CONTACT");
+      }
       const actual = this.recipient.canonical(phone.phone, scoped.shop);
       if (canonical !== actual) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
       if (decision === "GRANTED" &&
@@ -175,6 +178,7 @@ export class ShopifyConsentProjectionWriter {
             whatsappCanonicalPhone: phone.whatsappCanonicalPhone,
             whatsappConsentRevision: phone.whatsappConsentRevision,
             whatsappConsentDecisionSequence: phone.whatsappConsentDecisionSequence,
+            ...(decision === "GRANTED" ? { whatsappNoContact: false } : {}),
             customer: {
               shopId: scoped.shop.id, shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
               shop: { platform: "SHOPIFY", status: "ACTIVE" },
