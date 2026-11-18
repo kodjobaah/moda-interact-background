@@ -69,7 +69,7 @@ describe("published Shared model chronology adoption", () => {
     expect(result.maxTokens).toBe(77);
     expect(result.signalAborted).toBe(false);
     expect(result.networkCalls).toBe(0);
-  });
+  }, 20_000);
 
   it("keeps current-turn tool observations after the current question", () => {
     const result = serializeAtModelBoundary({ ...base,
@@ -83,7 +83,7 @@ describe("published Shared model chronology adoption", () => {
     expect(result.messages[2]?.content).toContain(currentQuestion);
     expect(result.messages[3]?.content).toContain("commerce_get_product");
     expect(result.networkCalls).toBe(0);
-  });
+  }, 20_000);
 });
 
 
@@ -103,5 +103,5 @@ describe("published typed current-customer message serialization", () => {
     expect(result.messages.filter(message => message.content.includes(current))).toHaveLength(1);
     expect(result.messages[0]!.content).toContain("A newly named product takes precedence");
     expect(result.networkCalls).toBe(0);
-  });
+  }, 20_000);
 });

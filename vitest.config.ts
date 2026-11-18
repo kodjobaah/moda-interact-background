@@ -3,6 +3,12 @@ import { configDefaults, defineConfig } from 'vitest/config'
 
 const disposableIntegrationEnabled = process.env.MODA_DISPOSABLE_INTEGRATION === '1'
 
+// Unit tests may import the Redis client even when they mock its callers.
+// Provide the same local-only default as CI unless an environment was supplied.
+if (!disposableIntegrationEnabled) {
+  process.env.REDIS_URL ??= 'redis://localhost:6379'
+}
+
 export default defineConfig({
   test: {
     environment: 'node',

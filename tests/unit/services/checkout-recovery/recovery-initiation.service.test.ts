@@ -137,10 +137,12 @@ beforeEach(() => {
   mocks.senderPool.allocate.mockResolvedValue({
     kind: "assigned",
     sender: {
+      conversationId: "conversation-1",
       routeId: "route-1",
       threadId: "thread-1",
+      canonicalRecipient: attempt.recipient,
       providerPhoneNumberId: "phone-1",
-      providerAccountId: "account-1",
+      providerAccountId: "provider-1",
     },
   });
   mocks.customer.resolveCustomer.mockResolvedValue(null);

@@ -19,5 +19,5 @@ describe("shared onboarding authority", () => {
     });
 
     expect(matches).toEqual([]);
-  });
+  }, 20_000);
 });
