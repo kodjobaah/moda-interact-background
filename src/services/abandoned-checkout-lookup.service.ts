@@ -74,6 +74,7 @@ type ShopifyAbandonedCheckoutNode = {
     lastName?: string | null;
     locale?: string | null;
   } | null;
+  customAttributes?: unknown;
   billingAddress?: {
     countryCodeV2?: string | null;
     timeZone?: string | null;
@@ -312,6 +313,10 @@ export class AbandonedCheckoutLookupService {
                 lastName
                 locale
               }
+              customAttributes {
+                key
+                value
+              }
               billingAddress {
                 countryCodeV2
                 timeZone
@@ -384,6 +389,9 @@ export class AbandonedCheckoutLookupService {
             lastName: node.customer.lastName ?? null,
           }
         : null,
+      authoritativeCheckoutAttributes: normalizeAuthoritativeCheckoutAttributes(
+        node?.customAttributes,
+      ),
       lineItems: Array.isArray(node?.lineItems?.nodes)
         ? node.lineItems.nodes.map((li) => ({
             productId: li?.product?.id ?? null,
@@ -456,6 +464,30 @@ export class AbandonedCheckoutLookupService {
 }
 
 export const abandonedCheckoutLookupService = new AbandonedCheckoutLookupService(readRecoveryExecutionPolicy);
+
+function normalizeAuthoritativeCheckoutAttributes(
+  value: unknown,
+): NormalizedAbandonedCheckout["authoritativeCheckoutAttributes"] {
+  if (!Array.isArray(value)) return { kind: "malformed" };
+
+  const attributes = [];
+  for (const entry of value) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !("key" in entry) ||
+      !("value" in entry) ||
+      typeof entry.key !== "string" ||
+      typeof entry.value !== "string"
+    ) {
+      return { kind: "malformed" };
+    }
+    attributes.push({ key: entry.key, value: entry.value });
+  }
+
+  return { kind: "available", values: attributes };
+}
+
 function normalizeInternationalContext(node: ShopifyAbandonedCheckoutNode): InternationalContext {
   const presentmentMoney = node?.totalPriceSet?.presentmentMoney;
   const billingAddress = node?.billingAddress;
