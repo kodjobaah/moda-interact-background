@@ -390,6 +390,23 @@ describe("RecoveryMaterializationService", () => {
     expect(harness.initiate).not.toHaveBeenCalled();
   });
 
+  it("rethrows operational consent configuration failures for worker retry without outreach", async () => {
+    const cause = new Error("Shared keyring parser rejected deployment configuration");
+    const harness = createHarness({
+      consentOutcome: {
+        status: "MATERIALISATION_FAILURE",
+        reason: "KEYRING_INVALID",
+        cause,
+      },
+    });
+
+    await expect(harness.service.materialize(candidate)).rejects.toMatchObject({
+      message: "Shopify checkout consent materialisation failed: KEYRING_INVALID",
+      cause,
+    });
+    expect(harness.initiate).not.toHaveBeenCalled();
+  });
+
   it("passes an already materialised grant into normal checkout admission", async () => {
     const harness = createHarness({
       consentOutcome: { status: "MATERIALISED_GRANTED", recipient: "15551234567" },

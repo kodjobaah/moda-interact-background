@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   encryptCredential,
   parseCredentialKeyring,
@@ -83,6 +83,12 @@ function verify(
   });
 }
 
+const logger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+};
+
 describe("Shopify checkout consent receipt verifier", () => {
   it("verifies the Shared AEAD receipt against authenticated base cart and customer", () => {
     expect(verify(receipt())).toMatchObject({
@@ -161,7 +167,7 @@ describe("Shopify checkout consent receipt verifier", () => {
 
   it("fails closed when the keyring is unavailable or the future clock skew is excessive", () => {
     expect(verify(receipt(), { keyringJson: undefined }).status)
-      .toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+      .toBe("KEYRING_CONFIGURATION_FAILURE");
     const future = Math.floor(now.getTime() / 1000) + 301;
     const keyring = parseCredentialKeyring(keyringJson);
     const bindingDigest = digest(cartToken);
@@ -170,6 +176,60 @@ describe("Shopify checkout consent receipt verifier", () => {
     const envelope = encryptCredential({ keyring, activeKeyId: "new-key", plaintext, aad });
     const value = `v1.${envelope.keyId}.${Buffer.from(envelope.nonce).toString("base64url")}.${Buffer.from(envelope.ciphertext).toString("base64url")}.${Buffer.from(envelope.authTag).toString("base64url")}`;
     expect(verify(value).status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+  });
+
+  it("classifies missing keyring configuration as an operational failure", () => {
+    const result = verify(receipt(), { keyringJson: undefined, logger });
+
+    expect(result).toMatchObject({
+      status: "KEYRING_CONFIGURATION_FAILURE",
+      reason: "KEYRING_MISSING",
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      "shopify.consent.receipt.keyring_missing",
+      expect.objectContaining({
+        shopId,
+        outcome: "operational_failure",
+        reasonCode: "KEYRING_MISSING",
+        error: expect.objectContaining({
+          message: "MODA_ENCRYPTION_KEYS_JSON is not configured",
+        }),
+      }),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("logs the original Shared parser failure and distinguishes invalid configuration from invalid receipts", () => {
+    const result = verify(receipt(), { keyringJson: "{invalid-json", logger });
+    const logged = logger.error.mock.calls.find(
+      ([event]) => event === "shopify.consent.receipt.keyring_invalid",
+    )?.[1] as { error?: Error } | undefined;
+
+    expect(result).toMatchObject({
+      status: "KEYRING_CONFIGURATION_FAILURE",
+      reason: "KEYRING_INVALID",
+    });
+    expect(logged?.error).toBeInstanceOf(Error);
+    expect(logged?.error?.message).toBeTruthy();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("keeps unknown receipt keys and authentication failures as terminal invalid evidence", () => {
+    const keyMissing = verify(receipt(), {
+      keyringJson: JSON.stringify({ "new-key": Buffer.alloc(32, 2).toString("base64") }),
+      logger,
+    });
+    const tampered = verify(receipt().replace(/.$/, "x"), { logger });
+
+    expect(keyMissing.status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(tampered.status).toBe("INVALID_OR_AMBIGUOUS_RECEIPT");
+    expect(logger.warn).toHaveBeenCalledWith(
+      "shopify.consent.receipt.decrypt_rejected",
+      expect.objectContaining({
+        reasonCode: "RECEIPT_DECRYPT_REJECTED",
+        error: expect.anything(),
+      }),
+    );
   });
 
   it("rejects an empty or malformed attribute without exposing receipt contents", () => {

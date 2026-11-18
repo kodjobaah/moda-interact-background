@@ -93,13 +93,16 @@ function signedReceipt(decision: "G" | "R" = "G") {
   ].join(".");
 }
 
-function createService(result: any = { status: "MATERIALISED_GRANTED" }) {
+function createService(
+  result: any = { status: "MATERIALISED_GRANTED" },
+  keyringProvider: () => string | undefined = () => keyringJson,
+) {
   const consent = { materializeExplicitChoice: vi.fn(async () => result) };
   const prepareCustomer = vi.fn(async () => ({ id: "customer-db-id" }));
   const service = new ShopifyCheckoutConsentMaterializationService(
     consent as never,
     prepareCustomer,
-    () => keyringJson,
+    keyringProvider,
     () => now,
   );
   return { service, consent, prepareCustomer };
@@ -183,5 +186,25 @@ describe("Shopify checkout consent materialisation", () => {
       checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt("R") } },
       seed,
     })).resolves.toEqual({ status: "MATERIALISATION_FAILURE", reason: "CONSENT_WRITE_FAILURE" });
+  });
+
+  it.each([
+    ["missing", () => undefined, "KEYRING_MISSING"],
+    ["invalid", () => "{invalid-json", "KEYRING_INVALID"],
+  ] as const)("returns a retryable failure for %s keyring config before SQL or outreach", async (_kind, keyringProvider, reason) => {
+    const harness = createService({ status: "MATERIALISED_GRANTED" }, keyringProvider);
+    const result = await harness.service.materialize({
+      candidate,
+      checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt() } },
+      seed,
+    });
+
+    expect(result).toMatchObject({
+      status: "MATERIALISATION_FAILURE",
+      reason,
+      cause: expect.anything(),
+    });
+    expect(harness.prepareCustomer).not.toHaveBeenCalled();
+    expect(harness.consent.materializeExplicitChoice).not.toHaveBeenCalled();
   });
 });

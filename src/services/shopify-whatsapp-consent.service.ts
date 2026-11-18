@@ -49,7 +49,7 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
   constructor(
     database: PrismaClient = prisma,
     private readonly now: () => Date = () => new Date(),
-    private readonly logger: Pick<StructuredLogger, "warn" | "info"> = defaultLogger,
+    private readonly logger: Pick<StructuredLogger, "warn" | "info" | "error"> = defaultLogger,
   ) {
     this.recipients = new ShopifyConsentRecipientResolver(database);
     this.writes = new ShopifyConsentProjectionWriter(database, this.recipients, logger);
@@ -115,7 +115,11 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
           ? { status: "BLOCKED_STOP" }
           : { status: "DEFER_IDENTITY_OR_RECIPIENT" };
       }
-      return { status: "MATERIALISATION_FAILURE", reason: result.reason };
+      return {
+        status: "MATERIALISATION_FAILURE",
+        reason: result.reason,
+        ...("cause" in result && result.cause !== undefined ? { cause: result.cause } : {}),
+      };
     }
     return input.decision === "GRANTED"
       ? { status: "MATERIALISED_GRANTED" }

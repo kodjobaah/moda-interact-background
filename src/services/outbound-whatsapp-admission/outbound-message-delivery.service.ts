@@ -696,10 +696,36 @@ export class OutboundMessageDeliveryService {
       // Stored-consent preflight is performed outside SQL; no Meta GET.
       // A changed consent/STOP revision is independently caught inside the
       // Shop-locked final permit; this check cannot perform Shopify GraphQL.
-      const permission = await this.recoveryConsent.preflight({
-        shopId: input.shopId, recoveryId: ownership.recoveryId, recipient: input.to,
-      });
+      let permission: Awaited<ReturnType<StoredRecoveryConsentReader["preflight"]>>;
+      try {
+        permission = await this.recoveryConsent.preflight({
+          shopId: input.shopId, recoveryId: ownership.recoveryId, recipient: input.to,
+        });
+      } catch (error) {
+        deliveryLogger.error("shopify.consent.outbound.blocked", {
+          shopId: input.shopId,
+          recoveryId: ownership.recoveryId,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          operation: "proactive_final_send",
+          stage: "consent_preflight",
+          outcome: "retryable_failure",
+          reasonCode: "CONSENT_PREFLIGHT_FAILED",
+          error,
+        });
+        throw error;
+      }
       if (permission.kind !== "allowed") {
+        deliveryLogger.info("shopify.consent.outbound.blocked", {
+          shopId: input.shopId,
+          recoveryId: ownership.recoveryId,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          operation: "proactive_final_send",
+          stage: "consent_preflight",
+          outcome: "blocked",
+          reasonCode: permission.reason,
+        });
         await this.failPrepared(input.messageId);
         return { kind: "suppressed", reason: "conversation-invalid" };
       }
@@ -716,7 +742,9 @@ export class OutboundMessageDeliveryService {
         ...(input.template.parameters?{templateParameters:input.template.parameters}:{}),
       };
     }
-    const permit = await this.recoveryFence.admitFinalSend({
+    let permit: Awaited<ReturnType<OutboundSendFenceService["admitFinalSend"]>>;
+    try {
+      permit = await this.recoveryFence.admitFinalSend({
       senderType: message.senderType,
       ...(input.recoveryShopHeader ? {recoveryShopHeader: input.recoveryShopHeader} : {}),
       conversationId: input.conversationId, shopId: input.shopId,
@@ -728,9 +756,37 @@ export class OutboundMessageDeliveryService {
       ...(proactive ? { proactive } : {}),
       deliveryKind: input.deliveryKind,
       ...(input.deliveryPlan ? {deliveryPlan: input.deliveryPlan, presentationReceipt: input.presentationReceipt, expectedContent: input.expectedContent} : {}),
-      ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
-    });
+        ...(input.initialOutreach ? { initialOutreach: input.initialOutreach } : {}),
+      });
+    } catch (error) {
+      if (proactive) {
+        deliveryLogger.error("shopify.consent.outbound.blocked", {
+          shopId: input.shopId,
+          recoveryId: ownership.recoveryId,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          operation: "proactive_final_send",
+          stage: "postgresql_final_fence",
+          outcome: "retryable_failure",
+          reasonCode: "FINAL_SEND_FENCE_FAILED",
+          error,
+        });
+      }
+      throw error;
+    }
     if (permit.kind === "admitted") return {kind: "sender", sender: permit.sender};
+    if (proactive) {
+      deliveryLogger.info("shopify.consent.outbound.blocked", {
+        shopId: input.shopId,
+        recoveryId: ownership.recoveryId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        operation: "proactive_final_send",
+        stage: "postgresql_final_fence",
+        outcome: "blocked",
+        reasonCode: permit.reason,
+      });
+    }
     if(permit.reason === "allowance-capacity-reopened")return {kind:"suppressed",reason:"allowance-capacity-reopened"};
     if (permit.reason !== "already-admitted-or-sent") {
       await this.failPrepared(input.messageId);

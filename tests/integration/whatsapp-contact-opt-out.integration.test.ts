@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { randomInt, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WhatsAppContactOptOutService } from "../../src/services/whatsapp-contact-opt-out.service.js";
 import { hasLocalNoContact } from "../../src/services/whatsapp-contact-opt-out/local-no-contact.js";
 import { publishStopNotices, writeLocalStop } from "../../src/services/whatsapp-contact-opt-out/stop-writer.js";
@@ -119,16 +119,52 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
         type: "RECOVERY", checkoutRecoveryId: recovery.id,
       } });
       const originalId = `wamid-original-${suffix}`;
-      await db.conversationMessage.create({ data: {
+      const originalMessage = await db.conversationMessage.create({ data: {
         conversationId: conversation.id, providerMessageId: originalId,
         direction: "OUTBOUND", senderType: "AUTOMATION", content: "Your basket",
         status: "SENT", sentAt: now,
+        providerDispatchKey: `stop-test-${suffix}`,
+        providerDispatchAdmittedAt: now,
+        providerDispatchControlRevision: 0,
+        dispatchProviderAccountId: "12345",
+        dispatchProviderPhoneNumberId: "67890",
       } });
-      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: originalId }));
+      await db.recoveryOutreachAttempt.create({ data: {
+        checkoutRecoveryId: recovery.id,
+        recipient: canonical,
+        sequence: 1,
+        trigger: "INITIAL",
+        status: "WAITING_FOR_RESPONSE",
+        configuredOfferMode: "NONE",
+        outboundMessageId: originalMessage.id,
+        sentAt: now,
+      } });
+      const stopLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const quotedSender = async () => ({ providerAccountId: "12345", providerPhoneNumberId: "67890" });
+      await new WhatsAppContactOptOutService(db, quotedSender, stopLog, () => now)
+        .handleInbound(incoming(canonical, {
+          providerAccountId: "12345",
+          providerPhoneNumberId: "67890",
+          contextMessageId: originalId,
+        }));
+      expect(stopLog.info).toHaveBeenCalledWith(
+        "whatsapp.stop.quote_resolution",
+        expect.objectContaining({ outcome: "verified_quote", shopId: shopA }),
+      );
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } })).whatsappNoContact).toBe(true);
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(false);
-      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: "unknown-quoted-provider-id" }));
+      stopLog.info.mockClear();
+      await new WhatsAppContactOptOutService(db, quotedSender, stopLog, () => now)
+        .handleInbound(incoming(canonical, {
+          providerAccountId: "12345",
+          providerPhoneNumberId: "67890",
+          contextMessageId: "unknown-quoted-provider-id",
+        }));
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(true);
+      expect(stopLog.info).toHaveBeenCalledWith(
+        "whatsapp.stop.quote_resolution",
+        expect.objectContaining({ outcome: "global_fallback" }),
+      );
     } finally {
       await db.shop.deleteMany({ where: { id: { in: [shopA, shopB] } } });
       await db.$disconnect();

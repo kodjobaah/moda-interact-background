@@ -268,6 +268,8 @@ function mapConsentOutcome(
     case "BLOCKED_STOP":
       return { outcome: "discarded-consent-stop", checkoutToken };
     case "MATERIALISATION_FAILURE":
-      throw new Error(`Shopify checkout consent materialisation failed: ${result.reason}`);
+      throw new Error(`Shopify checkout consent materialisation failed: ${result.reason}`, {
+        ...(result.cause !== undefined ? { cause: result.cause } : {}),
+      });
   }
 }
