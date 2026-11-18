@@ -134,7 +134,15 @@ function createInitiation(overrides: {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.senderPool.allocate.mockResolvedValue({ kind: "assigned" });
+  mocks.senderPool.allocate.mockResolvedValue({
+    kind: "assigned",
+    sender: {
+      routeId: "route-1",
+      threadId: "thread-1",
+      providerPhoneNumberId: "phone-1",
+      providerAccountId: "account-1",
+    },
+  });
   mocks.customer.resolveCustomer.mockResolvedValue(null);
   mocks.prisma.shop.findUniqueOrThrow.mockResolvedValue({ id: "shop-1" });
   mocks.prisma.shop.findUnique.mockResolvedValue({ id: "shop-1", platform: "SHOPIFY" });

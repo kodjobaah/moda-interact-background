@@ -2,7 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => {
   return {
-    senderPoolMock: { allocate: vi.fn(async () => ({ kind: "assigned" as const })) },
+    senderPoolMock: { allocate: vi.fn(async () => ({
+      kind: "assigned" as const,
+      sender: {
+        routeId: "route-1",
+        threadId: "thread-1",
+        providerPhoneNumberId: "phone-1",
+        providerAccountId: "account-1",
+      },
+    })) },
     redisMock: {
       set: vi.fn(async () => "OK"),
       get: vi.fn(async () => null),
