@@ -17,6 +17,13 @@ export type ShopifyWhatsAppConsentSyncResult =
   | { status: "UPDATED" | "UNCHANGED"; customerPhoneId: string }
   | { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS"; reason: string };
 
+export type ShopifyConsentMaterializationResult =
+  | { status: "MATERIALISED_GRANTED" }
+  | { status: "MATERIALISED_REVOKED" }
+  | { status: "BLOCKED_STOP" }
+  | { status: "DEFER_IDENTITY_OR_RECIPIENT" }
+  | { status: "MATERIALISATION_FAILURE"; reason: string; cause?: unknown };
+
 export type Failure = Extract<ShopifyWhatsAppConsentEligibility, { status: "NOT_AUTHORISED" | "UNAVAILABLE" | "AMBIGUOUS" }>;
 export type Identity = ReturnType<typeof parseShopifyCustomerIdentity>;
 export type ScopedCustomer = {
@@ -35,5 +42,9 @@ export type InvalidationResult = {
 };
 
 export const notAuthorised = (reason: string): Failure => ({ status: "NOT_AUTHORISED", reason });
-export const unavailable = (reason: string): Failure => ({ status: "UNAVAILABLE", reason });
+export const unavailable = (reason: string, cause?: unknown): Failure => ({
+  status: "UNAVAILABLE",
+  reason,
+  ...(cause !== undefined ? { cause } : {}),
+});
 export const ambiguous = (reason: string): Failure => ({ status: "AMBIGUOUS", reason });

@@ -46,11 +46,10 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       const differentPhone = "+447409000000";
       const different = await db.customerPhone.create({ data: { customerId: b.id, phone: differentPhone } });
       const identity = { shopId: shopA, shopifyCustomerId: "gid://shopify/Customer/125678912345" };
-      const first = new ShopifyWhatsAppConsentService({ readCurrent: vi.fn(async () => ({
-        kind: "OBSERVED" as const, customerGid: identity.shopifyCustomerId, phoneNumber: phone,
-        state: "SUBSCRIBED" as const, updatedAt: "2026-10-21T10:00:00Z",
-      })) }, db, () => now);
-      expect((await first.syncCustomer(identity)).status).toBe("UPDATED");
+      const first = new ShopifyWhatsAppConsentService(db, () => now);
+      expect(await first.materializeExplicitChoice({
+        ...identity, customerId: a.id, recipient: phone, decision: "GRANTED",
+      })).toEqual({ status: "MATERIALISED_GRANTED" });
       // The legacy same-shop matching number is registered after the native
       // grant; positive consent never transfers to another Customer by phone.
       const ap2 = await db.customerPhone.create({ data: { customerId: a2.id, phone: `0${phone.slice(3, 7)} ${phone.slice(7)}` } });
@@ -71,11 +70,10 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
       // End the deliberately ambiguous second CustomerPhone before independently
       // checking a later Shopify observation for the identified customer.
       await db.customerPhone.update({ where: { id: ap2.id }, data: { endedAt: now } });
-      const renew = new ShopifyWhatsAppConsentService({ readCurrent: vi.fn(async () => ({
-        kind: "OBSERVED" as const, customerGid: identity.shopifyCustomerId,
-        phoneNumber: phone, state: "SUBSCRIBED" as const, updatedAt: "2026-10-22T16:00:00Z",
-      })) }, db, () => now);
-      expect((await renew.syncCustomer(identity)).status).toBe("UPDATED");
+      const renew = new ShopifyWhatsAppConsentService(db, () => new Date(now.getTime() + 1000));
+      expect(await renew.materializeExplicitChoice({
+        ...identity, customerId: a.id, recipient: phone, decision: "GRANTED",
+      })).toEqual({ status: "BLOCKED_STOP" });
       expect((await renew.evaluateStoredRecipient({ shopId: shopA, customerId: a.id, recipient: phone })).status)
         .toBe("NOT_AUTHORISED");
       const final = await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } });
@@ -121,16 +119,52 @@ describeWithDatabase("ARCH-045 WhatsApp STOP PostgreSQL", () => {
         type: "RECOVERY", checkoutRecoveryId: recovery.id,
       } });
       const originalId = `wamid-original-${suffix}`;
-      await db.conversationMessage.create({ data: {
+      const originalMessage = await db.conversationMessage.create({ data: {
         conversationId: conversation.id, providerMessageId: originalId,
         direction: "OUTBOUND", senderType: "AUTOMATION", content: "Your basket",
         status: "SENT", sentAt: now,
+        providerDispatchKey: `stop-test-${suffix}`,
+        providerDispatchAdmittedAt: now,
+        providerDispatchControlRevision: 0,
+        dispatchProviderAccountId: "12345",
+        dispatchProviderPhoneNumberId: "67890",
       } });
-      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: originalId }));
+      await db.recoveryOutreachAttempt.create({ data: {
+        checkoutRecoveryId: recovery.id,
+        recipient: canonical,
+        sequence: 1,
+        trigger: "INITIAL",
+        status: "WAITING_FOR_RESPONSE",
+        configuredOfferMode: "NONE",
+        outboundMessageId: originalMessage.id,
+        sentAt: now,
+      } });
+      const stopLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const quotedSender = async () => ({ providerAccountId: "12345", providerPhoneNumberId: "67890" });
+      await new WhatsAppContactOptOutService(db, quotedSender, stopLog, () => now)
+        .handleInbound(incoming(canonical, {
+          providerAccountId: "12345",
+          providerPhoneNumberId: "67890",
+          contextMessageId: originalId,
+        }));
+      expect(stopLog.info).toHaveBeenCalledWith(
+        "whatsapp.stop.quote_resolution",
+        expect.objectContaining({ outcome: "verified_quote", shopId: shopA }),
+      );
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: ap.id } })).whatsappNoContact).toBe(true);
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(false);
-      await optOut(db).handleInbound(incoming(canonical, { contextMessageId: "unknown-quoted-provider-id" }));
+      stopLog.info.mockClear();
+      await new WhatsAppContactOptOutService(db, quotedSender, stopLog, () => now)
+        .handleInbound(incoming(canonical, {
+          providerAccountId: "12345",
+          providerPhoneNumberId: "67890",
+          contextMessageId: "unknown-quoted-provider-id",
+        }));
       expect((await db.customerPhone.findUniqueOrThrow({ where: { id: bp.id } })).whatsappNoContact).toBe(true);
+      expect(stopLog.info).toHaveBeenCalledWith(
+        "whatsapp.stop.quote_resolution",
+        expect.objectContaining({ outcome: "global_fallback" }),
+      );
     } finally {
       await db.shop.deleteMany({ where: { id: { in: [shopA, shopB] } } });
       await db.$disconnect();

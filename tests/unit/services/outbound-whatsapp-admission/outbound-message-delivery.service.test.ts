@@ -33,6 +33,7 @@ function harness({
   generalFence,
   wooFence,
   recoveryFence,
+  recoveryConsent,
   ownership,
   footerContext,
 }: {
@@ -43,6 +44,7 @@ function harness({
   generalFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
   wooFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
   recoveryFence?: { admitFinalSend: ReturnType<typeof vi.fn> };
+  recoveryConsent?: { preflight: ReturnType<typeof vi.fn> };
   ownership?: { readTurnOwnership: ReturnType<typeof vi.fn> };
   footerContext?: { loadContext: ReturnType<typeof vi.fn> };
 } = {}) {
@@ -119,7 +121,7 @@ function harness({
       recoveryFence as never,
       moderationMock as never,
       undefined, // providerFailure uses its production adapter
-      generalFence as never, undefined, wooFence as never, footerContext as never,
+      generalFence as never, recoveryConsent as never, wooFence as never, footerContext as never,
     ),
   };
 }
@@ -765,6 +767,21 @@ describe("unified known-recovery service and limit notice bodies",()=>{
   const untouched=noticeHarness();await untouched.service.sendPreparedText({...admission,executionScope:"recovery",to:"15551234567",text});
   expect(untouched.footerContext.loadContext).not.toHaveBeenCalled();
   expect(untouched.providerMock.sendWhatsAppText).toHaveBeenCalledWith({expectedSender: {providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"},to:"15551234567",text});
+ });
+ it("keeps customer-initiated freeform service replies independent of proactive consent",async()=>{
+  const recoveryConsent={preflight:vi.fn(async()=>({kind:"denied",reason:"stored-consent-denied"}))};
+  const test=harness({
+   recoveryConsent,
+   recoveryFence:{admitFinalSend:vi.fn(async()=>({kind:"admitted",sender:{providerAccountId:"waba-1",providerPhoneNumberId:"phone-1"}}))},
+   ownership:{readTurnOwnership:vi.fn(async()=>({conversationId:"conversation-1",shopId:"shop-1",mode:"AI",recoveryId:"recovery-1",revision:7}))},
+  });
+  const result=await test.service.sendPreparedText({
+   ...admission,executionScope:"recovery",to:"15551234567",text:"Here is the answer to your question.",
+   expectedInboundVersion:3,expectedControlRevision:7,
+  });
+  expect(result.kind).toBe("admitted");
+  expect(recoveryConsent.preflight).not.toHaveBeenCalled();
+  expect(test.providerMock.sendWhatsAppText).toHaveBeenCalledOnce();
  });
  it.each([null,"TENANT_MISMATCH",{...context,shopId:"other-shop"},{...context,variables:{"checkout.url":"http://shop.example/unsafe"}}])("refuses untrusted terminal context %#",async value=>{
   const test=noticeHarness(value);

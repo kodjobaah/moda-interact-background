@@ -8,7 +8,7 @@ export class ShopifyConsentProjectionWriter {
   constructor(
     private readonly database: PrismaClient,
     private readonly recipient: ShopifyConsentRecipientResolver,
-    private readonly logger: Pick<StructuredLogger, "warn" | "info">,
+    private readonly logger: Pick<StructuredLogger, "warn" | "info" | "error">,
   ) {}
 
   async invalidateOtherNumbers(
@@ -116,11 +116,15 @@ export class ShopifyConsentProjectionWriter {
           return null;
         }
       } catch (error) {
-        this.logger.warn("shopify.whatsapp_consent.sync", {
-          shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE",
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+        this.logger.error("shopify.consent.materialization.failed", {
+          shopId: scoped.shop.id,
+          operation: "invalidate_displaced_consent",
+          stage: "postgresql_write",
+          outcome: "failed",
+          reasonCode: "CONSENT_WRITE_FAILURE",
+          error,
         });
-        return unavailable("CONSENT_WRITE_FAILURE");
+        return unavailable("CONSENT_WRITE_FAILURE", error);
       }
       // Re-read after any competing native consent update; never overwrite its
       // revision, provider timestamp, or an independently recorded STOP.
@@ -144,6 +148,9 @@ export class ShopifyConsentProjectionWriter {
         } },
       });
       if (!phone) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
+      if (decision === "GRANTED" && phone.whatsappNoContact) {
+        return notAuthorised("LOCAL_NO_CONTACT");
+      }
       const actual = this.recipient.canonical(phone.phone, scoped.shop);
       if (canonical !== actual) return notAuthorised("ACTIVE_RECIPIENT_CHANGED");
       if (decision === "GRANTED" &&
@@ -175,6 +182,7 @@ export class ShopifyConsentProjectionWriter {
             whatsappCanonicalPhone: phone.whatsappCanonicalPhone,
             whatsappConsentRevision: phone.whatsappConsentRevision,
             whatsappConsentDecisionSequence: phone.whatsappConsentDecisionSequence,
+            ...(decision === "GRANTED" ? { whatsappNoContact: false } : {}),
             customer: {
               shopId: scoped.shop.id, shopifyCustomerId: { in: [scoped.identity.numericId, scoped.identity.gid] },
               shop: { platform: "SHOPIFY", status: "ACTIVE" },
@@ -194,11 +202,15 @@ export class ShopifyConsentProjectionWriter {
         });
       } catch (error) {
         // A constraint/permission failure is not proof of consent.
-        this.logger.warn("shopify.whatsapp_consent.sync", {
-          shopId: scoped.shop.id, outcome: "unavailable", reasonCode: "CONSENT_WRITE_FAILURE",
-          errorMessage: error instanceof Error ? error.message : String(error), error,
+        this.logger.error("shopify.consent.materialization.failed", {
+          shopId: scoped.shop.id,
+          operation: `materialize_${decision.toLowerCase()}_consent`,
+          stage: "postgresql_write",
+          outcome: "failed",
+          reasonCode: "CONSENT_WRITE_FAILURE",
+          error,
         });
-        return unavailable("CONSENT_WRITE_FAILURE");
+        return unavailable("CONSENT_WRITE_FAILURE", error);
       }
       if (updated.count === 1) {
         this.logger.info("shopify.whatsapp_consent.sync", { shopId: scoped.shop.id, outcome: "updated", decision });

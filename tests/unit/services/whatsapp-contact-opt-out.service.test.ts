@@ -83,7 +83,7 @@ function setup(phones: Phone[], quoted?: { shopId: string; recipient?: string } 
       } : null),
     },
   };
-  const logger = { info: vi.fn(), warn: vi.fn() };
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const sender = vi.fn(async () => ({ providerAccountId: "waba-1", providerPhoneNumberId: "phone-1" }));
   const service = new WhatsAppContactOptOutService(db as never, sender, logger as never, () => new Date("2026-10-22T17:10:00Z"));
   return { service, db, tx, notices, threads, logger, sender,
