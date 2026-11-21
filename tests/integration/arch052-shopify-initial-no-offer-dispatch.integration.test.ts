@@ -231,6 +231,7 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
           shopifyCustomerId: "gid://shopify/Customer/125678912345",
           email: null, phone: f.phone, firstName: "Taylor", lastName: null,
         },
+        authoritativeCheckoutAttributes: { kind: "available", values: [] },
         lineItems: f.lineItems,
       },
     });
@@ -331,6 +332,7 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
           shopifyCustomerId: "gid://shopify/Customer/125678912345",
           email: null, phone: f.phone, firstName: "Taylor", lastName: null,
         },
+        authoritativeCheckoutAttributes: { kind: "available", values: [] },
         lineItems: f.lineItems,
       },
     });
