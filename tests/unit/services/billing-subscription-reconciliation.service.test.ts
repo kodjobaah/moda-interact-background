@@ -39,8 +39,8 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
 
-  it("enters fail-closed SYNC_ERROR for a provider-current target with a missing meter", async () => {
-    const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, usageEventHandles: [] }, plan: establishedCurrentPlan });
+  it("enters fail-closed SYNC_ERROR for a provider-current target with a colliding reporting handle", async () => {
+    const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, usageEventHandles: ["recovery-audit"] }, plan: establishedCurrentPlan });
     test.database.billingPlan.findUnique
       .mockResolvedValueOnce(establishedCurrentPlan)
       .mockResolvedValueOnce(establishedTargetPlan);
@@ -231,7 +231,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow(),
       providerResult: { ...freeProvider, planHandle: "paid-2026", pendingPlanHandle: "free-2026", pendingEffectiveAt: pendingAt },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
+      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", includedRecoveryConversationAllowance: 100, recoveryCreditPackEnabled: false },
     });
     test.transaction.billingPlan.findUnique.mockResolvedValue({ id: "plan-free", active: true });
     await test.service.reconcileJob(payload);
@@ -242,7 +242,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow(),
       providerResult: { ...freeProvider, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
+      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", includedRecoveryConversationAllowance: 100, recoveryCreditPackEnabled: false },
     });
     await test.service.reconcileJob(payload);
 

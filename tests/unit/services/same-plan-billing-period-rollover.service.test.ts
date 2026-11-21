@@ -15,7 +15,7 @@ const plan = {
   shopifyPlanHandle: "paid-2026",
   includedRecoveryConversationAllowance: 100,
   recoveryCreditPackEnabled: true,
-  shopifyUsageEventHandle: "recovery-meter",
+  shopifyUsageEventHandle: "recovery-audit",
   shopifyRecoveryCreditPackEventHandle: "pack-meter",
 };
 

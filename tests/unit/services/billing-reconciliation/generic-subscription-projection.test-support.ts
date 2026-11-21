@@ -29,7 +29,7 @@ export const paidPlan: ObservedBillingPlan = {
   name: "Paid",
   kind: "PAID_METERED",
   shopifyPlanHandle: "paid-2026",
-  shopifyUsageEventHandle: "recovery-meter",
+  shopifyUsageEventHandle: "recovery-audit",
   shopifyRecoveryCreditPackEventHandle: "pack-meter",
   recoveryCreditPackEnabled: true,
   includedRecoveryConversationAllowance: 100,

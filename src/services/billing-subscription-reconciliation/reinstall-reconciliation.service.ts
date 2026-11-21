@@ -3,6 +3,7 @@ import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKi
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
+import { hasValidRecoveryReportingHandle, hasConfiguredCreditPackMeter } from "../billing-reconciliation/shopify-event-handle-validation.js";
 import type { PartnerSubscription, ShopifyPartnerBillingProvider } from "../../providers/shopify-partner-billing.provider.js";
 import { ensureCurrentBillingPeriodProjection } from "../current-billing-period-projection.service.js";
 import { SamePlanBillingPeriodRolloverService } from "../same-plan-billing-period-rollover.service.js";
@@ -54,8 +55,7 @@ export class ReinstallReconciliationService {
       return;
     }
     if (plan.kind === BillingPlanKind.FREE) {
-      if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle
-        || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) {
+      if (plan.recoveryCreditPackEnabled && (!hasConfiguredCreditPackMeter(plan.shopifyRecoveryCreditPackEventHandle, provider.usageEventHandles))) {
         await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER");
         return;
       }
@@ -66,7 +66,7 @@ export class ReinstallReconciliationService {
       await this.recordReinstallBlocked(shopId, expected, "UNSUPPORTED_PLAN_KIND");
       return;
     }
-    if (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle)) {
+    if (!hasValidRecoveryReportingHandle(plan.shopifyUsageEventHandle, provider.usageEventHandles)) {
       await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER");
       return;
     }

@@ -111,8 +111,9 @@ describe("GenericSubscriptionProjectionService", () => {
     expect(test.database.$transaction).not.toHaveBeenCalled();
   });
 
-  it("retains the mapped plan but fails closed when the provider omits its required usage meter", async () => {
-    const test = serviceHarness();
+  it("accepts a custom recovery reporting handle absent from billable meters", async () => {
+    const transaction = transactionHarness();
+    const test = serviceHarness(transaction);
     const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
     const observedProvider = { ...provider, usageEventHandles: ["pack-meter"] };
 
@@ -125,14 +126,11 @@ describe("GenericSubscriptionProjectionService", () => {
       now,
     });
 
-    expect(result).toEqual({ billingPeriodId: null, packMeterHandle: "pack-meter" });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
-        planId: "plan-paid",
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "MISSING_USAGE_METER",
-      }),
+    expect(result).toEqual({ billingPeriodId: "period-1", packMeterHandle: "pack-meter" });
+    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ planId: "plan-paid", status: "ACTIVE", billingPeriodId: "period-1" }),
     }));
+    expect(test.database.subscription.upsert).not.toHaveBeenCalled();
   });
 
   it("does not recreate lifetime Free capacity after historical recovery usage", async () => {

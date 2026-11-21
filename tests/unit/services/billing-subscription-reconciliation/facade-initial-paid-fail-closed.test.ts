@@ -144,7 +144,7 @@ describe("BillingSubscriptionReconciliationService", () => {
   it.each([
     ["missing cycle", { currentPeriodStart: null, currentPeriodEnd: null }, "MISSING_BILLING_CYCLE"],
     ["invalid cycle", { currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-09-01T00:00:00.000Z") }, "MISSING_BILLING_CYCLE"],
-    ["missing meter", { usageEventHandles: [] }, "MISSING_USAGE_METER"],
+    ["reporting handle collision", { usageEventHandles: ["recovery-audit"] }, "MISSING_USAGE_METER"],
     ["null allowance", { includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
     ["negative allowance", { includedRecoveryConversationAllowance: -1 }, "INVALID_INCLUDED_ALLOWANCE"],
     ["non-integer allowance", { includedRecoveryConversationAllowance: 1.5 }, "INVALID_INCLUDED_ALLOWANCE"],

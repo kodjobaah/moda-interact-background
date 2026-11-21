@@ -62,7 +62,7 @@ const targetPlan = {
   name: "Target",
   kind: BillingPlanKind.PAID_METERED,
   shopifyPlanHandle: expected.pendingShopifyPlanHandle,
-  shopifyUsageEventHandle: "recovery-meter",
+  shopifyUsageEventHandle: "recovery-audit",
   shopifyRecoveryCreditPackEventHandle: null,
   recoveryCreditPackEnabled: false,
   includedRecoveryConversationAllowance: 200,

@@ -4,6 +4,7 @@ import {
 import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import { BillingPlanKind, Prisma, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { hasValidRecoveryReportingHandle, hasConfiguredCreditPackMeter } from "../billing-reconciliation/shopify-event-handle-validation.js";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import { recoveryCapacityResumeService } from "../recovery-capacity-resume.service.js";
 import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "../shopify-plan-change-transition.service.js";
@@ -94,12 +95,12 @@ export class EstablishedPlanChangeReconciliationService {
           await this.recordRetry(shopId, expected, "INVALID_INCLUDED_ALLOWANCE", undefined, true);
           return;
         }
-        if (!targetPlan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyUsageEventHandle)) {
+        if (!hasValidRecoveryReportingHandle(targetPlan.shopifyUsageEventHandle, provider.usageEventHandles)) {
           await this.recordRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
           return;
         }
       }
-      if (targetPlan.recoveryCreditPackEnabled && (!targetPlan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyRecoveryCreditPackEventHandle))) {
+      if (targetPlan.recoveryCreditPackEnabled && (!hasConfiguredCreditPackMeter(targetPlan.shopifyRecoveryCreditPackEventHandle, provider.usageEventHandles))) {
         await this.recordRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
         return;
       }

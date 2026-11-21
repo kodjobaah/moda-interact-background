@@ -33,7 +33,7 @@ function harness({
   partnerResult = providerSubscription,
   partnerError,
   latestLifecycleEvent = null,
-  plan = { id: "plan-1", active: true, name: "Pro", kind: "PAID_METERED", shopifyPlanHandle: "pro-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter", recoveryCreditPackEnabled: true, includedRecoveryConversationAllowance: 100 },
+  plan = { id: "plan-1", active: true, name: "Pro", kind: "PAID_METERED", shopifyPlanHandle: "pro-2026", shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: "pack-meter", recoveryCreditPackEnabled: true, includedRecoveryConversationAllowance: 100 },
   modaQuantity = 5,
   nowValue = () => new Date("2026-09-12T12:00:00.000Z"),
   queue,
@@ -290,8 +290,8 @@ describe("BillingReconciliationService", () => {
 
   it("fails closed before the boundary and never exposes the stale pack meter", async () => {
     const queue = { add: vi.fn().mockResolvedValue({}) };
-    const test = harness({ queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") } });
-    test.database.billingPlan.findUnique.mockImplementation(async ({ where }: { where: { id?: string; shopifyPlanHandle?: string } }) => where.id ? { id: "plan-current", active: true, kind: "PAID_METERED", shopifyRecoveryCreditPackEventHandle: "old-pack" } : { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: "pack-new" });
+    const test = harness({ queue, plan: { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-audit-new", shopifyRecoveryCreditPackEventHandle: "pack-new" }, partnerResult: { ...providerSubscription, planHandle: "pro-2027", usageEventHandles: ["recovery-new"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z") } });
+    test.database.billingPlan.findUnique.mockImplementation(async ({ where }: { where: { id?: string; shopifyPlanHandle?: string } }) => where.id ? { id: "plan-current", active: true, kind: "PAID_METERED", shopifyRecoveryCreditPackEventHandle: "old-pack" } : { id: "plan-target", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-audit-new", shopifyRecoveryCreditPackEventHandle: "pack-new" });
     test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-current", pendingPlanId: "plan-target", pendingShopifyPlanHandle: "pro-2027", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z"), billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") });
 
     const result = await test.service.reconcileOnce();
@@ -309,7 +309,7 @@ describe("BillingReconciliationService", () => {
         name: "Pro",
         kind: "PAID_METERED",
         shopifyPlanHandle: "plan-a",
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: "pack-meter",
         recoveryCreditPackEnabled: true,
         includedRecoveryConversationAllowance: 100,
@@ -325,7 +325,7 @@ describe("BillingReconciliationService", () => {
         name: "Pro",
         kind: "PAID_METERED",
         shopifyPlanHandle: "plan-a",
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: "pack-meter",
         recoveryCreditPackEnabled: true,
         includedRecoveryConversationAllowance: 100,
@@ -336,7 +336,7 @@ describe("BillingReconciliationService", () => {
         name: "Pro",
         kind: "PAID_METERED",
         shopifyPlanHandle: "plan-b",
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: "pack-meter",
         recoveryCreditPackEnabled: true,
         includedRecoveryConversationAllowance: 100,
@@ -365,7 +365,7 @@ describe("BillingReconciliationService", () => {
     });
     test.database.billingPlan.findUnique.mockReset()
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "plan-new", active: true, name: "New", kind: "PAID_METERED", shopifyPlanHandle: "future-plan", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
+      .mockResolvedValueOnce({ id: "plan-new", active: true, name: "New", kind: "PAID_METERED", shopifyPlanHandle: "future-plan", shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
 
     await test.service.reconcileOnce();
     test.database.subscription.upsert.mockClear();
@@ -422,7 +422,7 @@ describe("BillingReconciliationService", () => {
         name: "Paid",
         kind: "PAID_METERED",
         shopifyPlanHandle: "paid-2026",
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: null,
         recoveryCreditPackEnabled: false,
         includedRecoveryConversationAllowance: 100,
@@ -444,7 +444,7 @@ describe("BillingReconciliationService", () => {
       shop: { update: vi.fn() },
       shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted }), update: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z") }), update: vi.fn() },
-      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
+      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", includedRecoveryConversationAllowance: 100 }) },
       billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-paid" }) },
       billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn() },
       shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), create: vi.fn() },
@@ -473,7 +473,7 @@ describe("BillingReconciliationService", () => {
         name: "Paid",
         kind: "PAID_METERED",
         shopifyPlanHandle: "paid-new",
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: null,
         recoveryCreditPackEnabled: false,
         includedRecoveryConversationAllowance: 100,
@@ -504,11 +504,11 @@ describe("BillingReconciliationService", () => {
     const test = harness({
       queue,
       partnerResult: { ...providerSubscription, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null, status: "TRIALING", trialEndsAt: new Date("2026-09-20T00:00:00.000Z"), currentPeriodStart: null, currentPeriodEnd: null },
-      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 },
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 },
     });
     test.database.shopSettings.findUnique.mockResolvedValue({ onboardingCompleted: false });
     test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"), billingPeriodId: null });
-    test.database.billingPlan.findUnique.mockReset().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
+    test.database.billingPlan.findUnique.mockReset().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 });
     const current = { status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt: new Date("2026-09-12T11:00:00.000Z"), nextReconcileAt: null };
     test.database.subscription.updateMany.mockResolvedValue({ count: 1 });
     await test.service.reconcileOnce();
@@ -522,7 +522,7 @@ describe("BillingReconciliationService", () => {
       shop: { update: vi.fn() },
       shopSettings: { findUnique: vi.fn().mockResolvedValue({ onboardingCompleted: false }), update: vi.fn() },
       subscription: { findUnique: vi.fn().mockResolvedValue({ ...current, nextReconcileAt: null }), update: vi.fn() },
-      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", includedRecoveryConversationAllowance: 100 }) },
+      billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-audit", includedRecoveryConversationAllowance: 100 }) },
       billingPeriod: { findUnique: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: "period-paid" }) },
       billingPeriodEntitlementCounter: { findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn() },
       shopEntitlementCounter: { findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }), create: vi.fn() },

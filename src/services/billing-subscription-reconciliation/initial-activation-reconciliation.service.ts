@@ -2,6 +2,7 @@ import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKi
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
+import { hasValidRecoveryReportingHandle } from "../billing-reconciliation/shopify-event-handle-validation.js";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import { ensureCurrentBillingPeriodProjection } from "../current-billing-period-projection.service.js";
@@ -178,7 +179,7 @@ export class InitialActivationReconciliationService {
     const hasValidCycle = provider.currentPeriodStart !== null
       && provider.currentPeriodEnd !== null
       && provider.currentPeriodStart < provider.currentPeriodEnd;
-    const hasMeter = Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
+    const hasMeter = hasValidRecoveryReportingHandle(plan.shopifyUsageEventHandle, provider.usageEventHandles);
     if (provider.status === "TRIALING" && provider.trialEndsAt && provider.trialEndsAt > now && !hasValidCycle) {
       await this.recordUnsupportedPaidTrial(shopId, expected);
       return;
@@ -219,8 +220,7 @@ export class InitialActivationReconciliationService {
         && currentPlan.shopifyPlanHandle === provider.planHandle
         && currentPlan.active
         && currentPlan.kind === BillingPlanKind.PAID_METERED
-        && currentPlan.shopifyUsageEventHandle !== null
-        && provider.usageEventHandles.includes(currentPlan.shopifyUsageEventHandle)
+        && hasValidRecoveryReportingHandle(currentPlan.shopifyUsageEventHandle, provider.usageEventHandles)
         && currentAllowance === allowance
         && Number.isSafeInteger(currentAllowance)
         && (currentAllowance ?? -1) >= 0;
@@ -357,7 +357,7 @@ export class InitialActivationReconciliationService {
     const now = this.now();
     const planUsable = Boolean(plan?.active);
     const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
-      || Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
+      || hasValidRecoveryReportingHandle(plan.shopifyUsageEventHandle, provider.usageEventHandles);
     const hasValidProviderCycle = provider.currentPeriodStart !== null
       && provider.currentPeriodEnd !== null
       && provider.currentPeriodStart < provider.currentPeriodEnd;

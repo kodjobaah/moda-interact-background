@@ -57,7 +57,7 @@ const paidPlan = {
   name: "Paid",
   kind: BillingPlanKind.PAID_METERED,
   shopifyPlanHandle: "paid-2026",
-  shopifyUsageEventHandle: "recovery-meter",
+  shopifyUsageEventHandle: "recovery-audit",
   shopifyRecoveryCreditPackEventHandle: null,
   recoveryCreditPackEnabled: false,
   includedRecoveryConversationAllowance: 100,

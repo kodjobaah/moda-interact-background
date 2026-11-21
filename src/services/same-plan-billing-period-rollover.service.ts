@@ -6,6 +6,7 @@ import {
 import type { PrismaClient } from "@prisma/client";
 
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
+import { hasValidRecoveryReportingHandle, hasConfiguredCreditPackMeter } from "./billing-reconciliation/shopify-event-handle-validation.js";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
 import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
 import {
@@ -71,12 +72,12 @@ export class SamePlanBillingPeriodRolloverService {
       return { kind: "not-applicable" };
     }
     if (input.plan.kind === BillingPlanKind.PAID_METERED) {
-      if (!input.plan.shopifyUsageEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyUsageEventHandle)) {
+      if (!hasValidRecoveryReportingHandle(input.plan.shopifyUsageEventHandle, input.provider.usageEventHandles)) {
         return { kind: "not-applicable" };
       }
     }
     if (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled) {
-      if (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle)) {
+      if (!hasConfiguredCreditPackMeter(input.plan.shopifyRecoveryCreditPackEventHandle, input.provider.usageEventHandles)) {
         return { kind: "not-applicable" };
       }
     }

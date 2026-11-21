@@ -159,7 +159,7 @@ export const paidPlan = {
   name: "Paid",
   kind: "PAID_METERED",
   shopifyPlanHandle: "paid-2026",
-  shopifyUsageEventHandle: "recovery-meter",
+  shopifyUsageEventHandle: "recovery-audit",
   recoveryCreditPackEnabled: false,
   shopifyRecoveryCreditPackEventHandle: null,
   includedRecoveryConversationAllowance: 100,

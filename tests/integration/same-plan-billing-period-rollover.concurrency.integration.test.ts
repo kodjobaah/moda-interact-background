@@ -29,7 +29,7 @@ describeWithDatabase("same-plan billing-period rollover PostgreSQL concurrency",
           shopifyPlanHandle: `paid-${shopId}`,
           name: "Paid integration plan",
           kind: "PAID_METERED",
-          shopifyUsageEventHandle: "recovery-meter",
+          shopifyUsageEventHandle: "recovery-audit",
           includedRecoveryConversationAllowance: 10,
         },
       });
@@ -109,7 +109,7 @@ describeWithDatabase("same-plan billing-period rollover PostgreSQL concurrency",
         shopifyPlanHandle: plan.shopifyPlanHandle,
         includedRecoveryConversationAllowance: 10,
         recoveryCreditPackEnabled: false,
-        shopifyUsageEventHandle: "recovery-meter",
+        shopifyUsageEventHandle: "recovery-audit",
         shopifyRecoveryCreditPackEventHandle: null,
       };
       const input = {

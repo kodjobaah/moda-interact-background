@@ -5,6 +5,7 @@ import {
   Prisma,
   SubscriptionProjectionStatus,
 } from "@prisma/client";
+import { hasValidRecoveryReportingHandle, hasConfiguredCreditPackMeter } from "./billing-reconciliation/shopify-event-handle-validation.js";
 import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 
@@ -350,9 +351,9 @@ function validateProviderPlan(
   }
   if (plan.kind === BillingPlanKind.PAID_METERED) {
     if (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance) || (plan.includedRecoveryConversationAllowance ?? -1) < 0) return "INVALID_INCLUDED_ALLOWANCE";
-    if (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle)) return "MISSING_USAGE_METER";
+    if (!hasValidRecoveryReportingHandle(plan.shopifyUsageEventHandle, provider.usageEventHandles)) return "MISSING_USAGE_METER";
   }
-  if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) return "MISSING_USAGE_METER";
+  if (plan.recoveryCreditPackEnabled && (!hasConfiguredCreditPackMeter(plan.shopifyRecoveryCreditPackEventHandle, provider.usageEventHandles))) return "MISSING_USAGE_METER";
   return null;
 }
 

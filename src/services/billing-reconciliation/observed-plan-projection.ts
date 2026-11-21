@@ -1,5 +1,6 @@
 import { BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
 
+import { hasValidRecoveryReportingHandle } from "./shopify-event-handle-validation.js";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import type { CurrentBillingPeriodPlanProjection } from "../current-billing-period-projection.service.js";
 
@@ -24,7 +25,7 @@ export function classifyObservedPlanProjection(
 ): ObservedPlanProjection {
   const planUsable = Boolean(plan?.active);
   const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
-    || Boolean(plan?.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
+    || hasValidRecoveryReportingHandle(plan?.shopifyUsageEventHandle, provider.usageEventHandles);
   const status = !planUsable
     ? SubscriptionProjectionStatus.UNMAPPED
     : !meterUsable
