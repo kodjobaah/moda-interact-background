@@ -145,7 +145,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       kind: "PAID_METERED" as const,
       shopifyPlanHandle: "free-2026",
       recoveryCreditPackEnabled: false,
-      shopifyUsageEventHandle: "recovery-audit",
+      shopifyUsageEventHandle: "recovery-meter",
       shopifyRecoveryCreditPackEventHandle: null,
       includedRecoveryConversationAllowance: 100,
     };
@@ -243,7 +243,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: new Date("2026-08-01T00:00:00.000Z"), currentPeriodEnd: oldEnd, nextReconcileAt: oldEnd } });
     const test = harness({
       row,
-      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
       providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"], currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: successorEnd },
       nowValue: new Date("2026-09-01T00:00:01.000Z"),
     });

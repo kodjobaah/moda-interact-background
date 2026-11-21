@@ -11,7 +11,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: oldNext } });
     const test = harness({
       row,
-      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
       nowValue: new Date("2026-09-30T22:30:00.000Z"),
     });
     test.database.subscription.findUnique.mockResolvedValue({
@@ -65,7 +65,7 @@ describe("BillingSubscriptionReconciliationService", () => {
         kind: "PAID_METERED",
         shopifyPlanHandle: "paid-2026",
         recoveryCreditPackEnabled: true,
-        shopifyUsageEventHandle: "recovery-audit",
+        shopifyUsageEventHandle: "recovery-meter",
         shopifyRecoveryCreditPackEventHandle: null,
         includedRecoveryConversationAllowance: 100,
       },
@@ -125,7 +125,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       plan: {
         id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED",
         shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true,
-        shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: "pack-meter",
+        shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter",
         includedRecoveryConversationAllowance: 100,
       },
       nowValue: new Date("2026-09-30T23:56:00.000Z"),
@@ -159,7 +159,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const retryNow = new Date("2026-09-30T23:56:00.000Z");
     const retryAt = new Date("2026-09-30T23:57:00.000Z");
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt } });
-    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: retryNow });
+    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: retryNow });
     test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt });
     const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockRejectedValue(new Error("publisher unavailable"));
 
@@ -179,7 +179,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const preCloseAt = new Date("2026-09-30T23:55:00.000Z");
     const finalMinute = new Date("2026-09-30T23:59:30.000Z");
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt } });
-    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: finalMinute });
+    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: finalMinute });
     test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt });
     const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockRejectedValue(new Error("publisher unavailable"));
 
@@ -199,7 +199,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: retryNow } });
     const test = harness({
       row,
-      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
+      plan: { id: "plan-paid", active: true, name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, includedRecoveryConversationAllowance: 100 },
       nowValue: retryNow,
     });
     test.database.subscription.findUnique.mockResolvedValue({
@@ -223,7 +223,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const periodEnd = new Date("2026-10-01T00:00:00.000Z");
     const preCloseAt = new Date("2026-09-30T23:55:00.000Z");
     const row = cycleRow({ subscription: { ...cycleRow().subscription, planId: "plan-paid", billingPeriodId: "period-old", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt } });
-    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: new Date("2026-09-30T23:56:00.000Z") });
+    const test = harness({ row, plan: { ...cyclePlan, id: "plan-paid", name: "Paid", kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", recoveryCreditPackEnabled: true, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: "pack-meter", includedRecoveryConversationAllowance: 100 }, nowValue: new Date("2026-09-30T23:56:00.000Z") });
     test.database.subscription.findUnique.mockResolvedValue({ id: "subscription-1", status: "ACTIVE", planId: "plan-paid", billingPeriodId: "period-new", currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, nextReconcileAt: preCloseAt });
     const publishDue = vi.spyOn(shopifyUsageEventPublisherService, "publishDue").mockResolvedValue({ selected: 0, claimed: 0, reported: 0, retryable: 0, needsAttention: 0 });
 

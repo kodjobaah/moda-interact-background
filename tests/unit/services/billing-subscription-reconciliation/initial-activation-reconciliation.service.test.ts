@@ -34,7 +34,7 @@ const paidPlan = {
   name: "Paid",
   kind: BillingPlanKind.PAID_METERED,
   shopifyPlanHandle: "paid-2026",
-  shopifyUsageEventHandle: "recovery-audit",
+  shopifyUsageEventHandle: "recovery-meter",
   includedRecoveryConversationAllowance: 100,
 };
 
@@ -129,7 +129,7 @@ describe("InitialActivationReconciliationService", () => {
 
   it.each([
     ["missing cycle", { ...provider, currentPeriodStart: null }, paidPlan, "MISSING_BILLING_CYCLE"],
-    ["reporting handle collides with billable meter", { ...provider, usageEventHandles: ["recovery-audit"] }, paidPlan, "MISSING_USAGE_METER"],
+    ["missing usage meter", { ...provider, usageEventHandles: [] }, paidPlan, "MISSING_USAGE_METER"],
     ["invalid allowance", provider, { ...paidPlan, includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
   ])("fails closed for a Paid activation with %s", async (_name, providerState, plan, errorCode) => {
     const test = harness();

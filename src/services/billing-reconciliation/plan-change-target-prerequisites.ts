@@ -1,6 +1,5 @@
 import { BillingPlanKind } from "@prisma/client";
 
-import { hasValidRecoveryReportingHandle, hasConfiguredCreditPackMeter } from "./shopify-event-handle-validation.js";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import type { ShopifyPlanChangePlan } from "../shopify-plan-change-transition.service.js";
 
@@ -32,13 +31,15 @@ export function planChangeTargetPrerequisiteFailure(
   }
   if (
     plan.kind === BillingPlanKind.PAID_METERED
-    && !hasValidRecoveryReportingHandle(plan.shopifyUsageEventHandle, provider.usageEventHandles)
+    && (!plan.shopifyUsageEventHandle
+      || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle))
   ) {
     return "MISSING_USAGE_METER";
   }
   if (
     plan.recoveryCreditPackEnabled
-    && !hasConfiguredCreditPackMeter(plan.shopifyRecoveryCreditPackEventHandle, provider.usageEventHandles)
+    && (!plan.shopifyRecoveryCreditPackEventHandle
+      || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))
   ) {
     return "MISSING_USAGE_METER";
   }

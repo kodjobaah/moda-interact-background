@@ -6,7 +6,7 @@ const oldStart = new Date("2026-09-01T00:00:00.000Z");
 const oldEnd = new Date("2026-10-01T00:00:00.000Z");
 const newStart = oldEnd;
 const newEnd = new Date("2026-11-01T00:00:00.000Z");
-const paidPlan = { id: "paid-new", active: true, name: "Paid New", kind: "PAID_METERED" as const, shopifyPlanHandle: "paid-new", shopifyUsageEventHandle: "recovery-audit", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 };
+const paidPlan = { id: "paid-new", active: true, name: "Paid New", kind: "PAID_METERED" as const, shopifyPlanHandle: "paid-new", shopifyUsageEventHandle: "recovery-new", shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 };
 const freePlan = { id: "free-new", active: true, name: "Free New", kind: "FREE" as const, shopifyPlanHandle: "free-new", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: null };
 const provider = { planHandle: "paid-new", usageEventHandles: ["recovery-new"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE" as const, currentPeriodStart: newStart, currentPeriodEnd: newEnd, trialEndsAt: null, cancelAtPeriodEnd: false, providerSubscriptionId: "provider-new", providerUsageSnapshot: [] };
 
@@ -205,8 +205,8 @@ describe("ShopifyPlanChangeTransitionService", () => {
     ["negative Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: -1 } }],
     ["non-integer Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: 1.5 } }],
     ["unsafe Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 } }],
-    ["missing configured Paid reporting handle", { provider, plan: { ...paidPlan, shopifyUsageEventHandle: null } }],
-    ["reporting handle collides with billable meter", { provider: { ...provider, usageEventHandles: ["recovery-audit"] }, plan: paidPlan }],
+    ["missing configured normal Paid meter", { provider, plan: { ...paidPlan, shopifyUsageEventHandle: null } }],
+    ["provider omits normal Paid meter", { provider: { ...provider, usageEventHandles: [] }, plan: paidPlan }],
     ["enabled Paid pack meter missing/null", { provider, plan: { ...paidPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null } }],
     ["provider omits enabled Paid pack meter", { provider: { ...provider, usageEventHandles: ["recovery-new"] }, plan: { ...paidPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack-new" } }],
     ["enabled Free pack meter missing/null", { provider: { ...provider, planHandle: "free-new", usageEventHandles: [] }, plan: { ...freePlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null } }],

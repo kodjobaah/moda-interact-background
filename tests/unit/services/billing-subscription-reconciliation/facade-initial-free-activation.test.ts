@@ -155,7 +155,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow({ onboardingCompleted: true }),
       providerResult: { ...freeProvider, planHandle: "paid-2026", usageEventHandles: ["recovery-meter"] },
-      plan: { ...paidPlan, id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-audit", recoveryCreditPackEnabled: false },
+      plan: { ...paidPlan, id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
     });
     await test.service.reconcileJob(payload);
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -167,7 +167,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow(),
       providerResult: { ...freeProvider, planHandle: "paid-2026" },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-audit", recoveryCreditPackEnabled: false },
+      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
     });
     await test.service.reconcileJob(payload);
     expect(test.transaction.$queryRaw).toHaveBeenCalledTimes(2);

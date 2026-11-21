@@ -30,7 +30,7 @@ export const paidPlan: SamePlanRolloverPlan = {
   shopifyPlanHandle: "pro-2026",
   includedRecoveryConversationAllowance: 100,
   recoveryCreditPackEnabled: true,
-  shopifyUsageEventHandle: "recovery-audit",
+  shopifyUsageEventHandle: "recovery-meter",
   shopifyRecoveryCreditPackEventHandle: "pack-meter",
 };
 
