@@ -10,6 +10,7 @@ import { lockShop, lockShopSettings, lockSubscription } from "./locking.js";
 import { sameDate, type ReinstallExpected } from "./classification.js";
 import { nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
 import type { InitialActivationPlan } from "./types.js";
+import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
@@ -46,20 +47,8 @@ export class ReinstallReconciliationService {
       return;
     }
 
-    const plan = await this.database.billingPlan.findUnique({
-      where: { shopifyPlanHandle: provider.planHandle },
-      select: {
-        id: true,
-        active: true,
-        name: true,
-        kind: true,
-        shopifyPlanHandle: true,
-        shopifyUsageEventHandle: true,
-        shopifyRecoveryCreditPackEventHandle: true,
-        recoveryCreditPackEnabled: true,
-        includedRecoveryConversationAllowance: true,
-      },
-    });
+    const materializer = new BillingPlanMaterializationService(this.database, this.logger);
+    const plan = await materializer.resolve(provider.planHandle);
     if (!plan?.active) {
       await this.recordReinstallBlocked(shopId, expected, "UNMAPPED_PLAN_HANDLE");
       return;

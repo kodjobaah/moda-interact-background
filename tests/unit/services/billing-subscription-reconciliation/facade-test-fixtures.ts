@@ -45,6 +45,7 @@ export function harness({
       create: vi.fn(), upsert: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         id: "subscription-1",
@@ -82,6 +83,7 @@ export function harness({
       findMany: vi.fn().mockResolvedValue([]),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     subscription: {
       findUnique: vi.fn(),
       update: subscriptionUpdate,

@@ -41,6 +41,8 @@ function harness({
   const subscriptionUpsert = vi.fn();
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    billingPlan: { findUnique: vi.fn().mockResolvedValue(plan) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     billingPeriod: {
       findUnique: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockResolvedValue({ id: "period-1" }),

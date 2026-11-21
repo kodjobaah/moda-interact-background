@@ -1,4 +1,5 @@
 import { BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
+import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -14,7 +15,7 @@ import type {
   SamePlanReconciliationInput,
 } from "./same-plan-reconciliation.types.js";
 
-type PeriodProgressionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "subscription">;
+type PeriodProgressionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription">;
 type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue">;
 type CapacityResumeScheduler = Pick<RecoveryCapacityResumeService, "schedule">;
 type SamePlanRollover = Pick<SamePlanBillingPeriodRolloverService, "transition">;
@@ -118,12 +119,15 @@ export class SamePlanPeriodProgressionService {
       return null;
     }
 
-    const pendingPlan = provider.pendingPlanHandle
+    const existingPending = provider.pendingPlanHandle
       ? await this.database.billingPlan.findUnique({
           where: { shopifyPlanHandle: provider.pendingPlanHandle },
           select: { id: true, active: true },
         })
       : null;
+    const pendingPlan = existingPending ?? (provider.pendingPlanHandle
+      ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(provider.pendingPlanHandle)
+      : null);
     const next = provider.pendingPlanHandle && provider.pendingEffectiveAt
       ? provider.pendingEffectiveAt
       : now < new Date(currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)

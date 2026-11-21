@@ -1,6 +1,7 @@
 import {
   APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS,
 } from "@modainteract/moda-interact-shared/billing";
+import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import { BillingPlanKind, Prisma, SubscriptionProjectionStatus, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
@@ -39,9 +40,12 @@ export class EstablishedPlanChangeReconciliationService {
       && provider.planHandle === expected.pendingShopifyPlanHandle;
     if (providerIsCurrent) {
       const pendingHandle = provider.pendingPlanHandle;
-      const pendingPlan = pendingHandle
+      const existingPending = pendingHandle
         ? await this.database.billingPlan.findUnique({ where: { shopifyPlanHandle: pendingHandle }, select: { id: true, active: true } })
         : null;
+      const pendingPlan = existingPending ?? (pendingHandle
+        ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(pendingHandle)
+        : null);
       const next = pendingHandle && provider.pendingEffectiveAt
         ? provider.pendingEffectiveAt
         : this.nextPlanReconcileAt(currentPlan, expected.currentPeriodEnd, now);

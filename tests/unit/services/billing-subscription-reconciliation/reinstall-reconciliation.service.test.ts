@@ -97,6 +97,7 @@ function harness({
       update: vi.fn().mockImplementation(async () => events.push("subscription.update")),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     billingPeriod: {
       findUnique: vi.fn().mockResolvedValue(period),
       create: vi.fn().mockResolvedValue({ id: "period-new" }),
@@ -343,7 +344,10 @@ describe("ReinstallReconciliationService", () => {
       subscriptionId: expected.subscriptionId,
       errorCode: "UNMAPPED_PLAN_HANDLE",
     });
-    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.database.$transaction).toHaveBeenCalledOnce();
+    expect(test.database.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+    expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+    expect(test.transaction.shop.update).not.toHaveBeenCalled();
   });
 
   it("does not mutate or publish when the locked reinstall authority has changed", async () => {

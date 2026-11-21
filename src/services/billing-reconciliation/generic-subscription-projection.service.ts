@@ -1,4 +1,5 @@
 import { Prisma, SubscriptionProjectionStatus } from "@prisma/client";
+import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import type { PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -18,7 +19,7 @@ import type { BillingReconciliationSchedulerService } from "./reconciliation-sch
 
 const GENERIC_PROJECTION_RETRY_MS = 60 * 1000;
 
-type GenericSubscriptionProjectionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "subscription">;
+type GenericSubscriptionProjectionDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "merchantPricingPlan" | "subscription">;
 type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue">;
 
 type GenericSubscriptionProjectionInput = {
@@ -44,12 +45,15 @@ export class GenericSubscriptionProjectionService {
 
   async reconcile(input: GenericSubscriptionProjectionInput): Promise<GenericSubscriptionProjectionResult> {
     const { shopId, provider, plan, existing, projection, now } = input;
-    const pendingPlan = provider.pendingPlanHandle
+    const existingPending = provider.pendingPlanHandle
       ? await this.database.billingPlan.findUnique({
           where: { shopifyPlanHandle: provider.pendingPlanHandle },
           select: { id: true, active: true },
         })
       : null;
+    const pendingPlan = existingPending ?? (provider.pendingPlanHandle
+      ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(provider.pendingPlanHandle)
+      : null);
 
     if (projection.executableMapped && plan) {
       if (!hasValidProviderBillingCycle(provider)) {

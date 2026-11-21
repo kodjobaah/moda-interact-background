@@ -4,6 +4,7 @@ import {
   Prisma,
   type PrismaClient,
 } from "@prisma/client";
+import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
@@ -131,12 +132,15 @@ export class BillingCycleReconciliationService {
     provider: PartnerSubscription,
   ): Promise<void> {
     const { shopId, expected, runtimeConfig, subscription } = input;
-    const pendingPlan = provider.pendingPlanHandle
+    const existingPending = provider.pendingPlanHandle
       ? await this.database.billingPlan.findUnique({
           where: { shopifyPlanHandle: provider.pendingPlanHandle },
           select: { id: true, active: true },
         })
       : null;
+    const pendingPlan = existingPending ?? (provider.pendingPlanHandle
+      ? await new BillingPlanMaterializationService(this.database, this.logger).materializeIfMissing(provider.pendingPlanHandle)
+      : null);
     const periodEnd = provider.currentPeriodEnd!;
     const preCloseAt = new Date(periodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS);
     const next = this.now() < preCloseAt ? preCloseAt : periodEnd;

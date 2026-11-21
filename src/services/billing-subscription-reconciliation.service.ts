@@ -21,6 +21,7 @@ import {
 import { ReconciliationQueueService } from "./billing-subscription-reconciliation/reconciliation-queue.service.js";
 export { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation/reconciliation-queue.service.js";
 import type { InitialActivationPlan } from "./billing-subscription-reconciliation/types.js";
+import { BillingPlanMaterializationService } from "./billing-plan-materialization.service.js";
 import { DiscountSyncPublisherService } from "./billing-subscription-reconciliation/discount-sync-publisher.service.js";
 import { InitialActivationReconciliationService } from "./billing-subscription-reconciliation/initial-activation-reconciliation.service.js";
 import { ReinstallReconciliationService } from "./billing-subscription-reconciliation/reinstall-reconciliation.service.js";
@@ -272,20 +273,8 @@ export class BillingSubscriptionReconciliationService {
       return;
     }
 
-    const plan = await this.database.billingPlan.findUnique({
-      where: { shopifyPlanHandle: provider.planHandle },
-      select: {
-        id: true,
-        active: true,
-        name: true,
-        kind: true,
-        shopifyPlanHandle: true,
-        shopifyUsageEventHandle: true,
-        recoveryCreditPackEnabled: true,
-        shopifyRecoveryCreditPackEventHandle: true,
-        includedRecoveryConversationAllowance: true,
-      },
-    });
+    const materializer = new BillingPlanMaterializationService(this.database, this.logger);
+    const plan = await materializer.resolve(provider.planHandle);
     if (isEstablishedPlanChange && currentPlan) {
       await this.establishedPlanChangeReconciliation.reconcile(
         row.id,

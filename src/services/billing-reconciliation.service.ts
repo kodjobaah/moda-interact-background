@@ -29,6 +29,7 @@ import { SamePlanCurrentCycleReconciliationService } from "./billing-reconciliat
 import { SamePlanPeriodProgressionService } from "./billing-reconciliation/same-plan-period-progression.service.js";
 import { GenericSubscriptionProjectionService } from "./billing-reconciliation/generic-subscription-projection.service.js";
 import { classifyObservedPlanProjection } from "./billing-reconciliation/observed-plan-projection.js";
+import { BillingPlanMaterializationService } from "./billing-plan-materialization.service.js";
 
 export type { UsageDiscrepancy } from "./billing-reconciliation/provider-usage-reconciliation.service.js";
 
@@ -180,20 +181,8 @@ export class BillingReconciliationService {
       return this.providerAbsenceReconciliation.reconcile(shopId, snapshot, now, runtimeConfig);
     }
 
-    const plan = await this.database.billingPlan.findUnique({
-      where: { shopifyPlanHandle: provider.planHandle },
-      select: {
-        id: true,
-        active: true,
-        name: true,
-        kind: true,
-        shopifyPlanHandle: true,
-        shopifyUsageEventHandle: true,
-        shopifyRecoveryCreditPackEventHandle: true,
-        recoveryCreditPackEnabled: true,
-        includedRecoveryConversationAllowance: true,
-      },
-    });
+    const materializer = new BillingPlanMaterializationService(this.database, this.logger);
+    const plan = await materializer.resolve(provider.planHandle);
     let existing = await this.database.subscription.findUnique({
       where: { shopId },
       select: {

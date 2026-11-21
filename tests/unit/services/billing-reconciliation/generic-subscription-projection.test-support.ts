@@ -68,6 +68,8 @@ export function emptySubscription(
 export function transactionHarness(current: GenericExistingSubscription = emptySubscription()) {
   return {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     subscription: {
       upsert: vi.fn().mockResolvedValue({ id: current.id }),
       findUnique: vi.fn().mockResolvedValue(current),
@@ -96,6 +98,7 @@ export function transactionHarness(current: GenericExistingSubscription = emptyS
 export function serviceHarness(transaction = transactionHarness()) {
   const database = {
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     subscription: { upsert: vi.fn() },
     $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
   };
