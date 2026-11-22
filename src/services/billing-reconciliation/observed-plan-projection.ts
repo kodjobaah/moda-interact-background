@@ -1,21 +1,19 @@
-import { BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
+import { SubscriptionProjectionStatus } from "@prisma/client";
 
 import type { PartnerSubscription } from "../../providers/shopify-partner-billing.provider.js";
 import type { CurrentBillingPeriodPlanProjection } from "../current-billing-period-projection.service.js";
 
 export type ObservedBillingPlan = CurrentBillingPeriodPlanProjection & {
   active: boolean;
-  shopifyUsageEventHandle: string | null;
   shopifyRecoveryCreditPackEventHandle: string | null;
   recoveryCreditPackEnabled: boolean;
 };
 
 export type ObservedPlanProjection = {
   planUsable: boolean;
-  meterUsable: boolean;
   executableMapped: boolean;
   status: SubscriptionProjectionStatus;
-  syncErrorCode: "UNMAPPED_PLAN_HANDLE" | "MISSING_USAGE_METER" | null;
+  syncErrorCode: "UNMAPPED_PLAN_HANDLE" | null;
 };
 
 export function classifyObservedPlanProjection(
@@ -23,30 +21,19 @@ export function classifyObservedPlanProjection(
   plan: ObservedBillingPlan | null,
 ): ObservedPlanProjection {
   const planUsable = Boolean(plan?.active);
-  const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
-    || Boolean(plan?.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
   const status = !planUsable
     ? SubscriptionProjectionStatus.UNMAPPED
-    : !meterUsable
-      ? SubscriptionProjectionStatus.SYNC_ERROR
-      : provider.status === "TRIALING"
-        ? SubscriptionProjectionStatus.TRIALING
-        : SubscriptionProjectionStatus.ACTIVE;
-  const syncErrorCode = status === SubscriptionProjectionStatus.UNMAPPED
-    ? "UNMAPPED_PLAN_HANDLE"
-    : status === SubscriptionProjectionStatus.SYNC_ERROR
-      ? "MISSING_USAGE_METER"
-      : null;
+    : provider.status === "TRIALING"
+      ? SubscriptionProjectionStatus.TRIALING
+      : SubscriptionProjectionStatus.ACTIVE;
 
   return {
     planUsable,
-    meterUsable,
     executableMapped: planUsable
-      && meterUsable
       && plan !== null
       && (status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING),
     status,
-    syncErrorCode,
+    syncErrorCode: plan && !plan.active ? "UNMAPPED_PLAN_HANDLE" : null,
   };
 }
 

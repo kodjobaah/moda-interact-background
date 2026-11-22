@@ -77,21 +77,21 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.database.billingPlan.findUnique).toHaveBeenCalledWith(expect.objectContaining({
       where: { shopifyPlanHandle: "paid-new" },
     }));
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         lastSyncErrorCode: "PENDING_PLAN_HANDLE_MISMATCH",
         nextReconcileAt: new Date("2026-09-12T12:30:00.000Z"),
       }),
     }));
-    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.database.$transaction).toHaveBeenCalledOnce();
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
-    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingPlanId");
-    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingShopifyPlanHandle");
-    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingEffectiveAt");
+    expect(test.transaction.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingPlanId");
+    expect(test.transaction.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingShopifyPlanHandle");
+    expect(test.transaction.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("pendingEffectiveAt");
     expect(test.queue.add).toHaveBeenCalledTimes(1);
     expect(test.queue.add).toHaveBeenCalledWith(
       expect.any(String),
@@ -103,7 +103,6 @@ describe("BillingSubscriptionReconciliationService", () => {
   it.each([
     ["inactive", { active: false }],
     ["changed handle", { shopifyPlanHandle: "paid-new" }],
-    ["missing meter", { shopifyUsageEventHandle: null }],
     ["changed allowance", { includedRecoveryConversationAllowance: 101 }],
   ] as const)("revalidates the pending plan transactionally: %s", async (_label, mutation) => {
     const test = harness({

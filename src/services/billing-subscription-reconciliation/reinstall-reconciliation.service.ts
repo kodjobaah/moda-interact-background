@@ -11,6 +11,7 @@ import { sameDate, type ReinstallExpected } from "./classification.js";
 import { nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
 import type { InitialActivationPlan } from "./types.js";
 import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
+import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopify-usage-event-mapping.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
@@ -49,25 +50,25 @@ export class ReinstallReconciliationService {
 
     const materializer = new BillingPlanMaterializationService(this.database, this.logger);
     const plan = await materializer.resolve(provider.planHandle);
-    if (!plan?.active) {
-      await this.recordReinstallBlocked(shopId, expected, "UNMAPPED_PLAN_HANDLE");
+    if (!plan) {
+      await this.recordReinstallUnmapped(shopId, expected, provider);
+      return;
+    }
+    if (!plan.active) {
+      await this.recordReinstallBlocked(shopId, expected, "UNMAPPED_PLAN_HANDLE", provider);
       return;
     }
     if (plan.kind === BillingPlanKind.FREE) {
       if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle
         || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) {
-        await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER");
+        await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER", provider);
         return;
       }
       await this.completeReinstallFree(shopId, expected, provider, plan);
       return;
     }
     if (plan.kind !== BillingPlanKind.PAID_METERED) {
-      await this.recordReinstallBlocked(shopId, expected, "UNSUPPORTED_PLAN_KIND");
-      return;
-    }
-    if (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle)) {
-      await this.recordReinstallBlocked(shopId, expected, "MISSING_USAGE_METER");
+      await this.recordReinstallBlocked(shopId, expected, "UNSUPPORTED_PLAN_KIND", provider);
       return;
     }
     await this.completeReinstallPaid(shopId, expected, provider, plan);
@@ -85,7 +86,7 @@ export class ReinstallReconciliationService {
         billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null, trialEndsAt: null,
         cancelAtPeriodEnd: false, providerSubscriptionId: null, pendingShopifyPlanHandle: null,
         pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: null, lastSyncedAt: now,
-        lastSyncErrorCode: null, lastSyncErrorAt: null,
+        lastSyncErrorCode: null, lastSyncErrorAt: null, unmappedShopifyUsageEventHandles: [],
       } });
       await transaction.shop.update({ where: { id: shopId }, data: { status: "ACTIVE", uninstalledAt: null, reinstallPendingAt: null } });
       if (transaction.shopifyDiscountCatalogue && transaction.shopifyDiscount) {
@@ -113,6 +114,7 @@ export class ReinstallReconciliationService {
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, expected.subscriptionId);
       if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return { kind: "stale" as const };
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const pendingPlan = provider.pendingPlanHandle
         ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
         : null;
@@ -129,6 +131,7 @@ export class ReinstallReconciliationService {
       if (period.kind === "CONFLICT") {
         const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
         await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           status: SubscriptionProjectionStatus.SYNC_ERROR,
           lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
           lastSyncErrorAt: now,
@@ -137,6 +140,7 @@ export class ReinstallReconciliationService {
         return { kind: "conflict" as const, nextReconcileAt };
       }
       await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
+        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
         planId: plan.id, observedShopifyPlanHandle: provider.planHandle,
         status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
         billingPeriodId: period.billingPeriodId, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd,
@@ -165,13 +169,13 @@ export class ReinstallReconciliationService {
   ): Promise<void> {
     const current = await this.database.subscription.findUnique({ where: { id: expected.subscriptionId }, select: { planId: true, observedShopifyPlanHandle: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true } });
     if (!current || current.planId !== plan.id || current.observedShopifyPlanHandle !== provider.planHandle || !current.billingPeriodId || !current.currentPeriodStart || !current.currentPeriodEnd) {
-      await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
+      await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED", provider);
       return;
     }
     if (provider.currentPeriodStart?.getTime() === current.currentPeriodStart.getTime()
       && provider.currentPeriodEnd?.getTime() === current.currentPeriodEnd.getTime()) {
       const result = await this.activateReinstallPaid(shopId, expected, provider, plan);
-      if (result === "invalid") await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
+      if (result === "invalid") await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED", provider);
       return;
     }
     try {
@@ -194,9 +198,16 @@ export class ReinstallReconciliationService {
         if (result.nextReconcileAt) await this.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         return;
       }
-      if (result.kind !== "stale") await this.recordReinstallBlocked(shopId, expected, result.kind === "provider-cycle-lag" ? "PROVIDER_CYCLE_LAG" : "PERIOD_ALIGNMENT_REQUIRED");
-    } catch {
-      await this.recordReinstallBlocked(shopId, expected, "PERIOD_ALIGNMENT_REQUIRED");
+      if (result.kind !== "stale") await this.recordReinstallBlocked(shopId, expected, result.kind === "provider-cycle-lag" ? "PROVIDER_CYCLE_LAG" : "PERIOD_ALIGNMENT_REQUIRED", provider);
+    } catch (error) {
+      this.logger.error("billing.subscription_reconciliation.reinstall_rollover_failed", {
+        shopId,
+        subscriptionId: expected.subscriptionId,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      });
+      throw error;
     }
   }
 
@@ -227,10 +238,12 @@ export class ReinstallReconciliationService {
         && counter.grantedQuantity === period.includedRecoveryCreditsGranted
         && counter.committedQuantity + counter.reservedQuantity + counter.forfeitedQuantity <= counter.grantedQuantity);
       if (!valid) return "invalid";
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const pendingPlan = provider.pendingPlanHandle
         ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
         : null;
       await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
+        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
         status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
         trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId,
         pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt,
@@ -261,6 +274,42 @@ export class ReinstallReconciliationService {
     return committed;
   }
 
+  private async recordReinstallUnmapped(
+    shopId: string,
+    expected: ReinstallExpected,
+    provider: PartnerSubscription,
+  ): Promise<void> {
+    const now = this.now();
+    const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await lockShop(transaction, shopId);
+      await lockShopSettings(transaction, shopId);
+      await lockSubscription(transaction, expected.subscriptionId);
+      if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return false;
+      const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      const pendingPlan = provider.pendingPlanHandle
+        ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
+        : null;
+      await transaction.subscription.update({
+        where: { id: expected.subscriptionId },
+        data: {
+          planId: null,
+          observedShopifyPlanHandle: provider.planHandle,
+          status: SubscriptionProjectionStatus.UNMAPPED,
+          unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles,
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
+          nextReconcileAt: null,
+          lastSyncedAt: now,
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
+        },
+      });
+      return true;
+    });
+    if (committed) this.logger.warn("billing.subscription_reconciliation.reinstall_unmapped_plan", { shopId, subscriptionId: expected.subscriptionId, planHandle: provider.planHandle });
+  }
+
   private async recordReinstallProviderFailure(shopId: string, expected: ReinstallExpected, error: unknown): Promise<void> {
     const now = this.now();
     const next = nextSubscriptionReconcileAt(expected.reinstallPendingAt, now);
@@ -277,10 +326,27 @@ export class ReinstallReconciliationService {
     if (updated.count > 0 && next) await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
-  private async recordReinstallBlocked(shopId: string, expected: ReinstallExpected, errorCode: string): Promise<void> {
-    const updated = await this.database.subscription.updateMany({
-      where: { id: expected.subscriptionId, nextReconcileAt: expected.nextReconcileAt },
-      data: { lastSyncErrorCode: errorCode.slice(0, 128), lastSyncErrorAt: this.now(), nextReconcileAt: null },
+  private async recordReinstallBlocked(
+    shopId: string,
+    expected: ReinstallExpected,
+    errorCode: string,
+    provider?: PartnerSubscription,
+  ): Promise<void> {
+    const now = this.now();
+    const updated = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      await lockSubscription(transaction, expected.subscriptionId);
+      const mapping = provider
+        ? await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles)
+        : null;
+      return transaction.subscription.updateMany({
+        where: { id: expected.subscriptionId, nextReconcileAt: expected.nextReconcileAt },
+        data: {
+          lastSyncErrorCode: errorCode.slice(0, 128),
+          lastSyncErrorAt: now,
+          nextReconcileAt: null,
+          ...(mapping ? { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles } : {}),
+        },
+      });
     });
     if (updated.count > 0) this.logger.warn("billing.subscription_reconciliation.reinstall_blocked", { shopId, subscriptionId: expected.subscriptionId, errorCode });
   }

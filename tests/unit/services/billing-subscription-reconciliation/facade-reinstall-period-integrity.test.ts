@@ -40,7 +40,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(payload);
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED", nextReconcileAt: null }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED", nextReconcileAt: null }) }));
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
@@ -121,7 +121,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob(payload);
 
     expect(transition).not.toHaveBeenCalled();
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED" }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED" }) }));
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
     expect(test.transaction.billingPeriod.update).not.toHaveBeenCalled();

@@ -78,7 +78,15 @@ export class ProviderAbsenceReconciliationService {
       );
       await this.database.subscription.updateMany({
         where: { id: existing.id, nextReconcileAt: existing.nextReconcileAt },
-        data: { nextReconcileAt, lastSyncedAt: now },
+        data: {
+          nextReconcileAt,
+          lastSyncedAt: now,
+          ...(existing.status === SubscriptionProjectionStatus.NO_CONTRACT
+            && existing.pendingPlanId === null
+            && existing.pendingShopifyPlanHandle === null
+            ? { unmappedShopifyUsageEventHandles: [] }
+            : {}),
+        },
       });
       return {
         billingPeriodId: existing.billingPeriodId,
@@ -101,9 +109,10 @@ export class ProviderAbsenceReconciliationService {
         lastSyncedAt: now,
         lastSyncErrorCode: null,
         lastSyncErrorAt: null,
+        unmappedShopifyUsageEventHandles: [],
         ...pending,
       },
-      create: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT, lastSyncedAt: now },
+      create: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT, lastSyncedAt: now, unmappedShopifyUsageEventHandles: [] },
     });
     return { billingPeriodId: null, packMeterHandle: null };
   }

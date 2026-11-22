@@ -90,16 +90,20 @@ export async function ensureSuccessorBillingPeriod(
     if (expectedGrant === null) {
       throw new Error(input.errors.incompatibleIncludedCounter);
     }
-    const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
-      where: {
-        billingPeriodId_counter: {
-          billingPeriodId: period.id,
-          counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+    // A newly created period cannot have a pre-existing included-credit counter.
+    // Only reused periods need a compatibility read before the idempotent upsert.
+    if (existingSuccessor) {
+      const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
+        where: {
+          billingPeriodId_counter: {
+            billingPeriodId: period.id,
+            counter: BillingPeriodEntitlementCounterKind.INCLUDED_RECOVERY_CREDITS,
+          },
         },
-      },
-    });
-    if (counter && counter.grantedQuantity !== expectedGrant) {
-      throw new Error(input.errors.incompatibleIncludedCounter);
+      });
+      if (counter && counter.grantedQuantity !== expectedGrant) {
+        throw new Error(input.errors.incompatibleIncludedCounter);
+      }
     }
     await transaction.billingPeriodEntitlementCounter.upsert({
       where: {

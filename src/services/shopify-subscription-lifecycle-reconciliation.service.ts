@@ -20,6 +20,7 @@ import type { BackgroundRuntimeConfigSnapshot } from "../runtime/background-runt
 import { SamePlanBillingPeriodRolloverService } from "./same-plan-billing-period-rollover.service.js";
 import { ShopifyPlanChangeTransitionService } from "./shopify-plan-change-transition.service.js";
 import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
+import { resolveShopifyUsageEventMapping } from "./billing-reconciliation/shopify-usage-event-mapping.js";
 
 type LifecycleDatabase = Pick<PrismaClient, "$transaction">;
 type ResumeService = Pick<typeof recoveryCapacityResumeService, "schedule">;
@@ -63,9 +64,13 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         return { kind: "continue" as const };
       }
       if (current?.status === SubscriptionProjectionStatus.FROZEN) {
+        const mapping = active
+          ? await resolveShopifyUsageEventMapping(transaction, active.planHandle, active.usageEventHandles)
+          : null;
         await transaction.subscription.update({
           where: { id: subscriptionId },
           data: {
+            ...(mapping ? { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles } : {}),
             nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()),
             lastSyncedAt: now,
           },
@@ -143,6 +148,9 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         return;
       }
       const replay = isSameEvent(current?.lastProviderLifecycleEventAt ?? null, current?.lastProviderLifecycleEventId ?? null, lifecycle);
+      const mapping = active
+        ? await resolveShopifyUsageEventMapping(transaction, active.planHandle, active.usageEventHandles)
+        : null;
       const clearError = current?.lastSyncErrorCode === "UNFROZEN_LIVE_CONTRACT_PENDING"
         || current?.lastSyncErrorCode === "PROVIDER_STATE_UNRESOLVED"
         || current?.lastSyncErrorCode === "PARTNER_API_ERROR";
@@ -150,6 +158,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         where: { id: subscriptionId },
         data: {
           status: SubscriptionProjectionStatus.FROZEN,
+          ...(mapping ? { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles } : {}),
           ...(active ? { cancelAtPeriodEnd: active.cancelAtPeriodEnd } : {}),
           nextReconcileAt: new Date(now.getTime() + this.frozenReconcileIntervalMs()),
           lastSyncedAt: now,
@@ -210,8 +219,8 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       const subscription = await transaction.subscription.findUnique({ where: { id: subscriptionId }, include: { billingPeriod: true, plan: true } });
       if (!subscription || subscription.status !== SubscriptionProjectionStatus.FROZEN || isStrictlyOlder(subscription.lastProviderLifecycleEventAt, subscription.lastProviderLifecycleEventId, lifecycle)) return false;
       const plan = await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.planHandle } });
-      if (!plan?.active) {
-        await this.updateUnfreezeFailure(transaction, subscriptionId, subscription, provider, lifecycle, now, "UNMAPPED_PLAN_HANDLE", SubscriptionProjectionStatus.UNMAPPED);
+      if (!plan || !plan.active) {
+        await this.updateUnfreezeFailure(transaction, subscriptionId, subscription, provider, lifecycle, now, plan ? "UNMAPPED_PLAN_HANDLE" : null, SubscriptionProjectionStatus.UNMAPPED);
         return false;
       }
       const planInput = {
@@ -235,10 +244,12 @@ export class ShopifySubscriptionLifecycleReconciliationService {
         && subscription.currentPeriodStart?.getTime() === provider.currentPeriodStart?.getTime()
         && subscription.currentPeriodEnd?.getTime() === provider.currentPeriodEnd?.getTime();
       if (sameCycle) {
+        const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
         const pendingPlan = provider.pendingPlanHandle
           ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
           : null;
         await transaction.subscription.update({ where: { id: subscriptionId }, data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
           observedShopifyPlanHandle: provider.planHandle,
           providerSubscriptionId: provider.providerSubscriptionId,
@@ -275,12 +286,15 @@ export class ShopifySubscriptionLifecycleReconciliationService {
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
-  private async updateUnfreezeFailure(transaction: Prisma.TransactionClient, subscriptionId: string, subscription: { pendingShopifyPlanHandle: string | null; pendingPlanId: string | null; pendingEffectiveAt: Date | null }, provider: PartnerSubscription, lifecycle: PartnerSubscriptionLifecycleEvent, now: Date, errorCode: string, status: SubscriptionProjectionStatus): Promise<void> {
+  private async updateUnfreezeFailure(transaction: Prisma.TransactionClient, subscriptionId: string, subscription: { pendingShopifyPlanHandle: string | null; pendingPlanId: string | null; pendingEffectiveAt: Date | null }, provider: PartnerSubscription, lifecycle: PartnerSubscriptionLifecycleEvent, now: Date, errorCode: string | null, status: SubscriptionProjectionStatus): Promise<void> {
+    const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
     const pendingPlan = provider.pendingPlanHandle
       ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
       : null;
+    const unknownPlan = errorCode === null;
     await transaction.subscription.update({ where: { id: subscriptionId }, data: {
       status,
+      unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles,
       observedShopifyPlanHandle: provider.planHandle,
       pendingShopifyPlanHandle: provider.pendingPlanHandle,
       pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
@@ -288,8 +302,8 @@ export class ShopifySubscriptionLifecycleReconciliationService {
       cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
       lastSyncedAt: now,
       lastSyncErrorCode: errorCode,
-      lastSyncErrorAt: now,
-      nextReconcileAt: new Date(now.getTime() + this.providerRetryIntervalMs()),
+      lastSyncErrorAt: unknownPlan ? null : now,
+      nextReconcileAt: unknownPlan ? null : new Date(now.getTime() + this.providerRetryIntervalMs()),
       lastProviderLifecycleState: lifecycle.state,
       lastProviderLifecycleEventId: lifecycle.id,
       lastProviderLifecycleEventAt: lifecycle.occurredAt,
@@ -323,6 +337,7 @@ export class ShopifySubscriptionLifecycleReconciliationService {
           billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null, trialEndsAt: null,
           cancelAtPeriodEnd: false, providerSubscriptionId: null, pendingShopifyPlanHandle: null,
           pendingPlanId: null, pendingEffectiveAt: null, nextReconcileAt: null, lastSyncedAt: now,
+          unmappedShopifyUsageEventHandles: [],
           lastSyncErrorCode: null, lastSyncErrorAt: null, lastProviderLifecycleState: lifecycle.state,
           lastProviderLifecycleEventId: lifecycle.id, lastProviderLifecycleEventAt: lifecycle.occurredAt,
         },
@@ -337,7 +352,6 @@ function validateProviderPlan(
     kind: BillingPlanKind;
     includedRecoveryConversationAllowance: number | null;
     recoveryCreditPackEnabled: boolean;
-    shopifyUsageEventHandle: string | null;
     shopifyRecoveryCreditPackEventHandle: string | null;
   },
   provider: PartnerSubscription,
@@ -350,7 +364,6 @@ function validateProviderPlan(
   }
   if (plan.kind === BillingPlanKind.PAID_METERED) {
     if (!Number.isSafeInteger(plan.includedRecoveryConversationAllowance) || (plan.includedRecoveryConversationAllowance ?? -1) < 0) return "INVALID_INCLUDED_ALLOWANCE";
-    if (!plan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle)) return "MISSING_USAGE_METER";
   }
   if (plan.recoveryCreditPackEnabled && (!plan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))) return "MISSING_USAGE_METER";
   return null;

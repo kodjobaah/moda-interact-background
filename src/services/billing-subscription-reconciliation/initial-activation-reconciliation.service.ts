@@ -9,6 +9,7 @@ import { lockShop, lockShopSettings, lockSubscription } from "./locking.js";
 import { sameDate, type InitialActivationExpected } from "./classification.js";
 import { FREE_CYCLE_DISCOVERY_RETRY_MS, nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
 import type { InitialActivationPlan, OtherCurrentPlan } from "./types.js";
+import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopify-usage-event-mapping.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
@@ -35,6 +36,7 @@ export class InitialActivationReconciliationService {
       lastSyncedAt: now,
       lastSyncErrorCode: null,
       lastSyncErrorAt: null,
+      unmappedShopifyUsageEventHandles: [],
       ...(next ? { nextReconcileAt: next } : {
         pendingShopifyPlanHandle: null,
         pendingPlanId: null,
@@ -84,7 +86,7 @@ export class InitialActivationReconciliationService {
         lastSyncErrorCode: "MISSING_BILLING_CYCLE",
         lastSyncErrorAt: now,
         nextReconcileAt,
-      });
+      }, provider);
       if (updated && nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
       return;
     }
@@ -106,6 +108,7 @@ export class InitialActivationReconciliationService {
         || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)
       ) return { kind: "stale" as const };
 
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const lifetimeCounter = await transaction.shopEntitlementCounter.findUnique({ where: { shopId_counter: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } }, select: { id: true } });
       const policy = lifetimeCounter
         ? null
@@ -121,12 +124,13 @@ export class InitialActivationReconciliationService {
       });
       if (billingPeriod.kind === "CONFLICT") {
         const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
+        await transaction.subscription.update({ where: { id: subscriptionId }, data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles, status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, nextReconcileAt } });
         return { kind: "conflict" as const, nextReconcileAt };
       }
       await transaction.subscription.update({
         where: { id: subscriptionId },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           planId,
           observedShopifyPlanHandle: provider.planHandle,
           status: provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE,
@@ -178,13 +182,12 @@ export class InitialActivationReconciliationService {
     const hasValidCycle = provider.currentPeriodStart !== null
       && provider.currentPeriodEnd !== null
       && provider.currentPeriodStart < provider.currentPeriodEnd;
-    const hasMeter = Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
     if (provider.status === "TRIALING" && provider.trialEndsAt && provider.trialEndsAt > now && !hasValidCycle) {
-      await this.recordUnsupportedPaidTrial(shopId, expected);
+      await this.recordUnsupportedPaidTrial(shopId, expected, provider);
       return;
     }
-    if (!hasValidCycle || !isValidAllowance || !hasMeter) {
-      await this.recordPaidActivationFailure(shopId, expected, !hasValidCycle ? "MISSING_BILLING_CYCLE" : !hasMeter ? "MISSING_USAGE_METER" : "INVALID_INCLUDED_ALLOWANCE");
+    if (!hasValidCycle || !isValidAllowance) {
+      await this.recordPaidActivationFailure(shopId, expected, provider, !hasValidCycle ? "MISSING_BILLING_CYCLE" : "INVALID_INCLUDED_ALLOWANCE");
       return;
     }
 
@@ -211,7 +214,7 @@ export class InitialActivationReconciliationService {
 
       const currentPlan = await transaction.billingPlan.findUnique({
         where: { id: current.pendingPlanId },
-        select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, shopifyUsageEventHandle: true, includedRecoveryConversationAllowance: true },
+        select: { id: true, active: true, name: true, kind: true, shopifyPlanHandle: true, includedRecoveryConversationAllowance: true },
       });
       const currentAllowance = currentPlan?.includedRecoveryConversationAllowance;
       const currentPlanValid = currentPlan?.id === expected.pendingPlanId
@@ -219,13 +222,12 @@ export class InitialActivationReconciliationService {
         && currentPlan.shopifyPlanHandle === provider.planHandle
         && currentPlan.active
         && currentPlan.kind === BillingPlanKind.PAID_METERED
-        && currentPlan.shopifyUsageEventHandle !== null
-        && provider.usageEventHandles.includes(currentPlan.shopifyUsageEventHandle)
         && currentAllowance === allowance
         && Number.isSafeInteger(currentAllowance)
         && (currentAllowance ?? -1) >= 0;
       if (!currentPlanValid) throw new Error("Initial paid activation found an incompatible pending plan");
 
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const existingPeriod = await transaction.billingPeriod.findUnique({
         where: { shopId_periodStart_periodEnd: { shopId, periodStart, periodEnd } },
       });
@@ -301,6 +303,7 @@ export class InitialActivationReconciliationService {
       await transaction.subscription.update({
         where: { id: subscriptionId },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           planId: currentPlan.id,
           observedShopifyPlanHandle: provider.planHandle,
           status: SubscriptionProjectionStatus.ACTIVE,
@@ -332,7 +335,8 @@ export class InitialActivationReconciliationService {
   async recordPaidActivationFailure(
     shopId: string,
     expected: InitialActivationExpected,
-    errorCode: "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE" | "PENDING_PLAN_HANDLE_MISMATCH",
+    provider: PartnerSubscription,
+    errorCode: "MISSING_BILLING_CYCLE" | "INVALID_INCLUDED_ALLOWANCE" | "PENDING_PLAN_HANDLE_MISMATCH",
   ): Promise<void> {
     const now = this.now();
     const next = nextSubscriptionReconcileAt(expected.pendingEffectiveAt, now);
@@ -341,7 +345,7 @@ export class InitialActivationReconciliationService {
       lastSyncErrorCode: errorCode,
       lastSyncErrorAt: now,
       ...(next ? { nextReconcileAt: next } : { nextReconcileAt: null }),
-    });
+    }, provider);
     if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
   }
 
@@ -356,24 +360,21 @@ export class InitialActivationReconciliationService {
   ): Promise<void> {
     const now = this.now();
     const planUsable = Boolean(plan?.active);
-    const meterUsable = plan?.kind !== BillingPlanKind.PAID_METERED
-      || Boolean(plan.shopifyUsageEventHandle && provider.usageEventHandles.includes(plan.shopifyUsageEventHandle));
     const hasValidProviderCycle = provider.currentPeriodStart !== null
       && provider.currentPeriodEnd !== null
       && provider.currentPeriodStart < provider.currentPeriodEnd;
     const status = !planUsable
       ? SubscriptionProjectionStatus.UNMAPPED
-      : !meterUsable
-        ? SubscriptionProjectionStatus.SYNC_ERROR
-        : provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE;
-    if (planUsable && meterUsable && !hasValidProviderCycle) {
+      : provider.status === "TRIALING" ? SubscriptionProjectionStatus.TRIALING : SubscriptionProjectionStatus.ACTIVE;
+    const syncErrorCode = plan && !plan.active ? "UNMAPPED_PLAN_HANDLE" : null;
+    if (planUsable && !hasValidProviderCycle) {
       const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
       const updated = await this.casPendingUpdate(expected, {
         lastSyncedAt: now,
         lastSyncErrorCode: "MISSING_BILLING_CYCLE",
         lastSyncErrorAt: now,
         nextReconcileAt,
-      });
+      }, provider);
       if (updated) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
       return;
     }
@@ -382,7 +383,8 @@ export class InitialActivationReconciliationService {
       await lockSubscription(transaction, subscriptionId);
       const current = await transaction.subscription.findUnique({ where: { id: subscriptionId }, select: { status: true, planId: true, pendingPlanId: true, pendingShopifyPlanHandle: true, pendingEffectiveAt: true, nextReconcileAt: true } });
       if (!current || current.status !== SubscriptionProjectionStatus.NO_CONTRACT || current.planId !== null || current.pendingPlanId !== expected.pendingPlanId || current.pendingShopifyPlanHandle !== expected.pendingShopifyPlanHandle || current.pendingEffectiveAt?.toISOString() !== expected.pendingEffectiveAt.toISOString() || !sameDate(current.nextReconcileAt, expected.nextReconcileAt)) return { kind: "stale" as const };
-      const billingPeriod = planUsable && meterUsable && plan && provider.currentPeriodStart && provider.currentPeriodEnd
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      const billingPeriod = planUsable && plan && provider.currentPeriodStart && provider.currentPeriodEnd
         ? await ensureCurrentBillingPeriodProjection(transaction, {
             shopId,
             subscriptionId,
@@ -394,26 +396,26 @@ export class InitialActivationReconciliationService {
         : null;
       if (billingPeriod?.kind === "CONFLICT") {
         const nextReconcileAt = new Date(now.getTime() + ROLLOVER_RETRY_MS);
-        await transaction.subscription.update({ where: { id: subscriptionId }, data: { status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt } });
+        await transaction.subscription.update({ where: { id: subscriptionId }, data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles, status: SubscriptionProjectionStatus.SYNC_ERROR, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt } });
         return { kind: "conflict" as const, nextReconcileAt };
       }
       const pendingPlan = provider.pendingPlanHandle
         ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
         : null;
-      await transaction.subscription.update({ where: { id: subscriptionId }, data: { planId: planUsable ? plan?.id ?? null : null, observedShopifyPlanHandle: provider.planHandle, status, billingPeriodId: billingPeriod?.kind === "READY" ? billingPeriod.billingPeriodId : null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd, trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId, pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: status === SubscriptionProjectionStatus.UNMAPPED ? "UNMAPPED_PLAN_HANDLE" : status === SubscriptionProjectionStatus.SYNC_ERROR ? "MISSING_USAGE_METER" : null, lastSyncErrorAt: status === SubscriptionProjectionStatus.ACTIVE || status === SubscriptionProjectionStatus.TRIALING ? null : now } });
+      await transaction.subscription.update({ where: { id: subscriptionId }, data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles, planId: planUsable ? plan?.id ?? null : null, observedShopifyPlanHandle: provider.planHandle, status, billingPeriodId: billingPeriod?.kind === "READY" ? billingPeriod.billingPeriodId : null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd, trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId, pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: syncErrorCode, lastSyncErrorAt: syncErrorCode ? now : null } });
       return { kind: "committed" as const };
     });
     if (committed.kind === "conflict") await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
   }
 
-  private async recordUnsupportedPaidTrial(shopId: string, expected: InitialActivationExpected): Promise<void> {
+  private async recordUnsupportedPaidTrial(shopId: string, expected: InitialActivationExpected, provider: PartnerSubscription): Promise<void> {
     const now = this.now();
     const updated = await this.casPendingUpdate(expected, {
       lastSyncedAt: now,
       lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL",
       lastSyncErrorAt: now,
       nextReconcileAt: null,
-    });
+    }, provider);
     if (updated) {
       this.logger.warn("billing.subscription_reconciliation.unsupported_paid_trial", {
         shopId,
@@ -425,7 +427,27 @@ export class InitialActivationReconciliationService {
   private async casPendingUpdate(
     expected: InitialActivationExpected,
     data: Prisma.SubscriptionUpdateManyMutationInput,
+    provider?: PartnerSubscription,
   ): Promise<boolean> {
+    if (provider) {
+      return this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+        await lockSubscription(transaction, expected.subscriptionId);
+        const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+        const result = await transaction.subscription.updateMany({
+          where: {
+            id: expected.subscriptionId,
+            status: SubscriptionProjectionStatus.NO_CONTRACT,
+            planId: null,
+            pendingPlanId: expected.pendingPlanId,
+            pendingShopifyPlanHandle: expected.pendingShopifyPlanHandle,
+            pendingEffectiveAt: expected.pendingEffectiveAt,
+            nextReconcileAt: expected.nextReconcileAt,
+          },
+          data: { ...data, unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles },
+        });
+        return result.count > 0;
+      });
+    }
     const result = await this.database.subscription.updateMany({
       where: {
         id: expected.subscriptionId,

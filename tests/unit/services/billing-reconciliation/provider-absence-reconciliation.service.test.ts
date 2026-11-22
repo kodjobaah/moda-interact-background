@@ -63,6 +63,22 @@ describe("ProviderAbsenceReconciliationService", () => {
     expect(test.database.subscription.upsert).not.toHaveBeenCalled();
   });
 
+
+  it("clears previously unmapped handles when provider absence is confirmed for NO_CONTRACT", async () => {
+    const test = harness(existingSubscription({
+      status: "NO_CONTRACT",
+      billingPeriodId: null,
+      nextReconcileAt: null,
+    }));
+
+    await test.service.reconcile("shop-1", snapshot, now);
+
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "subscription-1", nextReconcileAt: null },
+      data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
+    }));
+  });
+
   it("materialises NO_CONTRACT only when there is no existing local subscription", async () => {
     const test = harness(null);
 
@@ -87,11 +103,12 @@ describe("ProviderAbsenceReconciliationService", () => {
         lastSyncedAt: now,
         lastSyncErrorCode: null,
         lastSyncErrorAt: null,
+        unmappedShopifyUsageEventHandles: [],
         pendingShopifyPlanHandle: null,
         pendingPlanId: null,
         pendingEffectiveAt: null,
       },
-      create: { shopId: "shop-1", status: "NO_CONTRACT", lastSyncedAt: now },
+      create: { shopId: "shop-1", status: "NO_CONTRACT", lastSyncedAt: now, unmappedShopifyUsageEventHandles: [] },
     });
   });
 

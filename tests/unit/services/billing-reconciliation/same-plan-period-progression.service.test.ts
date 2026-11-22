@@ -13,8 +13,13 @@ import {
 } from "./same-plan-reconciliation.test-support.js";
 
 function harness() {
+  const transaction = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }, { eventHandle: "pack-meter" }] }) },
+    subscription: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+  };
   const database = {
-    $transaction: vi.fn(),
+    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
     billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "plan-next", active: true }) },
     subscription: {
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -30,7 +35,7 @@ function harness() {
     capacityResume,
     rollover as never,
   );
-  return { service, database, scheduler, logger, capacityResume, rollover };
+  return { service, database, transaction, scheduler, logger, capacityResume, rollover };
 }
 
 describe("SamePlanPeriodProgressionService", () => {
@@ -48,7 +53,7 @@ describe("SamePlanPeriodProgressionService", () => {
     });
 
     expect(result).toEqual({ billingPeriodId: "period-1", packMeterHandle: "pack-meter" });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith({
       where: {
         id: "subscription-1",
         planId: paidPlan.id,
@@ -80,7 +85,7 @@ describe("SamePlanPeriodProgressionService", () => {
       now,
     });
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         pendingShopifyPlanHandle: null,
         pendingPlanId: null,
@@ -186,7 +191,7 @@ describe("SamePlanPeriodProgressionService", () => {
       now: new Date("2026-10-01T00:00:01.000Z"),
     });
 
-    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
     expect(test.scheduler.enqueue).not.toHaveBeenCalled();
   });
 

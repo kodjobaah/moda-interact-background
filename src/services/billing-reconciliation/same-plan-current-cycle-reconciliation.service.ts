@@ -5,6 +5,7 @@ import type { StructuredLogger } from "@modainteract/moda-interact-shared/loggin
 import { ensureCurrentBillingPeriodProjection } from "../current-billing-period-projection.service.js";
 import { ensureLifetimeFreeCounterForMappedSubscription } from "./lifetime-free-counter-repair.js";
 import type { BillingReconciliationSchedulerService } from "./reconciliation-scheduler.service.js";
+import { resolveShopifyUsageEventMapping } from "./shopify-usage-event-mapping.js";
 import type {
   SamePlanProjection,
   SamePlanReconciliationInput,
@@ -62,11 +63,13 @@ export class SamePlanCurrentCycleReconciliationService {
         return { kind: "stale" as const };
       }
 
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const lifetimeCounter = await ensureLifetimeFreeCounterForMappedSubscription(transaction, shopId);
       if (lifetimeCounter.kind === "history-conflict") {
         await transaction.subscription.update({
           where: { id: existing.id },
           data: {
+            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
             status: SubscriptionProjectionStatus.SYNC_ERROR,
             lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
             lastSyncErrorAt: now,
@@ -90,6 +93,7 @@ export class SamePlanCurrentCycleReconciliationService {
         await transaction.subscription.update({
           where: { id: existing.id },
           data: {
+            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
             status: SubscriptionProjectionStatus.SYNC_ERROR,
             lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
             lastSyncErrorAt: now,
@@ -103,6 +107,7 @@ export class SamePlanCurrentCycleReconciliationService {
       await transaction.subscription.update({
         where: { id: existing.id },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           status,
           observedShopifyPlanHandle: provider.planHandle,
           billingPeriodId: result.billingPeriodId,

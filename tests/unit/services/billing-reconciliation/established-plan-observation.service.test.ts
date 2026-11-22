@@ -27,7 +27,25 @@ describe("EstablishedPlanObservationService", () => {
 
     expect(result).toEqual({ kind: "not-applicable" });
     expect(test.database.billingPlan.findUnique).not.toHaveBeenCalled();
-    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
+  });
+
+
+  it("persists provider usage-event mapping when Shopify still reports the current established plan", async () => {
+    const test = harness();
+    const result = await test.service.reconcile({
+      shopId: "shop-1",
+      provider: { ...provider, planHandle: currentPlan.shopifyPlanHandle },
+      observedPlan: targetPlan,
+      existing,
+      now,
+    });
+
+    expect(result.kind).toBe("handled");
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith({
+      where: { id: existing.id },
+      data: { unmappedShopifyUsageEventHandles: [] },
+    });
   });
 
   it("fails closed when the expected target appears inside the unchanged billing cycle", async () => {
@@ -42,7 +60,7 @@ describe("EstablishedPlanObservationService", () => {
     });
 
     expect(result).toEqual({ kind: "handled", billingPeriodId: "period-old", packMeterHandle: null });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "SYNC_ERROR",
         lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
@@ -70,7 +88,7 @@ describe("EstablishedPlanObservationService", () => {
     });
 
     expect(result).toEqual({ kind: "handled", billingPeriodId: "period-old", packMeterHandle: null });
-    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
     expect(test.scheduler.enqueue).not.toHaveBeenCalled();
     expect(test.transition.transition).not.toHaveBeenCalled();
   });
@@ -89,7 +107,7 @@ describe("EstablishedPlanObservationService", () => {
       now,
     });
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_BILLING_CYCLE" }),
     }));
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
@@ -108,7 +126,7 @@ describe("EstablishedPlanObservationService", () => {
       now,
     });
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: expectedCode }),
     }));
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
@@ -134,7 +152,7 @@ describe("EstablishedPlanObservationService", () => {
       now,
     });
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_USAGE_METER" }),
     }));
     expect(test.transition.transition).not.toHaveBeenCalled();
@@ -231,7 +249,7 @@ describe("EstablishedPlanObservationService", () => {
     });
 
     expect(result).toEqual({ kind: "handled", billingPeriodId: "period-old", packMeterHandle: null });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" }),
     }));
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
@@ -250,7 +268,7 @@ describe("EstablishedPlanObservationService", () => {
     });
 
     expect(result).toEqual({ kind: "handled", billingPeriodId: "period-old", packMeterHandle: null });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "SYNC_ERROR",
         observedShopifyPlanHandle: "pro-2028",
@@ -271,24 +289,19 @@ describe("EstablishedPlanObservationService", () => {
       now,
     });
 
-    expect(result).toEqual({ kind: "handled", billingPeriodId: "period-old", packMeterHandle: null });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "subscription-1",
-        planId: "plan-current",
-        pendingPlanId: "plan-target",
-        pendingShopifyPlanHandle: "pro-2027",
-        pendingEffectiveAt: existing.pendingEffectiveAt,
-      },
-      data: {
+    expect(result.kind).toBe("handled");
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith({
+      where: { id: "subscription-1" },
+      data: expect.objectContaining({
         planId: null,
         status: "UNMAPPED",
         observedShopifyPlanHandle: "missing-plan",
+        unmappedShopifyUsageEventHandles: expect.any(Array),
         nextReconcileAt: null,
         lastSyncedAt: now,
-        lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE",
-        lastSyncErrorAt: now,
-      },
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+      }),
     });
     expect(test.scheduler.enqueue).not.toHaveBeenCalled();
   });

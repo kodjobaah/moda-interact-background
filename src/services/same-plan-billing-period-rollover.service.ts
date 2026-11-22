@@ -8,6 +8,7 @@ import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
 import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
+import { resolveShopifyUsageEventMapping } from "./billing-reconciliation/shopify-usage-event-mapping.js";
 import {
   ensureSuccessorBillingPeriod,
   findCompatibleSuccessorBillingPeriod,
@@ -22,9 +23,9 @@ export type SamePlanRolloverPlan = {
   name: string;
   kind: BillingPlanKind;
   shopifyPlanHandle: string;
+  shopifyUsageEventHandle: string | null;
   includedRecoveryConversationAllowance: number | null;
   recoveryCreditPackEnabled: boolean;
-  shopifyUsageEventHandle: string | null;
   shopifyRecoveryCreditPackEventHandle: string | null;
 };
 
@@ -70,11 +71,6 @@ export class SamePlanBillingPeriodRolloverService {
     if (!input.plan.active || input.provider.planHandle !== input.plan.shopifyPlanHandle) {
       return { kind: "not-applicable" };
     }
-    if (input.plan.kind === BillingPlanKind.PAID_METERED) {
-      if (!input.plan.shopifyUsageEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyUsageEventHandle)) {
-        return { kind: "not-applicable" };
-      }
-    }
     if (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled) {
       if (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle)) {
         return { kind: "not-applicable" };
@@ -93,11 +89,16 @@ export class SamePlanBillingPeriodRolloverService {
       return { kind: "not-applicable" };
     }
 
+    const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, input.provider.planHandle, input.provider.usageEventHandles);
     const currentPeriod = subscription.billingPeriod;
     if (!currentPeriod || !subscription.currentPeriodStart || !subscription.currentPeriodEnd) {
       return { kind: "not-applicable" };
     }
     if (subscription.currentPeriodStart.getTime() === providerStart.getTime() && subscription.currentPeriodEnd.getTime() === providerEnd.getTime()) {
+      await transaction.subscription.update({
+        where: { id: subscription.id },
+        data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles },
+      });
       if (input.now.getTime() >= currentPeriod.periodEnd.getTime()) {
         return {
           kind: "provider-cycle-lag",
@@ -160,6 +161,7 @@ export class SamePlanBillingPeriodRolloverService {
     await transaction.subscription.update({
       where: { id: subscription.id },
       data: {
+        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
         observedShopifyPlanHandle: input.provider.planHandle,
         status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
         billingPeriodId: successor.id,

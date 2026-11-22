@@ -58,7 +58,9 @@ function harness({
     subscription: {
       findUnique: vi.fn().mockResolvedValue(current),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
     },
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
     billingPeriod: {
       findUnique: vi.fn().mockResolvedValue(period),
@@ -129,17 +131,33 @@ describe("InitialActivationReconciliationService", () => {
 
   it.each([
     ["missing cycle", { ...provider, currentPeriodStart: null }, paidPlan, "MISSING_BILLING_CYCLE"],
-    ["missing usage meter", { ...provider, usageEventHandles: [] }, paidPlan, "MISSING_USAGE_METER"],
     ["invalid allowance", provider, { ...paidPlan, includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
   ])("fails closed for a Paid activation with %s", async (_name, providerState, plan, errorCode) => {
     const test = harness();
 
     await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, providerState as never, plan as never, expected);
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ lastSyncErrorCode: errorCode }),
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ lastSyncErrorCode: errorCode, unmappedShopifyUsageEventHandles: expect.any(Array) }),
     }));
-    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.database.$transaction).toHaveBeenCalledOnce();
+  });
+
+
+  it("activates a Paid plan without the optional reporting handle and persists unmatched provider events", async () => {
+    const test = harness();
+    const providerWithoutReportingEvent = { ...provider, usageEventHandles: ["provider-event-without-catalogue-entry"] };
+    const planWithoutReportingHandle = { ...paidPlan, shopifyUsageEventHandle: null };
+
+    await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, providerWithoutReportingEvent as never, planWithoutReportingHandle as never, expected);
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: SubscriptionProjectionStatus.ACTIVE,
+        unmappedShopifyUsageEventHandles: ["provider-event-without-catalogue-entry"],
+      }),
+    }));
+    expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
   });
 
   it("records unsupported future Paid trials without opening a billing period", async () => {
@@ -154,14 +172,14 @@ describe("InitialActivationReconciliationService", () => {
 
     await test.service.completeVerifiedPaid("shop-1", expected.subscriptionId, trialProvider as never, paidPlan, expected);
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null }),
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null, unmappedShopifyUsageEventHandles: expect.any(Array) }),
     }));
     expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.unsupported_paid_trial", {
       shopId: "shop-1",
       subscriptionId: expected.subscriptionId,
     });
-    expect(test.database.$transaction).not.toHaveBeenCalled();
+    expect(test.database.$transaction).toHaveBeenCalledOnce();
   });
 
   it("commits Free activation, grants the lifetime counter once, and publishes post-commit work", async () => {
@@ -260,6 +278,35 @@ describe("InitialActivationReconciliationService", () => {
     expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ planId: freePlan.id, status: SubscriptionProjectionStatus.ACTIVE }),
     }));
+  });
+
+
+  it("projects an unknown local plan as UNMAPPED without a sync error or configuration retry", async () => {
+    const test = harness({ currentPlan: null });
+    const unknownProvider = { ...provider, planHandle: "unknown-plan", usageEventHandles: ["provider-event"] };
+
+    await test.service.applyOtherCurrentPlan(
+      "shop-1",
+      expected.subscriptionId,
+      unknownProvider as never,
+      null,
+      expected.pendingShopifyPlanHandle,
+      now.toISOString(),
+      expected,
+    );
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        planId: null,
+        status: SubscriptionProjectionStatus.UNMAPPED,
+        observedShopifyPlanHandle: "unknown-plan",
+        unmappedShopifyUsageEventHandles: ["provider-event"],
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+        nextReconcileAt: null,
+      }),
+    }));
+    expect(test.reconciliationQueue.publishNext).not.toHaveBeenCalled();
   });
 
   it("keeps activation committed when the post-commit queue publication fails", async () => {

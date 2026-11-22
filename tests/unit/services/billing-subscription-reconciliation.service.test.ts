@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { ShopPlatform } from "@prisma/client";
+import { BillingPlanKind, ShopPlatform } from "@prisma/client";
 import { createSubscriptionReconcilePayload, nextSubscriptionReconcileAt } from "../../../src/services/billing-subscription-reconciliation.service.js";
 import { shopifyUsageEventPublisherService } from "../../../src/services/shopify-usage-event-publisher.service.js";
+import { ShopifyPlanChangeTransitionService } from "../../../src/services/shopify-plan-change-transition.service.js";
 import { now, pendingEffectiveAt, defaultRuntimeConfig, harness, pendingRow, freeProvider, payload, cycleRow, establishedCurrentPlan, establishedTargetPlan, establishedProvider, establishedRow, expectNoModelMutations } from "./billing-subscription-reconciliation/facade-test-fixtures.js";
 
 describe("BillingSubscriptionReconciliationService", () => {
@@ -29,7 +30,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       .mockResolvedValueOnce(establishedTargetPlan);
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "SYNC_ERROR",
         lastSyncErrorCode: "MISSING_BILLING_CYCLE",
@@ -39,17 +40,21 @@ describe("BillingSubscriptionReconciliationService", () => {
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
 
-  it("enters fail-closed SYNC_ERROR for a provider-current target with a missing meter", async () => {
+  it("does not reject a provider-current target when its optional reporting handle is absent", async () => {
     const test = harness({ row: establishedRow(), providerResult: { ...establishedProvider, usageEventHandles: [] }, plan: establishedCurrentPlan });
+    const targetWithoutReportingHandle = { ...establishedTargetPlan, shopifyUsageEventHandle: null };
     test.database.billingPlan.findUnique
       .mockResolvedValueOnce(establishedCurrentPlan)
-      .mockResolvedValueOnce(establishedTargetPlan);
+      .mockResolvedValueOnce(targetWithoutReportingHandle);
+    const transition = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transition").mockResolvedValue({
+      kind: "transitioned", billingPeriodId: "period-new", nextReconcileAt: null, planKind: BillingPlanKind.PAID_METERED,
+    });
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "MISSING_USAGE_METER" }),
-    }));
-    expect(test.queue.add).toHaveBeenCalledOnce();
+
+    expect(transition).toHaveBeenCalledOnce();
+    expect(test.database.subscription.updateMany).not.toHaveBeenCalled();
+    transition.mockRestore();
   });
 
   it("keeps established entitlement on Partner failure and publishes one bounded retry", async () => {
@@ -58,11 +63,11 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ planId: "plan-current", pendingPlanId: "plan-target" }),
       data: expect.objectContaining({ lastSyncErrorCode: "PARTNER_API_ERROR", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
     }));
-    const data = test.database.subscription.updateMany.mock.calls[0][0].data;
+    const data = test.transaction.subscription.updateMany.mock.calls[0][0].data;
     for (const field of ["status", "planId", "billingPeriodId", "currentPeriodStart", "currentPeriodEnd", "pendingPlanId", "pendingShopifyPlanHandle", "pendingEffectiveAt"]) expect(data).not.toHaveProperty(field);
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
@@ -73,12 +78,12 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ lastSyncErrorCode: "PROVIDER_STATE_UNRESOLVED", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
     }));
-    const data = test.database.subscription.updateMany.mock.calls[0][0].data;
+    const data = test.transaction.subscription.updateMany.mock.calls[0][0].data;
     for (const field of ["status", "planId", "billingPeriodId", "currentPeriodStart", "currentPeriodEnd", "pendingPlanId", "pendingShopifyPlanHandle", "pendingEffectiveAt"]) expect(data).not.toHaveProperty(field);
-    expect(test.database.subscription.updateMany.mock.calls.every(([call]: any[]) => call.where?.status !== "NO_CONTRACT")).toBe(true);
+    expect(test.transaction.subscription.updateMany.mock.calls.every(([call]: any[]) => call.where?.status !== "NO_CONTRACT")).toBe(true);
     expect(test.queue.add).toHaveBeenCalledOnce();
   });
 
@@ -231,7 +236,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow(),
       providerResult: { ...freeProvider, planHandle: "paid-2026", pendingPlanHandle: "free-2026", pendingEffectiveAt: pendingAt },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
+      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 },
     });
     test.transaction.billingPlan.findUnique.mockResolvedValue({ id: "plan-free", active: true });
     await test.service.reconcileJob(payload);
@@ -242,7 +247,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     const test = harness({
       row: pendingRow(),
       providerResult: { ...freeProvider, planHandle: "paid-2026", pendingPlanHandle: null, pendingEffectiveAt: null },
-      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false },
+      plan: { id: "plan-paid", name: "Paid", active: true, kind: "PAID_METERED", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: "recovery-meter", recoveryCreditPackEnabled: false, includedRecoveryConversationAllowance: 100 },
     });
     await test.service.reconcileJob(payload);
 

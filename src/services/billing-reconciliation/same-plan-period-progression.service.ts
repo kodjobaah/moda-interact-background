@@ -10,6 +10,7 @@ import {
 } from "../recovery-capacity-resume.service.js";
 import { SamePlanBillingPeriodRolloverService } from "../same-plan-billing-period-rollover.service.js";
 import type { BillingReconciliationSchedulerService } from "./reconciliation-scheduler.service.js";
+import { resolveShopifyUsageEventMapping } from "./shopify-usage-event-mapping.js";
 import type {
   SamePlanProjection,
   SamePlanReconciliationInput,
@@ -133,22 +134,26 @@ export class SamePlanPeriodProgressionService {
       : now < new Date(currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
         ? new Date(currentPeriodEnd.getTime() - APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS)
         : currentPeriodEnd;
-    const updated = await this.database.subscription.updateMany({
-      where: {
-        id: existing.id,
-        planId: existing.planId,
-        billingPeriodId: existing.billingPeriodId,
-        nextReconcileAt: existing.nextReconcileAt,
-      },
-      data: {
-        pendingShopifyPlanHandle: provider.pendingPlanHandle,
-        pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
-        pendingEffectiveAt: provider.pendingEffectiveAt,
-        cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
-        currentPeriodEnd,
-        nextReconcileAt: next,
-        lastSyncedAt: now,
-      },
+    const updated = await this.database.$transaction(async (transaction) => {
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      return transaction.subscription.updateMany({
+        where: {
+          id: existing.id,
+          planId: existing.planId,
+          billingPeriodId: existing.billingPeriodId,
+          nextReconcileAt: existing.nextReconcileAt,
+        },
+        data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+          pendingShopifyPlanHandle: provider.pendingPlanHandle,
+          pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
+          pendingEffectiveAt: provider.pendingEffectiveAt,
+          cancelAtPeriodEnd: provider.pendingPlanHandle ? false : provider.cancelAtPeriodEnd,
+          currentPeriodEnd,
+          nextReconcileAt: next,
+          lastSyncedAt: now,
+        },
+      });
     });
     if (updated.count > 0) {
       await this.scheduler.enqueue(shopId, existing.id, next, now);

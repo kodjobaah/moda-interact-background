@@ -10,6 +10,7 @@ import { ShopifyPlanChangeTransitionService, type ShopifyPlanChangePlan } from "
 import type { EstablishedPlanChangeExpected } from "./classification.js";
 import { RETRYABLE_PLAN_CHANGE_SYNC_ERRORS } from "./classification.js";
 import { ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
+import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopify-usage-event-mapping.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
@@ -58,11 +59,8 @@ export class EstablishedPlanChangeReconciliationService {
         pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
         pendingEffectiveAt: provider.pendingEffectiveAt,
       } as Prisma.SubscriptionUpdateManyMutationInput & { pendingPlanId?: string | null };
-      const updated = await this.database.subscription.updateMany({
-        where: this.establishedPlanChangeWhere(expected),
-        data,
-      });
-      if (updated.count > 0 && next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+      const updated = await this.updateWithUsageEventMapping(expected, provider, data);
+      if (updated > 0 && next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
       return;
     }
     if (providerIsPendingTarget) {
@@ -71,36 +69,34 @@ export class EstablishedPlanChangeReconciliationService {
         && provider.currentPeriodStart?.getTime() === expected.currentPeriodStart.getTime()
         && provider.currentPeriodEnd?.getTime() === expected.currentPeriodEnd.getTime();
       if (sameCycle) {
-        await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle);
+        await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle, provider);
         return;
       }
       if (now < expected.pendingEffectiveAt) {
-        const updated = await this.database.subscription.updateMany({
-          where: this.establishedPlanChangeWhere(expected),
-          data: { nextReconcileAt: expected.pendingEffectiveAt, lastSyncedAt: now, lastSyncErrorCode: null, lastSyncErrorAt: null },
+        const updated = await this.updateWithUsageEventMapping(expected, provider, {
+          nextReconcileAt: expected.pendingEffectiveAt,
+          lastSyncedAt: now,
+          lastSyncErrorCode: null,
+          lastSyncErrorAt: null,
         });
-        if (updated.count > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, expected.pendingEffectiveAt);
+        if (updated > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, expected.pendingEffectiveAt);
         return;
       }
       if (!targetPlan) return;
       if (targetPlan.kind === BillingPlanKind.PAID_METERED || (targetPlan.kind === BillingPlanKind.FREE && targetPlan.recoveryCreditPackEnabled)) {
         if (!provider.currentPeriodStart || !provider.currentPeriodEnd || provider.currentPeriodStart >= provider.currentPeriodEnd) {
-          await this.recordRetry(shopId, expected, "MISSING_BILLING_CYCLE", undefined, true);
+          await this.recordRetry(shopId, expected, "MISSING_BILLING_CYCLE", undefined, true, provider);
           return;
         }
       }
       if (targetPlan.kind === BillingPlanKind.PAID_METERED) {
         if (!Number.isSafeInteger(targetPlan.includedRecoveryConversationAllowance) || (targetPlan.includedRecoveryConversationAllowance ?? -1) < 0) {
-          await this.recordRetry(shopId, expected, "INVALID_INCLUDED_ALLOWANCE", undefined, true);
-          return;
-        }
-        if (!targetPlan.shopifyUsageEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyUsageEventHandle)) {
-          await this.recordRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
+          await this.recordRetry(shopId, expected, "INVALID_INCLUDED_ALLOWANCE", undefined, true, provider);
           return;
         }
       }
       if (targetPlan.recoveryCreditPackEnabled && (!targetPlan.shopifyRecoveryCreditPackEventHandle || !provider.usageEventHandles.includes(targetPlan.shopifyRecoveryCreditPackEventHandle))) {
-        await this.recordRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true);
+        await this.recordRetry(shopId, expected, "MISSING_USAGE_METER", undefined, true, provider);
         return;
       }
       const result = await new ShopifyPlanChangeTransitionService(this.database).transition({
@@ -115,15 +111,33 @@ export class EstablishedPlanChangeReconciliationService {
         if (result.nextReconcileAt) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, result.nextReconcileAt);
         await this.schedulePlanChangeCapacityResume(shopId, result.planKind);
       } else {
-        await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle);
+        await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle, provider);
       }
       return;
     }
     if (!targetPlan) {
-      await this.recordFailure(shopId, expected, "UNMAPPED_PLAN_HANDLE", true, provider.planHandle);
+      await this.recordFailure(shopId, expected, "UNMAPPED_PLAN_HANDLE", true, provider.planHandle, provider);
       return;
     }
-    await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle);
+    await this.recordFailure(shopId, expected, "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", false, provider.planHandle, provider);
+  }
+
+  private async updateWithUsageEventMapping(
+    expected: EstablishedPlanChangeExpected,
+    provider: PartnerSubscription | null,
+    data: Prisma.SubscriptionUpdateManyMutationInput,
+  ): Promise<number> {
+    return this.database.$transaction(async (transaction) => {
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "billing"."Subscription" WHERE "id" = ${expected.subscriptionId} FOR UPDATE`);
+      const mapping = provider
+        ? await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles)
+        : null;
+      const result = await transaction.subscription.updateMany({
+        where: this.establishedPlanChangeWhere(expected),
+        data: { ...data, ...(mapping ? { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles } : {}) },
+      });
+      return result.count;
+    });
   }
 
   private establishedPlanChangeWhere(expected: EstablishedPlanChangeExpected) {
@@ -150,23 +164,21 @@ export class EstablishedPlanChangeReconciliationService {
     shopId: string,
     expected: EstablishedPlanChangeExpected,
     errorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE" | "UNMAPPED_PLAN_HANDLE",
-    unmapped = false,
-    observedHandle?: string,
+    unmapped: boolean,
+    observedHandle: string | undefined,
+    provider: PartnerSubscription,
   ): Promise<void> {
     const now = this.now();
     const next = unmapped ? null : new Date(now.getTime() + ROLLOVER_RETRY_MS);
-    const updated = await this.database.subscription.updateMany({
-      where: this.establishedPlanChangeWhere(expected),
-      data: {
-        ...(unmapped ? { planId: null, status: SubscriptionProjectionStatus.UNMAPPED } : { status: SubscriptionProjectionStatus.SYNC_ERROR }),
-        ...(observedHandle ? { observedShopifyPlanHandle: observedHandle } : {}),
-        nextReconcileAt: next,
-        lastSyncedAt: now,
-        lastSyncErrorCode: errorCode,
-        lastSyncErrorAt: now,
-      },
+    const updated = await this.updateWithUsageEventMapping(expected, provider, {
+      ...(unmapped ? { planId: null, status: SubscriptionProjectionStatus.UNMAPPED } : { status: SubscriptionProjectionStatus.SYNC_ERROR }),
+      ...(observedHandle ? { observedShopifyPlanHandle: observedHandle } : {}),
+      nextReconcileAt: next,
+      lastSyncedAt: now,
+      lastSyncErrorCode: unmapped ? null : errorCode,
+      lastSyncErrorAt: unmapped ? null : now,
     });
-    if (updated.count > 0 && next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+    if (updated > 0 && next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
   }
 
   async recordRetry(
@@ -175,6 +187,7 @@ export class EstablishedPlanChangeReconciliationService {
     errorCode: "PARTNER_API_ERROR" | "PROVIDER_STATE_UNRESOLVED" | "MISSING_BILLING_CYCLE" | "MISSING_USAGE_METER" | "INVALID_INCLUDED_ALLOWANCE",
     error?: unknown,
     failClosed = false,
+    provider?: PartnerSubscription,
   ): Promise<void> {
     const now = this.now();
     const next = new Date(now.getTime() + ROLLOVER_RETRY_MS);
@@ -186,17 +199,14 @@ export class EstablishedPlanChangeReconciliationService {
         error: error,
       });
     }
-    const updated = await this.database.subscription.updateMany({
-      where: this.establishedPlanChangeWhere(expected),
-      data: {
-        ...(failClosed ? { status: SubscriptionProjectionStatus.SYNC_ERROR } : {}),
-        nextReconcileAt: next,
-        lastSyncedAt: now,
-        lastSyncErrorCode: errorCode,
-        lastSyncErrorAt: now,
-      },
+    const updated = await this.updateWithUsageEventMapping(expected, provider ?? null, {
+      ...(failClosed ? { status: SubscriptionProjectionStatus.SYNC_ERROR } : {}),
+      nextReconcileAt: next,
+      lastSyncedAt: now,
+      lastSyncErrorCode: errorCode,
+      lastSyncErrorAt: now,
     });
-    if (updated.count > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+    if (updated > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
   }
 
   private async schedulePlanChangeCapacityResume(shopId: string, planKind: BillingPlanKind): Promise<void> {

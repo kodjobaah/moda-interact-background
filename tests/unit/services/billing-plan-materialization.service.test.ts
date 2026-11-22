@@ -125,8 +125,6 @@ describe("BillingPlanMaterializationService", () => {
   it("treats invalid catalogue configuration as an unmapped plan, not a sync failure", async () => {
     const invalid = [
       { ...catalogue, includedRecoveryCredits: -1 },
-      { ...catalogue, shopifyRecoveryUsageEventHandle: null },
-      { ...catalogue, planKind: MerchantPricingPlanKind.FREE, shopifyRecoveryUsageEventHandle: "starter" },
     ];
     for (const pricing of invalid) {
       const test = harness({ pricing });
@@ -137,6 +135,23 @@ describe("BillingPlanMaterializationService", () => {
         shopifyPlanHandle: "starter", unavailableReason: expect.any(String),
       }));
     }
+  });
+
+
+  it("materializes a Paid plan when its optional App Events reporting handle is absent", async () => {
+    const test = harness({ pricing: { ...catalogue, shopifyRecoveryUsageEventHandle: null } });
+    await test.service.resolve("starter");
+    expect(test.transaction.billingPlan.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: "PAID_METERED", shopifyUsageEventHandle: null }),
+    }));
+  });
+
+  it("does not reject a Free plan because an App Events reporting handle is populated", async () => {
+    const test = harness({ pricing: { ...catalogue, planKind: MerchantPricingPlanKind.FREE, shopifyRecoveryUsageEventHandle: "legacy-reporting-handle" } });
+    await test.service.resolve("starter");
+    expect(test.transaction.billingPlan.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: "FREE", shopifyUsageEventHandle: null }),
+    }));
   });
 
   it("keeps ordinary recovery-meter mapping separate from catalogue credit-pack offers", async () => {

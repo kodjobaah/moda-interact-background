@@ -1,3 +1,4 @@
+import { SubscriptionProjectionStatus } from "@prisma/client";
 import { vi } from "vitest";
 
 import { EstablishedPlanObservationService } from "../../../../src/services/billing-reconciliation/established-plan-observation.service.js";
@@ -33,6 +34,7 @@ export const targetPlan = {
 
 export const existing = {
   id: "subscription-1",
+  status: SubscriptionProjectionStatus.ACTIVE,
   planId: "plan-current",
   pendingPlanId: "plan-target",
   pendingShopifyPlanHandle: "pro-2027",
@@ -47,7 +49,7 @@ export const provider = {
   usageEventHandles: ["recovery-new", "pack-new"],
   pendingPlanHandle: null,
   pendingEffectiveAt: null,
-  status: "ACTIVE" as const,
+  status: SubscriptionProjectionStatus.ACTIVE,
   currentPeriodStart: currentCycleEnd,
   currentPeriodEnd: targetCycleEnd,
   trialEndsAt: null,
@@ -58,10 +60,19 @@ export const provider = {
 };
 
 export function establishedPlanObservationHarness() {
+  const transaction = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-new" }, { eventHandle: "pack-new" }] }) },
+    subscription: {
+      findUnique: vi.fn().mockImplementation(async () => existing),
+      update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+  };
   const database = {
     billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
     subscription: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
-    $transaction: vi.fn(),
+    $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)),
   };
   const scheduler = { enqueue: vi.fn().mockResolvedValue(undefined) };
   const logger = { warn: vi.fn(), error: vi.fn() };
@@ -81,7 +92,7 @@ export function establishedPlanObservationHarness() {
     capacityResume,
     transition as never,
   );
-  return { database, scheduler, logger, capacityResume, transition, service };
+  return { database, transaction, scheduler, logger, capacityResume, transition, service };
 }
 
 export const paidPrerequisiteCases = [
@@ -89,8 +100,6 @@ export const paidPrerequisiteCases = [
   ["negative Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: -1 }],
   ["non-integer Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: 1.5 }],
   ["unsafe Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 }],
-  ["missing normal Paid meter config", "MISSING_USAGE_METER", { shopifyUsageEventHandle: null }],
-  ["provider omits normal Paid meter", "MISSING_USAGE_METER", { providerUsageEventHandles: [] }],
   ["enabled Paid pack meter null", "MISSING_USAGE_METER", { recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null }],
   ["provider omits Paid pack meter", "MISSING_USAGE_METER", { recoveryCreditPackEnabled: true, providerUsageEventHandles: ["recovery-new"] }],
 ] as const;

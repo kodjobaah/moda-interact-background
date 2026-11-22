@@ -8,6 +8,7 @@ import type { PrismaClient } from "@prisma/client";
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
 import type { PartnerSubscription } from "../providers/shopify-partner-billing.provider.js";
 import { closeBillingPeriod } from "./billing-period-transition/close-billing-period.js";
+import { resolveShopifyUsageEventMapping } from "./billing-reconciliation/shopify-usage-event-mapping.js";
 import {
   ensureSuccessorBillingPeriod,
   findCompatibleSuccessorBillingPeriod,
@@ -65,8 +66,8 @@ export class ShopifyPlanChangeTransitionService {
       || (input.plan.kind === BillingPlanKind.FREE && input.plan.recoveryCreditPackEnabled);
     if (requiresExactCycle && (!start || !end || start >= end)) return { kind: "not-applicable" };
     if (input.plan.kind === BillingPlanKind.PAID_METERED) {
-      if (!Number.isSafeInteger(allowance) || (allowance ?? -1) < 0 || !input.plan.shopifyUsageEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyUsageEventHandle)) {
-        throw new Error("Provider-confirmed paid plan is missing a valid recovery meter or allowance");
+      if (!Number.isSafeInteger(allowance) || (allowance ?? -1) < 0) {
+        throw new Error("Provider-confirmed paid plan is missing a valid included recovery allowance");
       }
       if (input.plan.recoveryCreditPackEnabled && (!input.plan.shopifyRecoveryCreditPackEventHandle || !input.provider.usageEventHandles.includes(input.plan.shopifyRecoveryCreditPackEventHandle))) {
         throw new Error("Provider-confirmed Paid plan is missing its recovery pack meter");
@@ -85,6 +86,7 @@ export class ShopifyPlanChangeTransitionService {
     if (!subscription || subscription.shopId !== input.shopId || subscription.planId !== input.expectedCurrentPlanId || ((subscription.status !== "ACTIVE" && subscription.status !== "TRIALING") && !(subscription.status === "SYNC_ERROR" && retryableSyncError))) {
       return { kind: "not-applicable" };
     }
+    const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, input.provider.planHandle, input.provider.usageEventHandles);
     const outgoingPlanKind = subscription.billingPeriod?.planKindSnapshot ?? subscription.plan?.kind;
     if (outgoingPlanKind === BillingPlanKind.PAID_METERED && (!subscription.billingPeriod || !subscription.currentPeriodEnd)) {
       return { kind: "not-applicable" };
@@ -105,6 +107,7 @@ export class ShopifyPlanChangeTransitionService {
       await transaction.subscription.update({
         where: { id: subscription.id },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           planId: input.plan.id,
           observedShopifyPlanHandle: input.provider.planHandle,
           status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",
@@ -161,6 +164,7 @@ export class ShopifyPlanChangeTransitionService {
     await transaction.subscription.update({
       where: { id: subscription.id },
       data: {
+        unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
         planId: input.plan.id,
         observedShopifyPlanHandle: input.provider.planHandle,
         status: input.provider.status === "TRIALING" ? "TRIALING" : "ACTIVE",

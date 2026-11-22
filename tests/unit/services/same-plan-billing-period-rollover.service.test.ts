@@ -48,6 +48,7 @@ const provider = {
 function transactionHarness(overrides: Record<string, unknown> = {}) {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }, { eventHandle: "pack-meter" }] }) },
     subscription: {
       findUnique: vi.fn().mockResolvedValue({
         id: "subscription-1",
@@ -74,6 +75,7 @@ function transactionHarness(overrides: Record<string, unknown> = {}) {
     },
     billingPeriodEntitlementCounter: {
       findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue({ id: "counter-new" }),
       upsert: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
@@ -112,6 +114,34 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     expect(result).toEqual({ kind: "not-applicable" });
     expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
     expect(transaction.subscription.update).not.toHaveBeenCalled();
+  });
+
+
+  it("rolls over a Paid plan without requiring its optional App Events reporting handle", async () => {
+    const transaction = transactionHarness();
+    transaction.merchantPricingPlan.findUnique.mockResolvedValue({ usageEvents: [{ eventHandle: "pack-meter" }] });
+    transaction.billingPeriodEntitlementCounter.findUnique
+      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
+      .mockResolvedValueOnce({ id: "counter-old", grantedQuantity: 100, committedQuantity: 0, reservedQuantity: 0, forfeitedQuantity: 100, version: 2 });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof transaction) => unknown) => callback(transaction)) };
+    const providerWithoutReportingHandle = { ...provider, usageEventHandles: ["pack-meter"] };
+
+    const result = await new SamePlanBillingPeriodRolloverService(database as never).transition({
+      shopId: "shop-1",
+      subscriptionId: "subscription-1",
+      provider: providerWithoutReportingHandle,
+      plan: { ...plan, shopifyUsageEventHandle: null },
+      now: new Date("2026-10-01T00:00:01.000Z"),
+    });
+
+    expect(result.kind).toBe("transitioned");
+    expect(transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledTimes(2);
+    expect(transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ forfeitedQuantity: { increment: 100 } }),
+    }));
+    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
+    }));
   });
 
   it("fails closed when a successor has incompatible canonical identity", async () => {
@@ -541,7 +571,9 @@ describe("SamePlanBillingPeriodRolloverService", () => {
     expect(result).toEqual({ kind: "provider-cycle-lag", billingPeriodId: "period-old", nextReconcileAt: null });
     expect(transaction.billingPeriod.updateMany).not.toHaveBeenCalled();
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
-    expect(transaction.subscription.update).not.toHaveBeenCalled();
+    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ unmappedShopifyUsageEventHandles: [] }),
+    }));
   });
 
   it("schedules the next Paid pre-close boundary after a contiguous rollover", async () => {

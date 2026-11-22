@@ -17,12 +17,12 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledOnce();
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledOnce();
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ id: "subscription-1", planId: "plan-current", pendingPlanId: "plan-target", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt }),
       data: expect.objectContaining({ pendingPlanId: "plan-next", pendingShopifyPlanHandle: "paid-next", pendingEffectiveAt: new Date("2026-10-01T00:00:00.000Z") }),
     }));
-    expect(test.database.subscription.updateMany.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-10-01T00:00:00.000Z"));
+    expect(test.transaction.subscription.updateMany.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-10-01T00:00:00.000Z"));
     expect(test.database.subscription.update).not.toHaveBeenCalled();
     expect(test.queue.add).toHaveBeenCalledOnce();
     expect(test.queue.add).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ expectedNextReconcileAt: "2026-10-01T00:00:00.000Z" }), expect.objectContaining({ jobId: expect.any(String) }));
@@ -38,8 +38,8 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledOnce();
-    const call = test.database.subscription.updateMany.mock.calls[0][0];
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledOnce();
+    const call = test.transaction.subscription.updateMany.mock.calls[0][0];
     expect(call.data).toEqual(expect.objectContaining({ pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null, nextReconcileAt: new Date("2026-09-30T23:55:00.000Z") }));
     for (const field of ["status", "planId", "billingPeriodId", "currentPeriodStart", "currentPeriodEnd"]) expect(call.data).not.toHaveProperty(field);
     expect(test.database.subscription.update).not.toHaveBeenCalled();
@@ -211,7 +211,7 @@ describe("BillingSubscriptionReconciliationService", () => {
         pendingEffectiveAt: null,
         cancelAtPeriodEnd: false,
         nextReconcileAt: insideDrain,
-        lastSyncErrorCode: "MISSING_USAGE_METER",
+        lastSyncErrorCode: "PARTNER_API_ERROR",
       } }),
       providerResult: {
         ...establishedProvider,

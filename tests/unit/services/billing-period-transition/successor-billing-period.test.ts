@@ -82,6 +82,7 @@ describe("successor billing period", () => {
         status: "OPEN",
       },
     });
+    expect(transaction.billingPeriodEntitlementCounter.findUnique).not.toHaveBeenCalled();
     expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: {},
       create: expect.objectContaining({
@@ -109,6 +110,14 @@ describe("successor billing period", () => {
 
     expect(period).toEqual({ id: "period-new" });
     expect(transaction.billingPeriod.create).not.toHaveBeenCalled();
+    expect(transaction.billingPeriodEntitlementCounter.findUnique).toHaveBeenCalledWith({
+      where: {
+        billingPeriodId_counter: {
+          billingPeriodId: "period-new",
+          counter: "INCLUDED_RECOVERY_CREDITS",
+        },
+      },
+    });
     expect(transaction.billingPeriodEntitlementCounter.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: {} }));
     expect(existingCounter).toEqual({
       id: "counter-new",

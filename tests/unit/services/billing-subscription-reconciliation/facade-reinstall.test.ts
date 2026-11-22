@@ -84,7 +84,7 @@ describe("BillingSubscriptionReconciliationService", () => {
       plan: { id: "plan-free", name: "Free", active: true, kind: "FREE", recoveryCreditPackEnabled: true, ...planOverrides },
     });
     await test.service.reconcileJob(payload);
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "MISSING_USAGE_METER" }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "MISSING_USAGE_METER" }) }));
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
   });
 
@@ -152,7 +152,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     test.transaction.billingPeriod = { findUnique: vi.fn().mockResolvedValue(period), upsert: vi.fn() };
     test.transaction.billingPeriodEntitlementCounter = { findUnique: vi.fn().mockResolvedValue(counter), upsert: vi.fn() };
     await test.service.reconcileJob(payload);
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED" }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "PERIOD_ALIGNMENT_REQUIRED" }) }));
     expect(test.transaction.subscription.update).not.toHaveBeenCalled();
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
   });

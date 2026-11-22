@@ -46,6 +46,7 @@ function harness(
   });
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-new" }] }) },
     subscription: { findUnique: vi.fn().mockResolvedValue({ id: "subscription-1", shopId: "shop-1", planId: "paid-old", status: "ACTIVE", billingPeriodId: outgoingPeriod === null ? null : "period-old", currentPeriodStart: outgoingPeriod === null ? null : oldStart, currentPeriodEnd: outgoingPeriod === null ? null : oldEnd, plan: { kind: planKind }, billingPeriod: outgoingPeriod === undefined ? { id: "period-old", periodStart: oldStart, periodEnd: oldEnd, status: "OPEN", planKindSnapshot: planKind } : outgoingPeriod }), update: vi.fn() },
     billingPeriod: { findUnique: vi.fn().mockResolvedValue(successor), create: vi.fn().mockResolvedValue({ id: "period-new" }), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     usageEvent: { updateMany: vi.fn() },
@@ -205,8 +206,6 @@ describe("ShopifyPlanChangeTransitionService", () => {
     ["negative Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: -1 } }],
     ["non-integer Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: 1.5 } }],
     ["unsafe Paid allowance", { provider, plan: { ...paidPlan, includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 } }],
-    ["missing configured normal Paid meter", { provider, plan: { ...paidPlan, shopifyUsageEventHandle: null } }],
-    ["provider omits normal Paid meter", { provider: { ...provider, usageEventHandles: [] }, plan: paidPlan }],
     ["enabled Paid pack meter missing/null", { provider, plan: { ...paidPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null } }],
     ["provider omits enabled Paid pack meter", { provider: { ...provider, usageEventHandles: ["recovery-new"] }, plan: { ...paidPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack-new" } }],
     ["enabled Free pack meter missing/null", { provider: { ...provider, planHandle: "free-new", usageEventHandles: [] }, plan: { ...freePlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null } }],

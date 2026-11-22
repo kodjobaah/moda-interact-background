@@ -57,6 +57,7 @@ export function harness({
         nextReconcileAt: new Date("2026-09-12T12:00:00.000Z"),
       }),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     shopSettings: { update: vi.fn() },
     shop: {

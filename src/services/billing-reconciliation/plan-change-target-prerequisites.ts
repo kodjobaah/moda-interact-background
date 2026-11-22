@@ -30,13 +30,6 @@ export function planChangeTargetPrerequisiteFailure(
     return "INVALID_INCLUDED_ALLOWANCE";
   }
   if (
-    plan.kind === BillingPlanKind.PAID_METERED
-    && (!plan.shopifyUsageEventHandle
-      || !provider.usageEventHandles.includes(plan.shopifyUsageEventHandle))
-  ) {
-    return "MISSING_USAGE_METER";
-  }
-  if (
     plan.recoveryCreditPackEnabled
     && (!plan.shopifyRecoveryCreditPackEventHandle
       || !provider.usageEventHandles.includes(plan.shopifyRecoveryCreditPackEventHandle))

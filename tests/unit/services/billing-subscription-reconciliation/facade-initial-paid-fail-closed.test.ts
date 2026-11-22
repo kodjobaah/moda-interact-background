@@ -135,7 +135,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     });
     test.transaction.subscription.findUnique.mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt, nextReconcileAt: now });
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: "UNSUPPORTED_PAID_TRIAL", nextReconcileAt: null }) }));
     expect(test.transaction.billingPeriod.upsert).not.toHaveBeenCalled();
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
     expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.unsupported_paid_trial", expect.objectContaining({ shopId: "shop-1" }));
@@ -144,7 +144,6 @@ describe("BillingSubscriptionReconciliationService", () => {
   it.each([
     ["missing cycle", { currentPeriodStart: null, currentPeriodEnd: null }, "MISSING_BILLING_CYCLE"],
     ["invalid cycle", { currentPeriodStart: new Date("2026-10-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-09-01T00:00:00.000Z") }, "MISSING_BILLING_CYCLE"],
-    ["missing meter", { usageEventHandles: [] }, "MISSING_USAGE_METER"],
     ["null allowance", { includedRecoveryConversationAllowance: null }, "INVALID_INCLUDED_ALLOWANCE"],
     ["negative allowance", { includedRecoveryConversationAllowance: -1 }, "INVALID_INCLUDED_ALLOWANCE"],
     ["non-integer allowance", { includedRecoveryConversationAllowance: 1.5 }, "INVALID_INCLUDED_ALLOWANCE"],
@@ -158,7 +157,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     });
     test.transaction.subscription.findUnique.mockResolvedValue({ status: "NO_CONTRACT", planId: null, pendingPlanId: "plan-paid", pendingShopifyPlanHandle: "paid-2026", pendingEffectiveAt, nextReconcileAt: now });
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: errorCode }) }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ lastSyncErrorCode: errorCode }) }));
     expect(test.transaction.shopSettings.update).not.toHaveBeenCalled();
   });
 });

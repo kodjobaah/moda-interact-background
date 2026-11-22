@@ -79,13 +79,6 @@ export class BillingPlanMaterializationService {
         if (!Number.isSafeInteger(catalogue.includedRecoveryCredits) || catalogue.includedRecoveryCredits < 0) {
           return { created: false as const, plan: null, unavailableReason: "INVALID_INCLUDED_RECOVERY_CREDITS" };
         }
-        if (catalogue.planKind === MerchantPricingPlanKind.FREE && catalogue.shopifyRecoveryUsageEventHandle !== null) {
-          return { created: false as const, plan: null, unavailableReason: "FREE_PLAN_HAS_RECOVERY_USAGE_METER" };
-        }
-        if (catalogue.planKind === MerchantPricingPlanKind.PAID_METERED
-          && !catalogue.shopifyRecoveryUsageEventHandle?.trim()) {
-          return { created: false as const, plan: null, unavailableReason: "PAID_PLAN_MISSING_RECOVERY_USAGE_METER" };
-        }
         const kind = catalogue.planKind === MerchantPricingPlanKind.FREE
           ? BillingPlanKind.FREE
           : BillingPlanKind.PAID_METERED;
@@ -95,10 +88,10 @@ export class BillingPlanMaterializationService {
             name: catalogue.displayName,
             kind,
             active: true,
-            // This is the ordinary recovery usage meter, NOT a purchased credit-pack
-            // offer. Top-up bundles use MerchantPricingPlan.usageEvents independently.
+            // This is the optional included-recovery App Events reporting handle, not a
+            // billable TieredPrice usage-event mapping. Top-ups are mapped separately.
             shopifyUsageEventHandle: kind === BillingPlanKind.PAID_METERED
-              ? catalogue.shopifyRecoveryUsageEventHandle!.trim()
+              ? catalogue.shopifyRecoveryUsageEventHandle?.trim() || null
               : null,
             includedRecoveryConversationAllowance: kind === BillingPlanKind.PAID_METERED
               ? catalogue.includedRecoveryCredits

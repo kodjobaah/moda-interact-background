@@ -44,8 +44,6 @@ describe("BillingSubscriptionReconciliationService", () => {
     ["negative Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { provider: establishedProvider, plan: { ...establishedTargetPlan, includedRecoveryConversationAllowance: -1 } }],
     ["non-integer Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { provider: establishedProvider, plan: { ...establishedTargetPlan, includedRecoveryConversationAllowance: 1.5 } }],
     ["unsafe Paid allowance", "INVALID_INCLUDED_ALLOWANCE", { provider: establishedProvider, plan: { ...establishedTargetPlan, includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 } }],
-    ["missing normal Paid meter config", "MISSING_USAGE_METER", { provider: establishedProvider, plan: { ...establishedTargetPlan, shopifyUsageEventHandle: null } }],
-    ["provider omits normal Paid meter", "MISSING_USAGE_METER", { provider: { ...establishedProvider, usageEventHandles: [] }, plan: establishedTargetPlan }],
     ["enabled Paid pack meter null", "MISSING_USAGE_METER", { provider: establishedProvider, plan: { ...establishedTargetPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null } }],
     ["provider omits Paid pack meter", "MISSING_USAGE_METER", { provider: { ...establishedProvider, usageEventHandles: ["recovery-meter"] }, plan: { ...establishedTargetPlan, recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack-meter" } }],
     ["enabled Free pack meter null", "MISSING_USAGE_METER", { provider: { ...establishedProvider, planHandle: "paid-2026", usageEventHandles: ["pack-meter"] }, plan: { id: "plan-target", active: true, name: "Free target", kind: "FREE", shopifyPlanHandle: "paid-2026", shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null, recoveryCreditPackEnabled: true, includedRecoveryConversationAllowance: null } }],
@@ -57,7 +55,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
 
-    const call = test.database.subscription.updateMany.mock.calls.at(-1)?.[0];
+    const call = test.transaction.subscription.updateMany.mock.calls.at(-1)?.[0];
     expect(call.data).toEqual(expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: expectedCode, nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }));
     for (const field of ["planId", "billingPeriodId", "currentPeriodStart", "currentPeriodEnd", "pendingPlanId", "pendingShopifyPlanHandle", "pendingEffectiveAt"]) expect(call.data).not.toHaveProperty(field);
     expect(transition).not.toHaveBeenCalled();
@@ -89,7 +87,7 @@ describe("BillingSubscriptionReconciliationService", () => {
 
     expect(test.logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.objectContaining({ shopId: "shop-1" }));
     expect(
-      test.database.subscription.updateMany.mock.calls.some(([call]: any[]) =>
+      test.transaction.subscription.updateMany.mock.calls.some(([call]: any[]) =>
         call.data?.status === "SYNC_ERROR"
         || call.data?.lastSyncErrorCode != null
         || call.data?.nextReconcileAt?.getTime?.() === new Date("2026-09-12T12:01:00.000Z").getTime(),
@@ -129,7 +127,7 @@ describe("BillingSubscriptionReconciliationService", () => {
     await test.service.reconcileJob({ ...payload, expectedNextReconcileAt: now.toISOString() });
 
     expect(transition).not.toHaveBeenCalled();
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SYNC_ERROR", lastSyncErrorCode: "UNEXPECTED_IMMEDIATE_PLAN_CHANGE", nextReconcileAt: new Date("2026-09-12T12:01:00.000Z") }),
     }));
     expect(test.queue.add).toHaveBeenCalledOnce();

@@ -68,6 +68,7 @@ export function existingSubscription(
 export function currentCycleTransaction(existing: SamePlanExistingSubscription) {
   return {
     $queryRaw: vi.fn().mockResolvedValue([]),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }, { eventHandle: "pack-meter" }] }) },
     subscription: {
       findUnique: vi.fn().mockResolvedValue(existing),
       update: vi.fn(),

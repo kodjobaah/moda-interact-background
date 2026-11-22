@@ -328,6 +328,7 @@ export class BillingSubscriptionReconciliationService {
       await this.initialActivationReconciliation.recordPaidActivationFailure(
         row.id,
         expected as InitialActivationExpected,
+        provider,
         "PENDING_PLAN_HANDLE_MISMATCH",
       );
       return;

@@ -95,6 +95,7 @@ function harness({
     subscription: {
       findUnique: vi.fn(({ select }: { select?: Record<string, unknown> }) => Promise.resolve(select?.planId ? current : authority)),
       update: vi.fn().mockImplementation(async () => events.push("subscription.update")),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     billingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
     merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -330,23 +331,28 @@ describe("ReinstallReconciliationService", () => {
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledOnce();
   });
 
-  it("terminally blocks an unmapped plan with a schedule-guarded update", async () => {
+  it("projects an unmapped plan without a sync error or retry", async () => {
     const test = harness({ providerResult: paidProvider, plan: null });
 
     await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
 
-    expect(test.database.subscription.updateMany).toHaveBeenCalledWith({
-      where: { id: expected.subscriptionId, nextReconcileAt },
-      data: { lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE", lastSyncErrorAt: now, nextReconcileAt: null },
-    });
-    expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.reinstall_blocked", {
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: expected.subscriptionId },
+      data: expect.objectContaining({
+        status: "UNMAPPED",
+        planId: null,
+        observedShopifyPlanHandle: "paid-2026",
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+        nextReconcileAt: null,
+        unmappedShopifyUsageEventHandles: expect.any(Array),
+      }),
+    }));
+    expect(test.logger.warn).toHaveBeenCalledWith("billing.subscription_reconciliation.reinstall_unmapped_plan", expect.objectContaining({
       shopId: "shop-1",
       subscriptionId: expected.subscriptionId,
-      errorCode: "UNMAPPED_PLAN_HANDLE",
-    });
-    expect(test.database.$transaction).toHaveBeenCalledOnce();
-    expect(test.database.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
-    expect(test.transaction.subscription.update).not.toHaveBeenCalled();
+      planHandle: "paid-2026",
+    }));
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
   });
 

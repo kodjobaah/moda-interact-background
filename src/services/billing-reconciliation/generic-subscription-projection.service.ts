@@ -16,6 +16,7 @@ import {
   type ObservedPlanProjection,
 } from "./observed-plan-projection.js";
 import type { BillingReconciliationSchedulerService } from "./reconciliation-scheduler.service.js";
+import { resolveShopifyUsageEventMapping } from "./shopify-usage-event-mapping.js";
 
 const GENERIC_PROJECTION_RETRY_MS = 60 * 1000;
 
@@ -57,7 +58,7 @@ export class GenericSubscriptionProjectionService {
 
     if (projection.executableMapped && plan) {
       if (!hasValidProviderBillingCycle(provider)) {
-        return this.recordMissingBillingCycle(shopId, existing, now);
+        return this.recordMissingBillingCycle(shopId, provider, existing, now);
       }
       return this.materialiseMappedProjection({
         shopId,
@@ -70,14 +71,7 @@ export class GenericSubscriptionProjectionService {
       });
     }
 
-    await this.database.subscription.upsert({
-      where: { shopId },
-      update: this.failClosedProjectionData(provider, plan, pendingPlan, projection, now),
-      create: {
-        shopId,
-        ...this.failClosedProjectionData(provider, plan, pendingPlan, projection, now),
-      },
-    });
+    await this.recordFailClosedProjection({ shopId, provider, plan, existing, pendingPlan, projection, now });
 
     return {
       billingPeriodId: null,
@@ -85,8 +79,33 @@ export class GenericSubscriptionProjectionService {
     };
   }
 
+  private async recordFailClosedProjection(input: {
+    shopId: string;
+    provider: PartnerSubscription;
+    plan: ObservedBillingPlan | null;
+    existing: GenericExistingSubscription | null;
+    pendingPlan: { id: string; active: boolean } | null;
+    projection: ObservedPlanProjection;
+    now: Date;
+  }): Promise<void> {
+    const { shopId, provider, plan, existing, pendingPlan, projection, now } = input;
+    await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      const current = await readLockedGenericSubscription(transaction, shopId, existing);
+      if (!current) return;
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
+      await transaction.subscription.update({
+        where: { id: current.id },
+        data: {
+          ...this.failClosedProjectionData(provider, plan, pendingPlan, projection, now),
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
+        },
+      });
+    });
+  }
+
   private async recordMissingBillingCycle(
     shopId: string,
+    provider: PartnerSubscription,
     existing: GenericExistingSubscription | null,
     now: Date,
   ): Promise<GenericSubscriptionProjectionResult> {
@@ -94,10 +113,12 @@ export class GenericSubscriptionProjectionService {
       const current = await readLockedGenericSubscription(transaction, shopId, existing);
       if (!current) return { kind: "stale" as const };
 
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const nextReconcileAt = new Date(now.getTime() + GENERIC_PROJECTION_RETRY_MS);
       await transaction.subscription.update({
         where: { id: current.id },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           status: SubscriptionProjectionStatus.SYNC_ERROR,
           lastSyncErrorCode: "MISSING_BILLING_CYCLE",
           lastSyncErrorAt: now,
@@ -128,11 +149,13 @@ export class GenericSubscriptionProjectionService {
       const current = await readLockedGenericSubscription(transaction, shopId, existing);
       if (!current) return { kind: "stale" as const };
 
+      const usageEventMapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const lifetimeCounter = await ensureLifetimeFreeCounterForMappedSubscription(transaction, shopId);
       if (lifetimeCounter.kind === "history-conflict") {
         await transaction.subscription.update({
           where: { id: current.id },
           data: {
+            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
             status: SubscriptionProjectionStatus.SYNC_ERROR,
             lastSyncErrorCode: "LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
             lastSyncErrorAt: now,
@@ -156,6 +179,7 @@ export class GenericSubscriptionProjectionService {
         await transaction.subscription.update({
           where: { id: current.id },
           data: {
+            unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
             status: SubscriptionProjectionStatus.SYNC_ERROR,
             lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT",
             lastSyncErrorAt: now,
@@ -169,6 +193,7 @@ export class GenericSubscriptionProjectionService {
       await transaction.subscription.update({
         where: { id: current.id },
         data: {
+          unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles,
           planId: plan.id,
           observedShopifyPlanHandle: provider.planHandle,
           status: projection.status,
@@ -232,6 +257,7 @@ export class GenericSubscriptionProjectionService {
       pendingShopifyPlanHandle: provider.pendingPlanHandle,
       pendingPlanId: pendingPlan?.active ? pendingPlan.id : null,
       pendingEffectiveAt: provider.pendingEffectiveAt,
+      ...(projection.syncErrorCode ? {} : { nextReconcileAt: null }),
     };
   }
 }

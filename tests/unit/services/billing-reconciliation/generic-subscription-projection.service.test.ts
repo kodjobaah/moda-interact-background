@@ -100,37 +100,67 @@ describe("GenericSubscriptionProjectionService", () => {
     });
 
     expect(result).toEqual({ billingPeriodId: null, packMeterHandle: null });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
+    expect(test.database.$transaction).toHaveBeenCalledOnce();
+    expect(test.scheduler.enqueue).not.toHaveBeenCalled();
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
         planId: null,
         status: "UNMAPPED",
         observedShopifyPlanHandle: "unknown-plan",
-        lastSyncErrorCode: "UNMAPPED_PLAN_HANDLE",
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+        nextReconcileAt: null,
       }),
     }));
-    expect(test.database.$transaction).not.toHaveBeenCalled();
   });
 
-  it("retains the mapped plan but fails closed when the provider omits its required usage meter", async () => {
+  it("keeps a valid Paid projection when the optional reporting handle is absent and records unmapped provider handles", async () => {
     const test = serviceHarness();
     const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
-    const observedProvider = { ...provider, usageEventHandles: ["pack-meter"] };
+    const observedProvider = { ...provider, usageEventHandles: ["unmapped-provider-handle"] };
+    const planWithoutReportingHandle = { ...paidPlan, shopifyUsageEventHandle: null };
 
     const result = await service.reconcile({
       shopId: "shop-1",
       provider: observedProvider,
-      plan: paidPlan,
+      plan: planWithoutReportingHandle,
       existing: null,
-      projection: classifyObservedPlanProjection(observedProvider, paidPlan),
+      projection: classifyObservedPlanProjection(observedProvider, planWithoutReportingHandle),
       now,
     });
 
-    expect(result).toEqual({ billingPeriodId: null, packMeterHandle: "pack-meter" });
-    expect(test.database.subscription.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({
+    expect(result).toEqual({ billingPeriodId: "period-1", packMeterHandle: "pack-meter" });
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
         planId: "plan-paid",
-        status: "SYNC_ERROR",
-        lastSyncErrorCode: "MISSING_USAGE_METER",
+        status: "ACTIVE",
+        lastSyncErrorCode: null,
+        unmappedShopifyUsageEventHandles: ["unmapped-provider-handle"],
+      }),
+    }));
+  });
+
+
+  it("keeps a Trialing subscription Trialing when provider usage events are not yet mapped", async () => {
+    const test = serviceHarness();
+    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
+    const trialingProvider = { ...provider, status: "TRIALING" as const, usageEventHandles: ["trial-only-event"] };
+
+    await service.reconcile({
+      shopId: "shop-1",
+      provider: trialingProvider,
+      plan: { ...paidPlan, shopifyUsageEventHandle: "arbitrary-reporting-handle" },
+      existing: null,
+      projection: classifyObservedPlanProjection(trialingProvider, paidPlan),
+      now,
+    });
+
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "TRIALING",
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+        unmappedShopifyUsageEventHandles: ["trial-only-event"],
       }),
     }));
   });

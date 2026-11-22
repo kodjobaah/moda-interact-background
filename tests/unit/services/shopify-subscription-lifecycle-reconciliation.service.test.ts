@@ -32,6 +32,7 @@ function transaction(subscription: Record<string, unknown>) {
   });
   return {
     $queryRaw: vi.fn(),
+    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
     subscription: {
       findUnique: vi.fn().mockResolvedValue(subscription),
       update: vi.fn().mockResolvedValue(subscription),
@@ -275,14 +276,73 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     }
   });
 
+
+
+  it("restores a valid Paid subscription without requiring its optional reporting handle", async () => {
+    const currentStart = new Date("2026-09-01T00:00:00.000Z");
+    const currentEnd = new Date("2026-10-01T00:00:00.000Z");
+    const tx = transaction({
+      status: "FROZEN",
+      planId: "plan-1",
+      billingPeriodId: "period-1",
+      currentPeriodStart: currentStart,
+      currentPeriodEnd: currentEnd,
+      lastProviderLifecycleEventAt: null,
+      lastProviderLifecycleEventId: null,
+      billingPeriod: { id: "period-1", periodStart: currentStart, periodEnd: currentEnd, status: "OPEN" },
+    });
+    tx.billingPlan.findUnique.mockResolvedValue({
+      id: "plan-1", active: true, name: "Growth", kind: "PAID_METERED", shopifyPlanHandle: "growth",
+      includedRecoveryConversationAllowance: 100, recoveryCreditPackEnabled: false,
+      shopifyUsageEventHandle: null, shopifyRecoveryCreditPackEventHandle: null,
+    });
+    tx.merchantPricingPlan.findUnique.mockResolvedValue({ usageEvents: [] });
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    const provider = {
+      planHandle: "growth", usageEventHandles: [], pendingPlanHandle: null, pendingEffectiveAt: null,
+      status: "ACTIVE" as const, currentPeriodStart: currentStart, currentPeriodEnd: currentEnd,
+      trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [],
+    };
+
+    const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+      activeSubscription: provider,
+      latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
+    }, now);
+
+    expect(result).toBe("restored");
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "ACTIVE", unmappedShopifyUsageEventHandles: [] }),
+    }));
+  });
+
+  it("projects a genuinely unknown unfreeze plan as UNMAPPED without sync error or retry", async () => {
+    const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
+    tx.billingPlan.findUnique.mockResolvedValue(null);
+    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    const provider = { planHandle: "unregistered-plan", usageEventHandles: ["provider-event"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE" as const, currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] };
+
+    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+      activeSubscription: provider,
+      latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
+    }, now);
+
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "UNMAPPED",
+        unmappedShopifyUsageEventHandles: ["provider-event"],
+        lastSyncErrorCode: null,
+        lastSyncErrorAt: null,
+        nextReconcileAt: null,
+      }),
+    }));
+  });
+
   it.each([
     ["inactive mapping", "UNMAPPED_PLAN_HANDLE", { active: false }],
     ["Paid allowance null", "INVALID_INCLUDED_ALLOWANCE", { kind: "PAID_METERED", includedRecoveryConversationAllowance: null }],
     ["Paid allowance negative", "INVALID_INCLUDED_ALLOWANCE", { kind: "PAID_METERED", includedRecoveryConversationAllowance: -1 }],
     ["Paid allowance non-integer", "INVALID_INCLUDED_ALLOWANCE", { kind: "PAID_METERED", includedRecoveryConversationAllowance: 1.5 }],
     ["Paid allowance unsafe", "INVALID_INCLUDED_ALLOWANCE", { kind: "PAID_METERED", includedRecoveryConversationAllowance: Number.MAX_SAFE_INTEGER + 1 }],
-    ["Paid meter missing", "MISSING_USAGE_METER", { kind: "PAID_METERED", shopifyUsageEventHandle: null }],
-    ["provider omits Paid meter", "MISSING_USAGE_METER", { kind: "PAID_METERED" }],
     ["Paid pack missing", "MISSING_USAGE_METER", { kind: "PAID_METERED", recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: null }],
     ["provider omits Free pack", "MISSING_USAGE_METER", { kind: "FREE", recoveryCreditPackEnabled: true, shopifyRecoveryCreditPackEventHandle: "pack" }],
     ["Paid cycle missing", "MISSING_BILLING_CYCLE", { kind: "PAID_METERED" }],
@@ -293,7 +353,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const provider = { planHandle: "growth", usageEventHandles: code === "MISSING_USAGE_METER" ? [] : (overrides.kind === "FREE" ? [] : ["recovery-meter"]), pendingPlanHandle: "pending", pendingEffectiveAt: new Date("2026-10-01"), status: "ACTIVE" as const, currentPeriodStart: code === "MISSING_BILLING_CYCLE" ? null : new Date("2026-09-01"), currentPeriodEnd: code === "MISSING_BILLING_CYCLE" ? null : new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: true, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] };
     await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: provider, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
-    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: code === "UNMAPPED_PLAN_HANDLE" ? "UNMAPPED" : "SYNC_ERROR", lastSyncErrorCode: code, pendingShopifyPlanHandle: "pending" }) }));
+    expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: code === "UNMAPPED_PLAN_HANDLE" ? "UNMAPPED" : "SYNC_ERROR", lastSyncErrorCode: code, lastSyncErrorAt: expect.any(Date), nextReconcileAt: expect.any(Date), pendingShopifyPlanHandle: "pending" }) }));
     expect(tx.subscription.update.mock.calls.at(-1)?.[0].data.status).not.toBe("ACTIVE");
     expectNoModelMutations(tx.billingPeriod);
     expectNoModelMutations(tx.billingPeriodEntitlementCounter);
