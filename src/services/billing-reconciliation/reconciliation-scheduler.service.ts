@@ -8,7 +8,9 @@ import {
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
 import type { BackgroundRuntimeConfigSnapshot } from "../../runtime/background-runtime-config.js";
+import { isBlockedUnfreezeAccountingState } from "./unfreeze-integrity-guard.js";
 import { createSubscriptionReconcilePayload } from "../billing-subscription-reconciliation/reconciliation-queue.service.js";
+import { billingOperationalIncidentSink, billingIncidentProjectionSelect, reportCommittedBillingFailure, type BillingIncidentSink } from "../billing-operational-incident.service.js";
 
 type SchedulerDatabase = Pick<PrismaClient, "subscription">;
 type SubscriptionQueue = Pick<Queue, "add">;
@@ -21,6 +23,7 @@ export class BillingReconciliationSchedulerService {
     private readonly subscriptionQueue: SubscriptionQueue | undefined,
     private readonly logger: StructuredLogger,
     private readonly now: () => Date,
+    private readonly incidentSink: BillingIncidentSink = billingOperationalIncidentSink,
   ) {}
 
   async markSyncError(
@@ -30,14 +33,17 @@ export class BillingReconciliationSchedulerService {
     runtimeConfig?: Pick<BackgroundRuntimeConfigSnapshot, "billingFrozenRecheckSeconds" | "billingProviderRetrySeconds">,
   ): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
-    this.logger.error("billing.subscription_reconciliation.error", { shopId, errorCode, error: message });
+    // Retain the original Error object for the shared structured logger's
+    // provider-code/response diagnostics and production redaction policy.
+    this.logger.error("billing.subscription_reconciliation.error", { shopId, errorCode, errorMessage: message, error });
     const now = this.now();
     const subscription = await this.database.subscription.findUnique({
       where: { shopId },
-      select: { id: true, status: true, planId: true, billingPeriodId: true, nextReconcileAt: true },
+      select: { id: true, status: true, planId: true, billingPeriodId: true, nextReconcileAt: true, lastSyncErrorCode: true },
     });
     if (!subscription) return;
-    const nextReconcileAt = subscription.status === SubscriptionProjectionStatus.FROZEN
+    const blocked = isBlockedUnfreezeAccountingState(subscription);
+    const nextReconcileAt = subscription.status === SubscriptionProjectionStatus.FROZEN && !blocked
       ? new Date(now.getTime() + (runtimeConfig?.billingFrozenRecheckSeconds ?? 3600) * 1000)
       : new Date(now.getTime() + (runtimeConfig?.billingProviderRetrySeconds ?? 300) * 1000);
     const updated = await this.database.subscription.updateMany({
@@ -47,15 +53,21 @@ export class BillingReconciliationSchedulerService {
         planId: subscription.planId,
         billingPeriodId: subscription.billingPeriodId,
         nextReconcileAt: subscription.nextReconcileAt,
+        // CAS prevents a provider failure from overwriting a newly committed
+        // accounting block between the read and this update.
+        lastSyncErrorCode: subscription.lastSyncErrorCode,
       },
       data: {
-        lastSyncErrorCode: errorCode,
-        lastSyncErrorAt: now,
+        ...(blocked ? {} : { lastSyncErrorCode: errorCode, lastSyncErrorAt: now }),
         lastSyncedAt: now,
         nextReconcileAt,
       },
     });
-    if (updated.count > 0) await this.enqueue(shopId, subscription.id, nextReconcileAt, now);
+    if (updated.count > 0) {
+      await this.enqueue(shopId, subscription.id, nextReconcileAt, now);
+      // The CAS has committed. Never expose an error based on the stale read.
+      await this.publishCommittedFailure(shopId, subscription.id);
+    }
   }
 
   async enqueue(
@@ -83,11 +95,24 @@ export class BillingReconciliationSchedulerService {
     }
   }
 
+  async publishCommittedFailure(shopId: string, subscriptionId: string): Promise<void> {
+    try {
+      await reportCommittedBillingFailure(this.database, this.incidentSink, shopId, subscriptionId);
+    } catch (error) {
+      this.logger.error("billing.operational_incident.committed_read_failed", {
+        shopId, subscriptionId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      });
+    }
+  }
+
   async publishCommittedLifecycleSchedule(shopId: string, subscriptionId: string): Promise<void> {
     const current = await this.database.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { nextReconcileAt: true },
+      select: { ...billingIncidentProjectionSelect, nextReconcileAt: true },
     });
+    if (current) await this.incidentSink.report(shopId, current);
     if (current?.nextReconcileAt) {
       await this.enqueue(shopId, subscriptionId, current.nextReconcileAt);
     }

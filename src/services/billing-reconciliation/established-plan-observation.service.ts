@@ -1,4 +1,5 @@
 import { BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
+import { retireUnmappedCurrentPeriod } from "../billing-period-transition/retire-unmapped-current-period.js";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -17,7 +18,8 @@ import { resolveShopifyUsageEventMapping } from "./shopify-usage-event-mapping.j
 import { planChangeTargetPrerequisiteFailure } from "./plan-change-target-prerequisites.js";
 
 type EstablishedPlanObservationDatabase = Pick<PrismaClient, "$transaction" | "billingPlan" | "subscription">;
-type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue">;
+type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue"> &
+  Partial<Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">>;
 type CapacityResumeScheduler = Pick<RecoveryCapacityResumeService, "schedule">;
 type PlanChangeTransition = Pick<ShopifyPlanChangeTransitionService, "transition">;
 
@@ -126,7 +128,8 @@ export class EstablishedPlanObservationService {
 
     if (!observedPlan?.active) {
       await this.recordUnmappedPlan(existing, provider, now, observedPlan !== null);
-      return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+      await this.scheduler.publishCommittedFailure?.(shopId, existing.id);
+      return { kind: "handled", billingPeriodId: null, packMeterHandle: null };
     }
 
     await this.recordPlanChangeFailure(
@@ -177,11 +180,20 @@ export class EstablishedPlanObservationService {
           pendingEffectiveAt: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true,
         },
       });
-      if (!matchesExpectedSubscription(current, expected)) return;
+      if (!current || !matchesExpectedSubscription(current, expected)) return;
+      await retireUnmappedCurrentPeriod(transaction, {
+        subscriptionId: current.id,
+        billingPeriodId: current.billingPeriodId,
+        now,
+      });
       const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       await transaction.subscription.update({
         where: { id: expected.id },
         data: {
+          billingPeriodId: null,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
+          trialEndsAt: null,
           planId: null,
           status: SubscriptionProjectionStatus.UNMAPPED,
           observedShopifyPlanHandle: provider.planHandle,
@@ -295,6 +307,7 @@ export class EstablishedPlanObservationService {
     });
     if (updated.count > 0) {
       await this.scheduler.enqueue(shopId, existing.id, nextReconcileAt, now);
+      await this.scheduler.publishCommittedFailure?.(shopId, existing.id);
     }
   }
 

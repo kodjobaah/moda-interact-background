@@ -1,5 +1,5 @@
 import { APP_PRICING_BILLING_PERIOD_DRAIN_WINDOW_MS } from "@modainteract/moda-interact-shared/billing";
-import { BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
+import { BillingPeriodCloseReason, BillingPeriodEntitlementCounterKind, BillingPeriodStatus, BillingPlanKind, SubscriptionProjectionStatus } from "@prisma/client";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
@@ -12,9 +12,11 @@ import { nextSubscriptionReconcileAt, ROLLOVER_RETRY_MS } from "./reconciliation
 import type { InitialActivationPlan } from "./types.js";
 import { BillingPlanMaterializationService } from "../billing-plan-materialization.service.js";
 import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopify-usage-event-mapping.js";
+import { retireUnmappedCurrentPeriod } from "../billing-period-transition/retire-unmapped-current-period.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
+  publishCommittedFailure?(shopId: string, subscriptionId: string): Promise<void>;
 };
 
 type DiscountPublisher = {
@@ -81,6 +83,13 @@ export class ReinstallReconciliationService {
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, expected.subscriptionId);
       if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return { kind: "stale" as const };
+      const current = await transaction.subscription.findUnique({
+        where: { id: expected.subscriptionId }, select: { billingPeriodId: true },
+      });
+      await retireUnmappedCurrentPeriod(transaction, {
+        subscriptionId: expected.subscriptionId, billingPeriodId: current?.billingPeriodId ?? null,
+        now, closeReason: BillingPeriodCloseReason.CONTRACT_ENDED,
+      });
       await transaction.subscription.update({ where: { id: expected.subscriptionId }, data: {
         planId: null, observedShopifyPlanHandle: null, status: SubscriptionProjectionStatus.NO_CONTRACT,
         billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null, trialEndsAt: null,
@@ -155,6 +164,7 @@ export class ReinstallReconciliationService {
     });
     if (committed.kind === "conflict") {
       await this.publishNext(shopId, expected.subscriptionId, committed.nextReconcileAt);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
     } else if (committed.kind === "committed") {
       await this.publishDiscountSync(shopId, "REINSTALL_RECONCILED");
       if (next) await this.publishNext(shopId, expected.subscriptionId, next);
@@ -285,6 +295,12 @@ export class ReinstallReconciliationService {
       await lockShopSettings(transaction, shopId);
       await lockSubscription(transaction, expected.subscriptionId);
       if (!(await this.isReinstallAuthority(transaction, shopId, expected))) return false;
+      const current = await transaction.subscription.findUnique({
+        where: { id: expected.subscriptionId }, select: { billingPeriodId: true },
+      });
+      await retireUnmappedCurrentPeriod(transaction, {
+        subscriptionId: expected.subscriptionId, billingPeriodId: current?.billingPeriodId ?? null, now,
+      });
       const mapping = await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles);
       const pendingPlan = provider.pendingPlanHandle
         ? await transaction.billingPlan.findUnique({ where: { shopifyPlanHandle: provider.pendingPlanHandle }, select: { id: true, active: true } })
@@ -293,6 +309,10 @@ export class ReinstallReconciliationService {
         where: { id: expected.subscriptionId },
         data: {
           planId: null,
+          billingPeriodId: null,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
+          trialEndsAt: null,
           observedShopifyPlanHandle: provider.planHandle,
           status: SubscriptionProjectionStatus.UNMAPPED,
           unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles,
@@ -307,7 +327,10 @@ export class ReinstallReconciliationService {
       });
       return true;
     });
-    if (committed) this.logger.warn("billing.subscription_reconciliation.reinstall_unmapped_plan", { shopId, subscriptionId: expected.subscriptionId, planHandle: provider.planHandle });
+    if (committed) {
+      this.logger.warn("billing.subscription_reconciliation.reinstall_unmapped_plan", { shopId, subscriptionId: expected.subscriptionId, planHandle: provider.planHandle });
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
   }
 
   private async recordReinstallProviderFailure(shopId: string, expected: ReinstallExpected, error: unknown): Promise<void> {
@@ -348,7 +371,10 @@ export class ReinstallReconciliationService {
         },
       });
     });
-    if (updated.count > 0) this.logger.warn("billing.subscription_reconciliation.reinstall_blocked", { shopId, subscriptionId: expected.subscriptionId, errorCode });
+    if (updated.count > 0) {
+      this.logger.warn("billing.subscription_reconciliation.reinstall_blocked", { shopId, subscriptionId: expected.subscriptionId, errorCode });
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
   }
 
   private async publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void> {

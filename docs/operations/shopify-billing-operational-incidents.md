@@ -1,0 +1,51 @@
+# Shopify subscription billing: Admin incident and repair runbook
+
+This document describes the operational incident producer in the Background billing reconciliation flow. The producer reuses `OperationalIncident` and `OperationalIncidentEvent` and the Shared incident reporter. It does not create a ticketing system, a new retry queue, or a separate subscription status.
+
+## Detection and visibility
+
+After an actionable subscription failure commits, the scanner or scheduled reconciliation worker reads the committed subscription and publishes it through the same incident sink. Failure branches in initial activation, same-plan projection, plan changes, reinstall and billing-period reconciliation also call this sink after commit; healthy paths do not perform an additional incident lookup. An operational incident is grouped by the shop, subscription and reason code; the occurrence identifier is stable across re-observation of the same persisted failure. The Admin operational-incidents inbox is the destination for the resulting records, subject to its existing filtering/permissions.
+
+- `UNMAPPED`: reason `UNMAPPED_PLAN_HANDLE` when the exact local plan is absent, or `INACTIVE_SHOPIFY_PLAN_HANDLE` when the operational plan exists but is inactive; both are `MEDIUM`. This supplements Admin Billing > Unmapped and is not a Shopify synchronisation failure.
+- `SYNC_ERROR` or a frozen subscription with an actionable local billing error: severity `HIGH`. The incident's `errorMessage` contains curated repair instructions, not a raw Shopify response or credentials.
+- A persisted actionable billing-cycle error can be reported even if the subscription still has `ACTIVE`/`TRIALING` or `NO_CONTRACT` status. Healthy subscriptions with no error and isolated provider/API retry errors do not generate incident noise; those remain in structured server logs and the existing retry path.
+
+The incident reporter does **not** run inside the billing transaction. A reporter failure logs the original exception with `billing.operational_incident.report_failed` and does not roll back already committed billing records. Each global billing scan also performs a bounded, rotating read of persisted Shopify subscriptions with actionable errors, including `nextReconcileAt = null`, and retries incident publication. This is independent of provider API availability and does not change billing state. It uses stable occurrence IDs to avoid inflating incident history. The periodic scan must be running for this eventual retry; it is not a transactional outbox guarantee. An `UNMAPPED` subscription remains visible independently through the existing Unmapped view even if incident persistence is unavailable.
+
+## Admin triage and safe repair routes
+
+| Reason | Evidence to inspect | Permitted resolution |
+| --- | --- | --- |
+| `UNMAPPED_PLAN_HANDLE` | Exact Shopify flat-rate plan handle and missing catalogue record | Register the **exact** missing plan in Admin Billing > Unmapped/Plans. Reconcile; do not invent aliases. |
+| `INACTIVE_SHOPIFY_PLAN_HANDLE` | Exact existing operational/catalogue plan and why it was disabled | Inspect and approve correction/reactivation of the **existing** plan, then reconcile. Never register a duplicate handle. |
+| `INVALID_INCLUDED_ALLOWANCE` | Published plan allowance; current billing period | Correct the configured allowance from authoritative plan evidence, then reconcile. Never reset used credits to make a test pass. |
+| `MISSING_USAGE_METER` | Shopify billable `TieredPrice` events and the separately configured **credit-pack** meter | Configure the credit-pack meter if enabled. The optional App Events reporting handle is not a billable usage meter. |
+| `MISSING_BILLING_CYCLE` | Provider subscription and authoritative cycle dates | Restore a valid Shopify provider cycle and retry. No invented local period dates. |
+| `UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT` | Current billing-period ID, plan snapshot, cycle dates, allowance counter, committed usage | Repair the specific verified mismatch from durable records. Reconciliation can automatically revalidate this same cycle on a later eligible Shopify `UPDATED`/`UNFROZEN` observation without re-granting credits. A newer `FROZEN` event prevents restoration. |
+| `UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT` | Historical Free entitlements, committed usage and lifetime counter | Reconstruct only from verified history with audited administrative authority. No automatic counter creation or lifetime credit reset. |
+| `UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED` | UsageEvents in PENDING/RETRYABLE/NEEDS_ATTENTION and Shopify reporting acknowledgements | Complete/retry outstanding provider reports and verify acknowledgements. Provider `ACTIVE` alone is **not** resolution evidence. |
+| Other `SYNC_ERROR` | Exact `lastSyncErrorCode`, structured server logs, relevant plan/period/ledger | Investigate the precise invariant; fix via an approved, audited operational procedure and reconcile. |
+
+**Important scope boundary:** The Background patch publishes actionable incident records and instructions, and uses the existing reconciliation scheduling/revalidation path. It does **not** create privileged Admin mutation endpoints for repairing historical credits or confirming usage-report delivery. Those operations must use existing audited controls if available; otherwise they require a separately reviewed Admin/backend implementation. Resolving an Admin incident record alone must never rewrite subscription status, credit balances or billing-period data.
+
+## Incident resolution contract (Admin-controlled)
+
+Background publishes **observations**, not arbitrary incident resolutions. A subscription can become healthy after an authorized repair, but a healthy status alone must not rewrite an administrator-owned incident or append a synthetic `RESOLVED` audit event.
+
+1. Admin identifies the incident by `category=SHOPIFY_SUBSCRIPTION_BILLING`, shop, subscription `resourceKey` and `reasonCode`. The message includes the exact observed Shopify plan handle when present.
+2. The authorized operator follows the remedy above, checks original provider and ledger evidence, and performs an audited repair using existing authorized controls. For lifetime history and usage-flush failures, **Shopify ACTIVE alone is not proof**.
+3. Trigger a fresh provider reconciliation. Verify the committed subscription error is cleared, the expected plan/cycle and entitlement-counter/reservation invariants hold, and no usage report remains unacknowledged if that was the failure.
+4. Only a verified, authenticated Admin resolution operation may mark the incident resolved with `resolvedAt`, `resolvedByPlatformAdminId`, `resolutionNote` and an append-only `OperationalIncidentEvent`. Resolving the incident must never grant credits or change the subscription. **Background deliberately does not auto-resolve Admin incidents**.
+5. A recurrence after resolution must be reported using the existing Shared reporter semantics. Do not delete historical incident events or clear failures merely to remove an inbox item.
+
+The Admin incident view already accepts arbitrary incident categories and provides authenticated ownership and audited resolution. The separate Admin patch adds a billing-specific read-only verification of the current subscription before accepting `RESOLVE`; it does not implement a credit-repair endpoint. If the selected Admin branch differs from the reviewed snapshot, verify equivalent behaviour before applying that patch.
+
+## Acceptance checks
+
+1. An exceptional unfreeze failure commits a truthful `SYNC_ERROR` and an Admin operational incident with the subscription, shop, reason and repair guidance.
+2. Repeated observations of one persisted failure use the same occurrence identifier and do not create a new inbox incident per poll.
+3. A newer unknown/inactive plan cannot erase an outstanding unfreeze accounting error or close its historical open period.
+4. A verified same-cycle billing-period repair may restore without a second `UNFROZEN` event, but only after the existing period and counter invariants pass. No capacity is granted or reset by verification.
+5. Lifetime Free-history and pre-close usage-flush errors remain blocked until evidence-backed repair. The incident must remain visible.
+6. A failed incident-report write is logged with original error details; a bounded periodic replay retries committed, still-actionable errors, including records without a scheduled subscription retry.
+7. Admin rejects incident resolution while the subscription is unmapped or still has a persisted sync error, and preserves ownership and append-only audit semantics.

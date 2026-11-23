@@ -34,6 +34,7 @@ describe("ReconciliationContextService", () => {
             currentPeriodEnd: true,
             cancelAtPeriodEnd: true,
             lastSyncErrorCode: true,
+            lastProviderLifecycleState: true,
           },
         },
       },

@@ -72,7 +72,20 @@ function harness({ updateCount = 1, capacityResume = vi.fn().mockResolvedValue(u
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
     merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
-    subscription: { updateMany: vi.fn().mockResolvedValue({ count: updateCount }) },
+    subscription: {
+      findFirst: vi.fn().mockResolvedValue({ id: expected.subscriptionId, billingPeriodId: "period-1" }),
+      updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
+    },
+    billingPeriod: {
+      findUnique: vi.fn().mockResolvedValue({ id: "period-1", subscriptionId: expected.subscriptionId, status: "CLOSED" }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    billingPlan: { findUnique: vi.fn().mockResolvedValue({ kind: BillingPlanKind.PAID_METERED }) },
+    usageEvent: { updateMany: vi.fn() },
+    usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }), updateMany: vi.fn() },
+    billingPeriodEntitlementCounter: {
+      findUnique: vi.fn().mockResolvedValue(null), updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
   };
   const database = {
     billingPlan: { findUnique: vi.fn().mockResolvedValue({ id: "pending-plan", active: true }) },
@@ -280,4 +293,30 @@ describe("EstablishedPlanChangeReconciliationService", () => {
     });
     expect(test.reconciliationQueue.publishNext).toHaveBeenCalledTimes(2);
   });
+  it("does not retire a stale scheduled plan-change period", async () => {
+    const test = harness();
+    test.transaction.subscription.findFirst.mockResolvedValue(null);
+    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unknown" } as never, currentPlan, null);
+    expect(test.transaction.subscription.updateMany).not.toHaveBeenCalled();
+    expect(test.transaction.billingPeriod.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("retires the old paid period before an unknown scheduled plan change", async () => {
+    const test = harness();
+    test.transaction.billingPeriod.findUnique.mockResolvedValue({
+      id: "period-1", subscriptionId: expected.subscriptionId,
+      status: "OPEN", planKindSnapshot: "PAID_METERED",
+    });
+    test.transaction.billingPeriodEntitlementCounter.findUnique
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 12, committedQuantity: 5, reservedQuantity: 0, forfeitedQuantity: 0, version: 1 })
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 12, committedQuantity: 5, reservedQuantity: 0, forfeitedQuantity: 7, version: 2 });
+    await test.service.reconcile("shop-1", expected, { ...provider, planHandle: "unknown" } as never, currentPlan, null);
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "CLOSED", closeReason: "PLAN_CHANGED" }),
+    }));
+    expect(test.transaction.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "UNMAPPED", planId: null, billingPeriodId: null }),
+    }));
+  });
+
 });

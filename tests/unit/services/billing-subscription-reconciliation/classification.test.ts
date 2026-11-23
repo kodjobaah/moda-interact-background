@@ -34,6 +34,7 @@ function makeRow(overrides: {
     currentPeriodEnd: null,
     cancelAtPeriodEnd: false,
     lastSyncErrorCode: null,
+    lastProviderLifecycleState: null,
   };
   const { subscription, ...shopOverrides } = overrides;
   return {
@@ -173,6 +174,33 @@ describe("classifySubscriptionReconciliation", () => {
     }));
 
     expect(result).toMatchObject({ type: "accepted", kind: "established-plan-change" });
+  });
+
+  it.each([
+    "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+    "UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT",
+    "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED",
+  ])("keeps failed unfreeze %s eligible for its scheduled retry", (lastSyncErrorCode) => {
+    const row = makeRow({
+      onboardingCompleted: true,
+      subscription: {
+        status: SubscriptionProjectionStatus.SYNC_ERROR,
+        lastProviderLifecycleState: "UPDATED",
+        lastSyncErrorCode,
+        planId: "plan-current",
+        pendingPlanId: null,
+        pendingShopifyPlanHandle: null,
+        pendingEffectiveAt: null,
+      },
+    });
+    expect(classify(row)).toMatchObject({ type: "accepted", kind: "frozen-reconciliation" });
+    expect(classify(row, { ...job, expectedNextReconcileAt: "2026-09-12T13:00:00.000Z" })).toMatchObject({
+      type: "skip", reason: "stale-next-reconcile-at",
+    });
+    expect(classify(makeRow({
+      onboardingCompleted: true,
+      subscription: { ...row.subscription!, lastSyncErrorCode: "BILLING_PERIOD_PLAN_CONFLICT", lastProviderLifecycleState: "UNFROZEN" },
+    }))).toMatchObject({ type: "skip", reason: "subscription-state-ineligible" });
   });
 
   it("uses the same period-style expected shape for frozen reconciliation without pending keys", () => {

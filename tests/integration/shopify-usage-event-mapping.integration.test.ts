@@ -1,8 +1,11 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { BillingPlanKind, MerchantPricingAllowancePeriod, MerchantPricingBillingPeriod, MerchantPricingPlanKind, MerchantPricingUsagePricingMode, PrismaClient, SubscriptionProjectionStatus } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { PartnerSubscription } from "../../src/providers/shopify-partner-billing.provider.js";
+import { GenericSubscriptionProjectionService } from "../../src/services/billing-reconciliation/generic-subscription-projection.service.js";
+import { classifyObservedPlanProjection } from "../../src/services/billing-reconciliation/observed-plan-projection.js";
 import { resolveShopifyUsageEventMapping } from "../../src/services/billing-reconciliation/shopify-usage-event-mapping.js";
 
 const catalogueLocales = [
@@ -31,6 +34,7 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
           shopifyPlanHandle: `paid-${suffix}`,
           name: "ARCH-078 mapping integration plan",
           kind: BillingPlanKind.PAID_METERED,
+          includedRecoveryConversationAllowance: 100,
         },
       });
       billingPlanId = billingPlan.id;
@@ -38,6 +42,11 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
         data: { shopId, status: SubscriptionProjectionStatus.NO_CONTRACT },
       });
       subscriptionId = subscription.id;
+      // Keep the lifetime counter in place so real projection does not have
+      // to rely on an unrelated global platform-policy fixture.
+      await db.shopEntitlementCounter.create({
+        data: { shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 2 },
+      });
       const periodStart = new Date("2026-11-01T00:00:00.000Z");
       const periodEnd = new Date("2026-12-01T00:00:00.000Z");
       const period = await db.billingPeriod.create({
@@ -89,6 +98,24 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
       });
 
       const providerHandles = ["known-event", "new-event", "new-event"];
+      const provider: PartnerSubscription = {
+        planHandle: billingPlan.shopifyPlanHandle,
+        usageEventHandles: providerHandles,
+        pendingPlanHandle: null,
+        pendingEffectiveAt: null,
+        status: "ACTIVE",
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        trialEndsAt: null,
+        cancelAtPeriodEnd: false,
+        providerSubscriptionId: `provider-${suffix}`,
+        providerUsageSnapshot: [],
+        providerUsagePricingSnapshot: [],
+      };
+      const scheduler = { enqueue: vi.fn(async () => undefined) };
+      const reconciliation = new GenericSubscriptionProjectionService(
+        db, scheduler as never, { warn: vi.fn() } as never,
+      );
       const failedProjection = new Error("rollback projection after mapping update");
       await expect(db.$transaction(async (transaction) => {
         const mapping = await resolveShopifyUsageEventMapping(transaction, billingPlan.shopifyPlanHandle, providerHandles);
@@ -115,21 +142,18 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
       expect(rolledBack.currentPeriodEnd).toBeNull();
       expect(rolledBack.unmappedShopifyUsageEventHandles).toEqual([]);
 
-      await db.$transaction(async (transaction) => {
-        const mapping = await resolveShopifyUsageEventMapping(transaction, billingPlan.shopifyPlanHandle, providerHandles);
-        await transaction.subscription.update({
-          where: { id: subscription.id },
-          data: {
-            status: SubscriptionProjectionStatus.ACTIVE,
-            planId: billingPlan.id,
-            billingPeriodId: period.id,
-            currentPeriodStart: periodStart,
-            currentPeriodEnd: periodEnd,
-            observedShopifyPlanHandle: billingPlan.shopifyPlanHandle,
-            unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles,
-          },
-        });
+      // Exercise the production service: the plan, period and mapping must be
+      // committed by the same reconciliation transaction.
+      const firstProjection = await reconciliation.reconcile({
+        shopId,
+        provider,
+        plan: billingPlan,
+        existing: null,
+        projection: classifyObservedPlanProjection(provider, billingPlan),
+        now: new Date("2026-11-15T00:00:00.000Z"),
       });
+      expect(firstProjection.billingPeriodId).toBe(period.id);
+      expect(scheduler.enqueue).not.toHaveBeenCalled();
 
       const projected = await db.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
       expect(projected.status).toBe(SubscriptionProjectionStatus.ACTIVE);
@@ -149,12 +173,15 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
           fixedUnitAmountMinor: 20,
         },
       });
-      await db.$transaction(async (transaction) => {
-        const mapping = await resolveShopifyUsageEventMapping(transaction, billingPlan.shopifyPlanHandle, providerHandles);
-        await transaction.subscription.update({
-          where: { id: subscription.id },
-          data: { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles },
-        });
+      // A second real observation after Admin catalogue correction clears the
+      // unmapped array without disturbing the persisted plan or billing period.
+      await reconciliation.reconcile({
+        shopId,
+        provider,
+        plan: billingPlan,
+        existing: projected,
+        projection: classifyObservedPlanProjection(provider, billingPlan),
+        now: new Date("2026-11-15T00:01:00.000Z"),
       });
 
       const corrected = await db.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
@@ -162,6 +189,7 @@ suite("Shopify provider-authoritative usage-event mapping PostgreSQL integration
       expect(corrected.planId).toBe(billingPlan.id);
       expect(corrected.billingPeriodId).toBe(period.id);
       expect(corrected.unmappedShopifyUsageEventHandles).toEqual([]);
+      expect(scheduler.enqueue).not.toHaveBeenCalled();
     } finally {
       if (billingPeriodId) await db.billingPeriod.deleteMany({ where: { id: billingPeriodId } });
       if (subscriptionId) await db.subscription.deleteMany({ where: { id: subscriptionId } });

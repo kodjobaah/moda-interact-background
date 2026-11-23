@@ -1,5 +1,6 @@
 import type { BillingSubscriptionReconcileJob } from "@modainteract/moda-interact-shared/billing";
 import { SubscriptionProjectionStatus } from "@prisma/client";
+import { isBlockedUnfreezeAccountingState } from "../billing-reconciliation/unfreeze-integrity-guard.js";
 
 export const RETRYABLE_PLAN_CHANGE_SYNC_ERRORS = [
   "UNEXPECTED_IMMEDIATE_PLAN_CHANGE",
@@ -62,6 +63,7 @@ type ClassificationSubscription = {
   currentPeriodEnd: Date | null;
   cancelAtPeriodEnd: boolean;
   lastSyncErrorCode: string | null;
+  lastProviderLifecycleState?: string | null;
 };
 
 export type ReconciliationClassificationRow = {
@@ -168,7 +170,8 @@ export function classifySubscriptionReconciliation(
     && subscription.pendingEffectiveAt === null
     && subscription.nextReconcileAt !== null;
   const isFrozenReconciliation = row.onboardingCompleted
-    && subscription.status === SubscriptionProjectionStatus.FROZEN
+    && (subscription.status === SubscriptionProjectionStatus.FROZEN
+      || isBlockedUnfreezeAccountingState(subscription))
     && subscription.planId !== null
     && subscription.nextReconcileAt !== null;
   const isEstablishedPlanChange = row.onboardingCompleted

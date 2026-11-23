@@ -63,6 +63,15 @@ export function establishedPlanObservationHarness() {
   const transaction = {
     $queryRaw: vi.fn().mockResolvedValue([]),
     merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-new" }, { eventHandle: "pack-new" }] }) },
+    billingPeriod: { findUnique: vi.fn().mockResolvedValue({
+      id: "period-old", subscriptionId: existing.id, status: "CLOSED", planKindSnapshot: "PAID_METERED",
+    }), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    billingPlan: { findUnique: vi.fn().mockResolvedValue(currentPlan) },
+    usageEvent: { updateMany: vi.fn() },
+    usageReservation: { aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }), updateMany: vi.fn() },
+    billingPeriodEntitlementCounter: {
+      findUnique: vi.fn().mockResolvedValue(null), updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     subscription: {
       findUnique: vi.fn().mockImplementation(async () => existing),
       update: vi.fn().mockResolvedValue({}),

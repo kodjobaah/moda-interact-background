@@ -260,14 +260,6 @@ export class EffectiveBillingPolicyResolver {
       counter.reservedQuantity,
     );
 
-    if (
-      plan.kind === BillingPlanKind.PAID_METERED &&
-      subscription.shop.platform === "SHOPIFY" &&
-      !plan.shopifyUsageEventHandle
-    ) {
-      throw invalidConfiguration(shopId, "paid plan usage event handle is missing");
-    }
-
     const packConfiguration = resolveRecoveryCreditPackConfiguration(plan);
     const recoveryCreditPack = packConfiguration
       ? {

@@ -8,6 +8,9 @@ import { BillingPlanKind, ShopPlatform, SubscriptionProjectionStatus, type Prism
 import type { Queue } from "bullmq";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 
+import { UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS } from "../billing-reconciliation/unfreeze-integrity-guard.js";
+import { billingOperationalIncidentSink, billingIncidentProjectionSelect, reportCommittedBillingFailure, type BillingIncidentSink } from "../billing-operational-incident.service.js";
+
 type SubscriptionQueue = Pick<Queue, "add">;
 type BillingDatabase = PrismaClient;
 
@@ -30,6 +33,7 @@ export class ReconciliationQueueService {
     private readonly queue: SubscriptionQueue | undefined,
     private readonly logger: StructuredLogger,
     private readonly now: () => Date,
+    private readonly incidentSink: BillingIncidentSink = billingOperationalIncidentSink,
   ) {}
 
   async enqueue(job: BillingSubscriptionReconcileJob, delay = 0): Promise<void> {
@@ -54,6 +58,15 @@ export class ReconciliationQueueService {
           { OR: [
           { subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } },
           { subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } },
+          {
+            onboardingCompleted: true,
+            subscription: { is: {
+              status: SubscriptionProjectionStatus.SYNC_ERROR,
+              lastSyncErrorCode: { in: [...UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS] },
+              planId: { not: null },
+              nextReconcileAt: { not: null },
+            } },
+          },
           {
             onboardingCompleted: true,
             subscription: { is: {
@@ -138,11 +151,26 @@ export class ReconciliationQueueService {
     }
   }
 
+  async publishCommittedFailure(shopId: string, subscriptionId: string): Promise<void> {
+    try {
+      await reportCommittedBillingFailure(this.database, this.incidentSink, shopId, subscriptionId);
+    } catch (error) {
+      // The billing transaction already committed. Log the original read error
+      // and preserve normal worker progress; the persisted failure remains.
+      this.logger.error("billing.operational_incident.committed_read_failed", {
+        shopId, subscriptionId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        error,
+      });
+    }
+  }
+
   async publishCommittedLifecycleSchedule(shopId: string, subscriptionId: string): Promise<void> {
     const current = await this.database.subscription.findUnique({
       where: { id: subscriptionId },
-      select: { nextReconcileAt: true },
+      select: { ...billingIncidentProjectionSelect, nextReconcileAt: true },
     });
+    if (current) await this.incidentSink.report(shopId, current);
     if (current?.nextReconcileAt) await this.publishNext(shopId, subscriptionId, current.nextReconcileAt);
   }
 }

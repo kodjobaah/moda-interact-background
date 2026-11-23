@@ -284,6 +284,38 @@ describe("billing reconciliation coordinator", () => {
     expect(retry).toHaveBeenCalledWith("shop-1", expect.objectContaining({ currentPlanId: "plan-current" }), "PROVIDER_STATE_UNRESOLVED");
   });
 
+  it("preserves a failed-unfreeze accounting error when the scheduled provider query fails", async () => {
+    const row = rolloverRow("SYNC_ERROR");
+    row.subscription.lastSyncErrorCode = "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED";
+    const blocked = {
+      ...row,
+      subscription: { ...row.subscription, lastProviderLifecycleState: "UPDATED" },
+    };
+    const failure = new Error("Shopify provider unavailable");
+    const test = harness({ row: blocked, providerError: failure });
+    test.database.subscription.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    await test.service.reconcileJob(createSubscriptionReconcilePayload("shop-1", "subscription-1", now));
+
+    expect(test.partner.getSubscriptionReconciliationSnapshot).toHaveBeenCalledOnce();
+    expect(test.database.subscription.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        status: { in: ["SYNC_ERROR", "FROZEN"] },
+        planId: "plan-current",
+        nextReconcileAt: now,
+        lastSyncErrorCode: { in: [
+          "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT", "UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT", "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED",
+        ] },
+      }),
+      data: expect.objectContaining({ nextReconcileAt: expect.any(Date) }),
+    }));
+    expect(test.database.subscription.updateMany.mock.calls[0][0].data).not.toHaveProperty("lastSyncErrorCode");
+    expect(test.logger.error).toHaveBeenCalledWith("billing.subscription_reconciliation.provider_failed", expect.objectContaining({
+      shopId: "shop-1", errorMessage: "Shopify provider unavailable", error: failure,
+    }));
+    expect(test.queue.add).toHaveBeenCalledOnce();
+  });
+
   it.each(["handled", "restored"] as const)("republishes the committed schedule after lifecycle %s", async (result) => {
     const test = harness({ row: rolloverRow("FROZEN"), snapshot: {
       activeSubscription: provider,
@@ -298,7 +330,7 @@ describe("billing reconciliation coordinator", () => {
     expect(reconcile.mock.calls[0][0]).toBe("shop-1");
     expect(test.database.subscription.findUnique).toHaveBeenCalledWith({
       where: { id: "subscription-1" },
-      select: { nextReconcileAt: true },
+      select: expect.objectContaining({ nextReconcileAt: true, status: true, lastSyncErrorCode: true }),
     });
     expect(test.queue.add).toHaveBeenCalledOnce();
     expect(test.queue.add.mock.calls[0][1].expectedNextReconcileAt).toBe("2026-09-12T12:15:00.000Z");

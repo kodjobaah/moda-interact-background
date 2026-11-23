@@ -289,7 +289,13 @@ export class PaidIncludedRecoveryReservationService {
     const now = this.now();
     const subscription = await transaction.subscription.findUnique({
       where: { shopId: input.shopId },
-      select: { id: true, billingPeriodId: true, currentPeriodStart: true, currentPeriodEnd: true },
+      select: {
+        id: true,
+        billingPeriodId: true,
+        currentPeriodStart: true,
+        currentPeriodEnd: true,
+        plan: { select: { kind: true, shopifyUsageEventHandle: true } },
+      },
     });
     const counter = await transaction.billingPeriodEntitlementCounter.findUnique({
       where: { id: reservation.billingPeriodEntitlementCounterId },
@@ -317,16 +323,14 @@ export class PaidIncludedRecoveryReservationService {
     }
 
     const provider = await resolveRecoveryUsageProvider(transaction, input.shopId);
-    const plan = await transaction.subscription.findUnique({
-      where: { shopId: input.shopId },
-      select: { plan: { select: { kind: true, shopifyUsageEventHandle: true } } },
-    });
-    if (
-      plan?.plan?.kind !== BillingPlanKind.PAID_METERED ||
-      (provider === "SHOPIFY" && !plan.plan.shopifyUsageEventHandle)
-    ) {
-      throw new PaidIncludedRecoveryReservationError("Paid normal usage meter is missing");
+    if (subscription.plan?.kind !== BillingPlanKind.PAID_METERED) {
+      throw new PaidIncludedRecoveryReservationError("Paid included recovery plan is missing");
     }
+    // An App Events reporting handle is optional; it is not a Shopify billable
+    // usage-event meter. Keep the local usage record and credit commitment, but
+    // never enqueue an unpublishable App Events report without a valid handle.
+    const hasShopifyReportingHandle = provider === "SHOPIFY"
+      && Boolean(subscription.plan.shopifyUsageEventHandle?.trim());
 
     const updatedCounter = await transaction.billingPeriodEntitlementCounter.updateMany({
       where: {
@@ -354,13 +358,13 @@ export class PaidIncludedRecoveryReservationService {
         sourceId: input.sourceKey,
         occurredAt: input.occurredAt ?? now,
         provider,
-        shopifyReportState: provider === "SHOPIFY"
+        shopifyReportState: hasShopifyReportingHandle
           ? ShopifyReportState.PENDING
           : ShopifyReportState.NOT_APPLICABLE,
-        shopifyEventHandle: provider === "SHOPIFY"
-          ? plan.plan.shopifyUsageEventHandle
+        shopifyEventHandle: hasShopifyReportingHandle
+          ? subscription.plan.shopifyUsageEventHandle
           : null,
-        shopifyIdempotencyKey: provider === "SHOPIFY"
+        shopifyIdempotencyKey: hasShopifyReportingHandle
           ? createShopifyUsageIdempotencyKey(input.shopId, idempotencyKey)
           : null,
       },

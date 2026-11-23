@@ -71,9 +71,9 @@ function harness({
     id: "subscription-1",
     planId: "plan-paid",
     observedShopifyPlanHandle: "paid-2026",
-    billingPeriodId: "period-paid",
-    currentPeriodStart: paidProvider.currentPeriodStart,
-    currentPeriodEnd: paidProvider.currentPeriodEnd,
+    billingPeriodId: "period-paid" as string | null,
+    currentPeriodStart: paidProvider.currentPeriodStart as Date | null,
+    currentPeriodEnd: paidProvider.currentPeriodEnd as Date | null,
   },
   authority = { id: "subscription-1", nextReconcileAt },
   period = null,
@@ -93,7 +93,7 @@ function harness({
       update: vi.fn().mockImplementation(async () => events.push("settings.update")),
     },
     subscription: {
-      findUnique: vi.fn(({ select }: { select?: Record<string, unknown> }) => Promise.resolve(select?.planId ? current : authority)),
+      findUnique: vi.fn(({ select }: { select?: Record<string, unknown> }) => Promise.resolve(select?.planId || select?.billingPeriodId ? current : authority)),
       update: vi.fn().mockImplementation(async () => events.push("subscription.update")),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
@@ -103,11 +103,18 @@ function harness({
       findUnique: vi.fn().mockResolvedValue(period),
       create: vi.fn().mockResolvedValue({ id: "period-new" }),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    usageEvent: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    usageReservation: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     billingPeriodEntitlementCounter: {
       findUnique: vi.fn().mockResolvedValue(counter),
       create: vi.fn(),
       upsert: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     shopifyDiscountCatalogue: {
       upsert: vi.fn().mockResolvedValue({ unavailableAt: now }),
@@ -154,7 +161,11 @@ function harness({
 
 describe("ReinstallReconciliationService", () => {
   it("uses one direct active-subscription lookup for a no-contract reinstall and retains lock and discount transaction order", async () => {
-    const test = harness();
+    const test = harness({ current: {
+      id: "subscription-1", planId: "plan-paid", billingPeriodId: null,
+      observedShopifyPlanHandle: "paid-2026",
+      currentPeriodStart: null, currentPeriodEnd: null,
+    } });
 
     await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
 
@@ -332,7 +343,11 @@ describe("ReinstallReconciliationService", () => {
   });
 
   it("projects an unmapped plan without a sync error or retry", async () => {
-    const test = harness({ providerResult: paidProvider, plan: null });
+    const test = harness({ providerResult: paidProvider, plan: null, current: {
+      id: "subscription-1", planId: "plan-paid", billingPeriodId: null,
+      observedShopifyPlanHandle: "paid-2026",
+      currentPeriodStart: null, currentPeriodEnd: null,
+    } });
 
     await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
 
@@ -354,6 +369,45 @@ describe("ReinstallReconciliationService", () => {
       planHandle: "paid-2026",
     }));
     expect(test.transaction.shop.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { mode: "no contract", plan: null, providerResult: null, closeReason: "CONTRACT_ENDED", status: "NO_CONTRACT" },
+    { mode: "unmapped", plan: null, providerResult: paidProvider, closeReason: "PLAN_CHANGED", status: "UNMAPPED" },
+  ])("closes a prior paid period exactly once before $mode reinstall projection", async ({ plan, providerResult, closeReason, status }) => {
+    const period = {
+      id: "period-paid", subscriptionId: "subscription-1", status: BillingPeriodStatus.OPEN,
+      planKindSnapshot: BillingPlanKind.PAID_METERED, planId: "plan-paid",
+    };
+    const counter = {
+      id: "counter-1", version: 4, grantedQuantity: 10,
+      committedQuantity: 3, reservedQuantity: 2, forfeitedQuantity: 0,
+    };
+    const test = harness({ plan, providerResult, period, counter });
+    test.transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 2 } });
+    test.transaction.billingPeriodEntitlementCounter.findUnique
+      .mockResolvedValueOnce(counter)
+      .mockResolvedValueOnce({ ...counter, reservedQuantity: 0, forfeitedQuantity: 7 });
+
+    await test.service.reconcileReinstall("shop-1", expected, "gid://shopify/Shop/1");
+
+    expect(test.transaction.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "RELEASED" }),
+    }));
+    expect(test.transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "counter-1", version: 4, reservedQuantity: 2 }),
+    }));
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "period-paid", status: "OPEN" },
+      data: expect.objectContaining({ status: "CLOSED", closeReason }),
+    }));
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status, planId: null, billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null,
+      }),
+    }));
+    expect(test.transaction.billingPeriod.updateMany.mock.invocationCallOrder[0])
+      .toBeLessThan(test.transaction.subscription.update.mock.invocationCallOrder[0]);
   });
 
   it("does not mutate or publish when the locked reinstall authority has changed", async () => {

@@ -136,6 +136,36 @@ function harness({
 }
 
 describe("BillingReconciliationService", () => {
+  it("does not expose the old current period after lifecycle handling detaches it", async () => {
+    const test = harness({
+      latestLifecycleEvent: {
+        id: "unfrozen-1", state: "UNFROZEN", occurredAt: new Date("2026-09-12T11:00:00.000Z"),
+      },
+    });
+    test.database.subscription.findUnique
+      .mockResolvedValueOnce({
+        id: "subscription-1", status: "FROZEN", planId: "plan-1", billingPeriodId: "period-old",
+        pendingPlanId: null, pendingShopifyPlanHandle: null, pendingEffectiveAt: null,
+        currentPeriodStart: providerSubscription.currentPeriodStart,
+        currentPeriodEnd: providerSubscription.currentPeriodEnd,
+      })
+      .mockResolvedValueOnce({ status: "UNMAPPED", billingPeriodId: null });
+    const lifecycle = vi.spyOn(ShopifySubscriptionLifecycleReconciliationService.prototype, "reconcile")
+      .mockResolvedValue("handled");
+    try {
+      const result = await test.service.reconcileOnce();
+      expect(result.subscriptionErrors).toBe(0);
+      expect(test.database.subscription.findUnique).toHaveBeenCalledWith({
+        where: { id: "subscription-1" }, select: { status: true, billingPeriodId: true },
+      });
+      expect(test.purchases.reconcileProviderConfirmed).not.toHaveBeenCalledWith(expect.objectContaining({
+        billingPeriodId: "period-old",
+      }));
+    } finally {
+      lifecycle.mockRestore();
+    }
+  });
+
   it("repairs an incomplete current period after a restored lifecycle before returning", async () => {
     const cycleStart = new Date("2026-09-01T00:00:00.000Z");
     const cycleEnd = new Date("2026-10-01T00:00:00.000Z");
@@ -605,7 +635,8 @@ describe("BillingReconciliationService", () => {
       expect.objectContaining({
         shopId: "shop-1",
         errorCode: "PARTNER_API_ERROR",
-        error: "Partner unavailable",
+        errorMessage: "Partner unavailable",
+        error: expect.any(Error),
       }),
     );
   });
@@ -631,7 +662,8 @@ describe("BillingReconciliationService", () => {
       expect.objectContaining({
         shopId: "shop-1",
         errorCode: "INTERNAL_RECONCILIATION_ERROR",
-        error: "PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance",
+        errorMessage: "PlatformBillingPolicy.default has an invalid lifetime Free recovery allowance",
+        error: expect.any(Error),
       }),
     );
   });

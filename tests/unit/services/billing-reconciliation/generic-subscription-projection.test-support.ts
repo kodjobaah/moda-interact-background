@@ -79,16 +79,22 @@ export function transactionHarness(current: GenericExistingSubscription = emptyS
       findUnique: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockResolvedValue({ id: "period-1" }),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     billingPeriodEntitlementCounter: {
       findUnique: vi.fn().mockResolvedValue(null),
       create: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    usageReservation: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      updateMany: vi.fn(),
     },
     shopEntitlementCounter: {
       findUnique: vi.fn().mockResolvedValue({ id: "lifetime-1" }),
       upsert: vi.fn(),
     },
-    usageEvent: { count: vi.fn().mockResolvedValue(0) },
+    usageEvent: { count: vi.fn().mockResolvedValue(0), updateMany: vi.fn() },
     platformBillingPolicy: {
       findUnique: vi.fn().mockResolvedValue({ lifetimeFreeRecoveryAllowance: 5 }),
     },

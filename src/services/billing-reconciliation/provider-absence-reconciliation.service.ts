@@ -6,7 +6,7 @@ import type { BackgroundRuntimeConfigSnapshot } from "../../runtime/background-r
 import { ShopifySubscriptionLifecycleReconciliationService } from "../shopify-subscription-lifecycle-reconciliation.service.js";
 import type { BillingReconciliationSchedulerService } from "./reconciliation-scheduler.service.js";
 
-type ProviderAbsenceDatabase = Pick<PrismaClient, "$transaction" | "subscription">;
+type ProviderAbsenceDatabase = Pick<PrismaClient, "$transaction" | "subscription" | "billingPlan" | "merchantPricingPlan">;
 type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "publishCommittedLifecycleSchedule">;
 type ProviderAbsenceProjection = { billingPeriodId: string | null; packMeterHandle: string | null };
 

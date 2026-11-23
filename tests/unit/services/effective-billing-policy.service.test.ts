@@ -584,7 +584,7 @@ describe("EffectiveBillingPolicyResolver", () => {
       .rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({ reason: "INVALID_CONFIGURATION" });
   });
 
-  it("fails closed when a paid plan has no usage event handle", async () => {
+  it("allows an otherwise valid paid Shopify policy without an optional App Events reporting handle", async () => {
     const fake = client({
       subscription: {
         findUnique: async () => ({
@@ -618,13 +618,10 @@ describe("EffectiveBillingPolicyResolver", () => {
       },
     });
 
-    await expect(
-      new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now),
-    ).rejects.toMatchObject<Partial<EffectiveBillingPolicyError>>({
-      reason: "INVALID_CONFIGURATION",
-    });
-    await expect(new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now))
-      .rejects.toThrow("paid plan usage event handle is missing");
+    const policy = await new EffectiveBillingPolicyResolver(fake).resolve("shop-1", now);
+    expect(policy.shopifyUsageEventHandle).toBeNull();
+    expect(policy.planKind).toBe("PAID_METERED");
+    expect(policy.billingPeriod).toMatchObject({ id: "period-1", phase: "ACTIVE" });
   });
 
   it("preserves the effective billing error for invalid outbound overrides", async () => {

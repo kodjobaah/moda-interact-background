@@ -11,9 +11,11 @@ import type { EstablishedPlanChangeExpected } from "./classification.js";
 import { RETRYABLE_PLAN_CHANGE_SYNC_ERRORS } from "./classification.js";
 import { ROLLOVER_RETRY_MS } from "./reconciliation-timing.js";
 import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopify-usage-event-mapping.js";
+import { retireUnmappedCurrentPeriod } from "../billing-period-transition/retire-unmapped-current-period.js";
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
+  publishCommittedFailure?(shopId: string, subscriptionId: string): Promise<void>;
 };
 
 type CapacityResumeScheduler = Pick<typeof recoveryCapacityResumeService, "schedule">;
@@ -132,6 +134,18 @@ export class EstablishedPlanChangeReconciliationService {
       const mapping = provider
         ? await resolveShopifyUsageEventMapping(transaction, provider.planHandle, provider.usageEventHandles)
         : null;
+      if (data.status === SubscriptionProjectionStatus.UNMAPPED) {
+        // The subscription lock alone is insufficient: a stale scheduled job
+        // must not close a period if its expected state no longer matches.
+        const current = await transaction.subscription.findFirst({
+          where: this.establishedPlanChangeWhere(expected),
+          select: { id: true, billingPeriodId: true },
+        });
+        if (!current) return 0;
+        await retireUnmappedCurrentPeriod(transaction, {
+          subscriptionId: current.id, billingPeriodId: current.billingPeriodId, now: this.now(),
+        });
+      }
       const result = await transaction.subscription.updateMany({
         where: this.establishedPlanChangeWhere(expected),
         data: { ...data, ...(mapping ? { unmappedShopifyUsageEventHandles: mapping.unmappedProviderHandles } : {}) },
@@ -171,14 +185,21 @@ export class EstablishedPlanChangeReconciliationService {
     const now = this.now();
     const next = unmapped ? null : new Date(now.getTime() + ROLLOVER_RETRY_MS);
     const updated = await this.updateWithUsageEventMapping(expected, provider, {
-      ...(unmapped ? { planId: null, status: SubscriptionProjectionStatus.UNMAPPED } : { status: SubscriptionProjectionStatus.SYNC_ERROR }),
+      ...(unmapped ? {
+        planId: null, billingPeriodId: null,
+        currentPeriodStart: null, currentPeriodEnd: null,
+        trialEndsAt: null, status: SubscriptionProjectionStatus.UNMAPPED,
+      } : { status: SubscriptionProjectionStatus.SYNC_ERROR }),
       ...(observedHandle ? { observedShopifyPlanHandle: observedHandle } : {}),
       nextReconcileAt: next,
       lastSyncedAt: now,
       lastSyncErrorCode: unmapped ? null : errorCode,
       lastSyncErrorAt: unmapped ? null : now,
     });
-    if (updated > 0 && next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+    if (updated > 0) {
+      if (next) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
   }
 
   async recordRetry(
@@ -206,7 +227,10 @@ export class EstablishedPlanChangeReconciliationService {
       lastSyncErrorCode: errorCode,
       lastSyncErrorAt: now,
     });
-    if (updated > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+    if (updated > 0) {
+      await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
   }
 
   private async schedulePlanChangeCapacityResume(shopId: string, planKind: BillingPlanKind): Promise<void> {

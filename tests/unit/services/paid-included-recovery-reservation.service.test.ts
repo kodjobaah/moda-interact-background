@@ -59,12 +59,11 @@ function createHarness(
   const transaction = {
     shop: { findUnique: vi.fn(async () => ({ platform: provider })) },
     subscription: {
-      findUnique: vi.fn(async (args: { select?: { plan?: unknown } }) => {
-        if (args.select?.plan) {
-          return { plan: { ...state.plan } };
-        }
-        return { ...state.subscription, billingPeriod: { ...state.period } };
-      }),
+      findUnique: vi.fn(async () => ({
+        ...state.subscription,
+        billingPeriod: { ...state.period },
+        plan: { ...state.plan },
+      })),
     },
     billingPeriodEntitlementCounter: {
       findUnique: vi.fn(async (args: { where: { id?: string; billingPeriodId_counter?: { billingPeriodId: string } } }) => {
@@ -335,7 +334,7 @@ describe("PaidIncludedRecoveryReservationService", () => {
     await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "committed" });
     await expect(harness.service.commit({ shopId, sourceKey: "paid-included:period-1:recovery-1" })).resolves.toMatchObject({ kind: "already-committed" });
     expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
-    expect(harness.transaction.subscription.findUnique).toHaveBeenCalledTimes(2);
+    expect(harness.transaction.subscription.findUnique).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -375,17 +374,34 @@ describe("PaidIncludedRecoveryReservationService", () => {
     });
   });
 
-  it("fails closed when a Shopify paid commit has no usage event handle", async () => {
+  it("commits Shopify paid included credits without the optional reporting handle, without queuing an unpublishable report", async () => {
     const harness = createHarness();
     harness.state.plan.shopifyUsageEventHandle = null;
     await reserve(harness);
 
+    const sourceKey = "paid-included:period-1:recovery-1";
+    await expect(harness.service.commit({ shopId, sourceKey })).resolves.toMatchObject({ kind: "committed" });
+    await expect(harness.service.commit({ shopId, sourceKey })).resolves.toMatchObject({ kind: "already-committed" });
+    expect(harness.state.counter).toMatchObject({ committedQuantity: 1, reservedQuantity: 0 });
+    expect(harness.state.usageEvents).toHaveLength(1);
+    expect(harness.state.usageEvents[0]).toMatchObject({
+      provider: "SHOPIFY",
+      shopifyReportState: "NOT_APPLICABLE",
+      shopifyEventHandle: null,
+      shopifyIdempotencyKey: null,
+    });
+  });
+
+  it("treats a whitespace-only reporting handle as absent instead of queuing a failed report", async () => {
+    const harness = createHarness();
+    harness.state.plan.shopifyUsageEventHandle = "  ";
+    await reserve(harness);
     await expect(harness.service.commit({
-      shopId,
-      sourceKey: "paid-included:period-1:recovery-1",
-    })).rejects.toBeInstanceOf(PaidIncludedRecoveryReservationError);
-    expect(harness.state.counter).toMatchObject({ committedQuantity: 0, reservedQuantity: 1 });
-    expect(harness.state.usageEvents).toHaveLength(0);
+      shopId, sourceKey: "paid-included:period-1:recovery-1",
+    })).resolves.toMatchObject({ kind: "committed" });
+    expect(harness.state.usageEvents[0]).toMatchObject({
+      shopifyReportState: "NOT_APPLICABLE", shopifyEventHandle: null, shopifyIdempotencyKey: null,
+    });
   });
 
   it("does not create a second event or increment on duplicate commit", async () => {

@@ -30,6 +30,7 @@ import { SamePlanPeriodProgressionService } from "./billing-reconciliation/same-
 import { GenericSubscriptionProjectionService } from "./billing-reconciliation/generic-subscription-projection.service.js";
 import { classifyObservedPlanProjection } from "./billing-reconciliation/observed-plan-projection.js";
 import { BillingPlanMaterializationService } from "./billing-plan-materialization.service.js";
+import { isBlockedUnfreezeAccountingState } from "./billing-reconciliation/unfreeze-integrity-guard.js";
 
 export type { UsageDiscrepancy } from "./billing-reconciliation/provider-usage-reconciliation.service.js";
 
@@ -181,8 +182,6 @@ export class BillingReconciliationService {
       return this.providerAbsenceReconciliation.reconcile(shopId, snapshot, now, runtimeConfig);
     }
 
-    const materializer = new BillingPlanMaterializationService(this.database, this.logger);
-    const plan = await materializer.resolve(provider.planHandle);
     let existing = await this.database.subscription.findUnique({
       where: { shopId },
       select: {
@@ -197,10 +196,13 @@ export class BillingReconciliationService {
         currentPeriodEnd: true,
         cancelAtPeriodEnd: true,
         nextReconcileAt: true,
+        lastSyncErrorCode: true,
+        lastProviderLifecycleState: true,
       },
     });
+    const blockedUnfreeze = existing !== null && isBlockedUnfreezeAccountingState(existing);
     if (existing && existing.status !== SubscriptionProjectionStatus.NO_CONTRACT
-      && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN)) {
+      && (snapshot.latestLifecycleEvent || existing.status === SubscriptionProjectionStatus.FROZEN || blockedUnfreeze)) {
       const lifecycleResult = await new ShopifySubscriptionLifecycleReconciliationService(this.database, undefined, undefined, runtimeConfig).reconcile(
         shopId,
         existing.id,
@@ -209,7 +211,19 @@ export class BillingReconciliationService {
       );
       if (lifecycleResult === "handled") {
         await this.reconciliationScheduler.publishCommittedLifecycleSchedule(shopId, existing.id);
-        return { billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
+        // Lifecycle handling may have closed/detached the former period.
+        // Do not return its pre-transaction ID to the usage reconciler.
+        const committed = await this.database.subscription.findUnique({
+          where: { id: existing.id },
+          select: { status: true, billingPeriodId: true },
+        });
+        return {
+          billingPeriodId: committed && (
+            committed.status === SubscriptionProjectionStatus.ACTIVE
+            || committed.status === SubscriptionProjectionStatus.TRIALING
+          ) ? committed.billingPeriodId : null,
+          packMeterHandle: null,
+        };
       }
       if (lifecycleResult === "restored") {
         await this.reconciliationScheduler.publishCommittedLifecycleSchedule(shopId, existing.id);
@@ -227,12 +241,21 @@ export class BillingReconciliationService {
             currentPeriodEnd: true,
             cancelAtPeriodEnd: true,
             nextReconcileAt: true,
+            lastSyncErrorCode: true,
+            lastProviderLifecycleState: true,
           },
         });
         if (!restored) return { billingPeriodId: null, packMeterHandle: null };
         existing = restored;
       }
     }
+    // Never enter ordinary plan/cycle projection while an unfreeze integrity
+    // error remains recorded. The lifecycle branch above owns its retry.
+    if (existing && isBlockedUnfreezeAccountingState(existing)) {
+      return { billingPeriodId: null, packMeterHandle: null };
+    }
+    const materializer = new BillingPlanMaterializationService(this.database, this.logger);
+    const plan = await materializer.resolve(provider.planHandle);
     if (
       existing?.status === SubscriptionProjectionStatus.NO_CONTRACT
       && existing.planId === null

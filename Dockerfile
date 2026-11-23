@@ -17,7 +17,10 @@ COPY src ./src
 ENV PRISMA_CLIENT_ENGINE_TYPE='binary'
 RUN npx prisma generate --schema=./database/prisma/schema.prisma
 
-RUN npm run build
+
+# npm run build already generates the Prisma Client.
+# Give TypeScript sufficient memory for compilation.
+RUN NODE_OPTIONS="--max-old-space-size=4096" npm run build
 
 ENV NODE_ENV=production
 

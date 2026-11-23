@@ -22,6 +22,7 @@ import { ReconciliationQueueService } from "./billing-subscription-reconciliatio
 export { createSubscriptionReconcilePayload } from "./billing-subscription-reconciliation/reconciliation-queue.service.js";
 import type { InitialActivationPlan } from "./billing-subscription-reconciliation/types.js";
 import { BillingPlanMaterializationService } from "./billing-plan-materialization.service.js";
+import { UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS } from "./billing-reconciliation/unfreeze-integrity-guard.js";
 import { DiscountSyncPublisherService } from "./billing-subscription-reconciliation/discount-sync-publisher.service.js";
 import { InitialActivationReconciliationService } from "./billing-subscription-reconciliation/initial-activation-reconciliation.service.js";
 import { ReinstallReconciliationService } from "./billing-subscription-reconciliation/reinstall-reconciliation.service.js";
@@ -361,10 +362,30 @@ export class BillingSubscriptionReconciliationService {
       errorMessage: error instanceof Error ? error.message : "unknown failure",
       error: error,
     });
+    // A provider outage must not overwrite an unresolved unfreeze accounting
+    // error with PARTNER_API_ERROR (which ordinary projection could clear).
+    const held = await this.database.subscription.updateMany({
+      where: {
+        id: subscriptionId,
+        planId,
+        nextReconcileAt: consumedAt,
+        status: { in: [SubscriptionProjectionStatus.SYNC_ERROR, SubscriptionProjectionStatus.FROZEN] },
+        lastSyncErrorCode: { in: [...UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS] },
+      },
+      data: { lastSyncedAt: now, nextReconcileAt: next },
+    });
+    if (held.count > 0) {
+      await this.publishNext(shopId, subscriptionId, next);
+      return;
+    }
     const updated = await this.database.subscription.updateMany({
       where: {
         id: subscriptionId,
         status: SubscriptionProjectionStatus.FROZEN,
+        OR: [
+          { lastSyncErrorCode: null },
+          { lastSyncErrorCode: { notIn: [...UNRESOLVED_UNFREEZE_ACCOUNTING_ERRORS] } },
+        ],
         planId,
         nextReconcileAt: consumedAt,
       },

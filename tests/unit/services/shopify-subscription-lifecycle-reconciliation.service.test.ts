@@ -21,6 +21,20 @@ const frozen = {
 };
 
 function transaction(subscription: Record<string, unknown>) {
+  // Valid same-cycle fixtures must include an actual open period and a
+  // previously granted counter; neither is created by unfreeze restoration.
+  const defaultSameCycle = subscription.status === "FROZEN" && subscription.planId === "plan-1"
+    && subscription.currentPeriodStart instanceof Date && subscription.currentPeriodEnd instanceof Date
+    && (subscription.billingPeriodId === undefined || subscription.billingPeriodId === "period-1")
+    && subscription.billingPeriod !== null;
+  const period = defaultSameCycle ? {
+    id: "period-1", shopId: "shop-1", subscriptionId: "sub-1", planId: "plan-1",
+    shopifyPlanHandleSnapshot: "growth", planKindSnapshot: "PAID_METERED",
+    includedRecoveryCreditsGranted: 100, status: "OPEN",
+    periodStart: subscription.currentPeriodStart, periodEnd: subscription.currentPeriodEnd,
+    ...((subscription.billingPeriod ?? {}) as Record<string, unknown>),
+  } : subscription.billingPeriod;
+  subscription = defaultSameCycle ? { ...subscription, billingPeriodId: "period-1", billingPeriod: period } : subscription;
   const mutators = () => ({
     create: vi.fn(),
     createMany: vi.fn(),
@@ -32,12 +46,16 @@ function transaction(subscription: Record<string, unknown>) {
   });
   return {
     $queryRaw: vi.fn(),
-    merchantPricingPlan: { findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }) },
+    merchantPricingPlan: {
+      findUnique: vi.fn().mockResolvedValue({ usageEvents: [{ eventHandle: "recovery-meter" }] }),
+      update: vi.fn(),
+    },
     subscription: {
       findUnique: vi.fn().mockResolvedValue(subscription),
       update: vi.fn().mockResolvedValue(subscription),
     },
     billingPlan: {
+      create: vi.fn(),
       findUnique: vi.fn().mockResolvedValue({
         id: "plan-1",
         active: true,
@@ -52,7 +70,10 @@ function transaction(subscription: Record<string, unknown>) {
     },
     billingPeriod: { ...mutators(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     usageEvent: { ...mutators(), updateMany: vi.fn() },
-    billingPeriodEntitlementCounter: { ...mutators(), findUnique: vi.fn().mockResolvedValue(null) },
+    billingPeriodEntitlementCounter: { ...mutators(), findUnique: vi.fn().mockResolvedValue(defaultSameCycle ? {
+      id: "counter-1", shopId: "shop-1", billingPeriodId: "period-1", grantedQuantity: 100,
+      committedQuantity: 2, reservedQuantity: 1, forfeitedQuantity: 0,
+    } : null) },
     shopEntitlementCounter: mutators(),
     recoveryCreditPurchase: mutators(),
     recoveryCreditRefund: mutators(),
@@ -72,7 +93,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("projects FROZEN evidence and schedules one hourly retry", async () => {
     const tx = transaction({ lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", {
       activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: frozen,
     }, now);
@@ -83,7 +104,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("ignores strictly older lifecycle evidence without overwriting newer identity", async () => {
     const tx = transaction({ status: "ACTIVE", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         nextReconcileAt: new Date("2026-09-14T12:05:00.000Z"),
@@ -94,14 +115,14 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("replays the same FROZEN event and advances one hourly retry", async () => {
     const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: frozen.occurredAt, lastProviderLifecycleEventId: frozen.id });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
   });
 
   it("keeps newer lifecycle identity when older unresolved evidence arrives", async () => {
     const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, state: "UPDATED", eventType: "SUBSCRIPTION_UPDATED", id: "event-old" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, state: "UPDATED", eventType: "SUBSCRIPTION_UPDATED", id: "event-old" } }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
     expect(tx.subscription.update.mock.calls[0][0].data.lastProviderLifecycleEventId).toBeUndefined();
   });
@@ -109,7 +130,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("ignores stale FROZEN evidence and continues with live provider truth", async () => {
     const tx = transaction({ status: "ACTIVE", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+    const result = await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", {
       activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: frozen,
     }, now);
@@ -120,14 +141,14 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("keeps FROZEN and advances one hourly retry for stale UNFROZEN evidence", async () => {
     const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-old", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-old", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
   });
 
   it("does not overwrite a newer unfreeze schedule after stale FROZEN classification", async () => {
     const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: new Date("2026-09-14T12:00:00.000Z"), lastProviderLifecycleEventId: "event-newer", nextReconcileAt: new Date("2026-09-14T12:30:00.000Z") });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update).toHaveBeenCalledOnce();
     expect(tx.subscription.update.mock.calls[0][0].data.nextReconcileAt).toEqual(new Date("2026-09-14T13:00:00.000Z"));
   });
@@ -135,28 +156,28 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("preserves unrelated sync error while projecting FROZEN", async () => {
     const tx = transaction({ status: "ACTIVE", lastSyncErrorCode: "MISSING_USAGE_METER", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update.mock.calls[0][0].data.lastSyncErrorCode).toBeUndefined();
   });
 
   it("uses live cancelAtEndOfCycle while preserving FROZEN entitlement", async () => {
     const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtPeriodEnd: true, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtPeriodEnd: true, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: frozen }, now);
     expect(tx.subscription.update.mock.calls[0][0].data).toMatchObject({ status: "FROZEN", cancelAtPeriodEnd: true });
   });
 
   it("keeps FROZEN for UNFROZEN with no live contract and retries in one hour", async () => {
     const tx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", lastSyncErrorCode: "UNFROZEN_LIVE_CONTRACT_PENDING", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
   });
 
   it("closes the current period and writes NO_CONTRACT for effective cancellation", async () => {
     const tx = transaction({ id: "sub-1", status: "ACTIVE", planId: "plan-1", billingPeriod: { id: "period-1", status: "OPEN", planKindSnapshot: "FREE" }, lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
 
     expect(tx.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "CLOSED", closeReason: "CONTRACT_ENDED" }) }));
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "NO_CONTRACT", planId: null, billingPeriodId: null }) }));
@@ -165,7 +186,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("restores an unfrozen subscription only from live same-cycle evidence", async () => {
     const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), nextReconcileAt: now });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", {
       activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
@@ -188,7 +209,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
       lastProviderLifecycleEventId: null,
     });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
 
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FROZEN", nextReconcileAt: new Date("2026-09-14T13:00:00.000Z") }) }));
     expect(tx.subscription.update.mock.calls[0][0].data).not.toHaveProperty("planId");
@@ -202,7 +223,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const resume = { schedule: vi.fn().mockResolvedValue(undefined) };
-    const result = await new ShopifySubscriptionLifecycleReconciliationService(database, resume).reconcile("shop-1", "sub-1", {
+    const result = await new ShopifySubscriptionLifecycleReconciliationService(database as never, resume).reconcile("shop-1", "sub-1", {
       activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: "growth-next", pendingEffectiveAt: new Date("2026-10-01"), status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] },
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
@@ -219,7 +240,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const rollover = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: new Date("2026-10-01"), planKind: "PAID_METERED" });
     const planChange = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transitionInTransaction");
     try {
-      const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+      const result = await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
       expect(result).toBe("restored");
       expect(rollover).toHaveBeenCalledOnce();
       expect(planChange).not.toHaveBeenCalled();
@@ -236,7 +257,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const rollover = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: null, planKind: "PAID_METERED" });
     try {
-      await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+      await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
       expect(tx.billingPeriod.create).not.toHaveBeenCalled();
       expect(tx.billingPeriodEntitlementCounter.create).not.toHaveBeenCalled();
       expect(tx.billingPeriodEntitlementCounter.upsert).not.toHaveBeenCalled();
@@ -251,7 +272,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const rollover = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: null, planKind: "FREE" });
     try {
-      await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+      await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
       expect(rollover).toHaveBeenCalledOnce();
       expectNoModelMutations(tx.shopEntitlementCounter);
     } finally {
@@ -266,7 +287,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const rollover = vi.spyOn(SamePlanBillingPeriodRolloverService.prototype, "transitionInTransaction");
     const planChange = vi.spyOn(ShopifyPlanChangeTransitionService.prototype, "transitionInTransaction").mockResolvedValue({ kind: "transitioned", billingPeriodId: "period-2", nextReconcileAt: null, planKind: "PAID_METERED" });
     try {
-      const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "new", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+      const result = await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "new", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
       expect(result).toBe("restored");
       expect(planChange).toHaveBeenCalledOnce();
       expect(rollover).not.toHaveBeenCalled();
@@ -304,7 +325,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
       trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [],
     };
 
-    const result = await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+    const result = await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", {
       activeSubscription: provider,
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
@@ -315,13 +336,18 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     }));
   });
 
-  it("projects a genuinely unknown unfreeze plan as UNMAPPED without sync error or retry", async () => {
-    const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
+  it("projects a genuinely unknown unfreeze plan as UNMAPPED without retaining the old plan or changing period history", async () => {
+    const tx = transaction({ status: "FROZEN", planId: "plan-1", billingPeriodId: "period-old", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     tx.billingPlan.findUnique.mockResolvedValue(null);
-    const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
+    tx.merchantPricingPlan.findUnique.mockResolvedValue(null);
+    const database = {
+      billingPlan: tx.billingPlan,
+      merchantPricingPlan: tx.merchantPricingPlan,
+      $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)),
+    };
     const provider = { planHandle: "unregistered-plan", usageEventHandles: ["provider-event"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE" as const, currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] };
 
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", {
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", {
       activeSubscription: provider,
       latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" },
     }, now);
@@ -329,13 +355,24 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "UNMAPPED",
+        planId: null,
+        billingPeriodId: null,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        trialEndsAt: null,
+        observedShopifyPlanHandle: "unregistered-plan",
         unmappedShopifyUsageEventHandles: ["provider-event"],
         lastSyncErrorCode: null,
         lastSyncErrorAt: null,
         nextReconcileAt: null,
       }),
     }));
+    // Historical rows remain intact; the old current-period pointer is detached.
+    expect(tx.subscription.update.mock.calls.at(-1)![0].data.billingPeriodId).toBeNull();
+    expect(tx.billingPeriod.updateMany).not.toHaveBeenCalled();
+    expect(tx.billingPeriod.create).not.toHaveBeenCalled();
   });
+
 
   it.each([
     ["inactive mapping", "UNMAPPED_PLAN_HANDLE", { active: false }],
@@ -350,13 +387,43 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const tx = transaction({ status: "FROZEN", planId: "plan-1", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const plan = { id: "plan-1", active: true, name: "Plan", kind: "PAID_METERED", includedRecoveryConversationAllowance: 100, recoveryCreditPackEnabled: false, shopifyUsageEventHandle: "recovery-meter", shopifyRecoveryCreditPackEventHandle: null, shopifyPlanHandle: "growth", ...overrides };
     tx.billingPlan.findUnique.mockResolvedValue(plan);
+    if (code === "UNMAPPED_PLAN_HANDLE") {
+      // An inactive mapping unmaps the plan, so its old open Paid period
+      // must close with the same reservation/counter invariants as production.
+      tx.billingPeriodEntitlementCounter.findUnique
+        .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 100, committedQuantity: 2, reservedQuantity: 1, forfeitedQuantity: 0, version: 3 })
+        .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 100, committedQuantity: 2, reservedQuantity: 0, forfeitedQuantity: 98, version: 4 });
+      tx.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 1 } });
+      tx.billingPeriodEntitlementCounter.updateMany.mockResolvedValue({ count: 1 });
+    }
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const provider = { planHandle: "growth", usageEventHandles: code === "MISSING_USAGE_METER" ? [] : (overrides.kind === "FREE" ? [] : ["recovery-meter"]), pendingPlanHandle: "pending", pendingEffectiveAt: new Date("2026-10-01"), status: "ACTIVE" as const, currentPeriodStart: code === "MISSING_BILLING_CYCLE" ? null : new Date("2026-09-01"), currentPeriodEnd: code === "MISSING_BILLING_CYCLE" ? null : new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: true, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: provider, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: provider, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
     expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: code === "UNMAPPED_PLAN_HANDLE" ? "UNMAPPED" : "SYNC_ERROR", lastSyncErrorCode: code, lastSyncErrorAt: expect.any(Date), nextReconcileAt: expect.any(Date), pendingShopifyPlanHandle: "pending" }) }));
     expect(tx.subscription.update.mock.calls.at(-1)?.[0].data.status).not.toBe("ACTIVE");
-    expectNoModelMutations(tx.billingPeriod);
-    expectNoModelMutations(tx.billingPeriodEntitlementCounter);
+    if (code === "UNMAPPED_PLAN_HANDLE") {
+      expect(tx.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ planId: null, billingPeriodId: null, currentPeriodStart: null, currentPeriodEnd: null }),
+      }));
+      expect(tx.usageReservation.aggregate).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ billingPeriodEntitlementCounterId: "counter-1" }),
+      }));
+      expect(tx.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: "RELEASED", releaseReason: "PERIOD_CLOSED" }),
+      }));
+      expect(tx.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: "counter-1", version: 3, reservedQuantity: 1 }),
+        data: expect.objectContaining({ reservedQuantity: { decrement: 1 }, forfeitedQuantity: { increment: 98 } }),
+      }));
+      expect(tx.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: "period-1", status: "OPEN" }),
+        data: expect.objectContaining({ status: "CLOSED", closeReason: "PLAN_CHANGED" }),
+      }));
+    } else {
+      expectNoModelMutations(tx.billingPeriod);
+      expectNoModelMutations(tx.billingPeriodEntitlementCounter);
+      expectNoModelMutations(tx.usageReservation);
+    }
   });
 
   it("publishes one best-effort unfreeze capacity-resume hint after commit", async () => {
@@ -365,7 +432,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const order: string[] = [];
     database.$transaction.mockImplementation(async (callback: (value: typeof tx) => unknown) => { const result = await callback(tx); order.push("commit"); return result; });
     const resume = { schedule: vi.fn(async () => { order.push("resume"); }) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database, resume).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never, resume).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now);
     expect(resume.schedule).toHaveBeenCalledOnce();
     expect(order).toEqual(expect.arrayContaining(["commit", "resume"]));
     expect(order.indexOf("commit")).toBeLessThan(order.indexOf("resume"));
@@ -376,7 +443,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
     const logger = { warn: vi.fn(), error: vi.fn() };
     const resume = { schedule: vi.fn().mockRejectedValue(new Error("redis unavailable")) };
-    await expect(new ShopifySubscriptionLifecycleReconciliationService(database, resume, logger).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now)).resolves.toBe("restored");
+    await expect(new ShopifySubscriptionLifecycleReconciliationService(database as never, resume, logger).reconcile("shop-1", "sub-1", { activeSubscription: { planHandle: "growth", usageEventHandles: ["recovery-meter"], pendingPlanHandle: null, pendingEffectiveAt: null, status: "ACTIVE", currentPeriodStart: new Date("2026-09-01"), currentPeriodEnd: new Date("2026-10-01"), trialEndsAt: null, cancelAtEndOfCycle: false, providerSubscriptionId: "provider-1", providerUsageSnapshot: [] }, latestLifecycleEvent: { ...frozen, id: "event-unfrozen", eventType: "SUBSCRIPTION_UNFROZEN", state: "UNFROZEN" } }, now)).resolves.toBe("restored");
     expect(logger.warn).toHaveBeenCalledWith("billing.recovery_capacity_resume.enqueue_failed", expect.anything());
   });
 
@@ -384,10 +451,10 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     const resume = { schedule: vi.fn() };
     const unresolvedTx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const unresolvedDb = { $transaction: vi.fn(async (callback: (value: typeof unresolvedTx) => unknown) => callback(unresolvedTx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(unresolvedDb, resume).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(unresolvedDb as never, resume).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, state: "UNFROZEN", eventType: "SUBSCRIPTION_UNFROZEN" } }, now);
     const repeatedTx = transaction({ status: "FROZEN", lastProviderLifecycleEventAt: frozen.occurredAt, lastProviderLifecycleEventId: frozen.id });
     const repeatedDb = { $transaction: vi.fn(async (callback: (value: typeof repeatedTx) => unknown) => callback(repeatedTx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(repeatedDb, resume).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(repeatedDb as never, resume).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: frozen }, now);
     expect(resume.schedule).not.toHaveBeenCalled();
   });
 
@@ -400,7 +467,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
     tx.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 2 } });
     tx.billingPeriodEntitlementCounter.updateMany.mockResolvedValue({ count: 1 });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown, options?: unknown) => { const result = await callback(tx); return options ? { result, options } : result; }) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
     expect(database.$transaction.mock.calls.at(-1)?.[1]).toEqual({ isolationLevel: "Serializable" });
     expect(tx.usageReservation.aggregate).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: { in: ["RESERVED", "AMBIGUOUS"] } }) }));
     expect(tx.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "counter-1", version: 3, reservedQuantity: 2 }) }));
@@ -411,7 +478,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("replays effective cancellation without a second close or counter mutation", async () => {
     const tx = transaction({ id: "sub-1", status: "NO_CONTRACT", planId: null, billingPeriod: null, billingPeriodId: null, lastProviderLifecycleEventAt: frozen.occurredAt, lastProviderLifecycleEventId: "event-canceled" });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
     expect(tx.billingPeriod.updateMany).not.toHaveBeenCalled();
     expect(tx.billingPeriodEntitlementCounter.updateMany).not.toHaveBeenCalled();
     expect(tx.usageReservation.updateMany).not.toHaveBeenCalled();
@@ -420,14 +487,14 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("preserves lifetime purchased refund promotion and selection history on cancellation", async () => {
     const tx = transaction({ id: "sub-1", status: "ACTIVE", planId: "plan-1", providerSubscriptionId: "provider-1", billingPeriod: null, billingPeriodId: null, lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
     for (const model of [tx.shopEntitlementCounter, tx.recoveryCreditPurchase, tx.recoveryCreditRefund, tx.promotionalCreditGrant, tx.merchantPromotionSelection]) expectNoModelMutations(model);
   });
 
   it("does not retimestamp old-cycle UsageEvents during effective cancellation", async () => {
     const tx = transaction({ id: "sub-1", status: "ACTIVE", planId: "plan-1", providerSubscriptionId: "provider-1", billingPeriod: { id: "period-1", status: "OPEN", planKindSnapshot: "FREE" }, billingPeriodId: "period-1", lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
     const data = tx.usageEvent.updateMany.mock.calls[0]?.[0]?.data ?? {};
     expect(data).not.toHaveProperty("occurredAt");
     expect(data).not.toHaveProperty("createdAt");
@@ -438,7 +505,7 @@ describe("ShopifySubscriptionLifecycleReconciliationService", () => {
   it("ignores CANCELED lifecycle history for a genuinely fresh NO_CONTRACT row", async () => {
     const tx = transaction({ id: "sub-1", status: "NO_CONTRACT", planId: null, providerSubscriptionId: null, billingPeriodId: null, billingPeriod: null, lastProviderLifecycleEventAt: null, lastProviderLifecycleEventId: null });
     const database = { $transaction: vi.fn(async (callback: (value: typeof tx) => unknown) => callback(tx)) };
-    await new ShopifySubscriptionLifecycleReconciliationService(database).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
+    await new ShopifySubscriptionLifecycleReconciliationService(database as never).reconcile("shop-1", "sub-1", { activeSubscription: null, latestLifecycleEvent: { ...frozen, id: "event-canceled", eventType: "SUBSCRIPTION_CANCELED", state: "CANCELED" } }, now);
     expect(tx.subscription.update).not.toHaveBeenCalled();
     expect(tx.billingPeriod.updateMany).not.toHaveBeenCalled();
   });

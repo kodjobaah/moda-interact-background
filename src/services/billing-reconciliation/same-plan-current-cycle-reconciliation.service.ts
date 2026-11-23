@@ -12,7 +12,8 @@ import type {
 } from "./same-plan-reconciliation.types.js";
 
 type CurrentCycleDatabase = Pick<PrismaClient, "$transaction">;
-type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue">;
+type ReconciliationScheduler = Pick<BillingReconciliationSchedulerService, "enqueue"> &
+  Partial<Pick<BillingReconciliationSchedulerService, "publishCommittedFailure">>;
 
 type CurrentCycleInput = SamePlanReconciliationInput & {
   status: SubscriptionProjectionStatus;
@@ -123,9 +124,11 @@ export class SamePlanCurrentCycleReconciliationService {
 
     if (projection.kind === "conflict") {
       await this.scheduler.enqueue(shopId, existing.id, projection.nextReconcileAt, now);
+      await this.scheduler.publishCommittedFailure?.(shopId, existing.id);
       return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
     }
     if (projection.kind === "lifetime-counter-conflict") {
+      await this.scheduler.publishCommittedFailure?.(shopId, existing.id);
       this.logger.warn("billing.subscription_reconciliation.lifetime_free_counter_history_conflict", { shopId });
       return { kind: "handled", billingPeriodId: existing.billingPeriodId, packMeterHandle: null };
     }

@@ -305,4 +305,24 @@ describe("EstablishedPlanObservationService", () => {
     });
     expect(test.scheduler.enqueue).not.toHaveBeenCalled();
   });
+  it("closes the old open period atomically when an established pending target is unknown", async () => {
+    const test = harness();
+    test.transaction.billingPeriod.findUnique.mockResolvedValue({
+      id: "period-old", subscriptionId: existing.id, status: "OPEN", planKindSnapshot: "PAID_METERED",
+    });
+    test.transaction.billingPeriodEntitlementCounter.findUnique
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 8, committedQuantity: 4, reservedQuantity: 0, forfeitedQuantity: 0, version: 2 })
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 8, committedQuantity: 4, reservedQuantity: 0, forfeitedQuantity: 4, version: 3 });
+    const result = await test.service.reconcile({
+      shopId: "shop-1", provider: { ...provider, planHandle: "unknown" },
+      observedPlan: null, existing, now,
+    });
+    expect(result).toEqual({ kind: "handled", billingPeriodId: null, packMeterHandle: null });
+    expect(test.transaction.billingPeriod.updateMany).toHaveBeenCalledOnce();
+    expect(test.transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ planId: null, billingPeriodId: null,
+        currentPeriodStart: null, status: "UNMAPPED" }),
+    }));
+  });
+
 });

@@ -13,6 +13,7 @@ import { resolveShopifyUsageEventMapping } from "../billing-reconciliation/shopi
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
+  publishCommittedFailure?(shopId: string, subscriptionId: string): Promise<void>;
 };
 
 type DiscountPublisher = {
@@ -87,7 +88,10 @@ export class InitialActivationReconciliationService {
         lastSyncErrorAt: now,
         nextReconcileAt,
       }, provider);
-      if (updated && nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+      if (updated) {
+        if (nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+        await this.reconciliationQueue.publishCommittedFailure?.(shopId, subscriptionId);
+      }
       return;
     }
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
@@ -161,7 +165,10 @@ export class InitialActivationReconciliationService {
       }
       return { kind: "committed" as const };
     });
-    if (committed.kind === "conflict") await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
+    if (committed.kind === "conflict") {
+      await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, subscriptionId);
+    }
     if (committed.kind === "committed") {
       await this.discountPublisher.publishDiscountSync(shopId, "SUBSCRIPTION_ACTIVATED");
       if (nextReconcileAt) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
@@ -346,7 +353,10 @@ export class InitialActivationReconciliationService {
       lastSyncErrorAt: now,
       ...(next ? { nextReconcileAt: next } : { nextReconcileAt: null }),
     }, provider);
-    if (updated && next) await this.publishNext(shopId, expected.subscriptionId, next);
+    if (updated) {
+      if (next) await this.publishNext(shopId, expected.subscriptionId, next);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
   }
 
   async applyOtherCurrentPlan(
@@ -375,7 +385,10 @@ export class InitialActivationReconciliationService {
         lastSyncErrorAt: now,
         nextReconcileAt,
       }, provider);
-      if (updated) await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+      if (updated) {
+        await this.publishNext(shopId, subscriptionId, nextReconcileAt);
+        await this.reconciliationQueue.publishCommittedFailure?.(shopId, subscriptionId);
+      }
       return;
     }
     const committed = await this.database.$transaction(async (transaction: Prisma.TransactionClient) => {
@@ -405,7 +418,12 @@ export class InitialActivationReconciliationService {
       await transaction.subscription.update({ where: { id: subscriptionId }, data: { unmappedShopifyUsageEventHandles: usageEventMapping.unmappedProviderHandles, planId: planUsable ? plan?.id ?? null : null, observedShopifyPlanHandle: provider.planHandle, status, billingPeriodId: billingPeriod?.kind === "READY" ? billingPeriod.billingPeriodId : null, currentPeriodStart: provider.currentPeriodStart, currentPeriodEnd: provider.currentPeriodEnd, trialEndsAt: provider.trialEndsAt, cancelAtPeriodEnd: provider.cancelAtPeriodEnd, providerSubscriptionId: provider.providerSubscriptionId, pendingShopifyPlanHandle: provider.pendingPlanHandle, pendingPlanId: pendingPlan?.active ? pendingPlan.id : null, pendingEffectiveAt: provider.pendingEffectiveAt, nextReconcileAt: null, lastSyncedAt: now, lastSyncErrorCode: syncErrorCode, lastSyncErrorAt: syncErrorCode ? now : null } });
       return { kind: "committed" as const };
     });
-    if (committed.kind === "conflict") await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
+    if (committed.kind === "conflict") {
+      await this.publishNext(shopId, subscriptionId, committed.nextReconcileAt);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, subscriptionId);
+    } else if (committed.kind === "committed" && (!planUsable || syncErrorCode)) {
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, subscriptionId);
+    }
   }
 
   private async recordUnsupportedPaidTrial(shopId: string, expected: InitialActivationExpected, provider: PartnerSubscription): Promise<void> {
@@ -421,6 +439,7 @@ export class InitialActivationReconciliationService {
         shopId,
         subscriptionId: expected.subscriptionId,
       });
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
     }
   }
 

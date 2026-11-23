@@ -19,6 +19,7 @@ import { FREE_CYCLE_DISCOVERY_RETRY_MS, ROLLOVER_RETRY_MS } from "./reconciliati
 
 type ReconciliationQueuePublisher = {
   publishNext(shopId: string, subscriptionId: string, next: Date): Promise<void>;
+  publishCommittedFailure?(shopId: string, subscriptionId: string): Promise<void>;
 };
 
 type UsageEventPublisher = {
@@ -147,7 +148,11 @@ export class BillingCycleReconciliationService {
     if (this.now() >= preCloseAt && this.now() < periodEnd) {
       try {
         await this.usagePublisher.publishDue({ billingPeriodId: subscription.billingPeriodId!, runtimeConfig });
-      } catch {
+      } catch (error) {
+        this.logger.error("billing.subscription_reconciliation.pre_close_publish_failed", {
+          shopId, subscriptionId: expected.subscriptionId,
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
         const retryAt = new Date(Math.min(this.now().getTime() + ROLLOVER_RETRY_MS, periodEnd.getTime()));
         const failed = await this.database.subscription.updateMany({
           where: {
@@ -168,7 +173,10 @@ export class BillingCycleReconciliationService {
             lastSyncErrorAt: this.now(),
           },
         });
-        if (failed.count > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, retryAt);
+        if (failed.count > 0) {
+          await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, retryAt);
+          await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+        }
         return;
       }
     }
@@ -304,7 +312,12 @@ export class BillingCycleReconciliationService {
           : {}),
       },
     });
-    if (updated.count > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+    if (updated.count > 0) {
+      await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
+      if (errorCode !== "PARTNER_API_ERROR" && errorCode !== "PROVIDER_CYCLE_LAG") {
+        await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+      }
+    }
   }
 
   private async reconcilePreClose(
@@ -385,7 +398,10 @@ export class BillingCycleReconciliationService {
           lastSyncErrorAt: now,
         },
       });
-      if (updated.count > 0) await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, retryAt);
+      if (updated.count > 0) {
+        await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, retryAt);
+        await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+      }
       return;
     }
     const updated = await this.database.subscription.updateMany({
@@ -446,7 +462,10 @@ export class BillingCycleReconciliationService {
       });
       return { kind: "committed" as const };
     });
-    if (committed.kind === "conflict") await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, committed.nextReconcileAt);
+    if (committed.kind === "conflict") {
+      await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, committed.nextReconcileAt);
+      await this.reconciliationQueue.publishCommittedFailure?.(shopId, expected.subscriptionId);
+    }
     if (committed.kind === "committed") await this.reconciliationQueue.publishNext(shopId, expected.subscriptionId, next);
   }
 }

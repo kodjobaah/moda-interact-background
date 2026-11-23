@@ -240,4 +240,41 @@ describe("GenericSubscriptionProjectionService", () => {
     }));
     expect(test.scheduler.enqueue).toHaveBeenCalledOnce();
   });
+  it("closes an open paid cycle and releases reservations before an unmapped projection detaches it", async () => {
+    const existing = emptySubscription({
+      status: "ACTIVE", planId: "plan-paid", billingPeriodId: "old-period",
+      currentPeriodStart: cycleStart, currentPeriodEnd: cycleEnd,
+    });
+    const transaction = transactionHarness(existing);
+    transaction.billingPeriod.findUnique.mockResolvedValue({
+      id: "old-period", subscriptionId: existing.id, status: "OPEN",
+      planKindSnapshot: "PAID_METERED", planId: "plan-paid",
+    });
+    transaction.billingPeriodEntitlementCounter.findUnique
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 10, committedQuantity: 3, reservedQuantity: 2, forfeitedQuantity: 0, version: 1 })
+      .mockResolvedValueOnce({ id: "counter-1", grantedQuantity: 10, committedQuantity: 3, reservedQuantity: 0, forfeitedQuantity: 7, version: 2 });
+    transaction.usageReservation.aggregate.mockResolvedValue({ _sum: { quantity: 2 } });
+    const test = serviceHarness(transaction);
+    const service = new GenericSubscriptionProjectionService(test.database as never, test.scheduler, test.logger as never);
+    const unknownProvider = { ...provider, planHandle: "unknown-plan", usageEventHandles: [] };
+    const result = await service.reconcile({
+      shopId: "shop-1", provider: unknownProvider, plan: null, existing,
+      projection: classifyObservedPlanProjection(unknownProvider, null), now,
+    });
+    expect(result.billingPeriodId).toBeNull();
+    expect(transaction.usageReservation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "RELEASED", releaseReason: "PERIOD_CLOSED" }),
+    }));
+    expect(transaction.billingPeriodEntitlementCounter.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ reservedQuantity: 2, version: 1 }),
+    }));
+    expect(transaction.billingPeriod.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "CLOSED", closeReason: "PLAN_CHANGED" }),
+    }));
+    expect(transaction.subscription.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "UNMAPPED", billingPeriodId: null, planId: null,
+        currentPeriodStart: null, currentPeriodEnd: null }),
+    }));
+  });
+
 });

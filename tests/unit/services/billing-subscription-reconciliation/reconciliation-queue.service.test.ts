@@ -18,8 +18,9 @@ function harness(options: { queue?: { add: ReturnType<typeof vi.fn> }; rows?: an
   };
   const logger = { error: vi.fn(), info: vi.fn() };
   const clock = vi.fn(() => now);
-  const service = new ReconciliationQueueService(database as never, queue as never, logger as never, clock);
-  return { database, queue, logger, clock, service };
+  const incidentSink = { report: vi.fn().mockResolvedValue(undefined) };
+  const service = new ReconciliationQueueService(database as never, queue as never, logger as never, clock, incidentSink);
+  return { database, queue, logger, clock, service, incidentSink };
 }
 
 describe("ReconciliationQueueService", () => {
@@ -52,6 +53,20 @@ describe("ReconciliationQueueService", () => {
 
     expect(test.queue.add.mock.calls.map(([, , options]) => options.delay)).toEqual([5 * 60 * 1000, 0]);
     expect(test.clock).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes an ordinary committed billing incident without scheduling an extra job", async () => {
+    const test = harness();
+    test.database.subscription.findUnique.mockResolvedValueOnce({
+      id: "subscription-1", status: "SYNC_ERROR", observedShopifyPlanHandle: "growth",
+      billingPeriodId: null, lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+      lastSyncErrorAt: now, lastSyncedAt: now,
+    });
+    await test.service.publishCommittedFailure("shop-1", "subscription-1");
+    expect(test.incidentSink.report).toHaveBeenCalledWith("shop-1", expect.objectContaining({
+      lastSyncErrorCode: "MISSING_BILLING_CYCLE",
+    }));
+    expect(test.queue?.add).not.toHaveBeenCalled();
   });
 
   it("keeps enqueue a no-op when no queue is configured", async () => {
@@ -95,20 +110,30 @@ describe("ReconciliationQueueService", () => {
       { status: "ACTIVE" },
       { status: "UNINSTALLED", reinstallPendingAt: { not: null } },
     ]);
-    expect(where.AND[1].OR).toHaveLength(5);
+    expect(where.AND[1].OR).toHaveLength(6);
     expect(where.AND[1].OR[0]).toEqual({ subscription: { is: { pendingPlanId: { not: null }, nextReconcileAt: { not: null } } } });
     expect(where.AND[1].OR[1]).toEqual({ subscription: { is: { status: "FROZEN", nextReconcileAt: { not: null } } } });
-    expect(where.AND[1].OR[2]).toEqual(expect.objectContaining({
+    expect(where.AND[1].OR[2]).toEqual({
+      onboardingCompleted: true,
+      subscription: { is: {
+        status: "SYNC_ERROR",
+        lastSyncErrorCode: { in: [
+          "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT", "UNFREEZE_LIFETIME_FREE_COUNTER_HISTORY_CONFLICT", "UNFREEZE_PRE_CLOSE_USAGE_FLUSH_FAILED",
+        ] },
+        planId: { not: null }, nextReconcileAt: { not: null },
+      } },
+    });
+    expect(where.AND[1].OR[3]).toEqual(expect.objectContaining({
       onboardingCompleted: true,
       subscription: { is: expect.objectContaining({ billingPeriodId: null, plan: { is: { active: true, kind: "FREE", recoveryCreditPackEnabled: true } } }) },
     }));
-    expect(where.AND[1].OR[3]).toEqual(expect.objectContaining({
+    expect(where.AND[1].OR[4]).toEqual(expect.objectContaining({
       subscription: { is: expect.objectContaining({
         billingPeriodId: { not: null },
         plan: { is: { active: true, OR: [{ kind: "PAID_METERED" }, { kind: "FREE", recoveryCreditPackEnabled: true }] } },
       }) },
     }));
-    expect(where.AND[1].OR[4]).toEqual({
+    expect(where.AND[1].OR[5]).toEqual({
       status: "UNINSTALLED",
       reinstallPendingAt: { not: null },
       subscription: { is: { nextReconcileAt: { not: null } } },
@@ -133,5 +158,22 @@ describe("ReconciliationQueueService", () => {
       errorMessage: "queue unavailable",
       error: expect.objectContaining({ message: "queue unavailable" }),
     });
+  });
+});
+
+describe("Billing lifecycle incident handoff", () => {
+  it("reports a committed billing error before scheduling its retry", async () => {
+    const test = harness();
+    test.database.subscription.findUnique.mockResolvedValueOnce({
+      id: "subscription-1", status: "SYNC_ERROR", observedShopifyPlanHandle: "growth",
+      billingPeriodId: "period-1", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+      lastSyncErrorAt: now, lastSyncedAt: now, nextReconcileAt: next,
+    });
+    await test.service.publishCommittedLifecycleSchedule("shop-1", "subscription-1");
+    expect(test.database.subscription.findUnique).toHaveBeenCalledOnce();
+    expect(test.incidentSink.report).toHaveBeenCalledWith("shop-1", expect.objectContaining({
+      id: "subscription-1", lastSyncErrorCode: "UNFREEZE_BILLING_PERIOD_PLAN_CONFLICT",
+    }));
+    expect(test.queue?.add).toHaveBeenCalledOnce();
   });
 });

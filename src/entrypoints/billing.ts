@@ -137,12 +137,14 @@ void startReadyWorkerProcess({
       { RecoveryCreditRefundCorrectionService },
       { PromotionSelectionExpiryReconciliationService },
       { wooPaidEntitlementTimeReconciliationService },
+      { billingOperationalIncidentReplayService },
     ] = await Promise.all([
       import("./billing-resources.js"),
       import("../services/billing-reconciliation.service.js"),
       import("../services/recovery-credit-refund-correction.service.js"),
       import("../services/promotion-selection-expiry-reconciliation.service.js"),
       import("../services/woocommerce-billing/paid-entitlement-time-reconciliation.service.js"),
+      import("../services/billing-operational-incident-replay.service.js"),
     ]);
     const [, { BillingSubscriptionReconciliationService }, { createBillingSubscriptionReconciliationWorker }] = await Promise.all([
       import("./billing-resources.js"),
@@ -174,6 +176,18 @@ void startReadyWorkerProcess({
         intervalSeconds: runtimeConfig.billingReconciliationIntervalSeconds,
         shopBatchSize: runtimeConfig.billingReconciliationShopBatchSize,
       });
+
+      // Retry actionable incidents independently of subscription scheduling.
+      // A committed error can have nextReconcileAt = null, and incident storage
+      // may have been unavailable when that error was first recorded.
+      try {
+        const inspected = await billingOperationalIncidentReplayService.replayOnce();
+        logger.info("billing.operational_incident.replay_completed", { inspected });
+      } catch (error) {
+        logger.error("billing.operational_incident.replay_scan_failed", {
+          errorMessage: error instanceof Error ? error.message : String(error), error,
+        });
+      }
 
       const reconciliation = await reconcileWooReceiptsAndGlobalBillingScan(
         runtimeConfig,

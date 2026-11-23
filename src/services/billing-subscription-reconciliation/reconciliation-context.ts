@@ -20,6 +20,7 @@ const shopReconciliationSelect = {
       currentPeriodEnd: true,
       cancelAtPeriodEnd: true,
       lastSyncErrorCode: true,
+      lastProviderLifecycleState: true,
     },
   },
 } satisfies Prisma.ShopSelect;
