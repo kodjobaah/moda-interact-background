@@ -88,6 +88,7 @@ type ShopifyAbandonedCheckoutNode = {
   } | null;
   shippingAddress?: {
     phone?: string | null;
+    countryCodeV2?: string | null;
   } | null;
   lineItems?: {
     nodes?: ShopifyAbandonedCheckoutLineItem[] | null;
@@ -395,6 +396,7 @@ export class AbandonedCheckoutLookupService {
               }
               shippingAddress {
                 phone
+                countryCodeV2
               }
               totalPriceSet {
                 presentmentMoney {
@@ -483,7 +485,9 @@ export class AbandonedCheckoutLookupService {
       shopifyPlus,
       consentReceiptAttribute: this.normalizeConsentReceiptAttribute(node?.customAttributes),
       billingPhone: node?.billingAddress?.phone ?? null,
+      billingCountryCode: safelyNormalize(node?.billingAddress?.countryCodeV2, normalizeCountryCode),
       shippingPhone: node?.shippingAddress?.phone ?? null,
+      shippingCountryCode: safelyNormalize(node?.shippingAddress?.countryCodeV2, normalizeCountryCode),
       currencyCode: presentmentMoney?.currencyCode ?? null,
       totalPrice: presentmentMoney?.amount ?? null,
       internationalContext: normalizeInternationalContext(node),

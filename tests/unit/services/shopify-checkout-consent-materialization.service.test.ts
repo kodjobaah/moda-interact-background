@@ -5,206 +5,108 @@ import type { NormalizedAbandonedCheckout } from "../../../src/domain/abandoned-
 import type { PendingRecoveryCandidate } from "../../../src/domain/pending-recovery-candidate.js";
 import type { RecoveryCheckoutSeed } from "../../../src/events/checkout-events.js";
 import { ShopifyCheckoutConsentMaterializationService } from "../../../src/services/shopify-checkout-consent-materialization.service.js";
+import { materializeShopifyCheckoutPhones } from "../../../src/services/shopify-whatsapp-consent/phone-resolution.js";
 
+vi.mock("../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>();
+  return { ...original, materializeShopifyCheckoutPhones: vi.fn() };
+});
+const materializePhones = vi.mocked(materializeShopifyCheckoutPhones);
 const shopId = "cm123456789012345678901234";
+const now = new Date("2026-11-18T03:00:00.000Z");
 const keyringJson = JSON.stringify({ "old-key": Buffer.alloc(32, 9).toString("base64") });
 const keyring = parseCredentialKeyring(keyringJson);
-const now = new Date("2026-11-18T03:00:00.000Z");
 const candidate: PendingRecoveryCandidate = {
-  shopId,
-  shopDomain: "merchant.myshopify.com",
-  checkoutToken: "checkout-token",
-  cartToken: "cart-token?key=secret",
-  abandonedCheckoutUrl: "https://merchant.myshopify.com/recover",
+  shopId, shopDomain: "merchant.myshopify.com", checkoutToken: "checkout-token",
+  cartToken: "cart-token?key=secret", abandonedCheckoutUrl: "https://merchant.myshopify.com/recover",
   checkoutCreatedAt: now.toISOString(),
 };
 const checkout: NormalizedAbandonedCheckout = {
   shopifyAbandonedCheckoutId: "gid://shopify/AbandonedCheckout/1",
-  abandonedCheckoutUrl: candidate.abandonedCheckoutUrl!,
-  createdAt: now.toISOString(),
-  completedAt: null,
-  shopifyPlus: false,
+  abandonedCheckoutUrl: candidate.abandonedCheckoutUrl!, createdAt: now.toISOString(),
+  completedAt: null, shopifyPlus: false,
   consentReceiptAttribute: { kind: "MISSING" },
-  billingPhone: "+14155550123",
-  shippingPhone: "+14155550999",
-  currencyCode: "USD",
-  totalPrice: "12.00",
-  internationalContext: {
-    languageTag: "en-US",
-    languageSource: null,
-    countryCode: "US",
-    currencyCode: "USD",
-    timeZone: null,
-  },
-  customer: {
-    shopifyCustomerId: "gid://shopify/Customer/12345",
-    email: null,
-    phone: "not-a-phone",
-    firstName: null,
-    lastName: null,
-  },
+  billingPhone: "+14155550123", shippingPhone: "+14155550999",
+  billingCountryCode: "US", shippingCountryCode: "US",
+  currencyCode: "USD", totalPrice: "12.00",
+  internationalContext: { languageTag: "en-US", languageSource: null, countryCode: "US",
+    currencyCode: "USD", timeZone: null },
+  customer: { shopifyCustomerId: "gid://shopify/Customer/12345", email: null,
+    phone: "+14155550001", firstName: null, lastName: null },
   lineItems: [],
 };
 const seed: RecoveryCheckoutSeed = {
-  shop: candidate.shopDomain,
-  checkoutToken: candidate.checkoutToken,
-  cartToken: candidate.cartToken,
-  detectedAt: now.toISOString(),
-  currency: "USD",
-  totalPrice: "12.00",
-  checkoutUrl: candidate.abandonedCheckoutUrl,
-  completedAt: null,
-  customer: {
-    shopifyCustomerId: checkout.customer!.shopifyCustomerId,
-    phone: checkout.customer!.phone,
-    email: null,
-    firstName: null,
-    lastName: null,
-  },
-  lineItems: [],
+  shop: candidate.shopDomain, checkoutToken: candidate.checkoutToken,
+  cartToken: candidate.cartToken, detectedAt: now.toISOString(), currency: "USD",
+  totalPrice: "12.00", checkoutUrl: candidate.abandonedCheckoutUrl, completedAt: null,
+  customer: { ...checkout.customer! }, lineItems: [],
 };
 
-function signedReceipt(decision: "G" | "R" = "G") {
-  const bindingDigest = createHash("sha256").update("cart-token", "utf8").digest("base64url");
-  const plaintext = JSON.stringify([
-    1,
-    shopId,
-    "c",
-    bindingDigest,
-    decision,
-    "1",
-    "en-US",
-    Math.floor(now.getTime() / 1000),
-    "12345",
-  ]);
-  const aad = JSON.stringify(["moda-shopify-wa-consent", 1, shopId, "c", bindingDigest]);
-  const envelope = encryptCredential({
-    keyring,
-    activeKeyId: "old-key",
-    plaintext,
-    aad,
-  });
-  return [
-    "v1",
-    envelope.keyId,
-    Buffer.from(envelope.nonce).toString("base64url"),
+function receipt(decision: "G" | "R", claimCustomerId: string = "12345") {
+  const digest = createHash("sha256").update("cart-token", "utf8").digest("base64url");
+  const claims = [1, shopId, "c", digest, decision, "1", "en-US",
+    Math.floor(now.getTime() / 1000), claimCustomerId];
+  const envelope = encryptCredential({ keyring, activeKeyId: "old-key",
+    plaintext: JSON.stringify(claims),
+    aad: JSON.stringify(["moda-shopify-wa-consent", 1, shopId, "c", digest]) });
+  return ["v1", envelope.keyId, Buffer.from(envelope.nonce).toString("base64url"),
     Buffer.from(envelope.ciphertext).toString("base64url"),
-    Buffer.from(envelope.authTag).toString("base64url"),
-  ].join(".");
+    Buffer.from(envelope.authTag).toString("base64url")].join(".");
 }
-
-function createService(
-  result: any = { status: "MATERIALISED_GRANTED" },
-  keyringProvider: () => string | undefined = () => keyringJson,
-) {
-  const consent = { materializeExplicitChoice: vi.fn(async () => result) };
-  const prepareCustomer = vi.fn(async () => ({ id: "customer-db-id" }));
-  const service = new ShopifyCheckoutConsentMaterializationService(
-    consent as never,
-    prepareCustomer,
-    keyringProvider,
-    () => now,
-  );
-  return { service, consent, prepareCustomer };
+function service(keyring: () => string | undefined = () => keyringJson) {
+  return new ShopifyCheckoutConsentMaterializationService(keyring, () => now);
 }
 
 beforeEach(() => vi.clearAllMocks());
 
-describe("Shopify checkout consent materialisation", () => {
-  it("does not create a decision for a missing attribute", async () => {
-    const harness = createService();
-    await expect(harness.service.materialize({ candidate, checkout, seed }))
+describe("Shopify multi-phone checkout consent materialisation", () => {
+  it("does not invent a decision when no explicit receipt exists", async () => {
+    await expect(service().materialize({ candidate, checkout, seed }))
       .resolves.toEqual({ status: "NO_EXPLICIT_CHOICE" });
-    expect(harness.prepareCustomer).not.toHaveBeenCalled();
-    expect(harness.consent.materializeExplicitChoice).not.toHaveBeenCalled();
+    expect(materializePhones).not.toHaveBeenCalled();
   });
 
-  it("verifies and materialises a grant using the valid billing fallback after an invalid customer phone", async () => {
-    const harness = createService();
-    const result = await harness.service.materialize({
-      candidate,
-      checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt() } },
-      seed,
-    });
-
-    expect(result).toEqual({ status: "MATERIALISED_GRANTED", recipient: "14155550123" });
-    expect(harness.prepareCustomer).toHaveBeenCalledWith(
-      expect.objectContaining({ customer: expect.objectContaining({ phone: "+14155550123" }) }),
-      shopId,
-    );
-    expect(harness.consent.materializeExplicitChoice).toHaveBeenCalledWith({
-      shopId,
-      shopifyCustomerId: "gid://shopify/Customer/12345",
-      recipient: "+14155550123",
-      decision: "GRANTED",
-    });
+  it("materialises all checkout phones and returns one selected recipient", async () => {
+    materializePhones.mockResolvedValueOnce({ customerId: "guest-moda-id", selected: {
+      customerId: "guest-moda-id", customerPhoneId: "customer-phone-id",
+      recipient: "14155550001", source: "customer",
+    }, consentWriteCount: 3, evidenceInsertedCount: 3, validPhoneCount: 3, invalidSources: [] });
+    await expect(service().materialize({ candidate, checkout: {
+      ...checkout, consentReceiptAttribute: { kind: "VALUE", value: receipt("G") },
+    }, seed })).resolves.toEqual({ status: "MATERIALISED_GRANTED",
+      recipient: "14155550001", customerId: "guest-moda-id" });
+    expect(materializePhones).toHaveBeenCalledWith(expect.objectContaining({
+      shopId, decision: "GRANTED", acceptedAt: Math.floor(now.getTime() / 1000),
+      locale: "en-US", checkoutToken: candidate.checkoutToken,
+    }));
   });
 
-  it("defers when the authenticated candidate token is missing", async () => {
-    const harness = createService();
-    await expect(harness.service.materialize({
-      candidate: { ...candidate, cartToken: null },
-      checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt() } },
-      seed,
-    })).resolves.toEqual({ status: "DEFER_CHECKOUT_BINDING" });
-    expect(harness.prepareCustomer).not.toHaveBeenCalled();
-    expect(harness.consent.materializeExplicitChoice).not.toHaveBeenCalled();
+  it("accepts a checkout-bound guest receipt when Shopify later returns a customer ID", async () => {
+    materializePhones.mockResolvedValueOnce({ customerId: "local-guest", selected: null,
+      consentWriteCount: 3, evidenceInsertedCount: 3, validPhoneCount: 3, invalidSources: [] });
+    await expect(service().materialize({ candidate, checkout: {
+      ...checkout, consentReceiptAttribute: { kind: "VALUE", value: receipt("R", "-") },
+    }, seed })).resolves.toEqual({ status: "MATERIALISED_REVOKED" });
+    expect(materializePhones).toHaveBeenCalledOnce();
   });
 
-  it("does not infer a customer principal from a guest receipt and phone", async () => {
-    const guestClaims = JSON.stringify([
-      1, shopId, "c",
-      createHash("sha256").update("cart-token", "utf8").digest("base64url"),
-      "R", "1", "en-US", Math.floor(now.getTime() / 1000), "-",
-    ]);
-    const bindingDigest = createHash("sha256").update("cart-token", "utf8").digest("base64url");
-    const envelope = encryptCredential({
-      keyring,
-      activeKeyId: "old-key",
-      plaintext: guestClaims,
-      aad: JSON.stringify(["moda-shopify-wa-consent", 1, shopId, "c", bindingDigest]),
-    });
-    const guestReceipt = `v1.${envelope.keyId}.${Buffer.from(envelope.nonce).toString("base64url")}.${Buffer.from(envelope.ciphertext).toString("base64url")}.${Buffer.from(envelope.authTag).toString("base64url")}`;
-    const harness = createService({ status: "MATERIALISED_REVOKED" });
-
-    await expect(harness.service.materialize({
-      candidate,
-      checkout: {
-        ...checkout,
-        customer: null,
-        consentReceiptAttribute: { kind: "VALUE", value: guestReceipt },
-      },
-      seed: { ...seed, customer: { ...seed.customer, shopifyCustomerId: null } },
-    })).resolves.toEqual({ status: "DEFER_IDENTITY_OR_RECIPIENT" });
-    expect(harness.consent.materializeExplicitChoice).not.toHaveBeenCalled();
+  it("does not apply an invalid binding or incorrect signed account claim", async () => {
+    for (const [cartToken, value] of [
+      [null, receipt("G")],
+      [candidate.cartToken, receipt("G", "67890")],
+    ] as const) {
+      const result = await service().materialize({ candidate: { ...candidate, cartToken },
+        checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value } }, seed });
+      expect(result.status).not.toBe("MATERIALISED_GRANTED");
+    }
+    expect(materializePhones).not.toHaveBeenCalled();
   });
 
-  it("reports failed SQL materialisation instead of claiming success", async () => {
-    const harness = createService({ status: "MATERIALISATION_FAILURE", reason: "CONSENT_WRITE_FAILURE" });
-    await expect(harness.service.materialize({
-      candidate,
-      checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt("R") } },
-      seed,
-    })).resolves.toEqual({ status: "MATERIALISATION_FAILURE", reason: "CONSENT_WRITE_FAILURE" });
-  });
-
-  it.each([
-    ["missing", () => undefined, "KEYRING_MISSING"],
-    ["invalid", () => "{invalid-json", "KEYRING_INVALID"],
-  ] as const)("returns a retryable failure for %s keyring config before SQL or outreach", async (_kind, keyringProvider, reason) => {
-    const harness = createService({ status: "MATERIALISED_GRANTED" }, keyringProvider);
-    const result = await harness.service.materialize({
-      candidate,
-      checkout: { ...checkout, consentReceiptAttribute: { kind: "VALUE", value: signedReceipt() } },
-      seed,
-    });
-
-    expect(result).toMatchObject({
-      status: "MATERIALISATION_FAILURE",
-      reason,
-      cause: expect.anything(),
-    });
-    expect(harness.prepareCustomer).not.toHaveBeenCalled();
-    expect(harness.consent.materializeExplicitChoice).not.toHaveBeenCalled();
+  it("fails closed and preserves original keyring errors", async () => {
+    const result = await service(() => undefined).materialize({ candidate, checkout: {
+      ...checkout, consentReceiptAttribute: { kind: "VALUE", value: receipt("G") },
+    }, seed });
+    expect(result).toMatchObject({ status: "MATERIALISATION_FAILURE", reason: "KEYRING_MISSING" });
+    expect(materializePhones).not.toHaveBeenCalled();
   });
 });

@@ -45,15 +45,13 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
 
   async evaluateFirst(input: FirstInput): Promise<boolean> {
     const recipient = input.recipient ? canonicalWhatsAppSender(input.recipient) : null;
-    if (!input.customerId || !input.shopifyCustomerId || !recipient) {
+    if (!input.customerId || !recipient) {
       await this.notice(input, "RECIPIENT_UNVERIFIED", "CREATE_FIRST_RECOVERY");
       return false;
     }
-    const outcome = await this.consent.evaluateRecipient({
+    const outcome = await this.consent.evaluateStoredRecipient({
       shopId: input.shopId,
       customerId: input.customerId,
-      shopifyCustomerId: input.shopifyCustomerId,
-      // Recovery stores Meta international digits; Shopify consent expects E.164.
       recipient: `+${recipient}`,
     });
     return this.decide(input, outcome, "CREATE_FIRST_RECOVERY");
@@ -90,7 +88,9 @@ export class RecoveryConsentAdmissionService implements RecoveryConsentAdmission
     let reason: RecoveryConsentNoticeReason;
     if (outcome.status === "UNAVAILABLE") reason = "VERIFICATION_UNAVAILABLE";
     else if (outcome.status === "AMBIGUOUS") reason = "RECIPIENT_AMBIGUOUS";
-    else if (outcome.status === "NOT_AUTHORISED" && outcome.reason === "NATIVE_CONSENT_NOT_GRANTED") {
+    else if (outcome.status === "NOT_AUTHORISED" &&
+        (outcome.reason === "NATIVE_CONSENT_NOT_GRANTED" ||
+          outcome.reason === "CONSENT_NOT_GRANTED_OR_EVIDENCED")) {
       reason = "NO_VERIFIED_OPT_IN";
     } else reason = "RECIPIENT_UNVERIFIED";
     await this.notice(input, reason, blockedOperation);

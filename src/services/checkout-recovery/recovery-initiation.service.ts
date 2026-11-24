@@ -75,7 +75,7 @@ interface RecoveryInitiationPorts {
 export type RecoveryAdmissionGate = () => Promise<boolean>;
 
 /** Only the already accepted checkout seed is eligible for merchant notice context. */
-function noticeContextFromCheckout(event: RecoveryCheckoutSeed): RecoveryConsentCheckoutContext {
+export function noticeContextFromCheckout(event: RecoveryCheckoutSeed): RecoveryConsentCheckoutContext {
   const context: {
     customerName?: string;
     customerEmail?: string;
@@ -347,6 +347,7 @@ export class RecoveryInitiationService {
     resolvedRecipient?: string,
     suppressionWakeupTrigger?: string,
     admissionGate?: RecoveryAdmissionGate,
+    resolvedCustomerId?: string,
   ) {
     // Verify native Shopify permission BEFORE the first CheckoutRecovery INSERT.
     // The candidate worker has already checked the checkout/order lifecycle under
@@ -368,7 +369,9 @@ export class RecoveryInitiationService {
     let customer: Awaited<ReturnType<typeof recoveryShopifyCustomerService.resolve>> | undefined;
     let recipient: string | null = null;
     if (requiresAdmission) {
-      customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
+      customer = resolvedCustomerId
+        ? await prisma.customer.findFirst({ where: { id: resolvedCustomerId, shopId: shop.id } })
+        : await recoveryShopifyCustomerService.resolve(event, shop.id);
       let sourceRecipient = resolvedRecipient ?? event.customer?.phone;
       if (!sourceRecipient) {
         // Do not fall back to a test-only recipient for real customer consent.
@@ -402,7 +405,9 @@ export class RecoveryInitiationService {
       throw new Error(`Recovery generation was not materialized for ${event.checkoutToken}`);
     }
 
-    if (customer === undefined) customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
+    if (customer === undefined) customer = resolvedCustomerId
+      ? await prisma.customer.findFirst({ where: { id: resolvedCustomerId, shopId: shop.id } })
+      : await recoveryShopifyCustomerService.resolve(event, shop.id);
     if (customer && recovery.customerId !== customer.id) {
       recovery = await prisma.checkoutRecovery.update({
         where: { id: recovery.id },

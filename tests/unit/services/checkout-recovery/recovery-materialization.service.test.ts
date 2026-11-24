@@ -4,6 +4,11 @@ import type { NormalizedAbandonedCheckout } from "../../../../src/domain/abandon
 import type { ShopifyCheckoutConsentMaterialization } from "../../../../src/services/shopify-checkout-consent-materialization.service.js";
 import { RecoveryMaterializationService } from "../../../../src/services/checkout-recovery/recovery-materialization.service.js";
 import { ShopExecutionEligibilityService } from "../../../../src/services/shop-execution-eligibility.service.js";
+const storedPhone = vi.hoisted(() => vi.fn());
+vi.mock("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>();
+  return { ...original, selectStoredShopifyCheckoutPhone: storedPhone };
+});
 
 const candidate: PendingRecoveryCandidate = {
   shopId: "shop-1",
@@ -145,7 +150,11 @@ function createHarness(options: {
 }
 
 describe("RecoveryMaterializationService", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storedPhone.mockResolvedValue({ customerId: "customer-1", customerPhoneId: "phone-1",
+      recipient: "15551234567", source: "customer" });
+  });
 
   it("checks existing generation before eligibility, order tombstone, lookup, snapshot and initiation", async () => {
     const harness = createHarness();
@@ -162,7 +171,6 @@ describe("RecoveryMaterializationService", () => {
       "provider-lookup",
       "snapshot",
       "consent",
-      "recipient",
       "initiate",
     ]);
     expect(harness.abandonedCheckoutLookup.lookup).toHaveBeenCalledExactlyOnceWith({
@@ -173,8 +181,8 @@ describe("RecoveryMaterializationService", () => {
       abandonedCheckoutUrl: candidate.abandonedCheckoutUrl,
       checkoutCreatedAt: candidate.checkoutCreatedAt,
     });
-    expect(harness.recipientResolver.resolve).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
+    expect(storedPhone).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ shopId: candidate.shopId }),
     );
     expect(harness.snapshotBuilder.build).toHaveBeenCalledExactlyOnceWith(
       candidate,
@@ -185,6 +193,7 @@ describe("RecoveryMaterializationService", () => {
       expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
       1,
       "15551234567",
+      "customer-1",
     );
   });
 
@@ -292,7 +301,6 @@ describe("RecoveryMaterializationService", () => {
       "provider-lookup",
       "snapshot",
       "consent",
-      "recipient",
       "continue-progress",
       "initiate",
     ]);
@@ -304,6 +312,7 @@ describe("RecoveryMaterializationService", () => {
       expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
       4,
       "15551234567",
+      "customer-1",
     );
   });
 
@@ -336,7 +345,7 @@ describe("RecoveryMaterializationService", () => {
 
   it("defers a missing recipient without initiating recovery", async () => {
     const harness = createHarness();
-    harness.recipientResolver.resolve.mockResolvedValueOnce(null);
+    storedPhone.mockResolvedValueOnce(null);
 
     await expect(harness.service.materialize(candidate)).resolves.toEqual({
       outcome: "deferred-no-recipient",
@@ -415,7 +424,7 @@ describe("RecoveryMaterializationService", () => {
 
   it("passes an already materialised grant into normal checkout admission", async () => {
     const harness = createHarness({
-      consentOutcome: { status: "MATERIALISED_GRANTED", recipient: "15551234567" },
+      consentOutcome: { status: "MATERIALISED_GRANTED", recipient: "15551234567", customerId: "customer-1" },
     });
 
     await expect(harness.service.materialize(candidate)).resolves.toEqual({
@@ -426,6 +435,7 @@ describe("RecoveryMaterializationService", () => {
       expect.objectContaining({ customer: expect.objectContaining({ phone: "+15551234567" }) }),
       1,
       "15551234567",
+      "customer-1",
     );
   });
 
@@ -439,6 +449,7 @@ describe("RecoveryMaterializationService", () => {
       expect.objectContaining({ checkoutToken: candidate.checkoutToken }),
       5,
       "15551234567",
+      "customer-1",
     );
   });
 });

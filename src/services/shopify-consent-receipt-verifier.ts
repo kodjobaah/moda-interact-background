@@ -243,17 +243,9 @@ export function verifyShopifyConsentReceipt(input: {
     return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
   }
 
-  if (customerId === "-") {
-    if (input.verifiedShopifyCustomerId !== null) {
-      logger.info("shopify.consent.receipt.identity_deferred", {
-        ...logContext,
-        outcome: "deferred",
-        reasonCode: "GUEST_CUSTOMER_MISMATCH",
-        message: "Guest receipt does not match the verified Shopify customer state.",
-      });
-      return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
-    }
-  } else {
+  // Guest consent remains bound to the authenticated checkout, even when
+  // Shopify associates a customer account after the guest's selection.
+  if (customerId !== "-") {
     if (!input.verifiedShopifyCustomerId) {
       logger.info("shopify.consent.receipt.identity_deferred", {
         ...logContext,

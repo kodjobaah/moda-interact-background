@@ -37,8 +37,8 @@ describe("Shopify recovery consent admission with shared notifier", () => {
   it("denies a revoked/unknown native opt-in before first recovery insert", async () => {
     const { service, first, firstNotice, consent, notices } = context();
     expect(await service.evaluateFirst(first)).toBe(false);
-    expect(consent.evaluateRecipient).toHaveBeenCalledOnce();
-    expect(consent.evaluateStoredRecipient).not.toHaveBeenCalled();
+    expect(consent.evaluateStoredRecipient).toHaveBeenCalledOnce();
+    expect(consent.evaluateRecipient).not.toHaveBeenCalled();
     expect(notices.notify).toHaveBeenCalledWith({ ...firstNotice, reason: "NO_VERIFIED_OPT_IN" });
   });
 
@@ -56,30 +56,29 @@ describe("Shopify recovery consent admission with shared notifier", () => {
 
   it("does not misclassify independent local STOP or confirmed native grant", async () => {
     const { service, first, consent, notices } = context();
-    consent.evaluateRecipient.mockResolvedValue({ status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT" });
+    consent.evaluateStoredRecipient.mockResolvedValue({ status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT" });
     consent.evaluateStoredRecipient.mockResolvedValue({ status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT" });
     expect(await service.evaluateFirst(first)).toBe(false);
     expect(await service.evaluateReentry({ ...first })).toBe(false);
-    consent.evaluateRecipient.mockResolvedValue(allowed as never);
+    consent.evaluateStoredRecipient.mockResolvedValue(allowed as never);
     expect(await service.evaluateFirst(first)).toBe(true);
     expect(notices.notify).not.toHaveBeenCalled();
   });
 
   it("maps missing identity, native ambiguity, other mismatch and unavailability separately", async () => {
     const { service, first, firstNotice, consent, notices } = context();
-    expect(await service.evaluateFirst({ ...first, shopifyCustomerId: null })).toBe(false);
-    expect(consent.evaluateRecipient).not.toHaveBeenCalled();
+    expect(await service.evaluateFirst({ ...first, customerId: null, shopifyCustomerId: null })).toBe(false);
     expect(notices.notify).toHaveBeenLastCalledWith({ ...firstNotice, reason: "RECIPIENT_UNVERIFIED" });
 
-    consent.evaluateRecipient.mockResolvedValue({ status: "AMBIGUOUS", reason: "MULTIPLE_ACTIVE_RECIPIENTS" } as never);
+    consent.evaluateStoredRecipient.mockResolvedValue({ status: "AMBIGUOUS", reason: "MULTIPLE_ACTIVE_RECIPIENTS" } as never);
     expect(await service.evaluateFirst(first)).toBe(false);
     expect(notices.notify).toHaveBeenLastCalledWith({ ...firstNotice, reason: "RECIPIENT_AMBIGUOUS" });
 
-    consent.evaluateRecipient.mockResolvedValue({ status: "NOT_AUTHORISED", reason: "SHOPIFY_DEFAULT_PHONE_CHANGED" });
+    consent.evaluateStoredRecipient.mockResolvedValue({ status: "NOT_AUTHORISED", reason: "SHOPIFY_DEFAULT_PHONE_CHANGED" });
     expect(await service.evaluateFirst(first)).toBe(false);
     expect(notices.notify).toHaveBeenLastCalledWith({ ...firstNotice, reason: "RECIPIENT_UNVERIFIED" });
 
-    consent.evaluateRecipient.mockResolvedValue({ status: "UNAVAILABLE", reason: "SHOPIFY_READ_FAILURE" } as never);
+    consent.evaluateStoredRecipient.mockResolvedValue({ status: "UNAVAILABLE", reason: "SHOPIFY_READ_FAILURE" } as never);
     await expect(service.evaluateFirst(first)).rejects.toThrow(SHOPIFY_RECOVERY_CONSENT_RETRY_REQUIRED);
     expect(notices.notify).toHaveBeenLastCalledWith({ ...firstNotice, reason: "VERIFICATION_UNAVAILABLE" });
   });
@@ -107,7 +106,7 @@ describe("Shopify recovery consent admission with shared notifier", () => {
 
   it("preserves provider-unavailable retry only after a successfully persisted notice", async () => {
     const { service, first, consent, notices } = context();
-    consent.evaluateRecipient.mockResolvedValue({ status: "UNAVAILABLE", reason: "SHOPIFY_READ_FAILURE" } as never);
+    consent.evaluateStoredRecipient.mockResolvedValue({ status: "UNAVAILABLE", reason: "SHOPIFY_READ_FAILURE" } as never);
     const databaseFailure = new Error("db temporarily unavailable");
     notices.notify.mockRejectedValueOnce(databaseFailure);
     await expect(service.evaluateFirst(first)).rejects.toBe(databaseFailure);

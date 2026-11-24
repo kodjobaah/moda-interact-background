@@ -1,64 +1,40 @@
-import type { PrismaClient, Customer } from "@prisma/client";
+import type { Customer, PrismaClient } from "@prisma/client";
 import { normalizeRecipientPhone, parseShopifyCustomerIdentity } from "@modainteract/moda-interact-shared/identity";
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
 import prisma from "../../lib/db.js";
-import { customerService } from "../customer.service.js";
 
-/** Recovery must never link a phone-only legacy principal to Shopify by phone. */
+/** Shopify recovery customer lookup is read-only. The authenticated checkout
+ * materialiser alone may create a guest or associate a Shopify ID. In particular
+ * this method must never use the legacy single-phone rotation writer. */
 export class RecoveryShopifyCustomerService {
   constructor(private readonly database: Pick<PrismaClient, "customer" | "customerPhone" | "shop"> = prisma) {}
 
   async resolve(event: RecoveryCheckoutSeed, shopId: string): Promise<Customer | null> {
-    if (!event.customer?.shopifyCustomerId) return null;
-    let identity: ReturnType<typeof parseShopifyCustomerIdentity>;
-    try {
-      identity = parseShopifyCustomerIdentity(event.customer.shopifyCustomerId);
-    } catch {
-      return null;
-    }
-    const linked = await this.database.customer.findMany({
-      where: { shopId, shopifyCustomerId: { in: [identity.numericId, identity.gid] } },
-      select: { id: true, shopifyCustomerId: true },
-      take: 2,
+    const shop = await this.database.shop.findFirst({
+      where: { id: shopId, platform: "SHOPIFY", status: "ACTIVE" },
+      select: { defaultCountryCode: true },
     });
-    // Two aliases for the same provider identity must be repaired explicitly;
-    // never select an arbitrary Customer or fall back to a phone match.
-    if (linked.length > 1) return null;
-
-    let incomingPhone = event.customer.phone;
-    if (linked[0] && incomingPhone) {
-      const current = await this.database.customerPhone.findFirst({
-        where: { customerId: linked[0].id, endedAt: null },
-        orderBy: { startedAt: "desc" },
-        select: { phone: true },
-      });
-      if (current) {
-        const shop = await this.database.shop.findUnique({
-          where: { id: shopId }, select: { defaultCountryCode: true },
-        });
-        const country = shop?.defaultCountryCode?.toUpperCase();
-        const canonical = (phone: string) => normalizeRecipientPhone(
-          phone,
-          phone.trim().startsWith("+") ? {} :
-            country ? { verifiedCountryCode: country } : {},
-        );
-        const before = canonical(current.phone);
-        const next = canonical(incomingPhone);
-        if (before.ok && next.ok && before.e164 === next.e164) {
-          // Preserve the *same* active CustomerPhone row and its STOP revision.
-          // A Shopify number reformat must never close a locally STOPped row.
-          incomingPhone = current.phone;
-        }
-      }
-    }
-    return customerService.upsertShopifyCustomer({
-      shopId,
-      shopifyCustomerId: linked[0]?.shopifyCustomerId ?? identity.numericId,
-      phone: incomingPhone,
-      email: event.customer.email,
-      firstName: event.customer.firstName,
-      lastName: event.customer.lastName,
+    if (!shop) return null;
+    const supplied = event.customer?.phone?.trim();
+    if (!supplied) return null;
+    const parsed = normalizeRecipientPhone(supplied,
+      supplied.startsWith("+") || !shop.defaultCountryCode ? {} :
+      { verifiedCountryCode: shop.defaultCountryCode.toUpperCase() });
+    if (!parsed.ok) return null;
+    const records = await this.database.customerPhone.findMany({
+      where: { endedAt: null, whatsappCanonicalPhone: parsed.e164.slice(1), customer: { shopId } },
+      include: { customer: true }, take: 2,
     });
+    if (records.length !== 1) return null;
+    const customer = records[0]!.customer;
+    const providerId = event.customer?.shopifyCustomerId;
+    if (providerId) {
+      let identity: ReturnType<typeof parseShopifyCustomerIdentity>;
+      try { identity = parseShopifyCustomerIdentity(providerId); } catch { return null; }
+      if (customer.shopifyCustomerId && customer.shopifyCustomerId !== identity.numericId &&
+          customer.shopifyCustomerId !== identity.gid) return null;
+    }
+    return customer;
   }
 }
 

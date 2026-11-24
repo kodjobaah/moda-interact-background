@@ -133,10 +133,10 @@ describe("Shopify checkout consent receipt verifier", () => {
       .toBe("DEFER_IDENTITY_OR_RECIPIENT");
   });
 
-  it("accepts an explicitly signed guest only when Shopify reports no customer", () => {
+  it("accepts an authenticated guest receipt after Shopify later associates a customer", () => {
     const guest = receipt({ customerId: "-" });
     expect(verify(guest, { verifiedShopifyCustomerId: null }).status).toBe("VERIFIED");
-    expect(verify(guest).status).toBe("DEFER_IDENTITY_OR_RECIPIENT");
+    expect(verify(guest).status).toBe("VERIFIED");
   });
 
   it("rejects malformed, duplicate, noncanonical and tampered attributes", () => {

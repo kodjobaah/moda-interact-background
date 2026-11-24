@@ -1,7 +1,7 @@
 import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
 import prisma from "../../lib/db.js";
 import { recoveryShopifyCustomerService } from "./recovery-shopify-customer.service.js";
-import { customerPhoneService } from "../customer.phone.service.js";
+import { selectStoredShopifyCustomerPhone } from "../shopify-whatsapp-consent/phone-resolution.js";
 import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
 
 export class RecoveryRecipientResolverService {
@@ -13,13 +13,13 @@ export class RecoveryRecipientResolverService {
     const customer = await recoveryShopifyCustomerService.resolve(event, shop.id);
     if (!customer) return null;
 
-    const currentPhone = await customerPhoneService.getCurrentPhone(customer.id);
-    return canonicalizeRecoveryRecipient(currentPhone?.phone);
+    const selected = await selectStoredShopifyCustomerPhone({ customerId: customer.id, shopId: shop.id });
+    return canonicalizeRecoveryRecipient(selected?.recipient);
   }
 
   async resolveForCustomerInShop(customerId: string, shopId: string): Promise<string | null> {
-    const currentPhone = await customerPhoneService.getCurrentPhoneForShop(customerId, shopId);
-    return canonicalizeRecoveryRecipient(currentPhone?.phone);
+    const selected = await selectStoredShopifyCustomerPhone({ customerId, shopId });
+    return canonicalizeRecoveryRecipient(selected?.recipient);
   }
 }
 

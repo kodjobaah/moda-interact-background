@@ -98,7 +98,9 @@ export interface NormalizedAbandonedCheckout {
   shopifyPlus: boolean | null;
   consentReceiptAttribute: ShopifyConsentReceiptAttribute;
   billingPhone: string | null;
+  billingCountryCode?: string | null;
   shippingPhone: string | null;
+  shippingCountryCode?: string | null;
 
   currencyCode: string | null;
   totalPrice: string | null;

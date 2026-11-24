@@ -4,8 +4,8 @@ import prisma from "../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 import { ShopifyConsentRecipientResolver } from "./shopify-whatsapp-consent/recipient.js";
 import { ShopifyConsentProjectionWriter } from "./shopify-whatsapp-consent/projection-writer.js";
+import { evaluateShopifyStoredRecipient } from "./shopify-whatsapp-consent/phone-resolution.js";
 import {
-  notAuthorised,
   type ShopifyConsentMaterializationResult,
 } from "./shopify-whatsapp-consent/types.js";
 import type {
@@ -47,7 +47,7 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
   private readonly writes: ShopifyConsentProjectionWriter;
 
   constructor(
-    database: PrismaClient = prisma,
+    private readonly database: PrismaClient = prisma,
     private readonly now: () => Date = () => new Date(),
     private readonly logger: Pick<StructuredLogger, "warn" | "info" | "error"> = defaultLogger,
   ) {
@@ -131,31 +131,7 @@ export class ShopifyWhatsAppConsentService implements ShopifyWhatsAppConsentServ
     customerId: string;
     recipient: string;
   }): Promise<ShopifyWhatsAppConsentEligibility> {
-    const scoped = await this.recipients.resolveCustomerById(input.shopId, input.customerId);
-    if (!scoped.ok) return scoped.failure;
-    const match = await this.recipients.findRecipient(scoped.value, input.recipient);
-    if (!match.ok) return match.failure;
-    const row = match.phone;
-    // Local STOP and merchant suppression override any receipt-derived state.
-    if (row.whatsappNoContact) return notAuthorised("LOCAL_NO_CONTACT");
-    if (row.whatsappConsentPurpose !== "WHATSAPP_CHECKOUT_RECOVERY" ||
-        row.whatsappConsentDecision !== "GRANTED" ||
-        row.whatsappConsentSource !== "SHOPIFY_NATIVE" ||
-        !row.whatsappConsentVerifiedAt || !row.whatsappPhoneVerifiedAt ||
-        !row.whatsappConsentProviderObservedAt ||
-        row.whatsappConsentVerifiedAt < row.whatsappConsentProviderObservedAt ||
-        row.whatsappConsentVerifiedAt < row.whatsappPhoneVerifiedAt ||
-        row.whatsappConsentRevision <= 0n || row.whatsappConsentDecisionSequence <= 0n ||
-        row.whatsappCanonicalPhone !== match.canonical.slice(1)) {
-      return notAuthorised("NATIVE_CONSENT_NOT_GRANTED");
-    }
-    return {
-      status: "ALLOWED",
-      customerPhoneId: row.id,
-      canonicalRecipient: match.canonical.slice(1),
-      consentRevision: row.whatsappConsentRevision,
-      noContactRevision: row.whatsappNoContactRevision,
-    };
+    return evaluateShopifyStoredRecipient({ ...input, database: this.database });
   }
 
 }

@@ -132,5 +132,21 @@ export async function checkFinalStoredRecoveryConsent(
       phone.whatsappConsentVerifiedAt < phone.whatsappConsentProviderObservedAt ||
       phone.whatsappConsentVerifiedAt < phone.whatsappPhoneVerifiedAt)
     return "stored-consent-denied";
+  // The final shop-locked dispatch permit must not infer GRANT from an
+  // unaudited CustomerPhone projection. Check the current immutable evidence.
+  const evidence = await rows<{ matched: boolean }>(tx, `
+    SELECT EXISTS (
+      SELECT 1 FROM "commerce"."WhatsAppConsentEvidence" e
+      WHERE e."shopId"=$1 AND e."customerPhoneId"=$2
+        AND e."customerId"=(SELECT "customerId" FROM "commerce"."CheckoutRecovery" WHERE "id"=$7 AND "shopId"=$1)
+        AND e."installationId" IS NULL AND e."canonicalPhone"=$3
+        AND e."decision"='GRANT'
+        AND e."phoneConsentRevision"=$4 AND e."decisionSequence"=$5
+        AND e."decisionAt"=$6
+    ) AS "matched"`,
+    context.shopId, phone.id, canonical,
+    phone.whatsappConsentRevision, phone.whatsappConsentDecisionSequence,
+    phone.whatsappConsentProviderObservedAt, context.recoveryId);
+  if (!evidence[0]?.matched) return "stored-consent-evidence-missing";
   return null;
 }

@@ -21,6 +21,7 @@ import { findLatestRecovery } from "./checkout-recovery/latest-recovery.js";
 import {
   InitialOutreachHeldError,
   RecoveryInitiationService,
+  noticeContextFromCheckout,
 } from "./checkout-recovery/recovery-initiation.service.js";
 import type { InitialOutreachProgress } from "./checkout-recovery/recovery-initiation.service.js";
 export { InitialOutreachHeldError } from "./checkout-recovery/recovery-initiation.service.js";
@@ -80,9 +81,13 @@ export class CheckoutRecoveryService {
       snapshotBuilder: this.snapshotBuilderService,
       recipientResolver: recoveryRecipientResolverService,
       continueInitialOutreach: (input) => this.continueInitialOutreach(input),
-      initiate: (seed, generation, recipient) => this.handleCheckoutCreated(seed, generation, recipient),
-      noticeMissingRecipient: (shopId, checkoutToken) =>
-        recoveryConsentAdmissionService.notifyMissingRecipient({ shopId, checkoutToken }),
+      initiate: (seed, generation, recipient, resolvedCustomerId) =>
+        this.handleCheckoutCreated(seed, generation, recipient, undefined, undefined, resolvedCustomerId),
+      noticeMissingRecipient: (shopId, checkoutToken, seed) =>
+        recoveryConsentAdmissionService.notifyMissingRecipient({
+          shopId, checkoutToken,
+          ...(seed ? { noticeContext: noticeContextFromCheckout(seed) } : {}),
+        }),
     });
     this.checkoutEventOrchestrator = new CheckoutEventOrchestratorService(
       prisma,
@@ -190,6 +195,7 @@ export class CheckoutRecoveryService {
     resolvedRecipient?: string,
     suppressionWakeupTrigger?: string,
     admissionGate?: () => Promise<boolean>,
+    resolvedCustomerId?: string,
   ) {
     return this.initiationService.handleCheckoutCreated(
       event,
@@ -197,6 +203,7 @@ export class CheckoutRecoveryService {
       resolvedRecipient,
       suppressionWakeupTrigger,
       admissionGate,
+      resolvedCustomerId,
     );
   }
 

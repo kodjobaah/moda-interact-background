@@ -12,6 +12,7 @@ import {
   shopifyCheckoutConsentMaterializationService,
   type ShopifyCheckoutConsentMaterialization,
 } from "../shopify-checkout-consent-materialization.service.js";
+import { selectStoredShopifyCheckoutPhone } from "../shopify-whatsapp-consent/phone-resolution.js";
 
 export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string; recoveryId?: string }
@@ -50,8 +51,8 @@ type RecoveryMaterializationDependencies = {
   recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
   consentReceipt?: Pick<typeof shopifyCheckoutConsentMaterializationService, "materialize">;
   continueInitialOutreach?: (input: { shopId: string; recoveryId: string }) => Promise<InitialOutreachProgress>;
-  initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string) => Promise<unknown>;
-  noticeMissingRecipient?: (shopId: string, checkoutToken: string) => Promise<void>;
+  initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string, customerId?: string) => Promise<unknown>;
+  noticeMissingRecipient?: (shopId: string, checkoutToken: string, seed?: RecoveryCheckoutSeed) => Promise<void>;
 };
 
 export class RecoveryMaterializationService {
@@ -175,23 +176,29 @@ export class RecoveryMaterializationService {
             reenterSuppressionRetry,
             seed,
             consentReceipt.recipient,
+            consentReceipt.customerId,
           );
           return result;
         }
 
-        const recipient = await this.dependencies.recipientResolver.resolve(seedBase);
-        if (!recipient) {
-          await this.dependencies.noticeMissingRecipient?.(candidate.shopId, candidate.checkoutToken);
+        const stored = await selectStoredShopifyCheckoutPhone({ shopId: candidate.shopId, checkout });
+        if (!stored) {
+          await this.dependencies.noticeMissingRecipient?.(candidate.shopId, candidate.checkoutToken, seedBase);
           return { outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken } as const;
         }
+        const seed = {
+          ...seedBase,
+          customer: { ...seedBase.customer, phone: `+${stored.recipient}` },
+        };
         const result = await this.continueOrInitiateExisting(
           candidate,
           existing,
           generation,
           continueExistingGeneration,
           reenterSuppressionRetry,
-          seedBase,
-          recipient,
+          seed,
+          stored.recipient,
+          stored.customerId,
         );
         return result;
       },
@@ -206,6 +213,7 @@ export class RecoveryMaterializationService {
     reenterSuppressionRetry: boolean,
     seed: RecoveryCheckoutSeed,
     recipient: string,
+    customerId?: string,
   ): Promise<MaturedCandidateMaterializationResult> {
     if (existing && this.dependencies.continueInitialOutreach &&
         ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
@@ -231,7 +239,7 @@ export class RecoveryMaterializationService {
       return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status };
     }
 
-    const initiated = await this.dependencies.initiate(seed, generation, recipient);
+    const initiated = await this.dependencies.initiate(seed, generation, recipient, customerId);
     if (initiated === null) {
       return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken };
     }

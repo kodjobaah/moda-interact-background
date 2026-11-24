@@ -1,16 +1,15 @@
 import { createHash } from "node:crypto";
+import type { PrismaClient } from "@prisma/client";
+import prisma from "../lib/db.js";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
-import { normalizeRecipientPhone } from "@modainteract/moda-interact-shared/identity";
 import type { NormalizedAbandonedCheckout } from "../domain/abandoned-checkout.js";
 import type { PendingRecoveryCandidate } from "../domain/pending-recovery-candidate.js";
 import type { RecoveryCheckoutSeed } from "../events/checkout-events.js";
-import { recoveryShopifyCustomerService } from "./checkout-recovery/recovery-shopify-customer.service.js";
-import {
-  ShopifyWhatsAppConsentService,
-  type ShopifyWhatsAppConsentServicePort,
-} from "./shopify-whatsapp-consent.service.js";
 import { verifyShopifyConsentReceipt } from "./shopify-consent-receipt-verifier.js";
-import type { ShopifyConsentMaterializationResult } from "./shopify-whatsapp-consent/types.js";
+import {
+  materializeShopifyCheckoutPhones,
+  ShopifyPhoneResolutionError,
+} from "./shopify-whatsapp-consent/phone-resolution.js";
 import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environment.js";
 
 const materializationLogger = createLogger({
@@ -25,22 +24,16 @@ export type ShopifyCheckoutConsentMaterialization =
   | { status: "DEFER_IDENTITY_OR_RECIPIENT" }
   | { status: "BLOCKED_STOP" }
   | { status: "MATERIALISATION_FAILURE"; reason: string; cause?: unknown }
-  | { status: "MATERIALISED_GRANTED"; recipient: string }
+  | { status: "MATERIALISED_GRANTED"; recipient: string; customerId: string }
   | { status: "MATERIALISED_REVOKED" };
 
-type CustomerPreparer = (seed: RecoveryCheckoutSeed, shopId: string) => Promise<unknown>;
-
-/** Applies an authenticated receipt only after the caller has established recoverability. */
+/** Only authenticated, recoverable Shopify checkout receipts may modify consent. */
 export class ShopifyCheckoutConsentMaterializationService {
   constructor(
-    private readonly consent: Pick<ShopifyWhatsAppConsentServicePort, "materializeExplicitChoice"> =
-      new ShopifyWhatsAppConsentService(),
-    private readonly prepareCustomer: CustomerPreparer = (seed, shopId) =>
-      recoveryShopifyCustomerService.resolve(seed, shopId),
-    private readonly keyringJson: () => string | undefined = () =>
-      process.env.MODA_ENCRYPTION_KEYS_JSON,
+    private readonly keyringJson: () => string | undefined = () => process.env.MODA_ENCRYPTION_KEYS_JSON,
     private readonly now: () => Date = () => new Date(),
     private readonly logger: Pick<StructuredLogger, "info" | "warn" | "error"> = materializationLogger,
+    private readonly database: PrismaClient = prisma,
   ) {}
 
   async materialize(input: {
@@ -49,9 +42,7 @@ export class ShopifyCheckoutConsentMaterializationService {
     seed: RecoveryCheckoutSeed;
   }): Promise<ShopifyCheckoutConsentMaterialization> {
     const checkoutCorrelation = createHash("sha256")
-      .update(input.candidate.checkoutToken)
-      .digest("hex")
-      .slice(0, 16);
+      .update(input.candidate.checkoutToken).digest("hex").slice(0, 16);
     const logContext = {
       shopId: input.candidate.shopId,
       checkoutCorrelation,
@@ -72,100 +63,68 @@ export class ShopifyCheckoutConsentMaterializationService {
     if (verification.status !== "VERIFIED") {
       if (verification.status === "KEYRING_CONFIGURATION_FAILURE") {
         this.logger.error("shopify.consent.materialization.failed", {
-          ...logContext,
-          stage: "receipt_keyring",
-          outcome: "retryable_failure",
+          ...logContext, stage: "receipt_keyring", outcome: "retryable_failure",
           reasonCode: verification.reason,
           ...(verification.cause !== undefined ? { error: verification.cause } : {}),
         });
-        return {
-          status: "MATERIALISATION_FAILURE",
-          reason: verification.reason,
-          ...(verification.cause !== undefined ? { cause: verification.cause } : {}),
-        };
+        return { status: "MATERIALISATION_FAILURE", reason: verification.reason,
+          ...(verification.cause !== undefined ? { cause: verification.cause } : {}) };
       }
-      if (verification.status === "NO_EXPLICIT_CHOICE") {
-        this.logger.info("shopify.consent.materialization.no_choice", {
-          ...logContext,
-          stage: "receipt_verification",
-          outcome: "unchanged",
-          reasonCode: "NO_EXPLICIT_CHOICE",
-        });
-      } else if (verification.status === "DEFER_IDENTITY_OR_RECIPIENT" ||
-          verification.status === "DEFER_CHECKOUT_BINDING") {
-        this.logger.info("shopify.consent.receipt.identity_deferred", {
-          ...logContext,
-          stage: "checkout_identity",
-          outcome: "deferred",
-          reasonCode: verification.status,
-          message: "Consent receipt cannot be applied without verified checkout and customer binding.",
-        });
-      }
+      this.logger.info("shopify.consent.receipt.evaluation", {
+        ...logContext, stage: "receipt_verification", outcome: verification.status,
+      });
       return { status: verification.status };
     }
-
-    const shopifyCustomerId = input.checkout.customer?.shopifyCustomerId;
-    if (!shopifyCustomerId || verification.customerId === "-") {
-      this.logger.info("shopify.consent.receipt.identity_deferred", {
-        ...logContext,
-        stage: "checkout_identity",
-        outcome: "deferred",
-        reasonCode: "VERIFIED_CUSTOMER_PRINCIPAL_REQUIRED",
-        message: "Guest receipts are not materialised without a verified Shopify customer principal.",
-      });
-      return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
+    if (input.checkout.consentReceiptAttribute.kind !== "VALUE") {
+      return { status: "INVALID_OR_AMBIGUOUS_RECEIPT" };
     }
 
-    const chosen = selectAttributedRecipient(input.checkout);
-    if (!chosen) {
-      this.logger.info("shopify.consent.receipt.identity_deferred", {
-        ...logContext,
-        stage: "recipient_attribution",
-        outcome: "deferred",
-        reasonCode: "ATTRIBUTABLE_RECIPIENT_MISSING",
-        message: "No eligible customer, billing, or attributable shipping recipient was found.",
-      });
-      return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
-    }
-    const seed: RecoveryCheckoutSeed = {
-      ...input.seed,
-      customer: { ...input.seed.customer, phone: chosen.phone },
-    };
-
-    // A customer or billing phone can be attached to the authenticated
-    // Shopify customer. Shipping-only numbers must already be attributable to
-    // that customer's durable CustomerPhone row; never create a principal from
-    // a shipping destination.
-    if (chosen.source !== "shipping") {
-      let customer: unknown;
-      try {
-        customer = await this.prepareCustomer(seed, input.candidate.shopId);
-      } catch (error) {
-        this.logger.error("shopify.consent.materialization.failed", {
-          ...logContext,
-          stage: "customer_identity_resolution",
-          outcome: "retryable_failure",
-          reasonCode: "CUSTOMER_IDENTITY_RESOLUTION_FAILED",
-          error,
-        });
-        return {
-          status: "MATERIALISATION_FAILURE",
-          reason: "CUSTOMER_IDENTITY_RESOLUTION_FAILED",
-          cause: error,
-        };
-      }
-      if (!customer) return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
-    }
-
-    let result: ShopifyConsentMaterializationResult;
     try {
-      result = await this.consent.materializeExplicitChoice({
+      const resolved = await materializeShopifyCheckoutPhones({
         shopId: input.candidate.shopId,
-        shopifyCustomerId,
-        recipient: chosen.e164,
+        checkout: input.checkout,
         decision: verification.decision,
+        acceptedAt: verification.acceptedAt,
+        locale: verification.locale,
+        receiptKind: verification.kind,
+        receiptValue: input.checkout.consentReceiptAttribute.value,
+        checkoutToken: input.candidate.checkoutToken,
+        cartToken: input.candidate.cartToken,
+        now: this.now(),
+        database: this.database,
       });
+      this.logger.info("shopify.recovery.phone_consent_evaluation", {
+        ...logContext,
+        shopifyCustomerIdPresent: Boolean(input.checkout.customer?.shopifyCustomerId),
+        customerPhonePresent: Boolean(input.checkout.customer?.phone),
+        billingPhonePresent: Boolean(input.checkout.billingPhone),
+        shippingPhonePresent: Boolean(input.checkout.shippingPhone),
+        validDistinctPhoneCount: resolved.validPhoneCount,
+        invalidPhoneSources: resolved.invalidSources,
+        verifiedDecision: verification.decision,
+        consentWriteCount: resolved.consentWriteCount,
+        evidenceInsertedCount: resolved.evidenceInsertedCount,
+        selectedRecipientSource: resolved.selected?.source ?? null,
+        outcome: resolved.selected ? "eligible" : "no_eligible_recipient",
+      });
+      if (resolved.selected) return {
+        status: "MATERIALISED_GRANTED",
+        customerId: resolved.customerId,
+        recipient: resolved.selected.recipient,
+      };
+      if (verification.decision === "REVOKED") return { status: "MATERIALISED_REVOKED" };
+      return { status: "BLOCKED_STOP" };
     } catch (error) {
+      if (error instanceof ShopifyPhoneResolutionError) {
+        this.logger.warn("shopify.consent.receipt.identity_deferred", {
+          ...logContext,
+          stage: "shopify_phone_resolution",
+          outcome: "deferred",
+          reasonCode: error.reasonCode,
+          message: error.message,
+        });
+        return { status: "DEFER_IDENTITY_OR_RECIPIENT" };
+      }
       this.logger.error("shopify.consent.materialization.failed", {
         ...logContext,
         stage: "postgresql_write",
@@ -175,78 +134,7 @@ export class ShopifyCheckoutConsentMaterializationService {
       });
       return { status: "MATERIALISATION_FAILURE", reason: "CONSENT_WRITE_FAILED", cause: error };
     }
-    switch (result.status) {
-      case "MATERIALISED_GRANTED":
-        this.logger.info("shopify.consent.materialization.granted", {
-          ...logContext,
-          stage: "postgresql_write",
-          outcome: "materialised",
-          decision: verification.decision,
-          reasonCode: "CONSENT_GRANTED",
-        });
-        return { status: result.status, recipient: chosen.e164.slice(1) };
-      case "MATERIALISED_REVOKED":
-        this.logger.info("shopify.consent.materialization.revoked", {
-          ...logContext,
-          stage: "postgresql_write",
-          outcome: "materialised",
-          decision: verification.decision,
-          reasonCode: "CONSENT_REVOKED",
-        });
-        return result;
-      case "BLOCKED_STOP":
-        this.logger.info("shopify.consent.outbound.blocked", {
-          ...logContext,
-          stage: "stop_guard",
-          outcome: "blocked",
-          reasonCode: "BLOCKED_STOP",
-          message: "Independent STOP/no-contact state prevents proactive consent materialisation.",
-        });
-        return result;
-      case "DEFER_IDENTITY_OR_RECIPIENT":
-        this.logger.info("shopify.consent.receipt.identity_deferred", {
-          ...logContext,
-          stage: "recipient_attribution",
-          outcome: "deferred",
-          reasonCode: "RECIPIENT_NOT_ATTRIBUTABLE",
-          message: "The current SQL customer or recipient binding is not eligible for this decision.",
-        });
-        return result;
-      case "MATERIALISATION_FAILURE":
-        this.logger.error("shopify.consent.materialization.failed", {
-          ...logContext,
-          stage: "postgresql_write",
-          outcome: "retryable_failure",
-          reasonCode: result.reason,
-          ...(result.cause !== undefined ? { error: result.cause } : {}),
-        });
-        return result;
-    }
   }
-}
-
-function selectAttributedRecipient(
-  checkout: NormalizedAbandonedCheckout,
-): { source: "customer" | "billing" | "shipping"; phone: string; e164: string } | null {
-  const country = checkout.internationalContext.countryCode ?? undefined;
-  const choices = [
-    { source: "customer" as const, phone: checkout.customer?.phone },
-    { source: "billing" as const, phone: checkout.billingPhone },
-    { source: "shipping" as const, phone: checkout.shippingPhone },
-  ];
-  for (const choice of choices) {
-    if (!choice.phone?.trim()) continue;
-    const normalized = normalizeRecipientPhone(
-      choice.phone,
-      choice.phone.trim().startsWith("+") || !country
-        ? {}
-        : { verifiedCountryCode: country },
-    );
-    if (normalized.ok) {
-      return { source: choice.source, phone: choice.phone, e164: normalized.e164 };
-    }
-  }
-  return null;
 }
 
 export const shopifyCheckoutConsentMaterializationService =

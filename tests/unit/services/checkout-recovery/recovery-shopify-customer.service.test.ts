@@ -1,10 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
-const { upsert } = vi.hoisted(() => ({ upsert: vi.fn() }));
-vi.mock("../../../../src/services/customer.service.js", () => ({
-  customerService: { upsertShopifyCustomer: upsert },
-}));
+import { describe, expect, it, vi } from "vitest";
 import { RecoveryShopifyCustomerService } from "../../../../src/services/checkout-recovery/recovery-shopify-customer.service.js";
 
 const checkout = {
@@ -14,51 +8,43 @@ const checkout = {
   },
 } as never;
 
-describe("recovery Shopify customer identity", () => {
-  beforeEach(() => upsert.mockClear());
+function service(phones: Array<{ customer: { id: string; shopifyCustomerId: string | null } }>) {
+  const db = {
+    shop: { findFirst: vi.fn(async () => ({ defaultCountryCode: "GB" })) },
+    customerPhone: { findMany: vi.fn(async () => phones) },
+    customer: {},
+  };
+  return { subject: new RecoveryShopifyCustomerService(db as never), db };
+}
 
-  it("uses a verified Shopify identifier for new customers, never a phone match", async () => {
-    const findMany = vi.fn(async () => []);
-    const service = new RecoveryShopifyCustomerService({ customer: { findMany } } as never);
-    upsert.mockResolvedValue({ id: "customer-1" });
-    await expect(service.resolve(checkout, "shop-1")).resolves.toMatchObject({ id: "customer-1" });
-    expect(findMany).toHaveBeenCalledWith({
-      where: { shopId: "shop-1", shopifyCustomerId: { in: ["901", "gid://shopify/Customer/901"] } },
-      select: { id: true, shopifyCustomerId: true }, take: 2,
-    });
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
-      shopId: "shop-1", shopifyCustomerId: "901", phone: "+447400123456",
+describe("Shopify recovery customer lookup", () => {
+  it("resolves the unique Moda customer from the canonical phone without creating a customer", async () => {
+    const { subject, db } = service([{ customer: { id: "guest-1", shopifyCustomerId: null } }]);
+    await expect(subject.resolve(checkout, "shop-1")).resolves.toMatchObject({ id: "guest-1" });
+    expect(db.customerPhone.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { endedAt: null, whatsappCanonicalPhone: "447400123456", customer: { shopId: "shop-1" } },
+      take: 2,
     }));
   });
 
-  it("preserves a STOP on the same canonical number despite Shopify formatting changes", async () => {
-    const findMany = vi.fn(async () => [{ id: "linked", shopifyCustomerId: "901" }]);
-    const service = new RecoveryShopifyCustomerService({
-      customer: { findMany },
-      customerPhone: { findFirst: vi.fn(async () => ({ phone: "07400 123456" })) },
-      shop: { findUnique: vi.fn(async () => ({ defaultCountryCode: "GB" })) },
-    } as never);
-    upsert.mockResolvedValue({ id: "linked" });
-    await service.resolve(checkout, "shop-1");
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ phone: "07400 123456" }));
+  it("rejects a phone already associated with a different Shopify identity", async () => {
+    const { subject } = service([{ customer: { id: "other", shopifyCustomerId: "902" } }]);
+    await expect(subject.resolve(checkout, "shop-1")).resolves.toBeNull();
   });
 
-  it("preserves the exact linked identity representation and denies duplicates", async () => {
-    const findMany = vi.fn().mockResolvedValueOnce([{
-      id: "linked", shopifyCustomerId: "gid://shopify/Customer/901",
-    }]).mockResolvedValueOnce([
-      { id: "a", shopifyCustomerId: "901" },
-      { id: "b", shopifyCustomerId: "gid://shopify/Customer/901" },
+  it("fails closed for multiple merchant phone matches", async () => {
+    const { subject } = service([
+      { customer: { id: "a", shopifyCustomerId: null } },
+      { customer: { id: "b", shopifyCustomerId: null } },
     ]);
-    const service = new RecoveryShopifyCustomerService({
-      customer: { findMany },
-      customerPhone: { findFirst: vi.fn(async () => null) },
-      shop: { findUnique: vi.fn(async () => ({ defaultCountryCode: "GB" })) },
-    } as never);
-    upsert.mockResolvedValue({ id: "linked" });
-    await service.resolve(checkout, "shop-1");
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ shopifyCustomerId: "gid://shopify/Customer/901" }));
-    await expect(service.resolve(checkout, "shop-1")).resolves.toBeNull();
-    expect(upsert).toHaveBeenCalledTimes(1);
+    await expect(subject.resolve(checkout, "shop-1")).resolves.toBeNull();
+  });
+
+  it("does not manufacture an identity from a missing checkout phone", async () => {
+    const { subject, db } = service([]);
+    await expect(subject.resolve({ ...checkout, customer: {
+      ...checkout.customer, phone: null,
+    } } as never, "shop-1")).resolves.toBeNull();
+    expect(db.customerPhone.findMany).not.toHaveBeenCalled();
   });
 });
