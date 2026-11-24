@@ -65,6 +65,7 @@ describe("final stored CustomerPhone recovery consent fence", () => {
 describe("recovery proactive stored-only preflight", () => {
   const findUnique = vi.fn();
   const evaluateStoredRecipient = vi.fn();
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   beforeEach(() => {
     vi.resetAllMocks();
     findUnique.mockResolvedValue({ shopId: "shop-a", customerId: "customer-a", shop: { platform: "SHOPIFY" } });
@@ -73,6 +74,7 @@ describe("recovery proactive stored-only preflight", () => {
   const make = () => new RecoveryStoredConsentService(
     { checkoutRecovery: { findUnique } } as never,
     { evaluateStoredRecipient } as never,
+    logger,
   );
   it("uses stored Shopify permission and returns the revision snapshot", async () => {
     await expect(make().preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: "+447400123456" }))
@@ -83,9 +85,15 @@ describe("recovery proactive stored-only preflight", () => {
     evaluateStoredRecipient.mockResolvedValueOnce({ status: "NOT_AUTHORISED", reason: "LOCAL_NO_CONTACT" });
     await expect(make().preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: "+447400123456" }))
       .resolves.toEqual({ kind: "denied", reason: "stored-consent-denied" });
-    findUnique.mockRejectedValueOnce(new Error("db offline"));
+    const originalError = new Error("original Prisma connection failure");
+    findUnique.mockRejectedValueOnce(originalError);
     await expect(make().preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: "+447400123456" }))
       .resolves.toEqual({ kind: "denied", reason: "stored-consent-unavailable" });
+    expect(logger.error).toHaveBeenCalledWith("shopify.consent.outbound.blocked", expect.objectContaining({
+      operation: "proactive_final_send",
+      stage: "consent_preflight",
+      error: originalError,
+    }));
   });
   it("does not invent Shopify-native grants for WooCommerce", async () => {
     findUnique.mockResolvedValueOnce({ shopId: "shop-a", customerId: "woo-a", shop: { platform: "WOOCOMMERCE" } });

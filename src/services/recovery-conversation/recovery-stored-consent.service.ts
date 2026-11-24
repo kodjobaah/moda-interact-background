@@ -1,5 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
+import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import prisma from "../../lib/db.js";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { canonicalWhatsAppSender } from "../whatsapp-contact-opt-out/phone.js";
 import {
   ShopifyWhatsAppConsentService,
@@ -22,12 +24,17 @@ export type StoredRecoveryConsentDecision =
   | { kind: "denied"; reason: string };
 
 export type StoredRecoveryConsentReader = Pick<RecoveryStoredConsentService, "preflight">;
+const storedConsentLogger = createLogger({
+  serviceName: "moda-recovery-worker",
+  environment: resolveDeploymentEnvironmentName(),
+});
 
 export class RecoveryStoredConsentService {
   constructor(
     private readonly database: Pick<PrismaClient, "checkoutRecovery"> = prisma,
     private readonly shopify: Pick<ShopifyWhatsAppConsentServicePort, "evaluateStoredRecipient"> =
       new ShopifyWhatsAppConsentService(),
+    private readonly logger: Pick<StructuredLogger, "info" | "warn" | "error"> = storedConsentLogger,
   ) {}
 
   /** No Shopify GraphQL read: new checkout verification belongs to BG002. */
@@ -59,7 +66,16 @@ export class RecoveryStoredConsentService {
         consentRevision: decision.consentRevision,
         noContactRevision: decision.noContactRevision,
       } };
-    } catch {
+    } catch (error) {
+      this.logger.error("shopify.consent.outbound.blocked", {
+        shopId: input.shopId,
+        recoveryId: input.recoveryId,
+        operation: "proactive_final_send",
+        stage: "consent_preflight",
+        outcome: "blocked_unavailable",
+        reasonCode: "STORED_CONSENT_LOOKUP_FAILED",
+        error,
+      });
       return { kind: "denied", reason: "stored-consent-unavailable" };
     }
   }

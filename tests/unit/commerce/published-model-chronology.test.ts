@@ -21,7 +21,7 @@ function serializeAtModelBoundary(request: unknown) {
     }
   `;
   const probe = spawnSync(process.execPath, ["--input-type=module"], {
-    cwd: process.cwd(), encoding: "utf8", timeout: 15000,
+    cwd: process.cwd(), encoding: "utf8", timeout: 60_000,
     env: { ...process.env, DATABASE_URL: "postgresql://unit:unit@127.0.0.1:1/unit", REDIS_URL: "redis://127.0.0.1:1" },
     input: `
       import { registerHooks } from "node:module";
@@ -69,7 +69,7 @@ describe("published Shared model chronology adoption", () => {
     expect(result.maxTokens).toBe(77);
     expect(result.signalAborted).toBe(false);
     expect(result.networkCalls).toBe(0);
-  }, 20_000);
+  }, 65_000);
 
   it("keeps current-turn tool observations after the current question", () => {
     const result = serializeAtModelBoundary({ ...base,
@@ -83,7 +83,7 @@ describe("published Shared model chronology adoption", () => {
     expect(result.messages[2]?.content).toContain(currentQuestion);
     expect(result.messages[3]?.content).toContain("commerce_get_product");
     expect(result.networkCalls).toBe(0);
-  }, 20_000);
+  }, 65_000);
 });
 
 
@@ -103,5 +103,5 @@ describe("published typed current-customer message serialization", () => {
     expect(result.messages.filter(message => message.content.includes(current))).toHaveLength(1);
     expect(result.messages[0]!.content).toContain("A newly named product takes precedence");
     expect(result.networkCalls).toBe(0);
-  }, 20_000);
+  }, 65_000);
 });

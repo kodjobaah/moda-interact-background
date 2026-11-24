@@ -13,6 +13,7 @@ import { whatsAppService } from "../../src/services/whatsapp.service.js";
 import { ShopifyWhatsAppConsentService } from "../../src/services/shopify-whatsapp-consent.service.js";
 import { moderationAssessmentService } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
 import { abandonedCheckoutLookupService } from "../../src/services/abandoned-checkout-lookup.service.js";
+import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
 import type { RecoveryCheckoutSeed } from "../../src/events/checkout-events.js";
 import { seedApprovedInitialWooTemplateRegistration, WOO_TEST_SENDER_WABA } from
   "./fixtures/woo-approved-initial-template.fixture.js";
@@ -73,6 +74,37 @@ async function fixture(consentAllowed = true) {
     create: { id: "default", absoluteOutboundHardLimit: 20, defaultWarningPercent: 80 },
   });
   await db.backgroundRuntimeConfig.upsert({ where: { id: "default" }, update: {}, create: { id: "default" } });
+  const senderConfig = await db.platformConfiguration.upsert({
+    where: { environment_key: { environment: "test", key: "messaging.sender" } },
+    create: { environment: "test", key: "messaging.sender", value: { fixture: true }, version: 1 },
+    update: { value: { fixture: true }, version: 1 },
+  });
+  const originalConfigurationRead = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
+  vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(async (key) => {
+    if (key === "messaging.sender") {
+      return {
+        key,
+        rowId: senderConfig.id,
+        version: 1,
+        value: {
+          accessToken: "disposable-test-token",
+          phoneNumberId: "123456789",
+          businessAccountId: WOO_TEST_SENDER_WABA,
+        },
+      } as never;
+    }
+    return originalConfigurationRead(key as never) as never;
+  });
+  const poolPhoneId = (BigInt(`0x${suffix.slice(0, 12)}`) + 1n).toString();
+  await db.whatsAppPoolSender.create({
+    data: {
+      providerPhoneNumberId: poolPhoneId,
+      providerAccountId: WOO_TEST_SENDER_WABA,
+      verifiedAt: new Date(Date.now() - 60_000),
+      allocationEnabled: true,
+      priority: 0,
+    },
+  });
   await db.shopEntitlementCounter.create({ data: {
     shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1,
   } });
@@ -82,20 +114,15 @@ async function fixture(consentAllowed = true) {
   } });
   const customerPhone = await db.customerPhone.create({ data: { customerId: customer.id, phone } });
   if (consentAllowed) {
-    const consent = new ShopifyWhatsAppConsentService({
-      readCurrent: vi.fn(async () => ({
-        kind: "OBSERVED" as const,
-        customerGid: `gid://shopify/Customer/${shopifyCustomerId}`,
-        phoneNumber: phone,
-        state: "SUBSCRIBED" as const,
-        updatedAt: now.toISOString(),
-      })),
-    }, db);
-    const outcome = await consent.evaluateRecipient({
-      shopId, customerId: customer.id,
-      shopifyCustomerId: `gid://shopify/Customer/${shopifyCustomerId}`, recipient: phone,
+    const consent = new ShopifyWhatsAppConsentService(db);
+    const outcome = await consent.materializeExplicitChoice({
+      shopId,
+      customerId: customer.id,
+      shopifyCustomerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+      recipient: phone,
+      decision: "GRANTED",
     });
-    expect(outcome.status).toBe("ALLOWED");
+    expect(outcome.status).toBe("MATERIALISED_GRANTED");
   }
 
   vi.spyOn(recoveryShopifyCustomerService, "resolve").mockResolvedValue(customer as never);
@@ -224,6 +251,10 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
         abandonedCheckoutUrl: f.checkoutUrl,
         createdAt: f.event.detectedAt,
         completedAt: null,
+        shopifyPlus: false,
+        consentReceiptAttribute: { kind: "MISSING" },
+        billingPhone: null,
+        shippingPhone: null,
         currencyCode: "GBP",
         totalPrice: "25.00",
         internationalContext: f.event.internationalContext!,
@@ -325,6 +356,10 @@ withDatabase("ARCH-052 Shopify initial no-offer dispatch (disposable PostgreSQL)
         abandonedCheckoutUrl: f.checkoutUrl,
         createdAt: f.event.detectedAt,
         completedAt: null,
+        shopifyPlus: false,
+        consentReceiptAttribute: { kind: "MISSING" },
+        billingPhone: null,
+        shippingPhone: null,
         currencyCode: "GBP",
         totalPrice: "25.00",
         internationalContext: f.event.internationalContext!,

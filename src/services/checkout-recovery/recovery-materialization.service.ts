@@ -8,6 +8,10 @@ import type { RecoverySnapshotBuilderService } from "./recovery-snapshot-builder
 import type { findLatestRecovery } from "./latest-recovery.js";
 import type { RecoveryRecipientResolverService } from "./recovery-recipient-resolver.service.js";
 import { InitialOutreachHeldError, type InitialOutreachProgress } from "./recovery-initiation.service.js";
+import {
+  shopifyCheckoutConsentMaterializationService,
+  type ShopifyCheckoutConsentMaterialization,
+} from "../shopify-checkout-consent-materialization.service.js";
 
 export type MaturedCandidateMaterializationResult =
   | { outcome: "recovery-created"; checkoutToken: string; recoveryId?: string }
@@ -21,6 +25,11 @@ export type MaturedCandidateMaterializationResult =
   | { outcome: "discarded-superseded"; checkoutToken: string }
   | { outcome: "discarded-not-found"; checkoutToken: string }
   | { outcome: "discarded-not-recoverable"; checkoutToken: string }
+  | { outcome: "discarded-consent-revoked"; checkoutToken: string }
+  | { outcome: "discarded-consent-invalid"; checkoutToken: string }
+  | { outcome: "deferred-consent-checkout-binding"; checkoutToken: string }
+  | { outcome: "deferred-consent-identity-or-recipient"; checkoutToken: string }
+  | { outcome: "discarded-consent-stop"; checkoutToken: string }
   | { outcome: "discarded-ambiguous"; checkoutToken: string }
   | { outcome: "discarded-bound-exceeded"; checkoutToken: string }
   | { outcome: "discarded-order-completed"; checkoutToken: string }
@@ -39,6 +48,7 @@ type RecoveryMaterializationDependencies = {
   findLatestRecovery: typeof findLatestRecovery;
   snapshotBuilder: Pick<RecoverySnapshotBuilderService, "build">;
   recipientResolver: Pick<RecoveryRecipientResolverService, "resolve">;
+  consentReceipt?: Pick<typeof shopifyCheckoutConsentMaterializationService, "materialize">;
   continueInitialOutreach?: (input: { shopId: string; recoveryId: string }) => Promise<InitialOutreachProgress>;
   initiate: (seed: RecoveryCheckoutSeed, generation: number, recipient: string) => Promise<unknown>;
   noticeMissingRecipient?: (shopId: string, checkoutToken: string) => Promise<void>;
@@ -57,51 +67,24 @@ export class RecoveryMaterializationService {
       async () => {
         const existing = await this.dependencies.findLatestRecovery(candidate.shopId, candidate.checkoutToken);
         let generation = 1;
-        const reenterSuppressionRetry = options.retrySuppressionAdmission &&
-          existing?.status === "DETECTED";
+        const reenterSuppressionRetry = Boolean(
+          options.retrySuppressionAdmission && existing?.status === "DETECTED",
+        );
         let continueExistingGeneration = false;
         if (existing) {
-          if (this.dependencies.continueInitialOutreach) {
-            const progress = await this.dependencies.continueInitialOutreach({
-              shopId: candidate.shopId,
-              recoveryId: existing.id,
-            });
-            if (progress.kind === "reconciled") {
-              return { outcome: "recovery-reconciled", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId } as const;
-            }
-            if (progress.kind === "blocked") {
-              return { outcome: "deferred-initial-outreach", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId, reason: progress.reason } as const;
-            }
-            if (progress.kind === "held") {
-              throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
-            }
-          }
-          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
-            if (existing.status !== "DETECTED") {
-              return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status } as const;
-            }
-            if (this.dependencies.continueInitialOutreach) {
-              continueExistingGeneration = true;
-              generation = existing.generation;
-            } else if (!reenterSuppressionRetry) {
-              return {
-                outcome: "no-op-existing",
-                checkoutToken: candidate.checkoutToken,
-                status: existing.status,
-              } as const;
-            } else {
-              generation = existing.generation;
-              continueExistingGeneration = true;
-            }
-          } else {
-            generation = existing.generation + 1;
-          }
           if (["COMPLETED", "CANCELLED"].includes(existing.status)) {
             return {
               outcome: "discarded-terminal",
               checkoutToken: candidate.checkoutToken,
               status: existing.status,
             } as const;
+          }
+          if (["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+            generation = existing.generation;
+            continueExistingGeneration = existing.status === "DETECTED" &&
+              (Boolean(this.dependencies.continueInitialOutreach) || reenterSuppressionRetry);
+          } else {
+            generation = existing.generation + 1;
           }
         }
 
@@ -167,29 +150,126 @@ export class RecoveryMaterializationService {
           return { outcome: "discarded-not-recoverable", checkoutToken: candidate.checkoutToken } as const;
         }
 
-        const seed = await this.dependencies.snapshotBuilder.build(candidate, shopDomain, checkout);
-        const recipient = await this.dependencies.recipientResolver.resolve(seed);
+        const seedBase = await this.dependencies.snapshotBuilder.build(candidate, shopDomain, checkout);
+        const consentReceipt = await (this.dependencies.consentReceipt ??
+          shopifyCheckoutConsentMaterializationService).materialize({
+          candidate,
+          checkout,
+          seed: seedBase,
+        });
+        const consentOutcome = mapConsentOutcome(candidate.checkoutToken, consentReceipt);
+        if (consentOutcome) return consentOutcome;
+        if (consentReceipt.status === "MATERIALISED_REVOKED") {
+          return { outcome: "discarded-consent-revoked", checkoutToken: candidate.checkoutToken } as const;
+        }
+        if (consentReceipt.status === "MATERIALISED_GRANTED") {
+          const seed = {
+            ...seedBase,
+            customer: { ...seedBase.customer, phone: `+${consentReceipt.recipient}` },
+          };
+          const result = await this.continueOrInitiateExisting(
+            candidate,
+            existing,
+            generation,
+            continueExistingGeneration,
+            reenterSuppressionRetry,
+            seed,
+            consentReceipt.recipient,
+          );
+          return result;
+        }
+
+        const recipient = await this.dependencies.recipientResolver.resolve(seedBase);
         if (!recipient) {
           await this.dependencies.noticeMissingRecipient?.(candidate.shopId, candidate.checkoutToken);
           return { outcome: "deferred-no-recipient", checkoutToken: candidate.checkoutToken } as const;
         }
-        const initiated = await this.dependencies.initiate(seed, generation, recipient);
-        if (initiated === null) {
-          return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken } as const;
-        }
-
-        // The initiation port already has the persisted recovery. Reuse its
-        // identity for diagnostics; never issue another SELECT only for logging.
-        const recoveryId = typeof initiated === "object" && initiated !== null
-          && "id" in initiated && typeof initiated.id === "string"
-          ? initiated.id : undefined;
-        if (reenterSuppressionRetry || continueExistingGeneration) {
-          return { outcome: "recovery-reentered", checkoutToken: seed.checkoutToken,
-            ...(recoveryId ? { recoveryId } : {}) } as const;
-        }
-        return { outcome: "recovery-created", checkoutToken: seed.checkoutToken,
-          ...(recoveryId ? { recoveryId } : {}) } as const;
+        const result = await this.continueOrInitiateExisting(
+          candidate,
+          existing,
+          generation,
+          continueExistingGeneration,
+          reenterSuppressionRetry,
+          seedBase,
+          recipient,
+        );
+        return result;
       },
     );
+  }
+
+  private async continueOrInitiateExisting(
+    candidate: PendingRecoveryCandidate,
+    existing: Awaited<ReturnType<RecoveryMaterializationDependencies["findLatestRecovery"]>>,
+    generation: number,
+    continueExistingGeneration: boolean,
+    reenterSuppressionRetry: boolean,
+    seed: RecoveryCheckoutSeed,
+    recipient: string,
+  ): Promise<MaturedCandidateMaterializationResult> {
+    if (existing && this.dependencies.continueInitialOutreach &&
+        ["DETECTED", "MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+      const progress = await this.dependencies.continueInitialOutreach({
+        shopId: candidate.shopId,
+        recoveryId: existing.id,
+      });
+      if (progress.kind === "reconciled") {
+        return { outcome: "recovery-reconciled", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId };
+      }
+      if (progress.kind === "blocked") {
+        return { outcome: "deferred-initial-outreach", checkoutToken: candidate.checkoutToken, recoveryId: progress.recoveryId, reason: progress.reason };
+      }
+      if (progress.kind === "held") {
+        throw new InitialOutreachHeldError(progress.recoveryId, progress.reason, progress.creditReason);
+      }
+      if (existing.status !== "DETECTED") {
+        return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status };
+      }
+    } else if (existing && ["MESSAGE_SENT", "ENGAGED"].includes(existing.status)) {
+      return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status };
+    } else if (existing?.status === "DETECTED" && !continueExistingGeneration && !reenterSuppressionRetry) {
+      return { outcome: "no-op-existing", checkoutToken: candidate.checkoutToken, status: existing.status };
+    }
+
+    const initiated = await this.dependencies.initiate(seed, generation, recipient);
+    if (initiated === null) {
+      return { outcome: "discarded-admission-denied", checkoutToken: candidate.checkoutToken };
+    }
+
+    // The initiation port already has the persisted recovery. Reuse its
+    // identity for diagnostics; never issue another SELECT only for logging.
+    const recoveryId = typeof initiated === "object" && initiated !== null
+      && "id" in initiated && typeof initiated.id === "string"
+      ? initiated.id : undefined;
+    if (reenterSuppressionRetry || continueExistingGeneration) {
+      return { outcome: "recovery-reentered", checkoutToken: seed.checkoutToken,
+        ...(recoveryId ? { recoveryId } : {}) };
+    }
+    return { outcome: "recovery-created", checkoutToken: seed.checkoutToken,
+      ...(recoveryId ? { recoveryId } : {}) };
+  }
+}
+
+function mapConsentOutcome(
+  checkoutToken: string,
+  result: ShopifyCheckoutConsentMaterialization,
+): MaturedCandidateMaterializationResult | null {
+  switch (result.status) {
+    case "NO_EXPLICIT_CHOICE":
+    case "MATERIALISED_GRANTED":
+    case "MATERIALISED_REVOKED":
+      return null;
+    case "INVALID_OR_AMBIGUOUS_RECEIPT":
+      return { outcome: "discarded-consent-invalid", checkoutToken };
+    case "DEFER_CHECKOUT_BINDING":
+      return { outcome: "deferred-consent-checkout-binding", checkoutToken };
+    case "DEFER_IDENTITY_OR_RECIPIENT":
+      return { outcome: "deferred-consent-identity-or-recipient", checkoutToken };
+    case "BLOCKED_STOP":
+      return { outcome: "discarded-consent-stop", checkoutToken };
+    case "MATERIALISATION_FAILURE":
+      throw new Error(`Shopify checkout consent materialisation failed: ${result.reason}`, {
+        ...(result.cause !== undefined ? { cause: result.cause } : {}),
+      });
   }
 }

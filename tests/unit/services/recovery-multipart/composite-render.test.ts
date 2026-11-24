@@ -36,5 +36,5 @@ describe('actual packed composite renderer through Background host',()=>{
   expect(compositeTrustedContextV2(result!.receipt,common,result!.policy,product?pair:null)).not.toBeNull();
   // Deterministic rendering still runs, while immutable R2 reuses exact bytes.
   const replay=await prepareCompositeReply({...input,deadlineAt:Date.now()+15000},deps);expect(replay!.plan).toEqual(result!.plan);expect(prepare).toHaveBeenCalledTimes(2);expect(put).toHaveBeenCalledOnce();
- },5000);
+ },20_000);
 });

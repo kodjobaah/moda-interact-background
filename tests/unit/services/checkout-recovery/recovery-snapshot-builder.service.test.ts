@@ -42,6 +42,10 @@ const checkout: NormalizedAbandonedCheckout = {
   abandonedCheckoutUrl: "https://current.example/recover",
   createdAt: "2026-09-02T09:00:00.000Z",
   completedAt: null,
+  shopifyPlus: false,
+  consentReceiptAttribute: { kind: "MISSING" },
+  billingPhone: null,
+  shippingPhone: null,
   currencyCode: "GBP",
   totalPrice: "42.50",
   internationalContext: {

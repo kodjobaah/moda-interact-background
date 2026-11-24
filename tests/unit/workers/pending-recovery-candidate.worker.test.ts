@@ -374,6 +374,7 @@ describe("pending recovery candidate worker", () => {
       currencyCode: "GBP",
       totalPrice: "42.00",
       abandonedCheckoutUrl: "https://checkout/current",
+      consentReceiptAttribute: { kind: "MISSING" as const },
       customer: { shopifyCustomerId: null, phone: "15551234567", email: null, firstName: null, lastName: null },
       lineItems: [],
       internationalContext: null,

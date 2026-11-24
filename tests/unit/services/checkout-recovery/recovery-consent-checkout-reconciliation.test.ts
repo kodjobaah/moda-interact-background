@@ -19,6 +19,7 @@ const checkout = {
   completedAt: null as string | null,
   abandonedCheckoutUrl: checkoutEvent.abandonedCheckoutUrl,
   createdAt: checkoutEvent.checkoutCreatedAt,
+  consentReceiptAttribute: { kind: "MISSING" as const },
   customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
 };
 
