@@ -1,11 +1,9 @@
 import {
   Prisma, ShopifyReportState, UsageMetric,
-  type UsageEvent, type UsageReservationCompensationDisposition,
+  type UsageEvent, type UsageReservationCompensationDisposition, type UsageReservationCompensationReason,
 } from "@prisma/client";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { requireLineage, type CompensationTransaction, type RecoverySource } from "./types.js";
-
-const REASON = "WHATSAPP_RECIPIENT_UNDELIVERABLE" as const;
 
 /** Prove the original source before writing a negative credit event. */
 export async function readCommittedRecoveryUsage(
@@ -37,6 +35,7 @@ export async function readCommittedRecoveryUsage(
 export async function recordCommittedRecoveryCorrection(
   tx: CompensationTransaction, source: RecoverySource, original: UsageEvent,
   disposition: UsageReservationCompensationDisposition, now: Date,
+  reason: UsageReservationCompensationReason,
 ): Promise<void> {
   const { reservation } = source;
   const correction = await tx.usageEvent.create({ data: {
@@ -56,7 +55,7 @@ export async function recordCommittedRecoveryCorrection(
     where: { id: reservation.id, shopId: reservation.shopId, status: "COMMITTED",
       committedUsageEventId: original.id, compensationUsageEventId: null,
       compensationReason: null, compensationDisposition: null, compensatedAt: null },
-    data: { compensationUsageEventId: correction.id, compensationReason: REASON,
+    data: { compensationUsageEventId: correction.id, compensationReason: reason,
       compensationDisposition: disposition, compensatedAt: now },
   });
   requireLineage(recorded.count === 1, "reservation compensation conflict");
@@ -84,7 +83,8 @@ export async function readCommittedCorrectionReplay(
     negative.shopifyReportState === ShopifyReportState.NOT_APPLICABLE &&
     !negative.shopifyIdempotencyKey && !negative.shopifyEventHandle &&
     !negative.nextReportAt && !negative.lastReportAttemptAt && !negative.reportedAt &&
-    reservation.compensationReason === REASON && !!reservation.compensatedAt,
+    (reservation.compensationReason === "WHATSAPP_RECIPIENT_UNDELIVERABLE" ||
+      reservation.compensationReason === "WHATSAPP_DELIVERY_FAILED") && !!reservation.compensatedAt,
     "invalid previous compensation evidence");
   switch (reservation.compensationDisposition) {
     case "RESTORED_SPENDABLE": return "restored-spendable";

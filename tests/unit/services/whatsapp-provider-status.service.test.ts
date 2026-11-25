@@ -375,6 +375,7 @@ describe("WhatsAppProviderStatusService", () => {
       data: {
         status: "FAILED",
         failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE",
+        followUpDueAt: null,
         closedAt: new Date(baseEvent.occurredAt),
       },
     });
@@ -401,18 +402,16 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.providerFailureCode).toBe("131026");
   });
 
-  it("does not converge a waiting attempt for other provider failure codes", async () => {
+  it.each(["131047", "131049", "999999"])("converges definitive provider failure %s", async (providerCode) => {
     const test = harness();
-
-    await test.service.process({
-      ...baseEvent,
-      schemaVersion: 3 as const,
-      status: "FAILED" as const,
-      failure: { providerCode: "131047" },
-    });
-
-    expect(test.linkedAttempt?.status).toBe("WAITING_FOR_RESPONSE");
-    expect(test.transaction.recoveryOutreachAttempt.updateMany).not.toHaveBeenCalled();
+    const event = { ...baseEvent, schemaVersion: 3 as const,
+      status: "FAILED" as const, failure: { providerCode } };
+    await expect(test.service.process(event)).resolves.toBe("applied");
+    await expect(test.service.process(event)).resolves.toBe("ignored");
+    expect(test.linkedAttempt).toMatchObject({ status: "FAILED",
+      failureCode: `WHATSAPP_DELIVERY_FAILED:${providerCode}`, followUpDueAt: null });
+    expect(test.transaction.recoveryOutreachAttempt.updateMany).toHaveBeenCalledOnce();
+    expect(test.compensation.reconcile).toHaveBeenCalledTimes(2);
   });
 
   it.each(["DELIVERED", "READ"] as const)(
@@ -475,6 +474,7 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.status).toBe("FAILED");
     expect(test.message.failedAt).toEqual(new Date(baseEvent.occurredAt));
     expect(test.message.providerFailureCode).toBeNull();
+    expect(test.linkedAttempt).toMatchObject({ status: "FAILED", failureCode: "WHATSAPP_DELIVERY_FAILED" });
   });
 
   it("enriches null failure evidence idempotently on a replayed v3 FAILED", async () => {

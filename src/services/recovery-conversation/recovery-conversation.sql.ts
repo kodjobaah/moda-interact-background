@@ -106,6 +106,10 @@ export async function readRecoveryWindowEvidence(
       ORDER BY msg."createdAt" DESC, msg."id" DESC LIMIT 1
     ) verified ON TRUE
     WHERE initial."checkoutRecoveryId"=$1 AND initial."sequence"=1
+      AND (verified."createdAt" IS NOT NULL OR NOT EXISTS (
+        SELECT 1 FROM "whatsapp"."ConversationMessage" failed
+        WHERE failed."id"=initial."outboundMessageId" AND failed."status"='FAILED'
+      ))
     ${input.lockInitial ? 'FOR UPDATE OF initial' : ''}`,
     input.recoveryId, input.conversationId, input.now);
 }

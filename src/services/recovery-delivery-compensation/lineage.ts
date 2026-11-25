@@ -1,11 +1,15 @@
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { UsageReservation } from "@prisma/client";
+import { outreachDeliveryFailureCode } from "../../domain/whatsapp-recipient-failure.js";
 import { requireLineage, type CompensationTransaction, type RecoverySource, type RecoverySourceKind } from "./types.js";
 
 export type FailedOutbound = {
   id: string;
   conversationId: string;
   senderType: string;
+  sentAt: Date | null;
+  failedAt: Date | null;
+  providerFailureCode: string | null;
   conversation: {
     shopId: string | null;
     checkoutRecovery: { id: string; shopId: string } | null;
@@ -83,7 +87,7 @@ export async function resolveExactRecoverySource(
 
   const attempt = await tx.recoveryOutreachAttempt.findUnique({
     where: { id: attemptId },
-    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true },
+    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true, status: true, sentAt: true },
   });
   requireLineage(attempt && attempt.checkoutRecoveryId === recovery.id &&
     (attempt.sequence === 1 || attempt.sequence === 2) &&
@@ -100,6 +104,25 @@ export async function resolveExactRecoverySource(
 
   const source = await findExactRecoveryReservationSource(tx, shopId, attempt.id);
   requireLineage(source, "missing or ambiguous reservation");
+  // A failure may arrive before finalization links the outbound message. The
+  // exact admission key (or verified merchant command) proves that identity.
+  // Preserve it before deleting the hard-limit usage row; otherwise replays
+  // could lose the source and an old attempt key could admit a duplicate send.
+  const close = ["PENDING", "CAPACITY_BLOCKED", "WAITING_FOR_RESPONSE"].includes(attempt.status);
+  if (!attempt.outboundMessageId || close) {
+    requireLineage(message.failedAt, "failed recovery message lacks failure timestamp");
+    requireLineage(!attempt.sentAt || (message.sentAt && attempt.sentAt.getTime() === message.sentAt.getTime()),
+      "attempt/message sent timestamp mismatch");
+    const changed = await tx.recoveryOutreachAttempt.updateMany({
+      where: { id: attempt.id, checkoutRecoveryId: recovery.id, status: attempt.status,
+        outboundMessageId: attempt.outboundMessageId },
+      data: { outboundMessageId: message.id,
+        ...(message.sentAt && !attempt.sentAt ? { sentAt: message.sentAt } : {}),
+        ...(close ? { status: "FAILED" as const, failureCode: outreachDeliveryFailureCode(message.providerFailureCode),
+          followUpDueAt: null, closedAt: message.failedAt } : {}) },
+    });
+    requireLineage(changed.count === 1, "failed recovery attempt convergence conflict");
+  }
   return source;
 }
 

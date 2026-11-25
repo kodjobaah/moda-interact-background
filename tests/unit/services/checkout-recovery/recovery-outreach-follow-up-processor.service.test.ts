@@ -166,17 +166,18 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
     expect(mocks.attempt.markNoResponseIfWaiting).not.toHaveBeenCalled();
   });
 
-  it("suppresses a due follow-up when its exact initial message failed with 131026", async () => {
+  it.each([["131026", "recipient-undeliverable"], ["131049", "initial-delivery-failed"],
+    [null, "initial-delivery-failed"]] as const)("suppresses a due follow-up after initial failure %s", async (providerFailureCode, reason) => {
     setRecovery();
     mocks.prisma.conversationMessage.findUnique.mockResolvedValueOnce({
       status: "FAILED",
-      providerFailureCode: "131026",
+      providerFailureCode,
     });
     const { processor, billing } = createProcessor();
 
     await expect(processor.process(recovery.id)).resolves.toEqual({
       kind: "suppressed",
-      reason: "recipient-undeliverable",
+      reason,
     });
 
     expect(mocks.prisma.conversationMessage.findUnique).toHaveBeenCalledWith({
@@ -192,7 +193,7 @@ describe("RecoveryOutreachFollowUpProcessorService", () => {
   });
 
   it.each([
-    ["FAILED", "131047"],
+    ["SENT", null],
     ["DELIVERED", "131026"],
   ])("continues normal follow-up handling for %s message code %s", async (status, providerFailureCode) => {
     setRecovery();

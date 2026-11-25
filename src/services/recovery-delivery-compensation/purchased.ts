@@ -1,6 +1,6 @@
 import {
   RecoveryCreditPurchaseStatus, RecoveryCreditRefundStatus,
-  UsageReservationCompensationDisposition,
+  UsageReservationCompensationDisposition, type UsageReservationCompensationReason,
 } from "@prisma/client";
 import { readCommittedRecoveryUsage, recordCommittedRecoveryCorrection } from "./committed-usage.js";
 import { classifyPurchasedCreditState, type PurchasedCreditDisposition } from "./purchased-credit-state.js";
@@ -12,6 +12,7 @@ const FROZEN_REFUND_REASON = "ARCH028_DELIVERY_CORRECTION_REQUIRES_REFUND_REVIEW
 /** One serializable, exact-lot purchased correction. Never initiates a provider refund. */
 export async function compensatePurchasedSource(
   tx: CompensationTransaction, source: RecoverySource, now: Date,
+  reason: UsageReservationCompensationReason,
 ): Promise<PurchasedCreditDisposition> {
   const { reservation } = source;
   requireLineage(source.kind === "purchased" && !!reservation.counterId &&
@@ -84,6 +85,6 @@ export async function compensatePurchasedSource(
     "held-for-refund": UsageReservationCompensationDisposition.HELD_FOR_REFUND,
     "historical-only": UsageReservationCompensationDisposition.HISTORICAL_ONLY,
   }[disposition];
-  await recordCommittedRecoveryCorrection(tx, source, original, recorded, now);
+  await recordCommittedRecoveryCorrection(tx, source, original, recorded, now, reason);
   return disposition;
 }

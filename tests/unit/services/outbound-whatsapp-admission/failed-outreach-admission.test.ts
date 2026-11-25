@@ -35,13 +35,18 @@ describe("ARCH-028-BACKGROUND-006 recovery retry fence", () => {
     expect(findUnique).toHaveBeenCalledOnce();
   });
 
-  it("only fences a failed exact 131026 message, never a pending or unrelated failure", async () => {
-    const database = { recoveryOutreachAttempt: { findUnique: vi.fn() } };
-    for (const [status, providerFailureCode] of [["PENDING", "131026"], ["FAILED", "131027"]]) {
-      database.recoveryOutreachAttempt.findUnique.mockResolvedValueOnce({
-        ...attempt, outboundMessage: { ...attempt.outboundMessage, status, providerFailureCode },
-      });
-      expect(await failedRecipientOutreach(database as never, "recovery-outreach:attempt-1")).toBeNull();
-    }
+  it.each(["131026", "131049", "999999", null])("fences the exact linked failed message with code %s", async (providerFailureCode) => {
+    const database = { recoveryOutreachAttempt: { findUnique: vi.fn(async () => ({
+      ...attempt, outboundMessage: { ...attempt.outboundMessage, providerFailureCode },
+    })) } };
+    expect(await failedRecipientOutreach(database as never, "recovery-outreach:attempt-1"))
+      .toMatchObject({ message: { id: "m-1", status: "FAILED" } });
+  });
+
+  it("does not infer failed evidence from PENDING", async () => {
+    const database = { recoveryOutreachAttempt: { findUnique: vi.fn(async () => ({
+      ...attempt, outboundMessage: { ...attempt.outboundMessage, status: "PENDING" },
+    })) } };
+    expect(await failedRecipientOutreach(database as never, "recovery-outreach:attempt-1")).toBeNull();
   });
 });

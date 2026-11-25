@@ -60,11 +60,9 @@ export class RecoveryOutreachFollowUpProcessorService {
             where: { id: initial.outboundMessageId },
             select: { status: true, providerFailureCode: true },
           });
-          if (
-            initialMessage?.status === "FAILED" &&
-            classifyWhatsAppProviderFailure(initialMessage.providerFailureCode) === "RECIPIENT_UNDELIVERABLE"
-          ) {
-            return { kind: "suppressed", reason: "recipient-undeliverable" } as const;
+          if (initialMessage?.status === "FAILED") {
+            return { kind: "suppressed", reason: classifyWhatsAppProviderFailure(initialMessage.providerFailureCode) ===
+              "RECIPIENT_UNDELIVERABLE" ? "recipient-undeliverable" : "initial-delivery-failed" } as const;
           }
         }
         if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {

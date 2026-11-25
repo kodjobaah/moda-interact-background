@@ -25,8 +25,12 @@ const context = {
   revision: 7, lastInboundAt: null,
 };
 
-function fence(rows: unknown[]) {
-  const tx = { $queryRawUnsafe: vi.fn(async () => rows) };
+function fence(rows: unknown[], evidence: { matched: boolean }[] = [{ matched: true }]) {
+  const tx = {
+    $queryRawUnsafe: vi.fn()
+      .mockResolvedValueOnce(rows)
+      .mockResolvedValueOnce(evidence),
+  };
   return { tx, check: () => checkFinalStoredRecoveryConsent(
     tx as never, context, "+447400123456", snapshot,
   ) };
@@ -39,6 +43,18 @@ describe("final stored CustomerPhone recovery consent fence", () => {
     expect(f.tx.$queryRawUnsafe).toHaveBeenCalledWith(
       expect.stringContaining("FOR SHARE OF p"), "recovery-a", "shop-a", "447400123456",
     );
+    expect(f.tx.$queryRawUnsafe).toHaveBeenCalledTimes(2);
+    expect(f.tx.$queryRawUnsafe).toHaveBeenNthCalledWith(2,
+      expect.stringContaining('FROM "commerce"."WhatsAppConsentEvidence"'),
+      "shop-a", "phone-a", "447400123456", 5n, 3n,
+      shopifyPhone.whatsappConsentProviderObservedAt, "recovery-a",
+    );
+  });
+  it("denies a granted phone projection without matching immutable consent evidence", async () => {
+    await expect(fence([shopifyPhone], [{ matched: false }]).check())
+      .resolves.toBe("stored-consent-evidence-missing");
+    await expect(fence([shopifyPhone], []).check())
+      .resolves.toBe("stored-consent-evidence-missing");
   });
   it.each([
     [{ ...shopifyPhone, whatsappConsentDecision: "REVOKED", whatsappConsentRevision: 6n }, "stored-consent-revision-changed"],

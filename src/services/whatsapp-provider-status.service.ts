@@ -15,7 +15,7 @@ import {
   canApplyProviderStatus,
   statusForProviderEvent,
 } from "../domain/whatsapp-provider-status-transition.js";
-import { classifyWhatsAppProviderFailure } from "../domain/whatsapp-recipient-failure.js";
+import { outreachDeliveryFailureCode } from "../domain/whatsapp-recipient-failure.js";
 import { recoveryDeliveryCompensationService } from "./recovery-delivery-compensation/reconcile.service.js";
 import {
   RecoveryDeliveryMerchantNotificationService,
@@ -229,13 +229,11 @@ export class WhatsAppProviderStatusService {
       const persistedFailureCode = typeof updatedFailureCode === "string"
         ? updatedFailureCode
         : message.providerFailureCode;
-      const terminalRecipientFailure =
-        canApplyStatus &&
-        event.status === "FAILED" &&
-        classifyWhatsAppProviderFailure(persistedFailureCode) === "RECIPIENT_UNDELIVERABLE";
+      const confirmedDeliveryFailure = canApplyStatus && event.status === "FAILED" &&
+        nextStatus === "FAILED" && !message.deliveredAt && !message.readAt;
       let attemptConverged = false;
       if (
-        terminalRecipientFailure &&
+        confirmedDeliveryFailure &&
         message.recoveryOutreachAttempt?.status === "WAITING_FOR_RESPONSE"
       ) {
         const converged = await transaction.recoveryOutreachAttempt.updateMany({
@@ -245,8 +243,9 @@ export class WhatsAppProviderStatusService {
           },
           data: {
             status: "FAILED",
-            failureCode: "WHATSAPP_RECIPIENT_UNDELIVERABLE",
-            closedAt: occurredAt,
+            failureCode: outreachDeliveryFailureCode(persistedFailureCode),
+            followUpDueAt: null,
+            closedAt: message.failedAt ?? occurredAt,
           },
         });
         attemptConverged = converged.count === 1;

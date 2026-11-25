@@ -1,4 +1,4 @@
-import { classifyWhatsAppProviderFailure } from "../../domain/whatsapp-recipient-failure.js";
+import { isConfirmedProviderNonDelivery } from "../../domain/whatsapp-recipient-failure.js";
 import { randomUUID } from "node:crypto";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
@@ -175,10 +175,10 @@ export class RecoveryAllowanceService {
    const customerReturned=block.fundingKind==="FOLLOW_UP"&&customerWindow(evidence?.verifiedInboundAt??null,now).open;
    const noCurrentTurn=block.fundingKind==="CONTINUATION"&&!await hasCurrentContinuation(tx,context.id,context.inboundVersion);
    const invalid=noCurrentTurn||context.mode!=="AI"&&block.fundingKind==="CONTINUATION"||terminalRecovery(context.recoveryStatus)||block.repairDeadlineAt! <= now||contactBlocked||customerReturned;
-   // Persisted HTTP rejection has no receipt. A later delivery failure must
-   // satisfy the existing compensation owner's eligibility classification.
-   const definitiveFailure=opening?.status==="FAILED"&&!!opening.failedAt&&!!opening.providerFailureCode&&!opening.deliveredAt&&!opening.readAt&&
-    ((!opening.providerMessageId&&!opening.sentAt)||classifyWhatsAppProviderFailure(opening.providerFailureCode)==="RECIPIENT_UNDELIVERABLE");
+   // A persisted HTTP rejection or definitive provider FAILED receipt is not
+   // an ambiguous dispatch. Its specific code does not govern credit release.
+   const definitiveFailure=!!opening&&(isConfirmedProviderNonDelivery(opening)||
+    (opening.status==="FAILED"&&!!opening.failedAt&&!!opening.providerFailureCode&&!opening.deliveredAt&&!opening.readAt&&!opening.providerMessageId&&!opening.sentAt));
    if((noPermit && invalid)||opening?.status==="FAILED"&&(noPermit||definitiveFailure)){
     const otherAdmitted=messages.some(m=>m.id!==opening?.id&&(m.providerDispatchKey||m.providerDispatchAdmittedAt||m.providerMessageId||m.sentAt));
     if(otherAdmitted)throw new AllowanceHeld("late-opening-failure-after-consumption");

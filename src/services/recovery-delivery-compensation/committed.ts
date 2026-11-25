@@ -1,4 +1,4 @@
-import { UsageReservationCompensationDisposition } from "@prisma/client";
+import { UsageReservationCompensationDisposition, type UsageReservationCompensationReason } from "@prisma/client";
 import { correctCommittedCounter } from "./counter-adjustment.js";
 import {
   readCommittedRecoveryUsage, readCommittedCorrectionReplay,
@@ -10,6 +10,7 @@ import { requireLineage, type CompensationTransaction, type RecoverySource } fro
 /** All credit sources share the same immutable correction lineage and transaction. */
 export async function compensateCommittedSource(
   tx: CompensationTransaction, source: RecoverySource, now: Date,
+  reason: UsageReservationCompensationReason,
 ): Promise<"restored-spendable" | "held-for-refund" | "historical-only"> {
   const { reservation, kind } = source;
   if (reservation.compensationUsageEventId) {
@@ -17,7 +18,7 @@ export async function compensateCommittedSource(
   }
   requireLineage(!reservation.compensationReason && !reservation.compensationDisposition &&
     !reservation.compensatedAt, "partial compensation provenance");
-  if (kind === "purchased") return compensatePurchasedSource(tx, source, now);
+  if (kind === "purchased") return compensatePurchasedSource(tx, source, now, reason);
 
   const original = await readCommittedRecoveryUsage(tx, source);
   const disposition = await correctCommittedCounter(tx, source, now, original.billingPeriodId);
@@ -25,6 +26,6 @@ export async function compensateCommittedSource(
     disposition === "restored-spendable"
       ? UsageReservationCompensationDisposition.RESTORED_SPENDABLE
       : UsageReservationCompensationDisposition.HISTORICAL_ONLY,
-    now);
+    now, reason);
   return disposition;
 }
