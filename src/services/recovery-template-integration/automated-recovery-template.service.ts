@@ -49,6 +49,8 @@ export type AutomatedTemplateInput = Readonly<{
   conversationLanguageTag: string | null;
   customerFirstName?: string | null;
   outreachAttemptId?: string;
+  /** Authenticated persisted merchant choice, resolved again by the preparer. */
+  requestedTemplate?: Readonly<{ templateName: string; languageCode: string }>;
 }>;
 
 const logger = createLogger({
@@ -555,6 +557,8 @@ export class AutomatedRecoveryTemplateService {
         shopId: input.shopId,
         senderWabaId: await this.senderWaba(),
         stage: input.stage,
+        ...(input.requestedTemplate ? { selection: { kind: "EXACT" as const,
+          templateName: input.requestedTemplate.templateName, languageCode: input.requestedTemplate.languageCode } } : {}),
         offerPresentation,
         promotionTarget,
         conversationLanguageTag: input.stage === "INITIAL" ? null : input.conversationLanguageTag,

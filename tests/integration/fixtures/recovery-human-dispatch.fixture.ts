@@ -25,9 +25,10 @@ import { FollowUpClaimCancellationService } from "../../../src/services/recovery
 import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from
   "../../../src/services/recovery-conversation/recovery-follow-up-billing.service.js";
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
+import { startPooledHumanDispatchMocks } from "./recovery-human-sender.fixture.js";
 
 export async function humanDispatchFixture(
-  label: string, recipientOrOptions?: string | { recipient?: string; checkoutLifetimeDays?: number },
+  label: string, recipientOrOptions?: string | { recipient?: string; checkoutLifetimeDays?: number; pooledSender?: true },
 ) {
   const url = process.env.TEST_DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
@@ -61,7 +62,16 @@ export async function humanDispatchFixture(
       VALUES ($1,$2,'AI','HUMAN',0,1)`, randomUUID(), conversationId);
   });
 
-  const mocks = await startArch040BackgroundMocks();
+  // Opt in only for suites exercising the current final recovery-send fence.
+  const pooled = typeof recipientOrOptions === "object" && recipientOrOptions.pooledSender === true;
+  let pooledFixture: Awaited<ReturnType<typeof startPooledHumanDispatchMocks>> | undefined;
+  try {
+    if (pooled) pooledFixture = await startPooledHumanDispatchMocks(db, { shopId, conversationId, recipient });
+  } catch (error) {
+    try { await redis.quit(); } finally { await db.$disconnect(); }
+    throw error;
+  }
+  const mocks = pooledFixture?.mocks ?? await startArch040BackgroundMocks();
   const commands = new MerchantSendCommandService(db);
   const followUps = new RecoveryFollowUpPolicyService(db);
   const reconciliation = new HumanSendReconciliationService(db);
@@ -205,6 +215,7 @@ export async function humanDispatchFixture(
     await db.conversationMessage.create({ data: {
       id: messageId, conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
       status: "SENT", content: "Initial recovery outreach", createdAt: sentAt, sentAt,
+      ...(pooled ? { providerMessageId: `wamid-fixture-initial-${randomUUID()}` } : {}),
     } });
     await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
       ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
@@ -283,13 +294,13 @@ export async function humanDispatchFixture(
     persistedAllowModeration: persistedAllowModeration, dispatcher,
     addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
     async close() {
-      await db.shop.delete({ where: { id: shopId } });
-      for (const id of administratorIds) await db.platformAdmin.delete({ where: { id } });
       try {
-        await mocks.close();
+        await db.shop.delete({ where: { id: shopId } });
+        await pooledFixture?.cleanupAfterOwnerDeletion();
+        for (const id of administratorIds) await db.platformAdmin.delete({ where: { id } });
       } finally {
-        await redis.quit();
-        await db.$disconnect();
+        try { await mocks.close(); }
+        finally { try { await redis.quit(); } finally { await db.$disconnect(); } }
       }
     },
   };

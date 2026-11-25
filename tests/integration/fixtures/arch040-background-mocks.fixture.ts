@@ -15,10 +15,13 @@ import { Arch040WhatsAppEmulator } from "./arch040-whatsapp-emulator.fixture.js"
  *
  * All provider traffic must terminate at this disposable loopback emulator.
  */
-export async function startArch040BackgroundMocks() {
+export async function startArch040BackgroundMocks(senderConfiguration?: {
+  rowId: string; version: number; providerAccountId: string; standalonePhoneNumberId: string;
+}) {
   const whatsapp = new Arch040WhatsAppEmulator();
   await whatsapp.start();
-  const values = { ...whatsapp.environment, WHATSAPP_BUSINESS_ACCOUNT_ID: "arch040-test-business-account" };
+  const values = { ...whatsapp.environment,
+    WHATSAPP_BUSINESS_ACCOUNT_ID: senderConfiguration?.providerAccountId ?? "arch040-test-business-account" };
   const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
   for (const [key, value] of Object.entries(values)) process.env[key] = value;
 
@@ -31,10 +34,11 @@ export async function startArch040BackgroundMocks() {
     async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
       if (key === "messaging.sender") {
         return {
-          key, version: 1,
+          key, version: senderConfiguration?.version ?? 1,
+          ...(senderConfiguration ? { rowId: senderConfiguration.rowId } : {}),
           value: {
             accessToken: values.WHATSAPP_ACCESS_TOKEN,
-            phoneNumberId: whatsapp.phoneNumberId,
+            phoneNumberId: senderConfiguration?.standalonePhoneNumberId ?? whatsapp.phoneNumberId,
             businessAccountId: values.WHATSAPP_BUSINESS_ACCOUNT_ID,
           },
         } as ConfigurationSnapshot<K>;
@@ -75,7 +79,7 @@ export async function startArch040BackgroundMocks() {
   const provider = {
     sendWhatsAppText: vi.fn((input: SendTextInput) => realProvider.sendWhatsAppText(input)),
     sendWhatsAppTemplate: vi.fn((input: SendTemplateInput) => realProvider.sendWhatsAppTemplate(input)),
-    getProviderAccountId: () => "arch040-test-business-account",
+    getProviderAccountId: () => values.WHATSAPP_BUSINESS_ACCOUNT_ID,
   };
 
   let aimock: Arch040Aimock | null = null;

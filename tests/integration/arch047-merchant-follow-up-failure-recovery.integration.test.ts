@@ -69,6 +69,7 @@ suite("ARCH-047 BG007 late STOP, failures, and retry boundaries", () => {
       await dispatcher.processClaim(commandId, claim.leaseToken);
       await dispatcher.close();
       expect(permit).toHaveBeenCalledOnce();
+      expect(await permit.mock.results[0]!.value).toEqual({ kind: "suppressed", reason: "local-no-contact" });
       expect(resolver).toHaveBeenCalledOnce();
       expect(credit).toHaveBeenCalledOnce();
       expect(await f.commandState(commandId)).toMatchObject({
@@ -111,6 +112,7 @@ suite("ARCH-047 BG007 late STOP, failures, and retry boundaries", () => {
       }).processClaim(commandId, claim.leaseToken);
       expect(resolver).toHaveBeenCalledOnce();
       expect(permit).toHaveBeenCalledOnce();
+      expect(await permit.mock.results[0]!.value).toEqual({ kind: "suppressed", reason: "stale-control-revision" });
       expect(await f.commandState(commandId)).toMatchObject({
         state: "CANCELLED", providerDispatchKey: null, outboundMessageId: null,
       });
@@ -174,7 +176,8 @@ suite("ARCH-047 BG007 late STOP, failures, and retry boundaries", () => {
     const seeded = await approvedMerchantFollowUpFixture("expired-permit-restart");
     try {
       const { f, identity } = seeded;
-      const { commandId } = await f.addMerchantFollowUpCommand(identity.providerTemplateName);
+      const { commandId, attemptId } = await f.addMerchantFollowUpCommand(identity.providerTemplateName);
+      await seeded.reserveFollowUp(attemptId);
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
       // Model a hard crash after a committed BG006 permit but before transport.
       expect((await fence(f.db).admitFinalSend({
@@ -211,14 +214,7 @@ suite("ARCH-047 BG007 late STOP, failures, and retry boundaries", () => {
     try {
       const { f, identity } = seeded;
       const { commandId, attemptId } = await f.addMerchantFollowUpCommand(identity.providerTemplateName);
-      const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
-      const counter = await f.db.shopEntitlementCounter.create({ data: {
-        shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS",
-        grantedQuantity: 1, reservedQuantity: 1,
-      } });
-      await f.db.usageReservation.create({ data: {
-        shopId: f.shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
-      } });
+      const { sourceKey, counterId, reservationId } = await seeded.reserveFollowUp(attemptId);
       f.billing.onDefinitiveProviderFailure.mockImplementationOnce(async () => {
         const released = await new FreeRecoveryReservationService(f.db).release({ shopId: f.shopId, sourceKey });
         expect(released.kind).toBe("released");
@@ -239,14 +235,23 @@ suite("ARCH-047 BG007 late STOP, failures, and retry boundaries", () => {
       expect(f.billing.onConfirmedProviderSend).not.toHaveBeenCalled();
       expect((await f.db.usageReservation.findUniqueOrThrow({ where: { sourceKey } })).status)
         .toBe("RELEASED");
-      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counter.id } }))
+      expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: counterId } }))
         .reservedQuantity).toBe(0);
       expect(f.providerHttpRequests).toEqual([{ type: "template" }]);
       expect((await f.reconciliation.recordDefinitiveFailure({ commandId,
         reason: "provider_rejected", definitiveProviderEvidence: true,
       })).kind).toBe("ignored");
       expect(f.billing.onDefinitiveProviderFailure).toHaveBeenCalledOnce();
-      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+      // The current fence records outbound allowance admission separately from
+      // credit consumption. The original committed credit is untouched; the
+      // rejected follow-up must never create a second recovery-credit charge.
+      expect(await f.db.usageEvent.count({ where: {
+        shopId: f.shopId, metric: "RECOVERY_CONVERSATION", sourceId: reservationId,
+      } })).toBe(0);
+      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+      expect(await f.db.usageEvent.count({ where: {
+        shopId: f.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: (await f.commandState(commandId))!.outboundMessageId!,
+      } })).toBe(1);
     } finally { await seeded.cleanup(); }
   }, 60_000);
 

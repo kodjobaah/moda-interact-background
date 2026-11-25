@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import type { PreparedWrapper } from "@modainteract/moda-interact-shared/commerce/presentation";
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
 
@@ -57,6 +60,7 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     expect(f.templates.prepare).toHaveBeenCalledWith(expect.objectContaining({
       shopId: "shop-1", recoveryId: "recovery1", stage: "FOLLOW_UP",
       conversationLanguageTag: "fr",
+      requestedTemplate: { templateName: command.templateName, languageCode: command.templateLanguageCode },
     }));
     expect(f.database.conversation.findUnique).toHaveBeenCalledWith({
       where: { id: "conv1" },
@@ -166,6 +170,26 @@ describe("ARCH-047 BG007 merchant post-window template selection", () => {
     expect(chosen.send.imageHeader).toEqual({ link: "https://cdn.example.test/ready-r2.jpg" });
     expect(chosen.send.bodyParameters).toEqual(["customer-first-name"]);
     expect(chosen.send.dynamicUrlButton).toEqual({ index: 0, text: "trusted-checkout-token" });
+  });
+
+  it.each(["TEXT", "IMAGE"] as const)("accepts a verified %s common-layout checkout link without a separate button", async format => {
+    const f = fixture();
+    const projection: PreparedWrapper = { schemaVersion: 1, family: "MODA_CONVERSATION_WRAPPER", responseSlot: "response.body",
+      header: [{ kind: "text", value: "Shop: " }, { kind: "variable", name: "shop.name" }],
+      body: [{ kind: "responseSlot", name: "response.body" }], footer: [],
+      conditionals: [{ when: "checkout.available", tokens: [{ kind: "variable", name: "shop.websiteUrl" },
+        { kind: "text", value: "\nReturn to checkout:\n" }, { kind: "variable", name: "checkout.url" }] }] };
+    const commonLayout = { reference: { schemaVersion: 1, definitionId: "shared-layout", sourceHash: "a".repeat(64),
+      localeId: "shared-en", languageTag: "en", contentHash: createHash("sha256").update(canonicalJson(projection)).digest("hex"), prepared: projection },
+      variables: { "shop.name": "Merchant", "shop.websiteUrl": "https://shop.example", "checkout.url": "https://shop.example/checkout/one" },
+      parameters: { header: [], body: ["Merchant", "https://shop.example", "https://shop.example/checkout/one"] } };
+    const selected = { ...f.prepared, prepared: { ...f.prepared.prepared, commonLayout }, send: { ...f.prepared.send,
+      templateRegistration: { ...identity, commonLayout }, dynamicUrlButton: undefined,
+      imageHeader: format === "IMAGE" ? f.prepared.send.imageHeader : undefined, bodyParameters: commonLayout.parameters.body } };
+    f.templates.prepare.mockResolvedValue(selected as never);
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual(selected);
+    f.templates.prepare.mockResolvedValue({ ...selected, send: { ...selected.send, bodyParameters: ["Merchant"] } } as never);
+    expect(await f.resolver.resolve(command, "recovery1")).toEqual({ kind: "unavailable", reason: "follow_up_unavailable" });
   });
 
   it("emits bounded shared-logger refusals without merchant-provided parameter contents", async () => {

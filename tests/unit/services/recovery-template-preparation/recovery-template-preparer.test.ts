@@ -760,5 +760,123 @@ describe('published common Meta source parameters',()=>{
  const common:CommonRecoveryLayoutReference={schemaVersion:1,definitionId:'shared-common',sourceHash:'c'.repeat(64),localeId:'shared-en',languageTag:'en',contentHash:createHash('sha256').update(stableJson(projection)).digest('hex'),prepared:projection};
  function commonFixture(bad=false){return fixture({components:[{type:'BODY',text:'Custom shop {{1}}\nSite {{2}}\nRecover {{3}}: {{4}}\nCustom basket\n{{5}}'}],bindings:{header:[],body:[{position:1,variable:'shop.name'},{position:2,variable:'shop.websiteUrl'},{position:3,variable:'shop.name'},{position:4,variable:'checkout.itemsSummary'},{position:5,variable:'checkout.url'}],buttons:[]},locale:{localeAst:{authoring:{commonLayout:bad?{...common,contentHash:'0'.repeat(64)}:common}}}});}
  it('captures exact canonical saved values repeatedly used in approved provider parameters and retains snapshot bytes',async()=>{const row=commonFixture();const original=structuredClone(row.metaRegistration!.componentsSnapshot);const current=vi.fn(async()=>true);const {service}=setup([row],{domain:'shop.example',commonCurrent:current,brand:{shopId:'shop-1',brandName:'  Saved Merchant  '} as ShopBrandRow});const result=await service.prepare(input());expect(result.outcome).toBe('prepared');if(result.outcome!=='prepared')throw Error('fixture');expect(result.commonLayout).toMatchObject({reference:common,variables:{'shop.name':'Saved Merchant','shop.websiteUrl':'https://shop.example','checkout.url':sourceUrl},parameters:{header:[],body:['Saved Merchant','https://shop.example','Saved Merchant','1 × Saved item',sourceUrl]}});expect(row.metaRegistration!.componentsSnapshot).toEqual(original);expect(current).toHaveBeenCalledOnce();});
+ it('accepts a single shop.name from the compiled common layout in both formats and falls back without branding',async()=>{
+  const body={type:'BODY',text:'Shop {{1}}\nSite {{2}}\nBasket {{3}}. Use Reply on this message, then text or a voice note (up to 2 minutes).\n{{4}}'};
+  const bodyBindings=[{position:1,variable:'shop.name'},{position:2,variable:'shop.websiteUrl'},{position:3,variable:'checkout.itemsSummary'},{position:4,variable:'checkout.url'}];
+  const text=fixture({variant:{id:'common-text'},components:[body],bindings:{header:[],body:bodyBindings,buttons:[]},locale:{localeAst:{authoring:{commonLayout:common}}}});
+  const image=fixture({variant:{id:'common-image'},components:[{type:'HEADER',format:'IMAGE'},body],bindings:{schemaVersion:1,headerMediaRole:'LOGO',header:[],body:bodyBindings,buttons:[]},locale:{localeAst:{authoring:{commonLayout:common}}}});
+  const {service}=setup([image,text],{domain:'shop.example',commonCurrent:async()=>true});
+  const result=await service.prepare(input());
+  expect(result).toMatchObject({outcome:'prepared',variantId:text.id,commonLayout:{reference:common,parameters:{header:[],body:['shop.example','https://shop.example','1 × Saved item',sourceUrl]}}});
+ });
  it.each(['stale','malformed','missing-website'] as const)('refuses %s common authority instead of compiling or guessing a website',async kind=>{const row=commonFixture(kind==='malformed');const {service}=setup([row],{...(kind==='missing-website'?{}:{domain:'shop.example'}),commonCurrent:async()=>kind!=='stale'});expect(await service.prepare(input())).toMatchObject({outcome:'unavailable',reason:kind==='missing-website'?'BINDING_VALUE_UNAVAILABLE':'BINDINGS_INVALID'});});
+});
+
+/** Distinct immutable provider identities as created by the dual-format Admin workflow. */
+function formatFixture(stage: "INITIAL" | "FOLLOW_UP", format: "TEXT" | "IMAGE", options: {
+  offer?: "NO_OFFER" | "CODE_OFFER" | "AUTOMATIC_OFFER";
+  brandBody?: boolean; name?: string; language?: string; languageCode?: string;
+} = {}): AssignedVariantRow {
+  const offer = options.offer ?? "NO_OFFER";
+  const name = options.name ?? `moda_${stage.toLowerCase()}_${offer.toLowerCase()}_${format.toLowerCase()}`;
+  const variables = ["shop.name", ...(offer === "CODE_OFFER" ? ["offer.code"] : []),
+    ...(offer === "AUTOMATIC_OFFER" ? ["offer.description"] : []), ...(options.brandBody ? ["shopBrand.logoUrl"] : [])];
+  return fixture({ stage, offer, ...(options.language ? { language: options.language } : {}),
+    ...(options.languageCode ? { languageCode: options.languageCode } : {}),
+    components: [...(format === "IMAGE" ? [{ type: "HEADER", format: "IMAGE" }] : []),
+      { type: "BODY", text: variables.map((_, i) => `Value {{${i+1}}}`).join(". ") }],
+    bindings: { promotionTarget: "CHECKOUT", ...(format === "IMAGE" ? { schemaVersion: 1, headerMediaRole: "LOGO" } : {}),
+      header: [], body: variables.map((variable, i) => ({ position: i+1, variable })), buttons: [] },
+    variant: { id: `v-${name}`, providerTemplateName: name, providerTemplateId: `p-${name}`, metaRegistrationId: `r-${name}` },
+    registration: { id: `r-${name}`, providerTemplateName: name, providerTemplateId: `p-${name}` },
+    definition: { id: `d-${name}`, providerTemplateName: name },
+  });
+}
+
+const readyLogo: ReadyBrandMedia = { shopId: "shop-1", role: "LOGO", status: "READY", kind: "R2_DERIVATIVE",
+  httpsUrl: "https://assets.moda-cdn.test/ready.jpg" };
+
+describe("Independent recovery IMAGE and TEXT assignments", () => {
+  it.each(["INITIAL", "FOLLOW_UP"] as const)("keeps the same %s purpose and verified offer when branding is absent", async stage => {
+    for (const offer of ["NO_OFFER", "CODE_OFFER", "AUTOMATIC_OFFER"] as const) {
+      const text = formatFixture(stage, "TEXT", { offer });
+      const image = formatFixture(stage, "IMAGE", { offer });
+      const request = input({ stage, offerPresentation: offer,
+        verifiedOffer: offer === "NO_OFFER" ? null : { shopId: "shop-1", kind: offer, verified: true,
+          verifiedAt: now, expiresAt: null, code: "SAVE10", codes: ["SAVE10"], description: "Verified offer" } });
+      const missing = setup([image, text]);
+      const result = await missing.service.prepare(request);
+      expect(result).toMatchObject({ outcome: "prepared", purpose: `${stage}_${offer}`,
+        variantId: text.id, registrationId: text.metaRegistrationId,
+        providerTemplateName: text.providerTemplateName, submittedContentHash: text.metaRegistration!.submittedContentHash });
+      if (result.outcome !== "prepared") throw new Error("expected fallback");
+      expect(result.template.components.some(component => component.type === "header")).toBe(false);
+      expect(missing.warn).toHaveBeenCalledWith("recovery_template.prepare.text_fallback_selected",
+        expect.objectContaining({ imageVariantId: image.id, textVariantId: text.id, imageReason: "MEDIA_NOT_READY" }));
+      const ready = setup([image, text], { media: readyLogo, mediaHosts: ["assets.moda-cdn.test"] });
+      expect(await ready.service.prepare(request)).toMatchObject({ outcome: "prepared", variantId: image.id });
+      const onlyText = setup([text]);
+      expect(await onlyText.service.prepare(request)).toMatchObject({ outcome: "prepared", variantId: text.id });
+      expect(onlyText.resolveMedia).not.toHaveBeenCalled();
+      expect(onlyText.warn).not.toHaveBeenCalledWith("recovery_template.prepare.text_fallback_selected", expect.anything());
+    }
+  });
+
+  it("honours explicit TEXT-only initial degradation even when IMAGE is ready", async () => {
+    const text = formatFixture("INITIAL", "TEXT"), image = formatFixture("INITIAL", "IMAGE");
+    const configured = setup([image, text], { media: readyLogo, mediaHosts: ["assets.moda-cdn.test"] });
+    expect(await configured.service.prepare(input({ selection: { kind: "TEXT_ONLY" } })))
+      .toMatchObject({ outcome: "prepared", variantId: text.id });
+    expect(configured.resolveMedia).not.toHaveBeenCalled();
+    await unavailable(setup([image]).service, "NO_APPROVED_ASSIGNMENT", input({ selection: { kind: "TEXT_ONLY" } }));
+  });
+
+  it("resolves the exact requested follow-up format without substituting another provider identity", async () => {
+    const text = formatFixture("FOLLOW_UP", "TEXT"), image = formatFixture("FOLLOW_UP", "IMAGE");
+    const configured = setup([image, text], { media: readyLogo, mediaHosts: ["assets.moda-cdn.test"] });
+    const exact = (row: AssignedVariantRow): RecoveryTemplatePreparationInput => input({ stage: "FOLLOW_UP",
+      selection: { kind: "EXACT", templateName: row.providerTemplateName, languageCode: row.providerLanguageCode } });
+    expect(await configured.service.prepare(exact(text))).toMatchObject({ outcome: "prepared", variantId: text.id });
+    expect(configured.resolveMedia).not.toHaveBeenCalled();
+    expect(await configured.service.prepare(exact(image))).toMatchObject({ outcome: "prepared", variantId: image.id });
+    await unavailable(setup([image, text]).service, "MEDIA_NOT_READY", exact(image));
+    await unavailable(setup([image]).service, "NO_APPROVED_ASSIGNMENT", exact(text));
+    await unavailable(setup([image, text, formatFixture("FOLLOW_UP", "TEXT", { name: "another_text" })]).service,
+      "AMBIGUOUS_ASSIGNMENT", exact(text));
+    await unavailable(setup([image, text, { ...text, shopId: "other-shop" }]).service, "IDENTITY_MISMATCH", exact(text));
+  });
+
+  it("does not treat a missing mandatory BODY logo as optional header failure", async () => {
+    const text = formatFixture("FOLLOW_UP", "TEXT");
+    const image = formatFixture("FOLLOW_UP", "IMAGE", { brandBody: true });
+    const configured = setup([image, text]);
+    await unavailable(configured.service, "MEDIA_NOT_READY", input({ stage: "FOLLOW_UP" }));
+    expect(configured.warn).not.toHaveBeenCalledWith("recovery_template.prepare.text_fallback_selected", expect.anything());
+  });
+
+  it("does not hide corrupted IMAGE binding evidence behind the TEXT fallback", async () => {
+    const image = formatFixture("INITIAL", "IMAGE"), text = formatFixture("INITIAL", "TEXT");
+    const corrupt = { ...image, metaRegistration: { ...image.metaRegistration!, submittedContentHash: "f".repeat(64),
+      locale: { ...image.metaRegistration!.locale, contentHash: "f".repeat(64) } } };
+    const configured = setup([corrupt, text]);
+    await unavailable(configured.service, "BINDING_FINGERPRINT_MISMATCH");
+    expect(configured.resolveMedia).not.toHaveBeenCalled();
+  });
+
+  it("reports both failed formats without logging the checkout URL or customer text", async () => {
+    const image = formatFixture("INITIAL", "IMAGE");
+    const configured = setup([image]);
+    await unavailable(configured.service, "MEDIA_NOT_READY");
+    expect(configured.warn).toHaveBeenCalledWith("recovery_template.prepare.text_fallback_unavailable",
+      expect.objectContaining({ imageVariantId: image.id, imageReason: "MEDIA_NOT_READY", textReason: "NO_APPROVED_ASSIGNMENT" }));
+    expect(JSON.stringify(configured.warn.mock.calls)).not.toContain(sourceUrl);
+  });
+
+  it("propagates unexpected database/configuration errors instead of silently downgrading", async () => {
+    const configured = setup([formatFixture("INITIAL", "IMAGE"), formatFixture("INITIAL", "TEXT")]);
+    const failure = new Error("database unavailable");
+    configured.resolveMedia.mockRejectedValueOnce(failure);
+    await expect(configured.service.prepare(input())).rejects.toBe(failure);
+    expect(configured.error).toHaveBeenCalledWith("recovery_template.prepare.failed", expect.objectContaining({ error: failure }));
+  });
 });

@@ -77,7 +77,7 @@ export class PrismaRecoveryTemplateRepository implements RecoveryTemplateReposit
   }
 
   async readShopBrand(shopId: string): Promise<ShopBrandRow | null> {
-    // ShopBrand exists only for some Shopify shops; WooCommerce null is normal.
+    // ShopBrand is optional for both Shopify and WooCommerce merchants.
     // Selecting only needed scalar columns avoids accidental cross-shop material.
     return this.database.shopBrand.findUnique({
       where: { shopId },

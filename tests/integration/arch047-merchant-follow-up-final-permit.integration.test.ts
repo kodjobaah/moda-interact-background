@@ -41,9 +41,14 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
       expect(await f.commandState(commandId)).toMatchObject({
         state: "SENT", providerDispatchKey: expect.any(String), dispatchAttemptCount: 1,
       });
-      expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({
-        where: { id: attemptId },
-      })).outboundMessageId).toBeTruthy();
+      const attempt = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } });
+      expect(attempt.outboundMessageId).toBeTruthy();
+      const admitted = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: attempt.outboundMessageId! } });
+      expect(admitted).toMatchObject({ dispatchProviderAccountId: identity.senderWabaId,
+        dispatchProviderPhoneNumberId: f.whatsapp.phoneNumberId, allowanceBlockId: expect.any(String) });
+      expect(f.provider.sendWhatsAppTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        expectedSender: { providerAccountId: identity.senderWabaId, providerPhoneNumberId: f.whatsapp.phoneNumberId },
+      }));
       expect(await f.db.recoveryOutreachAttempt.count({
         where: { checkoutRecoveryId: f.recoveryId, sequence: 2 },
       })).toBe(1);
@@ -85,7 +90,10 @@ integration("ARCH-047 BG007 human final permit and revocation", () => {
       expect(f.provider.sendWhatsAppTemplate).not.toHaveBeenCalled();
       expect(f.providerHttpRequests).toEqual([]);
       expect(f.billing.onConfirmedProviderSend).not.toHaveBeenCalled();
-      expect(await f.db.usageEvent.count({ where: { shopId: f.shopId } })).toBe(0);
+      // The original recovery remains charged; the rejected follow-up adds no
+      // recovery-credit event and no outbound admission event.
+      const usage = await f.db.usageEvent.findMany({ where: { shopId: f.shopId } });
+      expect(usage.map(row => row.metric).sort()).toEqual(["OUTBOUND_AUTOMATED_MESSAGE", "RECOVERY_CONVERSATION"]);
     } finally { await seeded.cleanup(); }
   }, 60_000);
 

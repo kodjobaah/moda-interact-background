@@ -62,7 +62,13 @@ export type SourceBoundPromotionalProduct = Readonly<{
   }>;
 }>;
 
+/** Internal orchestration preference, never a provider parameter or send permit. */
+export type RecoveryTemplateSelection =
+  | Readonly<{ kind: "TEXT_ONLY" }>
+  | Readonly<{ kind: "EXACT"; templateName: string; languageCode: string }>;
+
 export type RecoveryTemplatePreparationInput = Readonly<{
+  selection?: RecoveryTemplateSelection;
   shopId: string;
   outreachEvaluation?: Extract<InitialOutreachEvaluationResult, { kind: "ready" }>;
   /** Must equal the currently configured sender WABA resolved again by this module. */

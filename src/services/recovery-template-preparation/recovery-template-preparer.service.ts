@@ -10,10 +10,10 @@ import {
   type PreparedOutreachProductMedia,
   type RecoveryProductImageResolver,
 } from "../recovery-product-media/recovery-product-image-resolver.js";
-import { prepareFrozenComponents } from "./recovery-template-bindings.js";
+import { prepareFrozenComponents, verifyFrozenTemplate } from "./recovery-template-bindings.js";
 import { decideInitialCheckoutItemsBinding } from "./initial-checkout-items-policy.js";
 import { PrismaRecoveryTemplateRepository } from "./recovery-template-repository.js";
-import { purposeFor, selectRecoveryAssignment } from "./recovery-template-selection.js";
+import { purposeFor, recoveryAssignmentFormat, selectRecoveryAssignment } from "./recovery-template-selection.js";
 import type {
   BrandMediaResolver, MediaApprovedHosts,
   PreparedRecoveryTemplate,
@@ -75,6 +75,12 @@ export class RecoveryTemplatePreparer {
           (input.stage === "INITIAL" && !["CHECKOUT", "ALTERNATIVE_PRODUCT"].includes(String(input.promotionTarget)))) {
         return unavailable("INVALID_REQUEST");
       }
+      if (input.selection && !(input.selection.kind === "TEXT_ONLY" && input.stage === "INITIAL" ||
+          input.selection.kind === "EXACT" && input.stage === "FOLLOW_UP" &&
+          typeof input.selection.templateName === "string" && input.selection.templateName.trim() &&
+          typeof input.selection.languageCode === "string" && input.selection.languageCode.trim())) {
+        return unavailable("INVALID_REQUEST");
+      }
       if (input.stage === "INITIAL" && input.promotionTarget !== "CHECKOUT") return unavailable("OUTSIDE_CHECKOUT");
       purpose = purposeFor(input.stage, input.offerPresentation);
       // This trust check is required even though the caller passes a resolved
@@ -105,25 +111,36 @@ export class RecoveryTemplatePreparer {
       const select = (headerFormat: "TEXT" | "IMAGE") => selectRecoveryAssignment({
         ...selectionInput, headerFormat, checkoutProductHeaderAvailable: Boolean(input.productImage),
       });
-      let selectedFormat: "TEXT" | "IMAGE" = "TEXT";
-      let selected = select("IMAGE");
-      let productMedia: PreparedOutreachProductMedia | undefined;
-      if (selected.outcome === "selected") {
-        const bindings = selected.value.variant.metaRegistration!.parameterBindingsSnapshot as { headerMediaRole?: string };
-        if (bindings.headerMediaRole === "CHECKOUT_PRODUCT" && input.productImage) {
-          productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+      // An explicit merchant selection chooses a format, but does not bypass
+      // the shared tenant, language, greeting, approval or ambiguity checks.
+      const requested = input.selection?.kind === "EXACT" ? input.selection : undefined;
+      const automatic = input.selection === undefined;
+      let selectedFormat: "TEXT" | "IMAGE" = input.selection?.kind === "TEXT_ONLY" ? "TEXT" : "IMAGE";
+      if (requested) {
+        if (catalogue.shop.id !== input.shopId || catalogue.variants.some(row =>
+          row.shopId !== input.shopId || row.providerAccountId !== configuredSender ||
+          row.purpose !== purpose || row.status !== "APPROVED" || !row.enabled)) {
+          return unavailable("IDENTITY_MISMATCH");
         }
-        // Retain the approved IMAGE assignment until its mandatory BODY
-        // evidence has been validated. Only header availability may select TEXT.
-        selectedFormat = "IMAGE";
+        const matches = catalogue.variants.filter(row => row.providerTemplateName === requested.templateName &&
+          row.providerLanguageCode === requested.languageCode);
+        if (matches.length !== 1) return unavailable(matches.length ? "AMBIGUOUS_ASSIGNMENT" : "NO_APPROVED_ASSIGNMENT");
+        const format = recoveryAssignmentFormat(matches[0]!);
+        if (!format) return unavailable(matches[0]!.metaRegistration ? "BINDINGS_INVALID" : "LEGACY_ASSIGNMENT");
+        selectedFormat = format;
       }
-      if (selected.outcome !== "selected") {
+      let selected = select(selectedFormat);
+      let imageSelectionFailure: TemplateUnavailableReason | undefined;
+      if (automatic && selected.outcome === "unavailable") {
         if (selected.reason === "IDENTITY_MISMATCH") return unavailable(selected.reason);
+        imageSelectionFailure = selected.reason;
         selected = select("TEXT");
         selectedFormat = "TEXT";
-        productMedia = undefined;
       }
       if (selected.outcome === "unavailable") return unavailable(selected.reason);
+      if (requested && (selected.value.variant.providerTemplateName !== requested.templateName ||
+          selected.value.variant.providerLanguageCode !== requested.languageCode)) return unavailable("NO_APPROVED_ASSIGNMENT");
+      let productMedia: PreparedOutreachProductMedia | undefined;
 
       let selectedAssignment = selected.value;
       let registration = selectedAssignment.variant.metaRegistration!;
@@ -149,6 +166,7 @@ export class RecoveryTemplatePreparer {
       let renderedText: string | undefined;
       let headerAvailabilityFailure = false;
       const prepareSelected = async (readyProduct?: PreparedOutreachProductMedia) => {
+        headerAvailabilityFailure = false;
         const variables = variablesFor(readyProduct);
         const common=readMetaCommonReference(registration.locale.localeAst);
         if(common.kind==='invalid'||common.kind==='present'&&!(await this.commonReferenceCurrent(common.reference)))throw new BindingUnavailable("BINDINGS_INVALID");
@@ -157,7 +175,15 @@ export class RecoveryTemplatePreparer {
         const captureCommon=async(components:readonly import("./recovery-template.types.js").PreparedMetaComponent[])=>{
           if(common.kind==='present')commonLayout={reference:common.reference,variables:{'shop.name':await variables.resolve('shop.name'),'shop.websiteUrl':await variables.resolve('shop.websiteUrl'),'checkout.url':variables.checkout()},parameters:{header:components.filter(c=>c.type==='header').flatMap(c=>c.parameters.filter(p=>p.type==='text').map(p=>(p as {text:string}).text)),body:components.filter(c=>c.type==='body').flatMap(c=>c.parameters.map(p=>p.text))}};
         };
-        if (input.stage !== "INITIAL") {const prepared=await prepareFrozenComponents({registration,variables});await captureCommon(prepared.components);return prepared;}
+        if (input.stage !== "INITIAL") {
+          const prepared = await prepareFrozenComponents({ registration, variables,
+            onImageHeaderUnavailable: () => { headerAvailabilityFailure = true; } });
+          await captureCommon(prepared.components);
+          return prepared;
+        }
+        // Shared still renders and verifies the final initial projection. This
+        // local immutable check precedes optional IMAGE availability decisions.
+        if (selectedFormat === "IMAGE") verifyFrozenTemplate(registration);
         if (!input.outreachEvaluation || input.outreachEvaluation.shopId !== input.shopId) throw new BindingUnavailable("INVALID_REQUEST");
         if (!input.checkoutItems || input.checkoutItems.shopId !== input.shopId || !Array.isArray(input.checkoutItems.lineItems) || input.checkoutItems.lineItems.length === 0) throw new BindingUnavailable("BINDING_VALUE_UNAVAILABLE");
         if (input.checkoutItems.lineItems.length !== input.outreachEvaluation.lines.length || input.checkoutItems.lineItems.some((raw, index) => {
@@ -211,13 +237,24 @@ export class RecoveryTemplatePreparer {
       };
       let preparedBindings: Awaited<ReturnType<typeof prepareFrozenComponents>>;
       try {
+        if (selectedFormat === "IMAGE" && input.stage === "INITIAL" && input.productImage &&
+            (registration.parameterBindingsSnapshot as { headerMediaRole?: string }).headerMediaRole === "CHECKOUT_PRODUCT") {
+          verifyFrozenTemplate(registration);
+          productMedia = await this.createProductImageResolver().prepareForBinding(input.productImage);
+        }
         preparedBindings = await prepareSelected(productMedia);
       } catch (error) {
-        if (selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
-            error.reason !== "MEDIA_NOT_READY" || (input.stage === "INITIAL" && !headerAvailabilityFailure)) throw error;
+        if (!automatic || selectedFormat !== "IMAGE" || !(error instanceof BindingUnavailable) ||
+            error.reason !== "MEDIA_NOT_READY" || !headerAvailabilityFailure) throw error;
+        const imageVariantId = selectedAssignment.variant.id;
         const textFallback = select("TEXT");
-        if (textFallback.outcome !== "selected") return unavailable(
-          textFallback.reason === "NO_APPROVED_ASSIGNMENT" ? error.reason : textFallback.reason);
+        if (textFallback.outcome !== "selected") {
+          this.logger.warn("recovery_template.prepare.text_fallback_unavailable", {
+            shopId: input.shopId, purpose, imageVariantId, imageReason: error.reason,
+            textReason: textFallback.reason,
+          });
+          return unavailable(textFallback.reason === "NO_APPROVED_ASSIGNMENT" ? error.reason : textFallback.reason);
+        }
         selectedAssignment = textFallback.value;
         selectedFormat = "TEXT";
         registration = selectedAssignment.variant.metaRegistration!;
@@ -226,6 +263,16 @@ export class RecoveryTemplatePreparer {
         });
         if (!checkoutItemsDecision.ok) return unavailable(checkoutItemsDecision.reason);
         preparedBindings = await prepareSelected(undefined);
+        this.logger.warn("recovery_template.prepare.text_fallback_selected", {
+          shopId: input.shopId, purpose, imageVariantId, imageReason: error.reason,
+          textVariantId: selectedAssignment.variant.id, languageTag: selectedAssignment.canonicalLanguageTag,
+        });
+      }
+      if (imageSelectionFailure && imageSelectionFailure !== "NO_APPROVED_ASSIGNMENT") {
+        this.logger.warn("recovery_template.prepare.text_fallback_selected", {
+          shopId: input.shopId, purpose, imageReason: imageSelectionFailure,
+          textVariantId: selectedAssignment.variant.id, languageTag: selectedAssignment.canonicalLanguageTag,
+        });
       }
       return {
         ...(renderedText !== undefined ? { renderedText } : {}),

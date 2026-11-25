@@ -86,6 +86,7 @@ describe("InitialNoOfferFallbackService", () => {
       send: { recoveryPromise: { kind: "NO_OFFER" }, dynamicUrlButton: { index: 0, text: "token" } } });
     expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({
       shopId: "shop-1", senderWabaId: "waba-1", stage: "INITIAL",
+      selection: { kind: "TEXT_ONLY" },
       promotionTarget: "CHECKOUT", offerPresentation: "NO_OFFER",
       merchantLanguageTag: "en-GB", customerFirstName: "Alice",
       shopName: { shopId: "shop-1", value: "shop.test" },
@@ -95,6 +96,16 @@ describe("InitialNoOfferFallbackService", () => {
     expect(f.preparer.prepare.mock.calls[0]?.[0]).not.toHaveProperty("verifiedOffer");
     expect(f.preparer.prepare.mock.calls[0]?.[0]).not.toHaveProperty("promotionalProduct");
     expect(f.preparer.prepare.mock.calls[0]?.[0]).not.toHaveProperty("productImage");
+  });
+
+  it("refuses an IMAGE result from a faulty injected TEXT-only preparer", async () => {
+    const f = fixture();
+    f.preparer.prepare.mockResolvedValueOnce({ ...preparedTemplate, template: { ...preparedTemplate.template,
+      components: [{ type: "header", parameters: [{ type: "image", image: { link: "https://cdn.example.com/image.jpg" } }] },
+        ...preparedTemplate.template.components] } });
+    await expect(f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1",
+      outreachAttemptId: "attempt-1", trigger: "IMAGE_UNAVAILABLE" }))
+      .resolves.toEqual({ kind: "BLOCKED", reason: "APPROVED_BINDING_UNAVAILABLE" });
   });
 
   it("blocks an empty or malformed saved basket before template preparation", async () => {

@@ -28,6 +28,18 @@ export type AssignmentSelection =
   | { outcome: "selected"; value: SelectedAssignment }
   | { outcome: "unavailable"; reason: TemplateUnavailableReason };
 
+/** The header family is determined from frozen Meta components, not a name or
+ * a client-provided format. Headerless and TEXT-header messages share a slot. */
+export function recoveryAssignmentFormat(row: AssignedVariantRow): "TEXT" | "IMAGE" | null {
+  const components = row.metaRegistration?.componentsSnapshot;
+  if (!Array.isArray(components)) return null;
+  const headers = components.filter(component => component && typeof component === "object" &&
+    !Array.isArray(component) && component.type === "HEADER");
+  if (headers.length === 0) return "TEXT";
+  if (headers.length !== 1) return null;
+  return headers[0].format === "IMAGE" ? "IMAGE" : headers[0].format === "TEXT" ? "TEXT" : null;
+}
+
 /** Selection is pure except for bounded diagnostics on caught parsing errors. */
 export function selectRecoveryAssignment(input: {
   shop: ShopSelectionRow;
@@ -57,13 +69,10 @@ export function selectRecoveryAssignment(input: {
     }
     const byLanguage = new Map<string, AssignedVariantRow[]>();
     for (const row of input.variants) {
-      const components = row.metaRegistration?.componentsSnapshot;
-      if (!Array.isArray(components)) continue;
-      const header = components.find(component => component && typeof component === "object" &&
-        !Array.isArray(component) && component.type === "HEADER");
-      const format = header && typeof header === "object" && !Array.isArray(header)
-        ? header.format ?? "TEXT" : "TEXT";
-      if (input.headerFormat && format !== input.headerFormat) continue;
+      const format = recoveryAssignmentFormat(row);
+      // Retain unclassifiable assignments for the shared eligibility checks;
+      // an unlinked legacy row must not make an ambiguous slot appear unique.
+      if (input.headerFormat && format !== null && format !== input.headerFormat) continue;
       const group = byLanguage.get(row.languageTag) ?? [];
       group.push(row); byLanguage.set(row.languageTag, group);
     }

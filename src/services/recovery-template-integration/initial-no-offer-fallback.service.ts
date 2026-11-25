@@ -189,6 +189,7 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
         outreachEvaluation: input.outreachEvaluation,
         senderWabaId,
         stage: "INITIAL",
+        selection: { kind: "TEXT_ONLY" },
         promotionTarget: "CHECKOUT",
         offerPresentation: "NO_OFFER",
         conversationLanguageTag: null,
@@ -227,6 +228,10 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       if (prepared.shopId !== input.shopId || prepared.senderWabaId !== senderWabaId ||
           prepared.purpose !== "INITIAL_NO_OFFER") {
         return { kind: "BLOCKED", reason: "MERCHANT_OR_SENDER_MISMATCH" };
+      }
+      if (prepared.template.components.some(component => component.type === "header" &&
+          component.parameters.some(parameter => parameter.type === "image"))) {
+        return { kind: "BLOCKED", reason: "APPROVED_BINDING_UNAVAILABLE" };
       }
       return {
         kind: "PREPARED",

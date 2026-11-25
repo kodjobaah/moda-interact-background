@@ -1,4 +1,6 @@
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
+import { canonicalJson } from "@modainteract/moda-interact-shared/commerce";
+import { readMetaCommonIdentity } from "../recovery-template-preparation/recovery-template-common.js";
 import prisma from "../../lib/db.js";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
@@ -59,6 +61,7 @@ export class MerchantFollowUpTemplateService {
         shopId: command.shopId, recoveryId, stage: "FOLLOW_UP", policy,
         outreachAttemptId: command.recoveryOutreachAttemptId,
         conversationLanguageTag: conversation.languageTag ?? null,
+        requestedTemplate: { templateName: command.templateName, languageCode: command.templateLanguageCode },
       });
       if (selection.kind !== "prepared") {
         this.log.warn("arch047.merchant_follow_up.preparation_unavailable", {
@@ -68,12 +71,18 @@ export class MerchantFollowUpTemplateService {
       }
       const { prepared, send } = selection;
       const registration = send.templateRegistration;
-      // Every merchant post-window recovery follow-up must use the checkout
-      // CTA that BG001 bound to the authenticated recovery. A static/no-button
-      // template must not silently turn into a message with no recovery link.
-      // The provider parameters are forwarded unchanged after this check.
-      if (!send.dynamicUrlButton || send.dynamicUrlButton.index !== 0 ||
-          typeof send.dynamicUrlButton.text !== "string" || !send.dynamicUrlButton.text ||
+      // New common-layout templates bind the trusted checkout URL in the BODY
+      // instead of a legacy dynamic button. Require exact prepared evidence;
+      // the locked final registration check independently revalidates the
+      // current layout, checkout, frozen binding positions and parameters.
+      const common = prepared.commonLayout === undefined ? null : readMetaCommonIdentity(prepared.commonLayout, command.shopId);
+      const commonCheckout = common !== null && registration?.commonLayout !== undefined &&
+        canonicalJson(registration.commonLayout) === canonicalJson(common) &&
+        canonicalJson(common.parameters) === canonicalJson({ header: send.textHeader === undefined ? [] : [send.textHeader], body: send.bodyParameters ?? [] }) &&
+        common.parameters.body.includes(common.variables["checkout.url"]);
+      const legacyCheckout = prepared.commonLayout === undefined && registration?.commonLayout === undefined &&
+        send.dynamicUrlButton?.index === 0 && typeof send.dynamicUrlButton.text === "string" && Boolean(send.dynamicUrlButton.text);
+      if ((!commonCheckout && !legacyCheckout) ||
           (send.imageHeader !== undefined && send.textHeader !== undefined) ||
           (send.textHeader !== undefined &&
            (typeof send.textHeader !== "string" || !send.textHeader.trim())) ||

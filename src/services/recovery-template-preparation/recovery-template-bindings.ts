@@ -131,11 +131,8 @@ function strictComponents(value: unknown): JsonObject[] {
   return value;
 }
 
-export async function prepareFrozenComponents(input: {
-  registration: RegistrationRow;
-  variables: RecoveryVariableResolver;
-}): Promise<{ components: readonly PreparedMetaComponent[]; bindingFingerprint: string }> {
-  const { registration, variables } = input;
+/** Verify frozen registration identity before any optional media lookup. */
+export function verifyFrozenTemplate(registration: RegistrationRow) {
   const approved = strictComponents(registration.componentsSnapshot);
   const frozen = parseFrozenBindings(registration.parameterBindingsSnapshot, registration.submittedContentHash);
   const header = approved.find((component) => component.type === "HEADER");
@@ -160,9 +157,20 @@ export async function prepareFrozenComponents(input: {
       fingerprint !== registration.submittedContentHash) {
     throw new BindingUnavailable("BINDING_FINGERPRINT_MISMATCH");
   }
-  if (registration.category !== "MARKETING") return invalid();
+  if (registration.category !== "MARKETING" ||
+      !textMatchesFrozenBindings(approved.find(component => component.type === "BODY")?.text, frozen.body, 1024)) return invalid();
+  return { approved, frozen, fingerprint };
+}
 
+export async function prepareFrozenComponents(input: {
+  registration: RegistrationRow;
+  variables: RecoveryVariableResolver;
+  onImageHeaderUnavailable?: () => void;
+}): Promise<{ components: readonly PreparedMetaComponent[]; bindingFingerprint: string }> {
+  const { registration, variables } = input;
+  const { approved, frozen, fingerprint } = verifyFrozenTemplate(registration);
   const result: PreparedMetaComponent[] = [];
+  let imageRole: RecoveryTemplateHeaderMediaRole | undefined;
   let matchedHeader = false;
   let matchedBody = false;
   let matchedButtons = false;
@@ -177,8 +185,9 @@ export async function prepareFrozenComponents(input: {
         }
       } else if (component.format === "IMAGE") {
         if (frozen.header.length || !frozen.headerMediaRole) return invalid();
-        const url = await variables.imageHeader(frozen.headerMediaRole);
-        result.push({ type: "header", parameters: [{ type: "image", image: { link: url } }] });
+        // Resolve required body/CTA bindings before the optional header. A
+        // media miss must not conceal a mandatory binding or integrity error.
+        imageRole = frozen.headerMediaRole;
       } else return invalid();
     } else if (component.type === "BODY") {
       matchedBody = true;
@@ -218,5 +227,16 @@ export async function prepareFrozenComponents(input: {
   }
   if (!matchedBody || (frozen.header.length > 0 && !matchedHeader) ||
       (frozen.buttons.length > 0 && !matchedButtons)) return invalid();
+  if (imageRole) {
+    try {
+      const url = await variables.imageHeader(imageRole);
+      result.unshift({ type: "header", parameters: [{ type: "image", image: { link: url } }] });
+    } catch (error) {
+      if (error instanceof BindingUnavailable && error.reason === "MEDIA_NOT_READY") {
+        input.onImageHeaderUnavailable?.();
+      }
+      throw error;
+    }
+  }
   return { components: result, bindingFingerprint: fingerprint };
 }

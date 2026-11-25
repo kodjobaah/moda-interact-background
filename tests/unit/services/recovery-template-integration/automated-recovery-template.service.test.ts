@@ -452,6 +452,16 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       stage: "FOLLOW_UP", conversationLanguageTag: "fr-CA" }));
   });
 
+  it("forwards a persisted merchant template choice without changing follow-up offer verification", async () => {
+    const f = fixture({ ...recovered, status: "MESSAGE_SENT" });
+    f.preparer.prepare.mockResolvedValueOnce({ ...basePrepared, purpose: "FOLLOW_UP_NO_OFFER" });
+    const requestedTemplate = { templateName: "approved_text_follow_up", languageCode: "en_GB" };
+    await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1", stage: "FOLLOW_UP",
+      policy: policy as never, conversationLanguageTag: "fr-CA", requestedTemplate });
+    expect(f.offers.resolve).toHaveBeenCalledWith(expect.objectContaining({ stage: "FOLLOW_UP", previouslyPromisedOffer: { kind: "NO_OFFER" } }));
+    expect(f.preparer.prepare).toHaveBeenCalledWith(expect.objectContaining({ selection: { kind: "EXACT", ...requestedTemplate } }));
+  });
+
   it("reads a confirmed singleton checkout offer-set receipt for follow-up verification", async () => {
     const f = fixture({ ...recovered, status: "MESSAGE_SENT" });
     f.database.conversationMessage.findUnique.mockResolvedValueOnce({
