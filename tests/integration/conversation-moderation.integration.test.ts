@@ -2,6 +2,7 @@ import "dotenv/config";
 import { describe, expect, it, vi } from "vitest";
 import { PostgresModerationAssessmentService, sha256Text } from "../../src/services/conversation-moderation/moderation-assessment.service.js";
 import { loadCommerceHistory } from "../../src/commerce/history.js";
+import { UNCONFIRMED_DELIVERY, UNCONFIRMED_AUTOMATION } from "../../src/commerce/history-delivery.js";
 import { ModerationTurnGate } from "../../src/services/conversation-moderation/moderation-turn-gate.js";
 import { moderationConfig } from "../../src/services/conversation-moderation/moderation-policy.js";
 import { allowedHistoryCandidates } from "../../src/services/conversation-moderation/moderation-history.js";
@@ -335,10 +336,69 @@ suite("ARCH-040 BACKGROUND-006 persisted moderation with B002-local AI and Whats
       const loaded=await loadCommerceHistory(f.conversationId,boundary);
       expect(loaded.currentMessages).toEqual(blocked?[]:[{role:'user',content}]);
       expect(loaded.history).toContainEqual({role:'user',content:old.content});
-      expect(loaded.history).toContainEqual({role:'assistant',content:'Earlier same-timestamp answer'});
+      expect(loaded.history).toContainEqual({role:'assistant',content:`${UNCONFIRMED_DELIVERY} Earlier same-timestamp answer`});
       expect(f.whatsapp.messages).toHaveLength(0);
       expect(await f.db.conversationMessage.count({where:{conversationId:f.conversationId,direction:'INBOUND'}})).toBeGreaterThanOrEqual(2);
     }finally{operation.mockRestore();await close();}
   },120000);
+
+  it("excludes failed deliveries before the history limit and preserves only moderated communicated offers", async () => {
+    const { f, aimock, close } = await moderatedFixture("delivery-aware-history");
+    const { platformConsumerConfiguration } = await import("../../src/services/platform-configuration/consumers.js");
+    const operation = vi.spyOn(platformConsumerConfiguration, "requireModerationOperation").mockImplementation(aimock.readOperation as never);
+    try {
+      const boundary = new Date(Date.now() - 1000);
+      const moderation = new PostgresModerationAssessmentService(f.db, aimock.moderate, undefined, aimock.readOperation);
+      const receipt = (code: string) => JSON.stringify({
+        contract: "moda.whatsapp.automated-template-parameters.v1", templateName: "checkout_recovery",
+        languageCode: "en_US", bodyParameters: [code], recoveryPromise: {
+          kind: "CODE_OFFER", promotionTarget: "CHECKOUT", providerDiscountId: code, code,
+        },
+      });
+      const createAutomation = async (code: string, status: "FAILED" | "SENT" | "DELIVERED", offset: number, approve = true) => {
+        const at = new Date(+boundary - offset);
+        const message = await f.db.conversationMessage.create({ data: {
+          conversationId: f.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
+          content: receipt(code), status, createdAt: at, sentAt: at,
+          providerMessageId: `${f.conversationId}-${code}`,
+          ...(status === "DELIVERED" ? { deliveredAt: at } : {}),
+          ...(status === "FAILED" ? { failedAt: at, providerFailureCode: "131049" } : {}),
+        } });
+        if (approve) expect((await moderation.assessText({ subject: { kind: "AUTOMATION_MESSAGE", messageId: message.id },
+          shopId: f.shopId, conversationId: f.conversationId, effectiveText: message.content,
+          inputKind: "TEXT", policyVersion: moderationConfig().policyVersion, now: new Date() })).kind).toBe("allow");
+        return message;
+      };
+      const communicated = await createAutomation("SAVE20", "DELIVERED", 60000);
+      const failed = await createAutomation("FAILED10", "FAILED", 50000);
+      // More failed rows than the entire SQL history window; they must not
+      // displace the earlier successful offer or consume moderation work.
+      await f.db.conversationMessage.createMany({ data: Array.from({ length: 21 }, (_, index) => ({
+        conversationId: f.conversationId, direction: "OUTBOUND" as const, senderType: "AUTOMATION" as const,
+        status: "FAILED" as const, content: receipt(`FAILED-${index}`),
+        createdAt: new Date(+boundary - 40000 + index), sentAt: new Date(+boundary - 40000 + index),
+        failedAt: new Date(+boundary - 40000 + index), providerFailureCode: "131049",
+      })) });
+      await createAutomation("UNCONFIRMED30", "SENT", 30000);
+      await createAutomation("UNMODERATED40", "DELIVERED", 20000, false);
+      const quoted = await createAutomation("QUOTED25", "SENT", 10000);
+      await f.db.conversationMessage.create({ data: { conversationId: f.conversationId,
+        direction: "INBOUND", senderType: "CUSTOMER", status: "DELIVERED", createdAt: boundary,
+        providerMessageId: `${f.conversationId}-question`, inReplyToProviderId: quoted.providerMessageId,
+        content: "Can I use this discount?",
+      } });
+      expect(await new ModerationTurnGate(moderation).moderatePending(f.conversationId, boundary)).toBe("allowed");
+      const loaded = await loadCommerceHistory(f.conversationId, boundary);
+      expect(loaded.currentMessages).toEqual([{ role: "user", content: "Can I use this discount?" }]);
+      expect(loaded.history).toHaveLength(3);
+      expect(loaded.history).toContainEqual({ role: "assistant", content: UNCONFIRMED_AUTOMATION });
+      for (const message of [communicated, quoted]) {
+        expect(loaded.history.some(row => row.content.includes("Delivery confirmed") && row.content.endsWith(message.content))).toBe(true);
+      }
+      expect(JSON.stringify(loaded)).not.toMatch(/FAILED10|FAILED-[0-9]|UNCONFIRMED30|UNMODERATED40/);
+      expect(await f.db.conversationMessage.findUniqueOrThrow({where:{id:failed.id}})).toEqual(failed);
+      expect(f.whatsapp.messages).toHaveLength(0);
+    } finally { operation.mockRestore(); await close(); }
+  }, 120_000);
 
 });

@@ -502,6 +502,27 @@ describe("ConversationService standalone snapshots", () => {
     );
   });
 
+  it("does not expose a failed or unconfirmed automated offer in a standalone snapshot", async () => {
+    setupStandaloneHistory();
+    const sentAt = new Date("2026-11-26T02:40:54Z");
+    const rows = [
+      { id: "failed", direction: "OUTBOUND", senderType: "AUTOMATION", status: "FAILED", sentAt, content: "FAILED10" },
+      { id: "accepted", direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT", sentAt, content: "ACCEPTED15" },
+      { id: "delivered", direction: "OUTBOUND", senderType: "AUTOMATION", status: "DELIVERED", sentAt, deliveredAt: sentAt, content: "DELIVERED20" },
+    ];
+    prismaMock.conversationMessage.findMany.mockResolvedValue(rows);
+    prismaMock.conversationModerationAssessment.findMany.mockResolvedValue(rows.map(row => ({
+      conversationMessageId: row.id, contentSha256: createHash("sha256").update(row.content, "utf8").digest("hex"),
+    })));
+    const snapshot = await new ConversationService().getAgentSnapshot("conversation-1");
+    expect(snapshot.messages).toHaveLength(2);
+    expect(snapshot.messages.some(row => row.content.includes("Delivery confirmed") && row.content.endsWith("DELIVERED20"))).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(/FAILED10|ACCEPTED15/);
+    expect(prismaMock.conversationMessage.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 20, where: {
+      AND: [expect.objectContaining({OR: expect.arrayContaining([{direction:"OUTBOUND",sentAt:{not:null},status:{in:["SENT","DELIVERED","READ"]}}])}), {conversationId:"conversation-1"}],
+    } }));
+  });
+
   it("fails closed when moderation configuration cannot be read", async () => {
     setupStandaloneHistory();
     operationReader.mockRejectedValueOnce(new Error("DB_UNAVAILABLE"));

@@ -12,7 +12,9 @@ const row = (
   content: string,
   direction = "INBOUND",
   senderType = "CUSTOMER",
-) => ({ id, content, direction, senderType });
+) => ({ id, content, direction, senderType,
+  ...(direction === "OUTBOUND" ? { status: "DELIVERED", sentAt: new Date(0), deliveredAt: new Date(1) } : {}),
+});
 it("preserves a prior agent question and deduplicates current fragments", () => {
   const result = boundHistory(
     [row("q", "Which size?", "OUTBOUND", "AGENT"), row("a", "large")],

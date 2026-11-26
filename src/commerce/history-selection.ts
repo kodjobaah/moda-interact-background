@@ -5,7 +5,7 @@ export const commerceHistoryVisible: Prisma.ConversationMessageWhereInput = {
   transcriptionStatus: { in: ["NOT_REQUIRED", "COMPLETED"] },
   OR: [
     { direction: "INBOUND", senderType: "CUSTOMER" },
-    { direction: "OUTBOUND", sentAt: { not: null } },
+    { direction: "OUTBOUND", sentAt: { not: null }, status: { in: ["SENT", "DELIVERED", "READ"] } },
   ],
 };
 

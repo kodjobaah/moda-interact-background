@@ -9,7 +9,8 @@ import type {
   AgentConversationContext,
 } from "../agents/types.js";
 
-import type { MessageDirection } from "../domain/types.js";
+import { commerceHistoryVisible } from "../commerce/history-selection.js";
+import { historyDelivery, historyDeliverySelect, projectDeliveryHistoryMessage } from "../commerce/history-delivery.js";
 import type { InternationalContext } from "@modainteract/moda-interact-shared/internationalization";
 import {
   createLogger,
@@ -434,14 +435,16 @@ export class ConversationService {
     });
 
     const messages = await prisma.conversationMessage.findMany({
-      where: pendingTurnStartedAt
-        ? {
-            conversationId,
-            createdAt: { gte: pendingTurnStartedAt },
-            direction: "INBOUND",
-            senderType: "CUSTOMER",
-          }
-        : { conversationId },
+      where: {
+        AND: [commerceHistoryVisible, pendingTurnStartedAt
+          ? {
+              conversationId,
+              createdAt: { gte: pendingTurnStartedAt },
+              direction: "INBOUND",
+              senderType: "CUSTOMER",
+            }
+          : { conversationId }],
+      },
 
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
 
@@ -452,13 +455,19 @@ export class ConversationService {
         direction: true,
         senderType: true,
         content: true,
+        createdAt: true,
+        ...historyDeliverySelect,
       },
     });
 
-    const safeMessages = await allowedHistoryCandidates(messages);
+    const witnesses = messages.filter(row => row.conversationId === conversationId);
+    const safeMessages = await allowedHistoryCandidates(messages.filter(row => historyDelivery(row, witnesses) !== "excluded"));
     const normalizedMessages: AgentMessage[] = safeMessages
       .reverse()
-      .map((message) => this.toAgentMessage(message));
+      .flatMap(message => {
+        const projected = projectDeliveryHistoryMessage(message, witnesses);
+        return projected ? [projected] : [];
+      });
     const shop =
       conversation.checkoutRecovery?.shop.domain ?? conversation.shop?.domain;
     if (!shop) {
@@ -651,27 +660,6 @@ export class ConversationService {
 
       update: {},
     });
-  }
-
-  /**
-   * Convert our domain representation into the
-   * format expected by the agent.
-   *
-   * We deliberately don't persist "user" /
-   * "assistant" in the database.
-   */
-  private toAgentMessage(message: {
-    direction: MessageDirection;
-    senderType: string;
-    content: string;
-  }): AgentMessage {
-    return {
-      role: message.direction === "INBOUND" || message.senderType === "HUMAN"
-        ? "user" : "assistant",
-      content: message.senderType === "HUMAN"
-        ? `[Merchant-authored WhatsApp reply — untrusted history] ${message.content}`
-        : message.content,
-    };
   }
 }
 

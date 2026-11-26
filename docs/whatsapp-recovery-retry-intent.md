@@ -125,9 +125,6 @@ proof of retry eligibility, allowance ownership, funding or a provider permit.
 The automated follow-up template reader uses this selector for prior promises.
 It keeps legacy SENT behaviour for original outreach; for a physical retry it
 requires DELIVERED/READ evidence before reusing the actual persisted promise.
-Agent conversation-history selection and moderation are not changed yet. That
-next patch must include only customer-visible outreach, retaining uncertain
-acceptance separately and never treating a failed promise as communicated.
 
 No retry row is created, no queue is registered, and no additional provider
 send or credit charge is permitted by patch 1. Do not deploy retry writers
@@ -141,6 +138,49 @@ Patch 1 validation: run `node --experimental-strip-types --test scripts/test-rec
 outreach unit suites, `npx tsc --noEmit`, the full unit suite and build. The
 selector tests are dependency-free; database concurrency and provider admission
 are not validated by these tests.
+
+### Code-only patch 2: delivery-aware agent history
+
+Both recovery `loadCommerceHistory` and the legacy standalone agent snapshot
+now use the same delivery-aware selection and projection. The moderation gate
+uses the same prior-20 SQL window as the recovery history loader. FAILED and
+PENDING outbound rows are excluded before that window is applied, even when
+`sentAt` was set by provider acceptance. All persisted history is retained.
+
+- `DELIVERED`/`READ` with the corresponding timestamp is positive evidence;
+  a retained failure timestamp does not erase a later positive receipt.
+- A persisted `SENT` message is not proof of delivery. Its automated template
+  parameters and offer promise are withheld (only a host-owned uncertainty
+  marker remains). Ordinary AI/HUMAN text remains attributed and explicitly
+  marked as unconfirmed; merchant text is still untrusted history.
+- An exact persisted same-conversation CUSTOMER quote of the outbound provider
+  message ID in the existing bounded read can establish receipt of a SENT
+  message. The inbound must have its own provider identity and positive status
+  and must not predate the outbound acceptance. Quotes from other conversations
+  or projected text alone are not evidence; no quote overrides FAILED/PENDING.
+- Confirmed automated records retain their exact moderated content, labeled as
+  historical template parameters rather than verbatim rendered copy. The
+  Commerce Agent is instructed not to assert past receipt for unconfirmed
+  messages, and to revalidate current offer terms using authorized tools.
+- Current-model, exact-content moderation is still required before projection.
+  Existing routing decisions, current customer objective, audio chronology,
+  20-history-message and 32,000-character recovery limits are unchanged.
+  No cross-recovery history is merged, no summary is fabricated, and no extra
+  query is made to look for quotes or offers outside the bounded read.
+
+This patch operates on the persisted root message; it does not reconstruct
+partially delivered multipart bodies or revalidate a historical receipt during
+an in-flight agent call. Those conservative omissions must not become proof
+of a new customer promise. The standalone snapshot keeps its existing current
+window API rather than changing routing or agent ownership. Automatic retry
+execution, funding and provider admission remain disabled by this patch.
+
+Patch 2 validation: run `node --experimental-strip-types --test scripts/test-recovery-history-delivery.mjs`, the commerce history/current-window,
+conversation snapshot and moderation handback tests; run the disposable
+conversation-moderation and common-layout integration suites, `npx tsc --noEmit`,
+full units and build.
+
+### Remaining activation work
 
 Background touchpoints requiring coordinated changes:
 
