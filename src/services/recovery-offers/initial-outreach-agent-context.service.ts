@@ -1,3 +1,4 @@
+import { initialOutreachRecoveryStateAllowed, isInitialOutreachIdentity } from "../../domain/recovery-outreach-identity.js";
 import type { PrismaClient } from "@prisma/client";
 import type { CommerceEnvironment } from "@modainteract/moda-interact-shared/commerce/model";
 import type { CheckoutPriceReconciliationService } from "../recovery-pricing/checkout-price-reconciliation.service.js";
@@ -186,14 +187,14 @@ export class InitialOutreachAgentContextService {
       }),
     ]);
     if (!recovery || recovery.shopId !== input.shopId || recovery.id !== input.checkoutRecoveryId ||
-        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(recovery.status) : recovery.status !== "DETECTED") || !Number.isSafeInteger(recovery.generation) || recovery.generation < 1) {
+        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(recovery.status) : !initialOutreachRecoveryStateAllowed(input.outreachAttemptId, recovery.status)) || !Number.isSafeInteger(recovery.generation) || recovery.generation < 1) {
       throw new InitialOutreachAgentContextError("RECOVERY_CONTEXT_INVALID");
     }
     if (!attempt || attempt.id !== input.outreachAttemptId || attempt.checkoutRecoveryId !== recovery.id ||
         (this.dependencies.stage === "FOLLOW_UP"
           ? attempt.sequence !== 2 || attempt.trigger !== "POST_WINDOW_FOLLOW_UP" ||
             attempt.initiatedBy !== "HUMAN" || !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status)
-          : attempt.sequence !== 1 || attempt.trigger !== "INITIAL" ||
+          : !isInitialOutreachIdentity(attempt) ||
             !ACTIVE_ATTEMPT_STATUSES.has(attempt.status) || attempt.initiatedBy === "HUMAN")) {
       throw new InitialOutreachAgentContextError("OUTREACH_ATTEMPT_INVALID");
     }

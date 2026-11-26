@@ -1,3 +1,5 @@
+import { isInitialOutreachIdentity, isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import {
   MerchantSupportMessageKind,
   MerchantSupportMessageState,
@@ -28,7 +30,8 @@ type NoticeEvent =
   | "recovery.initial_outreach_support_notice.created"
   | "recovery.initial_outreach_support_notice.disabled"
   | "recovery.initial_outreach_support_notice.replayed"
-  | "recovery.initial_outreach_support_notice.failed";
+  | "recovery.initial_outreach_support_notice.failed"
+  | "recovery.delivery_retry.attempt_finalized";
 
 const defaultLogger = createLogger({
   serviceName: "moda-recovery-worker",
@@ -39,6 +42,7 @@ const outcomeEvents = {
   created: "recovery.initial_outreach_support_notice.created",
   disabled: "recovery.initial_outreach_support_notice.disabled",
   replayed: "recovery.initial_outreach_support_notice.replayed",
+  "retry-finalized": "recovery.delivery_retry.attempt_finalized",
 } as const;
 const confirmedMessageStatuses: MessageStatus[] = [MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ];
 const replayableStatuses: RecoveryOutreachStatus[] = [
@@ -128,11 +132,14 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
           SELECT "id"
           FROM "commerce"."Shop"
           WHERE "id" = ${pointer.checkoutRecovery.shopId}
-          FOR KEY SHARE
+          ${isInitialRetryId(input.outreachAttemptId) ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR KEY SHARE`}
         `);
         if (lockedShop.length !== 1 || lockedShop[0]?.id !== input.shopId) {
           lineageMismatch("Initial outreach Shop pointer was not found");
         }
+        // A retry's provider status may race finalization. Lock Shop exclusively
+        // before reading the message and attempt; the status owner uses Shop
+        // KEY SHARE. Original sends preserve their existing lock path.
         const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
           SELECT "id"
           FROM "commerce"."RecoveryOutreachAttempt"
@@ -165,7 +172,7 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
         });
         if (!attempt || attempt.id !== input.outreachAttemptId ||
             attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
-            attempt.sequence !== 1 || attempt.trigger !== RecoveryOutreachTrigger.INITIAL ||
+            !isInitialOutreachIdentity(attempt) ||
             (attempt.initiatedBy !== null && attempt.initiatedBy !== RecoveryOutreachInitiator.AUTOMATION) ||
             attempt.checkoutRecovery.shopId !== pointer.checkoutRecovery.shopId) {
           lineageMismatch("Initial outreach attempt lineage did not match");
@@ -177,6 +184,9 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
           lineageMismatch("Recovery tenant or conversation lineage did not match");
         }
 
+        if (isInitialRetryId(attempt.id)) {
+          await readRetryFundingLineage(tx, { recoveryId: input.checkoutRecoveryId, conversationId: conversation.id, attemptId: attempt.id });
+        }
         const outboundMessage = await tx.conversationMessage.findUnique({
           where: { id: input.outboundMessageId },
           select: {
@@ -240,7 +250,7 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
             OR: repairingFalseFailure
               ? [{ initiatedBy: RecoveryOutreachInitiator.AUTOMATION }]
               : [{ initiatedBy: null }, { initiatedBy: RecoveryOutreachInitiator.AUTOMATION }],
-            sequence: 1,
+            sequence: attempt.sequence,
             trigger: RecoveryOutreachTrigger.INITIAL,
             sentAt: null,
             outboundMessageId: null,
@@ -258,6 +268,8 @@ export class RecoveryInitialOutreachSupportNoticeService implements ConfirmedIni
           finalizationConflict("Initial outreach attempt changed before finalisation");
         }
 
+        // Physical retries are not new merchant outreach notifications.
+        if (isInitialRetryId(attempt.id)) return { outcome: "retry-finalized", outreachAttemptId: attempt.id };
         const settings = await tx.shopSettings.findUnique({
           where: { shopId: recovery.shopId },
           select: { notifyOnInitialRecoveryOutreach: true },

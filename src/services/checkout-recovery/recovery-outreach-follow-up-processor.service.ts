@@ -1,3 +1,4 @@
+import { effectiveInitialForFollowUp } from "../recovery-delivery-retry/effective-initial.js";
 import { recoveryAllowanceService, type RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import prisma from "../../lib/db.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
@@ -51,7 +52,7 @@ export class RecoveryOutreachFollowUpProcessorService {
             conversation: true,
           },
         });
-        const initial = recovery?.outreachAttempts.find((item) => item.sequence === 1);
+        const initial = recovery ? await effectiveInitialForFollowUp(prisma, recoveryId, recovery.conversation?.id ?? null, recovery.outreachAttempts) : undefined;
         if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation) {
           return { kind: "suppressed", reason: "not-due" } as const;
         }
@@ -124,8 +125,8 @@ export class RecoveryOutreachFollowUpProcessorService {
         }
         const claimedNoResponse = await recoveryOutreachAttemptService.markNoResponseIfWaiting(initial.id);
         if (!claimedNoResponse || claimedNoResponse.count !== 1) {
-          const currentAttempt = await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient });
-          if (currentAttempt.status === "ENGAGED" || ("customerRespondedAt" in currentAttempt && currentAttempt.customerRespondedAt)) {
+          const currentAttempt = initial.sequence === 1 ? await recoveryOutreachAttemptService.getOrCreate({ recoveryId, sequence: 1, policy: await recoveryPolicyService.resolve(recovery.shopId), recipient: initial.recipient }) : await prisma.recoveryOutreachAttempt.findUnique({ where: { id: initial.id } });
+          if (currentAttempt && (currentAttempt.status === "ENGAGED" || ("customerRespondedAt" in currentAttempt && currentAttempt.customerRespondedAt))) {
             return { kind: "suppressed", reason: "engaged" } as const;
           }
           return { kind: "suppressed", reason: "already-claimed" } as const;

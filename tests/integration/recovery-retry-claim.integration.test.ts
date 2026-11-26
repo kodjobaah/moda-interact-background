@@ -1,9 +1,17 @@
+import { initialRetryExecutionPorts, InitialDeliveryRetryExecutionService } from "../../src/services/recovery-delivery-retry/execution.js";
+import { expectedInitialRetryDispatchKey } from "../../src/services/recovery-delivery-retry/provider-dispatch-key.js";
+import { RecoveryBillingService } from "../../src/services/recovery-billing.service.js";
+import { OutboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
+import { RecoveryPolicyService } from "../../src/services/recovery-policy.service.js";
+import { RecoveryOutreachFinalizationService } from "../../src/services/checkout-recovery/recovery-outreach-finalization.service.js";
+import { RecoveryInitialOutreachSupportNoticeService } from "../../src/services/checkout-recovery/recovery-initial-outreach-support-notice.service.js";
+import { readAssignedOwner } from "../../src/services/recovery-sender-pool/inbound-authority.js";
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { retryOutreachAttemptId } from "../../src/domain/recovery-outreach-identity.js";
 import { InitialDeliveryRetryClaimService, listDueInitialRetryIntents } from "../../src/services/recovery-delivery-retry/claim.js";
 import { checkInitialRetryPermit } from "../../src/services/recovery-delivery-retry/initial-permit.js";
-import { lockRecoveryContext } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
+import { lockRecoveryContext, readRecoveryWindowEvidence } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
 import { RecoveryDeliveryCompensationService } from "../../src/services/recovery-delivery-compensation/reconcile.service.js";
 import type { RecoveryPolicySnapshot } from "../../src/services/recovery-policy.service.js";
 import { createInitialOutreachCreditFixture } from "./fixtures/arch056-initial-outreach-credit.fixture.js";
@@ -119,4 +127,84 @@ suite("Initial delivery retry last-mile eligibility", () => {
       await noFinancialOrProviderChanges(f, s);
     } finally { await f.close(); }
   }, 60_000);
+});
+
+// Exercise the real replay/finalization and inbound SQL, with a simulated
+// durable provider receipt. No external WhatsApp or commerce request is made.
+suite("Initial delivery retry execution replay", () => {
+  it.each(["free", "purchased"] as const)("finalizes and routes an accepted %s retry without another provider call", async source => {
+    const f = await createInitialOutreachCreditFixture({ source, sentAgeMs: 60 * 60_000 });
+    try {
+      const s = await failure(f);
+      expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({ kind: "claimed" });
+      const attemptId = retryOutreachAttemptId(s.intent.id);
+      const scope = { shopId: f.shopId, recoveryId: f.recoveryId, outreachAttemptId: attemptId };
+      const original = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: f.messageId } });
+      const ports = initialRetryExecutionPorts();
+      ports.billing = new RecoveryBillingService(f.db);
+      ports.outbound = new OutboundWhatsAppAdmissionService(f.db);
+      ports.policy = new RecoveryPolicyService(f.db);
+      ports.finalizer = new RecoveryOutreachFinalizationService(ports.billing, new RecoveryInitialOutreachSupportNoticeService(f.db), undefined, f.db);
+      ports.wooEnabled = () => false; // Even disabled Woo must settle an earlier acceptance.
+      const reserve = vi.spyOn(ports.outbound, "reserve").mockRejectedValue(new Error("unexpected new admission"));
+      const send = vi.spyOn(ports.outbound, "resumeInitialTemplate").mockRejectedValue(new Error("unexpected provider send"));
+      const wooSend = vi.spyOn(ports.wooSender, "sendInitial").mockRejectedValue(new Error("unexpected Woo provider send"));
+      const executor = new InitialDeliveryRetryExecutionService(f.db, ports);
+      expect(await ports.billing.admit(scope)).toMatchObject({ kind: "admitted" });
+      const now = new Date();
+      const message = await f.db.conversationMessage.create({ data: {
+        conversationId: s.conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION", status: "DELIVERED",
+        content: "Simulated retry acceptance", providerMessageId: `wamid-${randomUUID()}`, sentAt: now, deliveredAt: now,
+        providerDispatchKey: expectedInitialRetryDispatchKey(f.provider, f.shopId, attemptId), providerDispatchAdmittedAt: now,
+        providerDispatchControlRevision: 0, dispatchProviderAccountId: original.dispatchProviderAccountId,
+        dispatchProviderPhoneNumberId: original.dispatchProviderPhoneNumberId,
+      } });
+      await f.db.usageEvent.create({ data: { shopId: f.shopId, provider: f.provider, metric: "OUTBOUND_AUTOMATED_MESSAGE",
+        quantity: 1, idempotencyKey: `recovery-outreach:${attemptId}`, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id } });
+      expect(await executor.execute(s.intent.id)).toEqual({ kind: "reconciled", messageId: message.id });
+      expect(await executor.execute(s.intent.id)).toEqual({ kind: "reconciled", messageId: message.id });
+      expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } })).toMatchObject({
+        status: "WAITING_FOR_RESPONSE", outboundMessageId: message.id, sentAt: now,
+      });
+      expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } })).toEqual(s.original);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: s.reservation.id } })).toEqual(s.reservation);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(2);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId, status: "COMMITTED", compensatedAt: null } })).toBe(1);
+      expect(await readAssignedOwner(f.db, s.conversation.id)).toMatchObject({ contacted: true, initialAccepted: true });
+      expect(await readRecoveryWindowEvidence(f.db, { recoveryId: f.recoveryId, conversationId: s.conversation.id, now })).toMatchObject({ initialAttemptId: attemptId });
+      expect(reserve).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(wooSend).not.toHaveBeenCalled();
+      expect(await f.db.conversationMessage.count({ where: { conversationId: s.conversation.id } })).toBe(2);
+    } finally { await f.close(); }
+  }, 60_000);
+  it("holds a committed provider permit with no receipt and never reserves or resubmits", async () => {
+    const f = await createInitialOutreachCreditFixture({ sentAgeMs: 60 * 60_000 });
+    try {
+      const s = await failure(f);
+      expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({ kind: "claimed" });
+      const attemptId = retryOutreachAttemptId(s.intent.id);
+      const scope = { shopId: f.shopId, recoveryId: f.recoveryId, outreachAttemptId: attemptId };
+      const ports = initialRetryExecutionPorts();
+      ports.billing = new RecoveryBillingService(f.db);
+      ports.outbound = new OutboundWhatsAppAdmissionService(f.db);
+      expect(await ports.billing.admit(scope)).toMatchObject({ kind: "admitted" });
+      const original = await f.db.conversationMessage.findUniqueOrThrow({ where: { id: f.messageId } });
+      const message = await f.db.conversationMessage.create({ data: {
+        conversationId: s.conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION", status: "PENDING",
+        content: "Simulated unknown provider outcome", providerDispatchKey: expectedInitialRetryDispatchKey(f.provider, f.shopId, attemptId),
+        providerDispatchAdmittedAt: new Date(), providerDispatchControlRevision: 0,
+        dispatchProviderAccountId: original.dispatchProviderAccountId, dispatchProviderPhoneNumberId: original.dispatchProviderPhoneNumberId,
+      } });
+      await f.db.usageEvent.create({ data: { shopId: f.shopId, provider: f.provider, metric: "OUTBOUND_AUTOMATED_MESSAGE",
+        quantity: 1, idempotencyKey: `recovery-outreach:${attemptId}`, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id } });
+      const reserve = vi.spyOn(ports.outbound, "reserve").mockRejectedValue(new Error("unexpected admission"));
+      const send = vi.spyOn(ports.outbound, "resumeInitialTemplate").mockRejectedValue(new Error("unexpected provider send"));
+      const executor = new InitialDeliveryRetryExecutionService(f.db, ports);
+      expect(await executor.execute(s.intent.id)).toEqual({ kind: "held", reason: "provider-outcome-unknown" });
+      expect(await executor.execute(s.intent.id)).toEqual({ kind: "held", reason: "provider-outcome-unknown" });
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId, status: "RESERVED" } })).toBe(1);
+      expect(await f.db.conversationMessage.count({ where: { conversationId: s.conversation.id } })).toBe(2);
+      expect(reserve).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  }, 60_000);
+
 });

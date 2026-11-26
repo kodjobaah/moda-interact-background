@@ -1,3 +1,5 @@
+import { effectiveInitialForFollowUp } from "../recovery-delivery-retry/effective-initial.js";
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import prisma from "../../lib/db.js";
 import type { PrismaClient } from "@prisma/client";
 import { createLogger, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
@@ -74,7 +76,9 @@ export class RecoveryOutreachFinalizationService {
   > {
     let stage: FinalizationStage = "billing";
     try {
-      if (input.attempt.sequence !== 1) return { kind: "held", reason: "lineage-conflict" };
+      const retry = isInitialRetryId(input.attempt.id);
+      if (retry ? input.attempt.sequence < 3 : input.attempt.sequence !== 1)
+        return { kind: "held", reason: "lineage-conflict" };
       const settlement = await this.billingService.settleConfirmedInitialOutreach({
         shopId: input.recovery.shopId,
         recoveryId: input.recovery.id,
@@ -123,7 +127,8 @@ export class RecoveryOutreachFinalizationService {
       }
 
       stage = "follow_up";
-      await this.ensureScheduledInitialFollowUp(input.recovery.id);
+      if (retry) await this.ensureScheduledInitialFollowUp(input.recovery.id, input.message.conversationId);
+      else await this.ensureScheduledInitialFollowUp(input.recovery.id);
       return { kind: "finalized", outboundMessageId: input.message.id, sentAt: input.message.sentAt };
     } catch (error) {
       this.logConfirmedFinalizationFailure(input, stage, error);
@@ -138,10 +143,11 @@ export class RecoveryOutreachFinalizationService {
     message: ConfirmedMessage;
     policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null };
   }) {
-    const alreadyFinalized = input.attempt.sequence === 1 &&
+    const initial = input.attempt.sequence === 1 || input.attempt.sequence >= 3 && isInitialRetryId(input.attempt.id);
+    const alreadyFinalized = initial &&
       input.attempt.outboundMessageId === input.message.id &&
       input.attempt.sentAt?.getTime() === input.message.sentAt.getTime();
-    const followUpDueAt = input.attempt.sequence === 1
+    const followUpDueAt = initial
       ? alreadyFinalized ? input.attempt.followUpDueAt ?? null : (
           input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
             ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
@@ -149,7 +155,7 @@ export class RecoveryOutreachFinalizationService {
         )
       : null;
 
-    if (input.attempt.sequence === 1) {
+    if (initial) {
       const result = await this.finalizeConfirmedInitialOutreach({
         recovery: input.recovery,
         attempt: {
@@ -167,6 +173,7 @@ export class RecoveryOutreachFinalizationService {
       return;
     }
 
+    if (input.attempt.sequence !== 2) throw new Error("UNSUPPORTED_OUTREACH_FINALIZATION_SEQUENCE");
     // Preserve the established billing and attempt transition behavior for sequence two.
     await this.billingService.commitSuccessfulInitiation({
       admission: input.admission,
@@ -229,12 +236,17 @@ export class RecoveryOutreachFinalizationService {
     }
   }
 
-  async ensureScheduledInitialFollowUp(recoveryId: string) {
+  async ensureScheduledInitialFollowUp(recoveryId: string, conversationId?: string) {
     const recovery = await this.database.checkoutRecovery.findUnique({
       where: { id: recoveryId },
       include: { outreachAttempts: { orderBy: { sequence: "asc" } } },
     });
-    const initial = recovery?.outreachAttempts?.find((item) => item.sequence === 1);
+    if (!recovery) return;
+    const hasRetry = recovery.outreachAttempts?.some(item => item.sequence >= 3);
+    const ownerId = hasRetry && !conversationId ? (await this.database.checkoutRecovery.findUnique({
+      where: { id: recoveryId }, select: { conversation: { select: { id: true } } },
+    }))?.conversation?.id : conversationId;
+    const initial = await effectiveInitialForFollowUp(this.database, recoveryId, ownerId ?? null, recovery.outreachAttempts ?? []);
     if (
       !recovery ||
       !["MESSAGE_SENT", "ENGAGED"].includes(recovery.status) ||

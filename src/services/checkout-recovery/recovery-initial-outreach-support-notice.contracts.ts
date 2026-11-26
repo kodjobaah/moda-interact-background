@@ -11,7 +11,8 @@ export type ConfirmedInitialRecoveryOutreachInput = Readonly<{
 export type InitialOutreachNoticeResult =
   | { outcome: "created"; outreachAttemptId: string }
   | { outcome: "disabled"; outreachAttemptId: string }
-  | { outcome: "replayed"; outreachAttemptId: string };
+  | { outcome: "replayed"; outreachAttemptId: string }
+  | { outcome: "retry-finalized"; outreachAttemptId: string };
 
 export interface ConfirmedInitialOutreachFinalizer {
   finalizeConfirmedInitial(

@@ -1,3 +1,4 @@
+import { initialOutreachRecoveryStateAllowed, isInitialOutreachIdentity } from "../../domain/recovery-outreach-identity.js";
 import { fingerprintRecoveryPricingBasket } from "../recovery-pricing/price-comparison.js";
 import type { InitialOutreachRenderInput } from "@modainteract/moda-interact-shared/commerce/outreach";
 import type { PrismaClient } from "@prisma/client";
@@ -143,11 +144,10 @@ export class InitialNoOfferFallbackService implements InitialNoOfferFallbackPort
       ]);
       if (!recovery || recovery.shopId !== input.shopId || recovery.shop.id !== input.shopId ||
           !["SHOPIFY", "WOOCOMMERCE"].includes(recovery.shop.platform) ||
-          recovery.shop.status !== "ACTIVE" || recovery.status !== "DETECTED" || recovery.expiredAt) {
+          recovery.shop.status !== "ACTIVE" || !initialOutreachRecoveryStateAllowed(input.outreachAttemptId, recovery.status) || recovery.expiredAt) {
         return { kind: "BLOCKED", reason: "INELIGIBLE_RECOVERY" };
       }
-      if (!attempt || attempt.checkoutRecoveryId !== recovery.id || attempt.sequence !== 1 ||
-          attempt.trigger !== "INITIAL" || !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
+      if (!attempt || attempt.checkoutRecoveryId !== recovery.id || !isInitialOutreachIdentity(attempt) || !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
           attempt.sentAt || attempt.outboundMessageId || attempt.followUpDueAt) {
         return { kind: "BLOCKED", reason: "INVALID_ATTEMPT" };
       }

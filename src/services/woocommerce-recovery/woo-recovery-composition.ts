@@ -1,3 +1,4 @@
+import { wooTestOutboundEnabled } from "./woo-test-outbound-gate.js";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 
 import prisma from "../../lib/db.js";
@@ -71,16 +72,7 @@ export function createWooRecoveryRuntime(serviceName: "moda-shopify-event-worker
   const outreach = createWooRecoveryOutreachService({
     coordinator, orders: observedOrders, guardedSender,
     enqueue: initialQueue, logger,
-    enableTestOutbound: () => {
-      if (process.env.MODA_WOO_TEST_OUTBOUND !== "1") return false;
-      try {
-        const target = new URL(process.env.WHATSAPP_API_BASE_URL ?? "");
-        return target.protocol === "http:" &&
-          ["127.0.0.1", "localhost", "[::1]", "host.docker.internal"].includes(target.hostname);
-      } catch {
-        return false;
-      }
-    },
+    enableTestOutbound: wooTestOutboundEnabled,
   });
   const orchestrator = new WooRecoveryOrchestratorService({
     checkout: createWooCheckoutActivityService({ coordinator, observedOrders, candidates }),

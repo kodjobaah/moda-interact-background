@@ -1,3 +1,4 @@
+import { initialOutreachRecoveryStateAllowed } from "../../domain/recovery-outreach-identity.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
@@ -46,7 +47,7 @@ export class WooGuardedInitialSenderService implements WooGuardedInitialSender {
     try {
       if (recovery.shop.platform !== "WOOCOMMERCE" || recovery.shopId !== consent.shopId ||
         recovery.customerId !== consent.customerId || recovery.shop.status !== "ACTIVE" ||
-        recovery.status !== "DETECTED" || recovery.completedAt ||
+        !initialOutreachRecoveryStateAllowed(input.attemptId, recovery.status) || recovery.completedAt ||
         input.idempotencyKey !== `recovery-outreach:${input.attemptId}` ||
         input.recoveryCreditSourceKey !== createRecoveryIdempotencyKey(recovery.shopId, input.idempotencyKey) ||
         template.verifiedCategory !== "MARKETING" || !template.name || !template.languageCode ||

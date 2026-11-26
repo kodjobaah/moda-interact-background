@@ -1,3 +1,4 @@
+import { historicalInitialRetryReceiptSql } from "../recovery-delivery-retry/historical-receipt.sql.js";
 /**
  * ARCH-040 SQL port. The accepted DATABASE-001 migration owns these names and
  * constraints. Fixed statements use bound positional values (never interpolated
@@ -96,6 +97,7 @@ export async function readRecoveryWindowEvidence(
     FROM "commerce"."RecoveryOutreachAttempt" initial
     JOIN "commerce"."CheckoutRecovery" recovery ON recovery."id"=initial."checkoutRecoveryId"
     JOIN "commerce"."Shop" shop ON shop."id"=recovery."shopId"
+    LEFT JOIN whatsapp."ConversationMessage" retry_message ON retry_message.id=initial."outboundMessageId"
     LEFT JOIN LATERAL (
       SELECT msg."createdAt"
       FROM "whatsapp"."ConversationMessage" msg
@@ -105,11 +107,17 @@ export async function readRecoveryWindowEvidence(
         AND msg."createdAt">=initial."sentAt" AND msg."createdAt"<=$3
       ORDER BY msg."createdAt" DESC, msg."id" DESC LIMIT 1
     ) verified ON TRUE
-    WHERE initial."checkoutRecoveryId"=$1 AND initial."sequence"=1
+    WHERE initial."checkoutRecoveryId"=$1 AND (initial."sequence"=1 OR (
+      ${historicalInitialRetryReceiptSql("window")}
+      AND retry_message.status IN ('SENT','DELIVERED','READ') AND retry_message."failedAt" IS NULL
+      AND (verified."createdAt" IS NOT NULL OR retry_message.status IN ('DELIVERED','READ')
+        AND (retry_message."deliveredAt" IS NOT NULL OR retry_message."readAt" IS NOT NULL))
+    ))
       AND (verified."createdAt" IS NOT NULL OR NOT EXISTS (
         SELECT 1 FROM "whatsapp"."ConversationMessage" failed
         WHERE failed."id"=initial."outboundMessageId" AND failed."status"='FAILED'
       ))
+    ORDER BY initial."sentAt" DESC NULLS LAST, initial.sequence DESC LIMIT 1
     ${input.lockInitial ? 'FOR UPDATE OF initial' : ''}`,
     input.recoveryId, input.conversationId, input.now);
 }

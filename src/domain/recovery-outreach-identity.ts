@@ -16,6 +16,16 @@ export function outreachSlot(trigger: string): OutreachSlot | null {
 
 export const isInitialRetryId = (id: string): boolean => /^retry_[A-Za-z0-9_-]{1,100}$/.test(id);
 
+/** Shape gate only. The execution and provider fences must verify persisted lineage. */
+export function isInitialOutreachIdentity(attempt: { id: string; sequence: number; trigger: string }): boolean {
+  return attempt.trigger === "INITIAL" && Number.isSafeInteger(attempt.sequence) &&
+    (isInitialRetryId(attempt.id) ? attempt.sequence >= 3 && attempt.sequence <= 2_147_483_647 : attempt.sequence === 1);
+}
+
+export function initialOutreachRecoveryStateAllowed(attemptId: string, status: string): boolean {
+  return status === "DETECTED" || (isInitialRetryId(attemptId) && status === "MESSAGE_SENT");
+}
+
 /** The ID is derived from the durable intent, not a job or delivery receipt.
  * Creation and re-read must be serialized by the recovery/checkout lock.
  */

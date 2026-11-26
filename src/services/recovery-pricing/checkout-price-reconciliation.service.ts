@@ -1,3 +1,4 @@
+import { initialOutreachRecoveryStateAllowed, isInitialOutreachIdentity } from "../../domain/recovery-outreach-identity.js";
 import {
   CommerceOutreachToolContextSchema,
   CommerceToolOutputs,
@@ -28,7 +29,6 @@ const MAX_PROVIDER_ERROR_PAYLOAD_NODES = 32;
 const MAX_PROVIDER_ERROR_PAYLOAD_DEPTH = 4;
 const MAX_PROVIDER_ERROR_PAYLOAD_ITEMS = 8;
 const MAX_PROVIDER_ERROR_PAYLOAD_STRING_LENGTH = 192;
-const ACTIVE_RECOVERY_STATUSES = new Set(["DETECTED"]);
 const ACTIVE_ATTEMPT_STATUSES = new Set(["PENDING", "CAPACITY_BLOCKED"]);
 const PROVIDER_ERROR_PAYLOAD_KEYS = new Set([
   "message", "code", "type", "error_subcode", "subcode", "status", "status_code",
@@ -425,13 +425,13 @@ export class CheckoutPriceReconciliationService {
     input.signal.throwIfAborted();
     if (!state || state.recovery.id !== input.checkoutRecoveryId || state.recovery.shopId !== input.shopId ||
         state.recovery.generation !== input.expectedGeneration ||
-        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(state.recovery.status) : !ACTIVE_RECOVERY_STATUSES.has(state.recovery.status)) ||
+        (this.dependencies.stage === "FOLLOW_UP" ? !["MESSAGE_SENT", "ENGAGED"].includes(state.recovery.status) : !initialOutreachRecoveryStateAllowed(input.outreachAttemptId, state.recovery.status)) ||
         !state.attempt || state.attempt.id !== input.outreachAttemptId ||
         state.attempt.checkoutRecoveryId !== input.checkoutRecoveryId ||
         (this.dependencies.stage === "FOLLOW_UP"
           ? state.attempt.sequence !== 2 || state.attempt.trigger !== "POST_WINDOW_FOLLOW_UP" ||
             state.attempt.initiatedBy !== "HUMAN" || !["PENDING", "CAPACITY_BLOCKED"].includes(state.attempt.status)
-          : state.attempt.sequence !== 1 || state.attempt.trigger !== "INITIAL" ||
+          : !isInitialOutreachIdentity(state.attempt) ||
             !ACTIVE_ATTEMPT_STATUSES.has(state.attempt.status) || state.attempt.initiatedBy === "HUMAN")) {
       throw new InvalidPriceReconciliationAttemptError("RECOVERY_ATTEMPT_LINEAGE_INVALID");
     }

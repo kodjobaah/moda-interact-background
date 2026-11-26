@@ -363,3 +363,35 @@ platform checkout authority and preparation, retry receipt finalization and
 reservation release/restart reconciliation, and update inbound ownership and
 follow-up scheduling/reporting before activating dispatch. A `131049` hold
 remains inert. This patch is not an instruction to manually dispatch retries.
+
+### Patch 4b.2 — initial retry execution and receipt reconciliation
+
+`InitialDeliveryRetryExecutionService` is a callable executor for the existing
+initial outreach pipeline, not a second offer or billing system. It acquires the
+checkout lease, inspects durable provider progress before any fresh send,
+revalidates stored checkout/customer/consent/suppression and merchant policy,
+prepares the current offer through the existing services, and uses the existing
+platform-specific billing, admission and provider send owners. The original
+attempt, message, compensation, recovery, conversation and sender identities
+are retained. An exact accepted receipt is reconciled against the retry's own
+attempt; a committed permit without a definitive outcome is held, never sent
+again. Definitive terminal failures release only an exact unused reservation.
+
+Preparation recognizes the retry's physical identity without granting dispatch
+authority. Finalization accepts the retry's exact historical predecessor chain,
+retains the original recovery timestamp, and uses positively delivered initial
+outreach for follow-up selection. Inbound authority and recovery-window queries
+recognize a retry only through exact historical lineage and its dispatch permit.
+Execution and finalization use structured, redacted diagnostics.
+
+`runDuePage` and `reconcileClaimedPage` expose bounded, cursor-based discovery
+and receipt reconciliation. Neither is registered with a production worker in
+this patch. Do not manually invoke the executor against production. The existing
+Woo outbound test-only gate is unchanged; `131049` policy holds are unchanged.
+Follow-up retries and incompatible allowance blocks remain held. Before worker
+activation, validate actual fresh provider dispatch and restart recovery in the
+local emulator, production checkout authority and consent races, recovery of
+reservations stranded before permit acquisition, and unchanged-hold log
+coalescing. Unknown provider outcomes must remain held for reconciliation.
+API/dashboard projections and full end-to-end validation remain outstanding.
+No schema changes are introduced.

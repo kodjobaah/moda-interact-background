@@ -1,3 +1,4 @@
+import { historicalInitialRetryReceiptSql } from "../recovery-delivery-retry/historical-receipt.sql.js";
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { WhatsAppInboundEvent, WhatsAppSenderIdentity } from '../../integration/whatsapp/types.js';
 import { lockRecoverySenderRecipient } from './recipient-lock.js';
@@ -54,7 +55,7 @@ const ownerSql = `SELECT c.id AS "conversationId",r.id AS "checkoutRecoveryId",r
  EXISTS(SELECT 1 FROM commerce."RecoveryOutreachAttempt" i
  JOIN whatsapp."ConversationMessage" m ON m.id=i."outboundMessageId"
  WHERE i."checkoutRecoveryId"=r.id
- AND i.sequence=1
+ AND (i.sequence=1 OR ${historicalInitialRetryReceiptSql("sender")})
  AND i.recipient=p."canonicalRecipient"
  AND i."sentAt" IS NOT NULL
  AND m."conversationId"=c.id
@@ -69,7 +70,7 @@ const ownerSql = `SELECT c.id AS "conversationId",r.id AS "checkoutRecoveryId",r
  EXISTS(SELECT 1 FROM commerce."RecoveryOutreachAttempt" i
  JOIN whatsapp."ConversationMessage" m ON m.id=i."outboundMessageId"
  WHERE i."checkoutRecoveryId"=r.id
- AND i.sequence=1
+ AND (i.sequence=1 OR ${historicalInitialRetryReceiptSql("sender")})
  AND i.recipient=p."canonicalRecipient"
  AND i."sentAt" IS NOT NULL
  AND m."conversationId"=c.id

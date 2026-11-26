@@ -145,7 +145,7 @@ export class RecoveryOutreachAttemptService {
         },
         sentAt: { lte: occurredAt },
       },
-      orderBy: { sequence: "desc" },
+      orderBy: [{ sentAt: "desc" }, { sequence: "desc" }],
     });
     if (!attempt) return null;
     return this.attemptModel.updateMany({

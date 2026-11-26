@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   originalOutreachTrigger, outreachSlot, retryOutreachAttemptId, nextRetryOutreachSequence, isInitialRetryId,
-  selectEffectiveOutreachAttempt, hasConfirmedOutreachDelivery,
+  selectEffectiveOutreachAttempt, hasConfirmedOutreachDelivery, isInitialOutreachIdentity, initialOutreachRecoveryStateAllowed,
 } from "../src/domain/recovery-outreach-identity.ts";
 
 const sentAt = new Date("2026-11-26T02:40:54Z");
@@ -129,4 +129,15 @@ test("READ is positive evidence even when historical failure time remains", () =
   assert.equal(hasConfirmedOutreachDelivery(read, "conversation"), true);
   assert.equal(hasConfirmedOutreachDelivery(read, "wrong-conversation"), false);
   assert.equal(hasConfirmedOutreachDelivery({ ...read, outboundMessageId: "wrong" }, "conversation"), false);
+});
+
+test("initial preparation distinguishes a physical retry from original and follow-up slots", () => {
+  assert.equal(isInitialOutreachIdentity(initial), true);
+  assert.equal(isInitialOutreachIdentity(firstRetry), true);
+  assert.equal(isInitialOutreachIdentity({ ...firstRetry, sequence: 1 }), false);
+  assert.equal(isInitialOutreachIdentity({ ...firstRetry, trigger: "NO_RESPONSE_FOLLOW_UP" }), false);
+  assert.equal(isInitialOutreachIdentity({ ...firstRetry, id: "unrelated" }), false);
+  assert.equal(initialOutreachRecoveryStateAllowed(initial.id, "MESSAGE_SENT"), false);
+  assert.equal(initialOutreachRecoveryStateAllowed(firstRetry.id, "MESSAGE_SENT"), true);
+  for (const status of ["ENGAGED", "COMPLETED", "CANCELLED", "EXPIRED"]) assert.equal(initialOutreachRecoveryStateAllowed(firstRetry.id, status), false);
 });
