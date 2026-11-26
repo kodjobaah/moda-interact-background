@@ -1,3 +1,5 @@
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
 import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
 import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { cancelReopenedContinuation } from "../recovery-allowance/storage.js";
@@ -223,15 +225,17 @@ export class OutboundSendFenceService {
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
 
       const initial = input.initialOutreach;
+      const retry = !!initial && isInitialRetryId(initial.outreachAttemptId);
+      let retrySender: WhatsAppSenderIdentity | undefined;
       if (initial) {
         if (shop.platform !== "SHOPIFY") return { kind: "suppressed", reason: "invalid-initial-platform" } as const;
         const attempt = await first<{ id: string }>(tx, `
           SELECT "id" FROM "commerce"."RecoveryOutreachAttempt"
-          WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND "sequence"=1
+          WHERE "id"=$1 AND "checkoutRecoveryId"=$2 AND ${retry ? `"sequence">=3` : `"sequence"=1`}
             AND "trigger"='INITIAL' AND "recipient"=$3 AND "status" IN ('PENDING','CAPACITY_BLOCKED')
             AND "sentAt" IS NULL AND "outboundMessageId" IS NULL AND "followUpDueAt" IS NULL
           FOR UPDATE`, initial.outreachAttemptId, input.recoveryId, input.recipient);
-        if (!attempt || context.recoveryStatus !== "DETECTED")
+        if (!attempt || (context.recoveryStatus !== "DETECTED" && !(retry && context.recoveryStatus === "MESSAGE_SENT")))
           return { kind: "suppressed", reason: "initial-attempt-unavailable" } as const;
         const message = await first<{ id: string }>(tx, `
           SELECT "id" FROM "whatsapp"."ConversationMessage"
@@ -253,6 +257,19 @@ export class OutboundSendFenceService {
           shopId: input.shopId, idempotencyKey: initial.idempotencyKey,
           sourceKey: initial.recoveryCreditSourceKey, allowPaid: true, clock: this.clock,
         }))) return { kind: "suppressed", reason: "initial-credit-unavailable" } as const;
+        if (retry) {
+          const gate = await checkInitialRetryPermit(tx as Prisma.TransactionClient, {
+            shopId: input.shopId, recoveryId: input.recoveryId, conversationId: context.id,
+            attemptId: initial.outreachAttemptId, recipient: input.recipient, now: this.clock(),
+          });
+          if (gate.kind === "held") return {kind: "suppressed", reason: gate.reason} as const;
+          retrySender = gate.sender;
+          // Stable per physical retry, not per message. A lost UsageEvent must
+          // not allow a second provider permit on a different message.
+          const key = `recovery-retry-${createHash("sha256").update(initial.outreachAttemptId).digest("hex")}`;
+          if (await first(tx, `SELECT id FROM whatsapp."ConversationMessage" WHERE "providerDispatchKey"=$1`, key))
+            return {kind: "suppressed", reason: "already-admitted-or-sent"} as const;
+        }
       }
 
       // This is the last reversible policy decision before the irreversible
@@ -313,8 +330,8 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
-      const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: input.expectedSender });
-      if (!sender || (input.proactive?.templateRegistration && input.proactive.templateRegistration.senderWabaId !== sender.providerAccountId)) return {kind: "suppressed", reason: "sender-assignment-unavailable"} as const;
+      const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: retrySender ?? input.expectedSender });
+      if (!sender || (retrySender && input.expectedSender && (input.expectedSender.providerAccountId !== sender.providerAccountId || input.expectedSender.providerPhoneNumberId !== sender.providerPhoneNumberId)) || (input.proactive?.templateRegistration && input.proactive.templateRegistration.senderWabaId !== sender.providerAccountId)) return {kind: "suppressed", reason: "sender-assignment-unavailable"} as const;
       // Every newly admitted recovery action is pinned to its immutable funded
       // block. Historical initial messages are deliberately not rewritten.
       let followUpBlockId: string | null = null;
@@ -362,6 +379,7 @@ export class OutboundSendFenceService {
       }
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
+        : retry ? `recovery-retry-${createHash("sha256").update(initial!.outreachAttemptId).digest("hex")}`
         : `arch040-auto-${createHash("sha256").update(input.messageId!).digest("hex")}`;
       const messageId = input.senderType === "HUMAN" ? randomUUID() : input.messageId!;
       if (input.senderType === "HUMAN") {

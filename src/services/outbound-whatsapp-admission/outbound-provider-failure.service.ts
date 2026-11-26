@@ -1,3 +1,5 @@
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
 import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
 import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
@@ -42,7 +44,7 @@ export class OutboundProviderFailureService {
         if (!attempt || attempt.checkoutRecoveryId !== recoveryId ||
             (attempt.outboundMessageId && attempt.outboundMessageId !== messageId) ||
             (owned.message.recoveryOutreachAttempt && owned.message.recoveryOutreachAttempt.id !== attemptId)) return;
-        if (attempt.sequence === 1 && attempt.trigger === "INITIAL") {
+        if (attempt.trigger === "INITIAL" && (attempt.sequence === 1 || attempt.sequence >= 3 && isInitialRetryId(attemptId))) {
           if (!await this.lockInitial(tx, owned, attemptId)) return;
           initial = attemptId;
         } else if (attempt.sequence !== 2 ||
@@ -104,13 +106,21 @@ export class OutboundProviderFailureService {
     const shop = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "commerce"."Shop" WHERE "id"=${owned.shopId} FOR UPDATE`;
     if (shop.length !== 1) return false;
-    const attempt = await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
+    const retry = isInitialRetryId(attemptId);
+    const attempt = retry ? await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
+      SELECT "id","recipient" FROM "commerce"."RecoveryOutreachAttempt"
+      WHERE "id"=${attemptId} AND "checkoutRecoveryId"=${owned.message.conversation.checkoutRecoveryId}
+        AND "sequence">=3 AND "trigger"='INITIAL' AND "status" IN ('PENDING','CAPACITY_BLOCKED')
+        AND "sentAt" IS NULL AND "followUpDueAt" IS NULL AND "outboundMessageId" IS NULL
+      FOR UPDATE` : await tx.$queryRaw<Array<{ id: string; recipient: string }>>`
       SELECT "id","recipient" FROM "commerce"."RecoveryOutreachAttempt"
       WHERE "id"=${attemptId} AND "checkoutRecoveryId"=${owned.message.conversation.checkoutRecoveryId}
         AND "sequence"=1 AND "trigger"='INITIAL' AND "status" IN ('PENDING','CAPACITY_BLOCKED')
         AND "sentAt" IS NULL AND "followUpDueAt" IS NULL AND "outboundMessageId" IS NULL
       FOR UPDATE`;
     if (attempt.length !== 1 || (recipient !== undefined && attempt[0]?.recipient !== recipient)) return false;
+    if (retry) await readRetryFundingLineage(tx, { recoveryId: owned.message.conversation.checkoutRecoveryId,
+      conversationId: owned.message.conversationId, attemptId });
     const message = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "whatsapp"."ConversationMessage"
       WHERE "id"=${owned.message.id} AND "conversationId"=${owned.message.conversationId}
@@ -129,7 +139,7 @@ export class OutboundProviderFailureService {
     const updated = await tx.recoveryOutreachAttempt.updateMany({
       where: {
         id: attemptId, checkoutRecoveryId: owned.message.conversation.checkoutRecoveryId!,
-        sequence: 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+        sequence: isInitialRetryId(attemptId) ? {gte: 3} : 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
         outboundMessageId: null, sentAt: null, followUpDueAt: null,
       },
       data: { outboundMessageId: owned.message.id, status: "FAILED", failureCode, closedAt: new Date() },

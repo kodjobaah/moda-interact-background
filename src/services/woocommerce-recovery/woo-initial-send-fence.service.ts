@@ -1,3 +1,5 @@
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
 import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
 import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
@@ -107,6 +109,7 @@ export class WooInitialSendFenceService {
       return { kind: "suppressed", reason: "invalid-woo-initial-scope" };
     }
 
+    const retry = isInitialRetryId(input.attemptId);
     const senderSnapshot = await readDispatchSenderSnapshot();
     return await this.database.$transaction(async (tx): Promise<WooInitialFinalPermit> => {
       // Same lock order as the accepted STOP writer and recovery sender:
@@ -135,7 +138,7 @@ export class WooInitialSendFenceService {
       const recovery = recoveries[0];
       if (!recovery || recovery.shopId !== input.shopId ||
         recovery.checkoutToken !== input.checkoutToken || recovery.customerId !== input.customerId ||
-        recovery.status !== "DETECTED" || recovery.completedAt || recovery.expiredAt)
+        (recovery.status !== "DETECTED" && !(retry && recovery.status === "MESSAGE_SENT")) || recovery.completedAt || recovery.expiredAt)
         return { kind: "suppressed", reason: "woo-recovery-terminal-or-mismatched" };
 
       // A persisted Woo order transition suppresses sending even when the
@@ -153,7 +156,7 @@ export class WooInitialSendFenceService {
           "sentAt","outboundMessageId","followUpDueAt"
         FROM "commerce"."RecoveryOutreachAttempt" WHERE "id"=$1 FOR UPDATE`, input.attemptId);
       const attempt = attempts[0];
-      if (!attempt || attempt.checkoutRecoveryId !== input.recoveryId || attempt.sequence !== 1 || attempt.trigger !== "INITIAL" ||
+      if (!attempt || attempt.checkoutRecoveryId !== input.recoveryId || (retry ? attempt.sequence < 3 : attempt.sequence !== 1) || attempt.trigger !== "INITIAL" ||
         !["PENDING", "CAPACITY_BLOCKED"].includes(attempt.status) ||
         attempt.recipient !== input.recipient || attempt.sentAt ||
         attempt.outboundMessageId || attempt.followUpDueAt)
@@ -265,7 +268,14 @@ export class WooInitialSendFenceService {
         sourceKey: input.recoveryCreditSourceKey, allowPaid: false, clock: this.clock,
       }))) return { kind: "suppressed", reason: "woo-recovery-credit-not-reserved" };
 
-      const sender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: input.conversationId, recipient: input.recipient, recovery: true});
+      let retrySender: WhatsAppSenderIdentity | undefined;
+      if (retry) {
+        const gate = await checkInitialRetryPermit(tx, {shopId: input.shopId, recoveryId: input.recoveryId,
+          conversationId: input.conversationId, attemptId: input.attemptId, recipient: input.recipient, now: this.clock()}, this.logger);
+        if (gate.kind === "held") return {kind: "suppressed", reason: gate.reason};
+        retrySender = gate.sender;
+      }
+      const sender = await checkDispatchSender(tx, {snapshot: senderSnapshot, conversationId: input.conversationId, recipient: input.recipient, recovery: true, ...(retrySender ? {expectedSender: retrySender} : {})});
       if (!sender || sender.providerAccountId !== registration.senderWabaId) return {kind: "suppressed", reason: "sender-assignment-unavailable"};
       const permitted = await tx.$queryRawUnsafe<Array<{ id: string }>>(`
         UPDATE "whatsapp"."ConversationMessage"

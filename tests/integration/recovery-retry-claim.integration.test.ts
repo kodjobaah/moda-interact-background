@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { retryOutreachAttemptId } from "../../src/domain/recovery-outreach-identity.js";
 import { InitialDeliveryRetryClaimService, listDueInitialRetryIntents } from "../../src/services/recovery-delivery-retry/claim.js";
+import { checkInitialRetryPermit } from "../../src/services/recovery-delivery-retry/initial-permit.js";
+import { lockRecoveryContext } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
 import { RecoveryDeliveryCompensationService } from "../../src/services/recovery-delivery-compensation/reconcile.service.js";
 import type { RecoveryPolicySnapshot } from "../../src/services/recovery-policy.service.js";
 import { createInitialOutreachCreditFixture } from "./fixtures/arch056-initial-outreach-credit.fixture.js";
@@ -88,6 +90,32 @@ suite("Initial delivery retry durable claims", () => {
       await f.db.checkoutRecovery.update({ where: { id: f.recoveryId }, data: { lastExternalActivityAt: new Date() } });
       expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({ kind: "held" });
       expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(1);
+      await noFinancialOrProviderChanges(f, s);
+    } finally { await f.close(); }
+  }, 60_000);
+});
+
+// Test the shared eligibility gate with actual persisted ownership. This is not
+// a provider permit or a provider call. The existing platform fences still own
+// current consent, template registration, exact credit and message admission.
+suite("Initial delivery retry last-mile eligibility", () => {
+  it.each(["free", "purchased"] as const)("revalidates a %s retry and refuses changed activity", async source => {
+    const f = await createInitialOutreachCreditFixture({ source, sentAgeMs: 60 * 60_000 });
+    try {
+      const s = await failure(f);
+      expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({kind: "claimed"});
+      const attemptId = retryOutreachAttemptId(s.intent.id);
+      const check = (id = attemptId) => f.db.$transaction(async tx => {
+        expect(await lockRecoveryContext(tx, s.conversation.id)).toMatchObject({shopId: f.shopId, recoveryId: f.recoveryId});
+        return checkInitialRetryPermit(tx, {shopId: f.shopId, recoveryId: f.recoveryId,
+          conversationId: s.conversation.id, attemptId: id, recipient: "15551234567", now: new Date()});
+      });
+      const original = await f.db.conversationMessage.findUniqueOrThrow({where: {id: f.messageId}});
+      expect(await check()).toEqual({kind: "ready", sender: {providerAccountId: original.dispatchProviderAccountId,
+        providerPhoneNumberId: original.dispatchProviderPhoneNumberId}});
+      expect(await check("retry_unrelated")).toMatchObject({kind: "held"});
+      await f.db.checkoutRecovery.update({where: {id: f.recoveryId}, data: {lastExternalActivityAt: new Date()}});
+      expect(await check()).toMatchObject({kind: "held"});
       await noFinancialOrProviderChanges(f, s);
     } finally { await f.close(); }
   }, 60_000);

@@ -1,3 +1,8 @@
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
+import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
+import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
+import { RecoveryCompensationLineageError } from "../recovery-delivery-compensation/types.js";
+import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
 import { AllowanceHeld, currentAllowance, allowanceUsage, notifyAllowanceBoundary, exactBlockSource } from "../recovery-allowance/storage.js";
 import { RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import { MessageStatus, Prisma, UsageMetric } from "@prisma/client";
@@ -83,7 +88,8 @@ export class OutboundAdmissionReservationService {
         where: { id: scope.outreachAttemptId },
         include: { checkoutRecovery: { select: { shopId: true, status: true } } },
       });
-      if (!attempt || attempt.sequence !== 1 || attempt.trigger !== "INITIAL" ||
+      const retry = isInitialRetryId(scope.outreachAttemptId);
+      if (!attempt || (retry ? attempt.sequence < 3 : attempt.sequence !== 1) || attempt.trigger !== "INITIAL" ||
           attempt.checkoutRecoveryId !== scope.recoveryId ||
           attempt.checkoutRecovery.shopId !== scope.shopId || !attempt.recipient)
         return conflict;
@@ -104,8 +110,14 @@ export class OutboundAdmissionReservationService {
           (conversation.shopId !== null && conversation.shopId !== scope.shopId))
         return conflict;
 
+      if (retry) {
+        // Historical lineage is intentionally separate from current eligibility:
+        // already-admitted receipts must remain inspectable after cancellation.
+        try { await readRetryFundingLineage(tx, { recoveryId: scope.recoveryId, conversationId: conversation.id, attemptId: attempt.id }); }
+        catch (error) { if (error instanceof RecoveryCompensationLineageError) return conflict; throw error; }
+      }
       const eligible = (attempt.status === "PENDING" || attempt.status === "CAPACITY_BLOCKED") &&
-        attempt.checkoutRecovery.status === "DETECTED" && !attempt.sentAt &&
+        (attempt.checkoutRecovery.status === "DETECTED" || retry && attempt.checkoutRecovery.status === "MESSAGE_SENT") && !attempt.sentAt &&
         !attempt.outboundMessageId && !attempt.followUpDueAt && !attempt.closedAt;
       const messageId = usage?.sourceId ?? attempt.outboundMessageId;
       if (!messageId) {
@@ -218,15 +230,36 @@ export class OutboundAdmissionReservationService {
           input.idempotencyKey !== `recovery-outreach:${scope.outreachAttemptId}` ||
           !input.recoveryCreditSourceKey)
         return { kind: "suppressed", reason: "conversation-invalid" };
+      const retry = isInitialRetryId(scope.outreachAttemptId);
+      if (retry) {
+        const owner = await lockRecoveryContext(transaction, input.conversationId);
+        if (!owner || owner.shopId !== input.shopId || owner.recoveryId !== scope.recoveryId)
+          return { kind: "suppressed", reason: "conversation-invalid" };
+        // Re-read after waiting for the owner lock. A concurrent reserve may
+        // have created the exact outbound usage while we were waiting.
+        if (await transaction.usageEvent.findUnique({ where: {idempotencyKey: input.idempotencyKey}, select: {id: true} }))
+          return { kind: "suppressed", reason: "duplicate" };
+      }
       const attempt = await transaction.recoveryOutreachAttempt.findFirst({
         where: { id: scope.outreachAttemptId, checkoutRecoveryId: scope.recoveryId,
-          sequence: 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
+          sequence: retry ? { gte: 3 } : 1, trigger: "INITIAL", status: { in: ["PENDING", "CAPACITY_BLOCKED"] },
           outboundMessageId: null, sentAt: null, followUpDueAt: null, closedAt: null,
-          checkoutRecovery: { shopId: input.shopId, status: "DETECTED",
+          checkoutRecovery: { shopId: input.shopId, status: retry ? {in: ["DETECTED", "MESSAGE_SENT"]} : "DETECTED",
             conversation: { id: input.conversationId } } },
         select: { id: true },
       });
       if (!attempt) return { kind: "suppressed", reason: "conversation-invalid" };
+      if (retry) {
+        const recipient = await transaction.recoveryOutreachAttempt.findUniqueOrThrow({where: {id: attempt.id}, select: {recipient: true}});
+        const gate = await checkInitialRetryPermit(transaction, {shopId: input.shopId, recoveryId: scope.recoveryId,
+          conversationId: input.conversationId, attemptId: attempt.id, recipient: recipient.recipient, now: new Date()});
+        if (gate.kind !== "ready") return {kind: "suppressed", reason: "conversation-invalid"};
+        // A deleted usage event must not make an earlier unlinked provider
+        // permit or message look like a fresh retry.
+        if (await transaction.conversationMessage.findFirst({where: {conversationId: input.conversationId,
+          direction: "OUTBOUND", senderType: "AUTOMATION", recoveryOutreachAttempt: null}, select: {id: true}}))
+          return {kind: "suppressed", reason: "conversation-invalid"};
+      }
     }
 
     const resolved = await this.policy.resolve(transaction, input, conversation);

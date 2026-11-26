@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  originalOutreachTrigger, outreachSlot, retryOutreachAttemptId, nextRetryOutreachSequence,
+  originalOutreachTrigger, outreachSlot, retryOutreachAttemptId, nextRetryOutreachSequence, isInitialRetryId,
   selectEffectiveOutreachAttempt, hasConfirmedOutreachDelivery,
 } from "../src/domain/recovery-outreach-identity.ts";
 
@@ -56,6 +56,10 @@ test("stable retry identity and physical sequence allocation reserve original sl
   for (const rows of [[initial, initial], [{ sequence: 0 }], [{ sequence: 1.5 }], [{ sequence: 2_147_483_647 }]]) {
     assert.throws(() => nextRetryOutreachSequence(rows));
   }
+});
+test("retry identity recognition does not grant authority to malformed IDs", () => {
+  assert.equal(isInitialRetryId(retryOutreachAttemptId("intent-a")), true);
+  for (const id of ["", "retry_", "initial", "retry_:", "retry_" + "a".repeat(101), "retry_a b"]) assert.equal(isInitialRetryId(id), false);
 });
 test("selects ordinary initial and follow-up independently", () => {
   assert.equal(selected([followUp, initial]).current.id, initial.id);

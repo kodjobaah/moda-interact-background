@@ -14,6 +14,8 @@ export function outreachSlot(trigger: string): OutreachSlot | null {
   return null;
 }
 
+export const isInitialRetryId = (id: string): boolean => /^retry_[A-Za-z0-9_-]{1,100}$/.test(id);
+
 /** The ID is derived from the durable intent, not a job or delivery receipt.
  * Creation and re-read must be serialized by the recovery/checkout lock.
  */

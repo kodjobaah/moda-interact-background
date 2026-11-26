@@ -336,3 +336,30 @@ polling, coalesce repeated unchanged holds across polling cycles; the present
 patch does not provide cross-process log deduplication or a worker-level summary.
 Log offer preparation, outbound admission, provider acceptance and final
 settlement at their actual boundaries when the dispatcher is implemented.
+
+
+### Patch 4b.1 — last-mile admission (not worker activation)
+
+The existing Shopify and Woo initial send fences now distinguish a physical
+initial retry by its deterministic ID, sequence >= 3, INITIAL trigger and exact
+persisted predecessor chain. They continue to require their original consent,
+STOP, template, moderation (where applicable), sender, usage and fresh-credit
+proof. The shared SQL-only retry check additionally rechecks current recovery
+ownership, generation/activity/lifetime, retry policy/budget, all predecessor
+funding corrections, customer response, allowance and original sender. A retry
+permit is attempt-keyed and never authorizes a second provider call for a
+previously admitted attempt. Admission inspection and pre-provider rejection
+use historical lineage rather than current retry eligibility for reconciliation.
+The legacy sequence-one flow retains its original behavior.
+
+The prepared/held, dispatch-admitted, provider-accepted and dispatch-failed
+observations use the existing structured logger and redacted diagnostics.
+Acceptance means the provider receipt was persisted; it does not establish
+customer delivery. No credentials, recipient, basket or offer content is logged.
+
+No retry worker, provider execution entrypoint, queue, or production Woo
+outbound enablement is added here. The remaining cutover must implement
+platform checkout authority and preparation, retry receipt finalization and
+reservation release/restart reconciliation, and update inbound ownership and
+follow-up scheduling/reporting before activating dispatch. A `131049` hold
+remains inert. This patch is not an instruction to manually dispatch retries.

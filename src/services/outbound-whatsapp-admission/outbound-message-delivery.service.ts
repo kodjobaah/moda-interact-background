@@ -1,3 +1,4 @@
+import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import { readRecoveryDispatchSender } from "../recovery-sender-pool/dispatch-sender.js";
 import type { WhatsAppSenderIdentity } from "../../integration/whatsapp/types.js";
 import { recoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
@@ -345,6 +346,11 @@ export class OutboundMessageDeliveryService {
       recoveryId: wooScope?.recoveryId ?? input.initialOutreach?.recoveryId,
       attemptId: wooScope?.attemptId ?? input.initialOutreach?.outreachAttemptId,
     };
+    const retry = identity.attemptId && isInitialRetryId(identity.attemptId) ? {
+      shopId: identity.shopId, checkoutRecoveryId: identity.recoveryId, conversationId: identity.conversationId,
+      outreachAttemptId: identity.attemptId, retryIntentId: identity.attemptId.slice("retry_".length),
+      outboundMessageId: identity.messageId,
+    } : null;
     if (input.initialOutreach && (input.initialOutreach.shopId !== admission.shopId ||
         !input.recoveryCreditSourceKey || admission.executionScope !== "recovery"))
       return { kind: "suppressed", reason: "conversation-invalid" };
@@ -462,6 +468,7 @@ export class OutboundMessageDeliveryService {
       await this.failPrepared(admission.messageId);
       return { kind: "suppressed", reason: "conversation-invalid" };
     }
+    if (retry) deliveryLogger.debug("recovery.delivery_retry.offer_prepared", {...retry, stage: "moderation_allowed"});
     let dispatchSender: WhatsAppSenderIdentity;
     if (wooScope) {
       // BG001 compilation already established immutable Marketing purpose.
@@ -477,6 +484,7 @@ export class OutboundMessageDeliveryService {
         ...(input.templateRegistration?.commonLayout?{templateParameters:{header:input.textHeader?[input.textHeader]:[],body:input.bodyParameters??[]}}:{}),
       });
       if (permit.kind === "suppressed") {
+        if (retry) deliveryLogger.debug("recovery.delivery_retry.dispatch_held", {...retry, stage: "woo_final_permit", reason: permit.reason});
         // A previously committed permit can already have reached Meta. Never
         // roll it back or release its usage/credit on a duplicate replay.
         if (permit.reason === "already-admitted-or-sent")
@@ -507,16 +515,21 @@ export class OutboundMessageDeliveryService {
           ...(input.templateRegistration?.commonLayout?{parameters:{header:input.textHeader?[input.textHeader]:[],body:input.bodyParameters??[]}}:{}),
           ...(input.templateRegistration ? { registration: input.templateRegistration } : {}) } } : {}),
       });
-      if (fenced.kind === "suppressed") return fenced;
+      if (fenced.kind === "suppressed") {
+        if (retry) deliveryLogger.debug("recovery.delivery_retry.dispatch_held", {...retry, stage: "shopify_final_permit", reason: fenced.reason});
+        return fenced;
+      }
       dispatchSender = fenced.sender;
     }
 
+    if (retry) deliveryLogger.info("recovery.delivery_retry.dispatch_admitted", {...retry, stage: "provider_permit_committed", providerAccountId: dispatchSender.providerAccountId, providerPhoneNumberId: dispatchSender.providerPhoneNumberId});
     let result: {providerMessageId: string; providerStatus?: string};
     try {
       result = prepared
         ? await this.provider.sendWhatsAppTemplate({...prepared.providerInput, expectedSender: dispatchSender!})
         : noticePlan && noticePlan.kind !== "TEXT" ? await this.provider.sendWhatsAppImage({to: input.to, link: noticePlan.image.publicUrl, caption: outboundText, expectedSender: dispatchSender!}) : await this.provider.sendWhatsAppText({ to: input.to, text: outboundText, expectedSender: dispatchSender! });
     } catch (error) {
+      if (retry) deliveryLogger.error("recovery.delivery_retry.dispatch_failed", {...retry, stage: "provider_http", sourceError: initialOutreachDiagnostic(error)});
       if (initial) deliveryLogger.error("outbound.initial.send.failed", {
         ...identity, stage: "provider_http", sourceError: initialOutreachDiagnostic(error),
       });
@@ -541,11 +554,13 @@ export class OutboundMessageDeliveryService {
     try {
       await this.markSent(admission.conversationId, admission.messageId, result.providerMessageId);
     } catch (error) {
+      if (retry) deliveryLogger.error("recovery.delivery_retry.dispatch_failed", {...retry, stage: "receipt_persistence", sourceError: initialOutreachDiagnostic(error)});
       if (initial) deliveryLogger.error("outbound.initial.send.failed", {
         ...identity, stage: "receipt_persistence", sourceError: initialOutreachDiagnostic(error),
       });
       throw error;
     }
+    if (retry) deliveryLogger.info("recovery.delivery_retry.provider_accepted", {...retry, providerMessageId: result.providerMessageId, deliveryConfirmed: false, stage: "receipt_persisted"});
     return admission;
   }
 
