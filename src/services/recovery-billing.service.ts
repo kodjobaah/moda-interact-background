@@ -4,6 +4,7 @@ import prisma from "../lib/db.js";
 import {
   effectiveBillingPolicyResolver,
   EffectiveBillingPolicyError,
+  EffectiveBillingPolicyResolver,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
 import { freeRecoveryReservationService } from "./free-recovery-reservation.service.js";
@@ -13,6 +14,7 @@ import { promotionalRecoveryReservationService } from "./promotional-recovery-re
 import {
   postContractRecoveryPolicyResolver,
   PostContractRecoveryPolicyError,
+  PostContractRecoveryPolicyResolver,
 } from "./post-contract-recovery-policy.service.js";
 import {
   RecoveryCapacityExhaustionNotificationService,
@@ -20,6 +22,7 @@ import {
 } from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
 import { RecoveryCapacityAdmissionService } from "./recovery-billing/recovery-capacity-admission.service.js";
 import { RecoveryReservationLifecycleService } from "./recovery-billing/recovery-reservation-lifecycle.service.js";
+import { admitRecoveryCapacityWithPolicy } from "./recovery-billing/capacity-policy.js";
 import { InitialOutreachCreditService } from "./recovery-billing/initial-outreach-credit.service.js";
 import type {
   ConfirmedInitialOutreachCreditInput,
@@ -50,7 +53,7 @@ type RecoveryPolicyResolver = Pick<
   typeof effectiveBillingPolicyResolver,
   "resolve"
 >;
-type PostContractRecoveryPolicyResolver = Pick<
+type PostContractPolicyResolverPort = Pick<
   typeof postContractRecoveryPolicyResolver,
   "resolve"
 >;
@@ -84,7 +87,7 @@ export class RecoveryBillingService {
     purchasedReservationService: PurchasedReservationService = purchasedRecoveryReservationService,
     paidIncludedReservationService: PaidIncludedReservationService = paidIncludedRecoveryReservationService,
     promotionalReservationService: PromotionalReservationService = promotionalRecoveryReservationService,
-    private readonly postContractPolicyResolver: PostContractRecoveryPolicyResolver = postContractRecoveryPolicyResolver,
+    private readonly postContractPolicyResolver: PostContractPolicyResolverPort = postContractRecoveryPolicyResolver,
   ) {
     this.initialOutreachCredit = new InitialOutreachCreditService(database);
     this.capacityExhaustionNotification =
@@ -122,6 +125,10 @@ export class RecoveryBillingService {
     /** Exact application-owned action identity, including allowance continuation. */
     fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
+    if (input.fundingSourceId?.startsWith("recovery-outreach:retry_") ||
+        (input.outreachAttemptId?.startsWith("retry_") && input.fundingSourceId !== undefined)) {
+      return { kind: "blocked", reason: "reservation-in-flight" };
+    }
     const sourceKey = createRecoveryIdempotencyKey(
       input.shopId,
       input.fundingSourceId ?? (input.outreachAttemptId
@@ -129,70 +136,25 @@ export class RecoveryBillingService {
         : input.recoveryId),
     );
 
-    let policy: EffectiveBillingPolicy;
-    try {
-      policy = await this.policyResolver.resolve(input.shopId);
-    } catch (error) {
-      if (error instanceof EffectiveBillingPolicyError) {
-        if (error.reason === "NO_CONTRACT") {
-          try {
-            const postContractPolicy =
-              await this.postContractPolicyResolver.resolve(input.shopId);
-            return this.capacityAdmission.admitPostContract({
-              shopId: input.shopId,
-              sourceKey,
-              policy: postContractPolicy,
-            });
-          } catch (postContractError) {
-            if (
-              postContractError instanceof PostContractRecoveryPolicyError &&
-              postContractError.reason === "CONTRACT_REQUIRED"
-            ) {
-              return { kind: "blocked", reason: "contract-required" };
-            }
-            throw postContractError;
-          }
-        }
-        if (error.reason === "SUBSCRIPTION_FROZEN") {
-          return { kind: "blocked", reason: "subscription-frozen" };
-        }
-      }
-      throw error;
-    }
-    if (!policy.features.has(CHECKOUT_RECOVERY_FEATURE_KEY)) {
-      return { kind: "blocked", reason: "feature-unavailable" };
-    }
-
-    if (policy.newRecoveriesPaused) {
-      return { kind: "blocked", reason: "paused" };
-    }
-
-    if (
-      policy.planKind === "PAID_METERED" &&
-      policy.billingPeriod?.phase === "EXPIRED_RECONCILING" &&
-      policy.platform !== "WOOCOMMERCE"
-    ) {
-      return { kind: "blocked", reason: "billing-period-reconciliation" };
-    }
-
-    const admission = await this.capacityAdmission.admit({
-      shopId: input.shopId,
-      recoveryId: input.recoveryId,
-      sourceKey,
-      policy,
-      ...(input.outreachAttemptId
-        ? { outreachAttemptId: input.outreachAttemptId }
-        : {}),
-    });
-
-    if (
-      admission.kind === "blocked" &&
-      admission.reason === "capacity-exhausted"
-    ) {
-      await this.capacityExhaustionNotification.notify(input.shopId, policy);
-    }
-
-    return admission;
+    const outcome = input.outreachAttemptId?.startsWith("retry_")
+      ? await this.initialOutreachCredit.admitInitialRetry({ ...input, outreachAttemptId: input.outreachAttemptId }, (tx) =>
+          admitRecoveryCapacityWithPolicy(input, sourceKey, {
+            policyResolver: new EffectiveBillingPolicyResolver(tx),
+            postContractPolicyResolver: new PostContractRecoveryPolicyResolver(tx),
+            capacityAdmission: new RecoveryCapacityAdmissionService(
+              { reserve: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value), reservePostContract: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value, true) },
+              { reserve: value => purchasedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+              { reserve: value => paidIncludedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+              { reserve: value => promotionalRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+            ),
+            retry: true,
+          }))
+      : await admitRecoveryCapacityWithPolicy(input, sourceKey, {
+          policyResolver: this.policyResolver, postContractPolicyResolver: this.postContractPolicyResolver,
+          capacityAdmission: this.capacityAdmission,
+        });
+    if (outcome.exhaustedPolicy) await this.capacityExhaustionNotification.notify(input.shopId, outcome.exhaustedPolicy);
+    return outcome.result;
   }
 
   async revalidateBeforeProvider(input: {
@@ -201,6 +163,17 @@ export class RecoveryBillingService {
     outreachAttemptId?: string;
     fundingSourceId?: string;
   }): Promise<RecoveryBillingAdmissionResult> {
+    if (input.fundingSourceId?.startsWith("recovery-outreach:retry_")) return { kind: "blocked", reason: "reservation-in-flight" };
+    if (input.outreachAttemptId?.startsWith("retry_")) {
+      if (input.fundingSourceId !== undefined) return { kind: "blocked", reason: "reservation-in-flight" };
+      const checked = await this.revalidateExistingInitialOutreach({
+        shopId: input.admission.policy.shopId, recoveryId: input.recoveryId,
+        outreachAttemptId: input.outreachAttemptId, outboundMessageId: null,
+      });
+      return checked.kind === "admitted" && checked.admission.sourceKey === input.admission.sourceKey
+        ? { kind: "admitted", admission: checked.admission }
+        : { kind: "blocked", reason: "reservation-in-flight" };
+    }
     let current: EffectiveBillingPolicy;
     try {
       current = await this.policyResolver.resolve(input.admission.policy.shopId);

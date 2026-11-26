@@ -17,9 +17,12 @@ import { promotionalRecoveryReservationService } from "../promotional-recovery-r
 import { purchasedRecoveryReservationService } from "../purchased-recovery-reservation.service.js";
 import { findExactRecoveryReservationSource } from "../recovery-delivery-compensation/lineage.js";
 import { readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
-import { RecoveryCompensationLineageError } from "../recovery-delivery-compensation/types.js";
+import { RecoveryCompensationLineageError, requireLineage } from "../recovery-delivery-compensation/types.js";
 import { DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES, isRecoveryReservationRetryableConflict } from "../recovery-reservation/reservation-lifecycle.js";
 import type { ExistingInitialOutreachCredit, ExistingInitialOutreachCreditInput, ConfirmedInitialOutreachCreditInput, ConfirmedInitialOutreachSettlement, RecoveryBillingAdmission } from "./recovery-billing.types.js";
+import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
+import type { CapacityPolicyOutcome } from "./capacity-policy.js";
+import { requireInitialRetryFundingReady } from "../recovery-delivery-retry/funding.js";
 import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialMessage, validateInitialMessageIdentity } from "./initial-outreach-credit-evidence.js";
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
@@ -36,6 +39,45 @@ class ExistingHoldSignal extends Error {
 
 export class InitialOutreachCreditService {
   constructor(private readonly database: Database, private readonly serviceLogger: StructuredLogger = logger, private readonly maxAttempts = DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES) {}
+
+  /** A retry's exact attempt owns all funding sources, including paid-period
+   * keys. Hold the existing recovery owner lock across lookup and reservation;
+   * a concurrent replay must reuse the same reservation, not select a new plan.
+   * This entrypoint does not create the attempt or grant a provider permit.
+   */
+  async admitInitialRetry(input: { shopId: string; recoveryId: string; outreachAttemptId: string }, reserve: (tx: Tx) => Promise<CapacityPolicyOutcome>): Promise<CapacityPolicyOutcome> {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      let stage = "identity";
+      try {
+        return await this.database.$transaction(async (tx): Promise<CapacityPolicyOutcome> => {
+          requireLineage(input.outreachAttemptId.startsWith("retry_"), "not a retry funding identity");
+          const candidate = { ...input, outboundMessageId: null };
+          const existing = await revalidate(tx, candidate, this.now(), value => { stage = value; });
+          if (existing.kind === "held") throw new ExistingHoldSignal(existing.reason);
+          if (existing.kind === "admitted") return { result: { kind: "admitted", admission: existing.admission } };
+          stage = "reserve_retry";
+          const outcome = await reserve(tx);
+          if (outcome.result.kind !== "admitted") return outcome;
+          const checked = await revalidate(tx, candidate, this.now(), value => { stage = value; });
+          requireLineage(checked.kind === "admitted" && checked.admission.sourceKey === outcome.result.admission.sourceKey,
+            "retry funding source changed during reservation");
+          return { result: { kind: "admitted", admission: checked.admission } };
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      } catch (error) {
+        if (error instanceof RecoveryCompensationLineageError || error instanceof ExistingHoldSignal) {
+          this.serviceLogger.warn("recovery.retry_credit.held", { ...input, stage, error, ...databaseErrorContext(error) });
+          return { result: { kind: "blocked", reason: "reservation-in-flight" } };
+        }
+        if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
+          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, stage, attempt, error, ...databaseErrorContext(error) });
+          continue;
+        }
+        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, stage, attempt, error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        throw error;
+      }
+    }
+    throw new Error("Unreachable retry funding state");
+  }
 
   async settleConfirmedInitialOutreach(input: ConfirmedInitialOutreachCreditInput): Promise<ConfirmedInitialOutreachSettlement> {
     let stage: string;
@@ -193,8 +235,21 @@ function databaseErrorContext(error: unknown): Record<string, unknown> {
 
 async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: (stage: string, sourceKind?: string) => void): Promise<ExistingInitialOutreachCredit> {
   setStage("identity");
-  const attempt = await readInitialAttempt(tx, input);
-  if (input.outboundMessageId === null) await assertNoInitialMessageEvidence(tx, input, attempt);
+  let attempt = await readInitialAttempt(tx, input);
+  let historicalMessageIds: string[] = [];
+  if (attempt.sequence >= 3) {
+    const conversationId = attempt.checkoutRecovery.conversation?.id;
+    requireLineage(conversationId, "initial retry conversation missing");
+    const owner = await lockRecoveryContext(tx, conversationId);
+    requireLineage(owner?.shopId === input.shopId && owner.recoveryId === input.recoveryId &&
+      owner.mode === "AI" && !terminalRecovery(owner.recoveryStatus) && !owner.lastInboundAt && owner.inboundVersion === 0,
+    "initial retry owner no longer eligible");
+    attempt = await readInitialAttempt(tx, input);
+    requireLineage(attempt.sequence >= 3, "retry identity changed");
+    const links = await requireInitialRetryFundingReady(tx, { ...input, conversationId, attemptId: attempt.id, now });
+    historicalMessageIds = links.map(link => link.intent.failedMessageId);
+  }
+  if (input.outboundMessageId === null) await assertNoInitialMessageEvidence(tx, input, attempt, historicalMessageIds);
   else {
     await tx.$queryRaw`SELECT "id" FROM "whatsapp"."ConversationMessage" WHERE "id"=${input.outboundMessageId} FOR UPDATE`;
     const message = await readInitialMessage(tx, input.outboundMessageId);
@@ -221,7 +276,7 @@ async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now
     else throw error;
   }
   if ("features" in policy && !policy.features.has("checkout_recovery")) return { kind: "held", reason: "feature-unavailable", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (policy.newRecoveriesPaused) return { kind: "held", reason: "paused", reservationId: reservation.id, sourceKey: reservation.sourceKey };
+  if (policy.newRecoveriesPaused || (attempt.sequence >= 3 && policy.automatedWhatsappPaused)) return { kind: "held", reason: "paused", reservationId: reservation.id, sourceKey: reservation.sourceKey };
   if (source.kind === "paid" && (!('planKind' in policy) || policy.planKind !== "PAID_METERED" || policy.subscriptionStatus === "FROZEN" || policy.billingPeriod?.phase !== "ACTIVE" || policy.billingPeriod.status !== BillingPeriodStatus.OPEN || policy.billingPeriod.id !== await paidPeriodId(tx, reservation))) return { kind: "held", reason: "paid-period-not-current", reservationId: reservation.id, sourceKey: reservation.sourceKey };
   if (source.kind === "promotional" && !await promotionalRecoveryReservationService.isReservedSourceEligibleInExistingTransaction(tx, { shopId: input.shopId, reservationId: reservation.id, sourceKey: reservation.sourceKey, now })) return { kind: "held", reason: "source-policy-mismatch", reservationId: reservation.id, sourceKey: reservation.sourceKey };
   if (source.kind === "purchased") {

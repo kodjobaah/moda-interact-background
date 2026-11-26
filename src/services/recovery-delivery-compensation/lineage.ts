@@ -1,5 +1,6 @@
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { UsageReservation } from "@prisma/client";
+import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { outreachDeliveryFailureCode } from "../../domain/whatsapp-recipient-failure.js";
 import { requireLineage, type CompensationTransaction, type RecoverySource, type RecoverySourceKind, type ResolvedRecoverySource } from "./types.js";
 
@@ -91,9 +92,15 @@ export async function resolveExactRecoverySource(
       initiatedBy: true, customerRespondedAt: true },
   });
   requireLineage(attempt && attempt.checkoutRecoveryId === recovery.id &&
-    (attempt.sequence === 1 || attempt.sequence === 2) &&
     (!attempt.outboundMessageId || attempt.outboundMessageId === message.id),
     "attempt/recovery/message mismatch");
+  if (attempt.sequence >= 3) {
+    requireLineage(message.senderType === "AUTOMATION" && attempt.initiatedBy !== "HUMAN",
+      "physical retry is not automated");
+    await readRetryFundingLineage(tx, { recoveryId: recovery.id, conversationId: message.conversationId, attemptId: attempt.id });
+  } else {
+    requireLineage(attempt.sequence === 1 || attempt.sequence === 2, "invalid original outreach sequence");
+  }
   if (message.senderType === "HUMAN") {
     requireLineage(attempt.sequence === 2 && command?.recoveryOutreachAttemptId === attempt.id,
       "human follow-up is not sequence two");
@@ -105,6 +112,10 @@ export async function resolveExactRecoverySource(
 
   const source = await findExactRecoveryReservationSource(tx, shopId, attempt.id);
   requireLineage(source, "missing or ambiguous reservation");
+  if (attempt.sequence >= 3 && pinned?.allowanceBlockId) {
+    const block = await tx.conversationAllowanceBlock.findUnique({ where: { id: pinned.allowanceBlockId } });
+    requireLineage(block?.creditReservationId === source.reservation.id, "outreach allowance reservation mismatch");
+  }
   // A failure may arrive before finalization links the outbound message. The
   // exact admission key (or verified merchant command) proves that identity.
   // Preserve it before deleting the hard-limit usage row; otherwise replays

@@ -7,6 +7,10 @@ import { lockRecoveryContext, readRecoveryWindowEvidence, terminalRecovery } fro
 import { customerWindow, CUSTOMER_WINDOW_MS } from "../recovery-conversation/recovery-follow-up-policy.service.js";
 import { findExactRecoveryReservationSource, findExactReservationSource } from "../recovery-delivery-compensation/lineage.js";
 import { readCommittedCorrectionReplay, readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
+import { hasConfirmedOutreachDelivery, selectEffectiveOutreachAttempt } from "../../domain/recovery-outreach-identity.js";
+import { retryFundingLineage } from "../../domain/recovery-retry-funding-lineage.js";
+import { retryFundingIdentitySelect, readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
+import { verifyRetryPredecessorFunding } from "../recovery-delivery-retry/funding.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
 type Tx = Prisma.TransactionClient;
 export type AllowanceLimits = {
@@ -18,15 +22,32 @@ export const allowanceSourceKey = (shopId: string, blockId: string) => createRec
 export class AllowanceHeld extends Error {
     constructor(readonly reason: string) { super(`Recovery allowance held: ${reason}`); }
 }
-/** Same owner and original funding, without retagging or resetting historical rows. */
+/** Adopt the original or positively delivered initial retry. Never rebind an
+ * existing allowance reservation, even if a later physical send succeeded. */
 export async function adoptInitial(tx: Tx, conversationId: string, limits: AllowanceLimits): Promise<ConversationAllowanceBlock> {
-    const existing = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, fundingKind: "INITIAL" } });
-    if (existing)
-        return existing;
     const context = await lockRecoveryContext(tx, conversationId);
     if (!context)
         throw new AllowanceHeld("owner-unavailable");
-    const initial = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: context.recoveryId, sequence: 1 } } });
+    const existing = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, fundingKind: "INITIAL" } });
+    const hasRetry = await tx.recoveryOutreachAttempt.findFirst({
+        where: { checkoutRecoveryId: context.recoveryId, sequence: { gte: 3 }, trigger: "INITIAL" }, select: { id: true },
+    });
+    if (existing && !hasRetry)
+        return existing;
+    let initial: { id: string; outboundMessageId: string | null; sentAt: Date | null } | null;
+    if (hasRetry) {
+        const attempts = await tx.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: context.recoveryId }, select: retryFundingIdentitySelect });
+        const selection = selectEffectiveOutreachAttempt({ recoveryId: context.recoveryId, conversationId, slot: "INITIAL", attempts });
+        if (selection.kind !== "selected" || selection.retryCount === 0 || !hasConfirmedOutreachDelivery(selection.current, conversationId))
+            throw new AllowanceHeld("initial-retry-delivery-unproven");
+        initial = selection.current;
+        const links = retryFundingLineage({ recoveryId: context.recoveryId, conversationId, attemptId: initial.id, attempts });
+        if (!links)
+            throw new AllowanceHeld("initial-retry-lineage-unproven");
+        await verifyRetryPredecessorFunding(tx, context.shopId, links);
+    } else {
+        initial = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: context.recoveryId, sequence: 1 } } });
+    }
     if (!initial?.outboundMessageId || !initial.sentAt)
         throw new AllowanceHeld("original-funding-unproven");
     const message = await tx.conversationMessage.findUnique({ where: { id: initial.outboundMessageId } });
@@ -36,6 +57,11 @@ export async function adoptInitial(tx: Tx, conversationId: string, limits: Allow
     if (!source || source.reservation.status !== "COMMITTED" || source.reservation.compensationUsageEventId)
         throw new AllowanceHeld("original-funding-unproven");
     await readCommittedRecoveryUsage(tx, source);
+    if (existing) {
+        if (existing.creditReservationId !== source.reservation.id)
+            throw new AllowanceHeld("initial-retry-existing-allowance");
+        return existing;
+    }
     return tx.conversationAllowanceBlock.create({ data: { id: randomUUID(), shopId: context.shopId, conversationId, ordinal: 0, fundingKind: "INITIAL", state: "ACTIVE", creditReservationId: source.reservation.id, hardMessageLimit: limits.outboundHardLimit, terminalReservedSlots: limits.terminalMessageReservedSlots } });
 }
 export async function currentAllowance(tx: Tx, conversationId: string, limits: AllowanceLimits) {
@@ -115,10 +141,29 @@ export async function readBlockSource(tx: Tx, block: ConversationAllowanceBlock)
     const conversation = await tx.conversation.findUnique({ where: { id: block.conversationId }, select: { checkoutRecoveryId: true } });
     if (!conversation?.checkoutRecoveryId)
         return null;
-    const attempt = block.fundingKind !== "CONTINUATION" ? await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: conversation.checkoutRecoveryId, sequence: block.fundingKind === "INITIAL" ? 1 : 2 } } }) : null;
-    const logical = block.fundingKind === "CONTINUATION" ? allowanceSourceKey(block.shopId, block.id) : attempt ? createRecoveryIdempotencyKey(block.shopId, `recovery-outreach:${attempt.id}`) : null;
-    if (!logical)
-        return null;
+    // Resolve the block's immutable reservation, never the newest attempt.
+    // The canonical key can be bounded/hashed, so compare generated keys
+    // rather than parsing the attempt ID from the persisted key.
+    let logical: string;
+    if (block.fundingKind === "CONTINUATION") {
+        logical = allowanceSourceKey(block.shopId, block.id);
+    } else {
+        const sequence = block.fundingKind === "INITIAL" ? 1 : 2;
+        const original = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: conversation.checkoutRecoveryId, sequence } } });
+        const keyFor = (id: string) => createRecoveryIdempotencyKey(block.shopId, `recovery-outreach:${id}`);
+        const matches = (key: string) => source.sourceKey === key || (source.sourceKey.startsWith("paid-included:") && source.sourceKey.endsWith(`:${key}`));
+        if (original && matches(keyFor(original.id))) {
+            logical = keyFor(original.id);
+        } else {
+            const candidates = await tx.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: conversation.checkoutRecoveryId, sequence: { gte: 3 }, trigger: block.fundingKind === "INITIAL" ? "INITIAL" : { in: ["NO_RESPONSE_FOLLOW_UP", "POST_WINDOW_FOLLOW_UP"] } }, select: { id: true } });
+            const matching = candidates.filter(attempt => matches(keyFor(attempt.id)));
+            if (matching.length !== 1)
+                return null;
+            const attempt = matching[0]!;
+            await readRetryFundingLineage(tx, { recoveryId: conversation.checkoutRecoveryId, conversationId: block.conversationId, attemptId: attempt.id });
+            logical = keyFor(attempt.id);
+        }
+    }
     const found = await findExactReservationSource(tx, block.shopId, logical);
     if (!found || found.reservation.id !== block.creditReservationId)
         return null;

@@ -6,6 +6,7 @@ import { InitialOutreachCreditService } from "../../../src/services/recovery-bil
 export async function createInitialOutreachCreditFixture(input: {
   databaseUrl?: string;
   withCredit?: boolean;
+  sentAgeMs?: number;
   source?: "free" | "paid" | "purchased" | "promotional";
 } = {}) {
   const db = new PrismaClient({ datasourceUrl: input.databaseUrl ?? process.env.TEST_DATABASE_URL! });
@@ -55,14 +56,14 @@ export async function createInitialOutreachCreditFixture(input: {
     id: recoveryId,
     shopId,
     checkoutToken: `checkout-${suffix}`,
-    lastExternalActivityAt: now,
+    lastExternalActivityAt: input.sentAgeMs === undefined ? now : new Date(now.getTime() - input.sentAgeMs - 60_000),
     status: "MESSAGE_SENT",
   } });
   const conversation = await db.conversation.create({ data: {
     type: "RECOVERY",
     checkoutRecoveryId: recoveryId,
   } });
-  const sentAt = new Date(now.getTime() - 1_000);
+  const sentAt = new Date(now.getTime() - (input.sentAgeMs ?? 1_000));
   if (input.withCredit !== false) {
     await db.conversationMessage.create({ data: {
       id: messageId,

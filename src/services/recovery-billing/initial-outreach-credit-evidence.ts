@@ -5,6 +5,7 @@ import type {
 } from "./recovery-billing.types.js";
 import { readExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
 import { requireLineage } from "../recovery-delivery-compensation/types.js";
+import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import type { AutomatedUsage } from "../recovery-delivery-compensation/lineage.js";
 
 type Transaction = Prisma.TransactionClient;
@@ -79,8 +80,14 @@ export async function readInitialAttempt(
     attempt.checkoutRecovery.shopId === input.shopId &&
     (!attempt.checkoutRecovery.conversation?.shopId ||
       attempt.checkoutRecovery.conversation.shopId === input.shopId) &&
-    attempt.sequence === 1 && attempt.trigger === "INITIAL",
+    attempt.trigger === "INITIAL" &&
+    (attempt.sequence === 1 && !attempt.id.startsWith("retry_") || attempt.sequence >= 3),
   "initial attempt/recovery/Shop identity mismatch");
+  if (attempt.sequence >= 3) {
+    const conversationId = attempt.checkoutRecovery.conversation?.id;
+    requireLineage(conversationId, "initial retry conversation missing");
+    await readRetryFundingLineage(tx, { recoveryId: input.recoveryId, conversationId, attemptId: attempt.id });
+  }
   return attempt;
 }
 
@@ -154,7 +161,7 @@ export async function validateInitialMessageIdentity(
     select: { id: true, sequence: true, trigger: true },
   });
   requireLineage(!linkedAttempt || (linkedAttempt.id === attempt.id &&
-    linkedAttempt.sequence === 1 && linkedAttempt.trigger === "INITIAL"),
+    linkedAttempt.sequence === attempt.sequence && linkedAttempt.trigger === "INITIAL"),
   "initial message has a conflicting attempt claim");
 
   const usage = await readExactAutomatedUsage(tx, input.shopId, message.id);
@@ -181,6 +188,7 @@ export async function assertNoInitialMessageEvidence(
   tx: Transaction,
   input: ExistingInitialOutreachCreditInput,
   attempt: InitialAttemptEvidence,
+  historicalMessageIds: readonly string[] = [],
 ): Promise<void> {
   requireLineage((attempt.status === "PENDING" || attempt.status === "CAPACITY_BLOCKED") &&
     attempt.outboundMessageId === null && attempt.sentAt === null &&
@@ -194,6 +202,7 @@ export async function assertNoInitialMessageEvidence(
           conversation: { is: { checkoutRecoveryId: input.recoveryId } },
           direction: "OUTBOUND",
           senderType: "AUTOMATION",
+          ...(historicalMessageIds.length ? { id: { notIn: [...historicalMessageIds] } } : {}),
         },
       ] },
       select: { id: true },

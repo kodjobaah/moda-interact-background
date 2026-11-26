@@ -119,6 +119,17 @@ export class PaidIncludedRecoveryReservationService {
     );
   }
 
+  /** Reuse the source owner inside a serialized retry funding transaction. */
+  async reserveInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId">> &
+      ({ recoveryId: string } | { sourceKey: string }) &
+      Pick<PaidIncludedRecoveryReservationInput, "quantity">,
+  ): Promise<PaidIncludedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PaidIncludedRecoveryReservationError(message));
+    return this.reserveInTransaction(transaction, input, quantity);
+  }
+
   async commit(
     input: Required<Pick<PaidIncludedRecoveryReservationInput, "shopId" | "sourceKey">> &
       Pick<PaidIncludedRecoveryReservationInput, "quantity"> & { occurredAt?: Date },

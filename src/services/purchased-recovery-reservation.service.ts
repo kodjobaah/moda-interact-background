@@ -74,6 +74,15 @@ export class PurchasedRecoveryReservationService {
     );
   }
 
+  /** Reuse the source owner inside a serialized retry funding transaction. */
+  async reserveInExistingTransaction(
+    transaction: Prisma.TransactionClient,
+    input: PurchasedRecoveryReservationInput,
+  ): Promise<PurchasedReservationOutcome> {
+    const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
+    return this.reserveInTransaction(transaction, input, quantity);
+  }
+
   async commit(input: PurchasedRecoveryReservationInput): Promise<PurchasedReservationOutcome> {
     const quantity = validateRecoveryReservationQuantity(input.quantity, (message) => new PurchasedRecoveryReservationError(message));
     return this.withRetry(() =>

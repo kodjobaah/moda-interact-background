@@ -180,6 +180,39 @@ conversation snapshot and moderation handback tests; run the disposable
 conversation-moderation and common-layout integration suites, `npx tsc --noEmit`,
 full units and build.
 
+### Patch 3: funding and allowance lineage (no activation)
+
+- Physical retries derive their identity from the predecessor's existing retry
+  intent. Financial reconciliation uses the historical chain, not the mutable
+  current-attempt selector: a later cancellation or positive receipt cannot
+  erase already admitted financial history.
+- Initial retry admission requires the exact current intent, a definitive
+  temporary/rate-limit failure, both persisted and current cooldowns, the
+  configured budget, unchanged checkout generation/activity, no customer
+  inbound or local opt-out, and no existing conversation allowance. Provider
+  policy holds (including 131049), repair and review decisions remain inert.
+- Prove each predecessor's exact reservation and its release or compensation.
+  A correction is not necessarily spendable capacity. Apply the existing
+  billing policy and free, paid-included, purchased and promotional owners
+  in one serializable Shop -> Conversation transaction. Lookup is across
+  paid-period keys; replay cannot charge a second source for the same retry.
+- Existing initial-send settlement accepts the retry's exact linked message and
+  reservation. Compensation resolves the exact physical attempt, not the
+  original sequence. The old positive/correction event pair is never rewritten.
+- Adopt an initial retry allowance only after positive delivery and exact
+  uncorrected commitment. Keep the block attached to its immutable funding
+  reservation; block source lookup can resolve historical retry identities.
+  An existing initial allowance is not reassigned. New follow-up retry
+  funding is deliberately held until the successor-allowance path is coordinated.
+- The new entrypoint does not create an attempt, schedule work, send to Meta,
+  or issue a provider permit. Checkout lifetime, current consent, sender,
+  offer and final admission still belong to the activation patch. Do not
+  activate retries in production from Patch 3 alone.
+
+Validate with `node --test scripts/test-recovery-retry-funding.mjs` and the
+new disposable `recovery-retry-funding.integration.test.ts`, plus existing
+initial-outreach settlement, recovery allowance and compensation suites.
+
 ### Remaining activation work
 
 Background touchpoints requiring coordinated changes:
@@ -194,8 +227,8 @@ Background touchpoints requiring coordinated changes:
   initiate and settle the exact new attempt through the normal path, not the
   historical sequence-one receipt. Preserve platform-specific authority.
 - `recovery-allowance/storage.ts`, `recovery-allowance/renewal.service.ts`:
-  a new funding block for a new physical send; cancelled/compensated blocks
-  must never authorize a provider permit or count as successful initial funding.
+  finish follow-up successor allowance and provider admission; initial retry
+  adoption and historical funding lookup are addressed by Patch 3.
 - `outbound-whatsapp-admission/outbound-admission-reservation.service.ts`,
   `outbound-whatsapp-admission/outbound-provider-failure.service.ts`,
   `recovery-sender-pool/sender-pool.service.ts`:
