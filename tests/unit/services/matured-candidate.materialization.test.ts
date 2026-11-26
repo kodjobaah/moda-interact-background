@@ -20,7 +20,9 @@ const hoisted = vi.hoisted(() => {
       get: vi.fn(async () => null),
       del: vi.fn(async () => 1),
     },
+    storedPhone: vi.fn(),
     prismaMock: {
+      customer: { findFirst: vi.fn() },
       shop: {
         findUnique: vi.fn(),
         findUniqueOrThrow: vi.fn(),
@@ -175,6 +177,10 @@ vi.mock("../../../src/services/abandoned-checkout-lookup.service.js", () => ({
   abandonedCheckoutLookupService: hoisted.lookupServiceMock,
 }));
 
+vi.mock("../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
+  selectStoredShopifyCheckoutPhone: hoisted.storedPhone,
+}));
 vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
   recoveryShopifyCustomerService: { resolve: hoisted.customerServiceMock.resolveCustomer },
 }));
@@ -198,6 +204,15 @@ vi.mock("../../../src/services/outbound-whatsapp-admission.service.js", () => ({
 }));
 vi.mock("../../../src/services/recovery-template-integration/automated-recovery-template.service.js", () => ({
   automatedRecoveryTemplateService: hoisted.automatedTemplateMock,
+}));
+// This suite exercises materialisation, admission and send orchestration, not
+// the platform-configuration reader. Provide the actual resolved policy shape.
+vi.mock("../../../src/services/recovery-policy.service.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../src/services/recovery-policy.service.js")>(),
+  recoveryPolicyService: { resolve: vi.fn(async () => ({
+    recoveryDelayMinutes: 30, recoveryOfferMode: "NONE", fixedShopifyDiscountId: null,
+    followUpEnabled: false, followUpDelayMinutes: null, source: "MERCHANT", offerSnapshot: null,
+  })) },
 }));
 vi.mock("../../../src/services/recovery-billing.service.js", () => ({
   recoveryBillingService: hoisted.recoveryBillingServiceMock,
@@ -294,6 +309,9 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
     vi.clearAllMocks();
     executionEligibilityMock.evaluate.mockResolvedValue({ allowed: true, shopId: "shop_1" });
     customerServiceMock.resolveCustomer.mockResolvedValue({ id: "customer_1" } as never);
+    hoisted.storedPhone.mockReset().mockResolvedValue({ customerId: "customer_1", customerPhoneId: "phone_1",
+      recipient: "15551234567", source: "customer" });
+    prismaMock.customer.findFirst.mockReset().mockResolvedValue({ id: "customer_1", shopId: "shop_1" });
     hoisted.consentAdmissionMock.evaluateFirst.mockResolvedValue(true);
     hoisted.consentAdmissionMock.evaluateReentry.mockResolvedValue(true);
     hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValue({ phone: "+15551234567" } as never);
@@ -387,7 +405,7 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("defers a matured candidate with no current CustomerPhone before creating recovery or billing state", async () => {
-    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValueOnce(null as never);
+    hoisted.storedPhone.mockResolvedValueOnce(null);
 
     const result = await service.materializeMaturedCandidate(candidate);
 
@@ -499,7 +517,8 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
   });
 
   it("uses current CustomerPhone when the checkout snapshot has no phone", async () => {
-    hoisted.customerPhoneServiceMock.getCurrentPhone.mockResolvedValueOnce({ phone: "+44 (0)20 7946 0958" } as never);
+    hoisted.storedPhone.mockResolvedValueOnce({ customerId: "customer_1", customerPhoneId: "phone_1",
+      recipient: "442079460958", source: "previous" });
     lookupServiceMock.lookup.mockResolvedValueOnce({
       kind: "found",
       checkout: { ...recoverableCheckout, customer: { ...recoverableCheckout.customer, phone: null } },
@@ -507,9 +526,11 @@ describe("CheckoutRecoveryService.materializeMaturedCandidate", () => {
 
     await service.materializeMaturedCandidate(candidate);
 
-    expect(customerServiceMock.resolveCustomer).toHaveBeenCalled();
+    expect(hoisted.storedPhone).toHaveBeenCalledWith(expect.objectContaining({ shopId: "shop_1" }));
+    expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({ where: { id: "customer_1", shopId: "shop_1" } });
+    expect(hoisted.customerPhoneServiceMock.getCurrentPhone).not.toHaveBeenCalled();
     expect(whatsAppServiceMock.sendWhatsAppTemplate).toHaveBeenCalledWith(
-      expect.objectContaining({ to: "4402079460958" }),
+      expect.objectContaining({ to: "442079460958" }),
     );
   });
 

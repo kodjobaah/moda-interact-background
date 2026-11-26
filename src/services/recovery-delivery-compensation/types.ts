@@ -3,6 +3,7 @@ import type { Prisma, UsageReservation } from "@prisma/client";
 export type CompensationTransaction = Prisma.TransactionClient;
 export type RecoverySourceKind = "free" | "paid" | "promotional" | "purchased";
 export type RecoverySource = { reservation: UsageReservation; kind: RecoverySourceKind };
+export type ResolvedRecoverySource = RecoverySource & { retryCandidateAttemptId?: string };
 
 export type RecoveryDeliveryCompensationOutcome =
   | "not-terminal"

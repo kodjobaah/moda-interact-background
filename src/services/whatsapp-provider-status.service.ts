@@ -35,6 +35,9 @@ import {
 
 type Database = typeof prisma;
 const MAX_TRANSACTION_RETRIES = 3;
+// Status convergence owns multiple database locks. Keep its budget local,
+// matching the compensation owner instead of extending every Prisma transaction.
+const PROVIDER_STATUS_TRANSACTION_TIMEOUT_MS = 15_000;
 
 const logger = createLogger({
   serviceName: "moda-messaging-worker",
@@ -164,6 +167,7 @@ export class WhatsAppProviderStatusService {
       }
 
       ownedStatus = true;
+      const wasFailed = message.status === "FAILED";
       const canApplyStatus = canApplyProviderStatus(message.status, event.status);
       const nextStatus = statusForProviderEvent(message.status, event.status);
       const shouldRecordDelivered =
@@ -252,6 +256,14 @@ export class WhatsAppProviderStatusService {
       }
 
       if (becameDelivered) {
+        // The same message lock serializes this with compensation/intent creation.
+        // Positive delivery is stronger evidence: invalidate an unexecuted plan.
+        if (wasFailed && message.recoveryOutreachAttempt) {
+          await transaction.recoveryOutreachRetryIntent.updateMany({
+            where: { failedMessageId: message.id, cancelledAt: null },
+            data: { cancelledAt: occurredAt },
+          });
+        }
         await transaction.usageEvent.upsert({
           where: { idempotencyKey: deliveredUsageKey(message.id) },
           create: {
@@ -280,7 +292,10 @@ export class WhatsAppProviderStatusService {
       return !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
         ? "ignored"
         : "applied";
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: PROVIDER_STATUS_TRANSACTION_TIMEOUT_MS,
+    }));
 
     if (appliedInfo) this.serviceLogger.info("whatsapp.provider_status.applied", appliedInfo);
 
@@ -324,8 +339,9 @@ export class WhatsAppProviderStatusService {
       try {
         return await operation();
       } catch (error) {
-        const fields = { operation: "processProviderStatus", stage: "status_transaction", providerMessageId: event.providerMessageId, status: event.status, attempt, maxAttempts: this.maxRetries, retryExhausted: isRetryableConflict(error) && attempt === this.maxRetries };
-        if (isRetryableConflict(error) && attempt < this.maxRetries) {
+        const retryable = isRetryableStatusTransactionError(error);
+        const fields = { operation: "processProviderStatus", stage: "status_transaction", providerMessageId: event.providerMessageId, status: event.status, attempt, maxAttempts: this.maxRetries, retryExhausted: retryable && attempt === this.maxRetries };
+        if (retryable && attempt < this.maxRetries) {
           this.serviceLogger.warn("whatsapp.provider_status.retry", { ...fields, reasonCode: providerConflictCode(error), error, ...databaseErrorContext(error) });
           continue;
         }
@@ -335,6 +351,15 @@ export class WhatsAppProviderStatusService {
     }
     throw new Error("Provider status retry limit exceeded");
   }
+}
+
+// P2028 includes expired and missing interactive transactions. Restart the
+// idempotent SQL transaction, never reuse its client or retry downstream work
+// here. Keep this policy local to status convergence: other callers of the
+// existing concurrency classifier retain their own transaction policies.
+function isRetryableStatusTransactionError(error: unknown): boolean {
+  return isRetryableConflict(error) ||
+    (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2028");
 }
 
 function providerConflictCode(error: unknown): string {

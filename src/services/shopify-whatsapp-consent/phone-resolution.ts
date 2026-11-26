@@ -3,6 +3,7 @@ import { Prisma, type CustomerPhone, type PrismaClient } from "@prisma/client";
 import { normalizeRecipientPhone, parseShopifyCustomerIdentity } from "@modainteract/moda-interact-shared/identity";
 import prisma from "../../lib/db.js";
 import type { NormalizedAbandonedCheckout } from "../../domain/abandoned-checkout.js";
+import { isCanonicalRecoveryRecipient } from "../checkout-recovery/recovery-recipient-canonicalization.js";
 
 export type CheckoutPhoneSource = "customer" | "billing" | "shipping" | "previous";
 export type CheckoutPhone = Readonly<{
@@ -100,7 +101,8 @@ export async function isEligibleShopifyPhone(
   tx: Pick<Prisma.TransactionClient, "whatsAppConsentEvidence">,
   shopId: string, customerId: string, row: CustomerPhone,
 ): Promise<boolean> {
-  if (row.endedAt || !row.whatsappCanonicalPhone || row.whatsappNoContact || row.whatsappNoContactReason ||
+  if (row.endedAt || !isCanonicalRecoveryRecipient(row.whatsappCanonicalPhone) ||
+      row.whatsappNoContact || row.whatsappNoContactReason ||
       row.whatsappConsentPurpose !== "WHATSAPP_CHECKOUT_RECOVERY" ||
       row.whatsappConsentSource !== "SHOPIFY_NATIVE" || row.whatsappConsentDecision !== "GRANTED" ||
       row.whatsappConsentRevision <= 0n || row.whatsappConsentDecisionSequence <= 0n ||
@@ -275,7 +277,7 @@ export async function evaluateShopifyStoredRecipient(input: {
 > {
   const database = input.database ?? prisma;
   const canonical = input.recipient.trim().replace(/^\+/, "");
-  if (!/^[1-9][0-9]{1,14}$/.test(canonical)) return { status: "NOT_AUTHORISED", reason: "INVALID_RECIPIENT" };
+  if (!isCanonicalRecoveryRecipient(canonical)) return { status: "NOT_AUTHORISED", reason: "INVALID_RECIPIENT" };
   const candidates = await database.customerPhone.findMany({
     where: { endedAt: null, whatsappCanonicalPhone: canonical, customer: { shopId: input.shopId } },
     take: 3,

@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecoveryConsentAdmissionService } from "../../../src/services/checkout-recovery/recovery-consent-admission.service.js";
 import { ShopifyWhatsAppConsentService } from "../../../src/services/shopify-whatsapp-consent.service.js";
+import { isEligibleShopifyPhone } from "../../../src/services/shopify-whatsapp-consent/phone-resolution.js";
 
 type TestPhone = {
   id: string;
@@ -45,7 +46,18 @@ function database() {
     { id: "other-customer", shopId: "shop-a", shopifyCustomerId: "67890" },
   ];
   const phones = [phone(), phone("phone-other", "other-customer", "+447700900456")];
+  // Immutable evidence is independent of the current projection. A projection
+  // write alone cannot authorise a send under the signed-receipt contract.
+  const evidence: Array<Record<string, unknown>> = [];
   const mock = {
+    whatsAppConsentEvidence: {
+      findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        evidence.find(row => Object.entries(where).every(([key, value]) => {
+          const stored = row[key];
+          return value instanceof Date && stored instanceof Date
+            ? stored.getTime() === value.getTime() : stored === value;
+        })) ?? null),
+    },
     shop: {
       findUnique: vi.fn(async ({ where }: any) => shops.find((shop) => shop.id === where.id) ?? null),
     },
@@ -63,7 +75,7 @@ function database() {
           if (where.customer?.shopId && owner?.shopId !== where.customer.shopId) return false;
           if (where.customerId && row.customerId !== where.customerId) return false;
           if (where.endedAt === null && row.endedAt !== null) return false;
-          if (where.whatsappCanonicalPhone === null && row.whatsappCanonicalPhone !== null) return false;
+          if (where.whatsappCanonicalPhone !== undefined && row.whatsappCanonicalPhone !== where.whatsappCanonicalPhone) return false;
           if (where.OR && !where.OR.some((clause: any) =>
             clause.whatsappCanonicalPhone !== undefined
               ? row.whatsappCanonicalPhone === clause.whatsappCanonicalPhone
@@ -97,7 +109,13 @@ function database() {
       }),
     },
   };
-  return { db: mock as unknown as PrismaClient, phones, mock };
+  function recordGrantEvidence(row: TestPhone) {
+    evidence.push({ id: `evidence-${row.id}-${row.whatsappConsentRevision}`, shopId: "shop-a",
+      customerId: row.customerId, customerPhoneId: row.id, canonicalPhone: row.whatsappCanonicalPhone,
+      installationId: null, decision: "GRANT", phoneConsentRevision: row.whatsappConsentRevision,
+      decisionSequence: row.whatsappConsentDecisionSequence, decisionAt: row.whatsappConsentProviderObservedAt });
+  }
+  return { db: mock as unknown as PrismaClient, phones, mock, recordGrantEvidence, evidence };
 }
 
 const grantInput = {
@@ -114,6 +132,7 @@ function createService(db: PrismaClient, readCurrent = vi.fn()) {
     }, {
       info: vi.fn(),
       warn: vi.fn(),
+      error: vi.fn(),
     }),
     readCurrent,
   };
@@ -128,14 +147,17 @@ describe("Shopify checkout consent SQL projection", () => {
     const { instance } = createService(ctx.db, readCurrent);
 
     await expect(instance.evaluateRecipient({
-      ...grantInput, customerId: "customer-a",
-    })).resolves.toEqual({ status: "NOT_AUTHORISED", reason: "NATIVE_CONSENT_NOT_GRANTED" });
+      ...grantInput, customerId: "customer-a", recipient: "447400123456",
+    })).resolves.toEqual({ status: "NOT_AUTHORISED", reason: "RECIPIENT_NOT_ATTACHED" });
     expect(await instance.materializeExplicitChoice({
       ...grantInput, customerId: "customer-a", decision: "GRANTED",
     })).toEqual({ status: "MATERIALISED_GRANTED" });
-    await expect(instance.evaluateRecipient({
-      ...grantInput, customerId: "customer-a",
-    })).resolves.toMatchObject({
+    const input = { ...grantInput, customerId: "customer-a", recipient: "447400123456" };
+    await expect(instance.evaluateRecipient(input)).resolves.toEqual({
+      status: "NOT_AUTHORISED", reason: "CONSENT_NOT_GRANTED_OR_EVIDENCED",
+    });
+    ctx.recordGrantEvidence(ctx.phones[0]!);
+    await expect(instance.evaluateRecipient(input)).resolves.toMatchObject({
       status: "ALLOWED",
       customerPhoneId: "phone-a",
       canonicalRecipient: "447400123456",
@@ -152,18 +174,35 @@ describe("Shopify checkout consent SQL projection", () => {
     });
   });
 
+  it("rejects malformed stored canonical phones even when evidence matches", async () => {
+    const ctx = database();
+    const { instance } = createService(ctx.db);
+    await expect(instance.materializeExplicitChoice({
+      ...grantInput, customerId: "customer-a", decision: "GRANTED",
+    })).resolves.toEqual({ status: "MATERIALISED_GRANTED" });
+    const row = ctx.phones[0]!;
+    ctx.recordGrantEvidence(row);
+    await expect(isEligibleShopifyPhone(ctx.db, "shop-a", row.customerId, row as never)).resolves.toBe(true);
+    ctx.mock.whatsAppConsentEvidence.findFirst.mockClear();
+    row.whatsappCanonicalPhone = "1234567890123456";
+    ctx.recordGrantEvidence(row);
+    await expect(isEligibleShopifyPhone(ctx.db, "shop-a", row.customerId, row as never)).resolves.toBe(false);
+    expect(ctx.mock.whatsAppConsentEvidence.findFirst).not.toHaveBeenCalled();
+  });
+
   it("applies a recoverable revoke to existing SQL permission and denies proactive eligibility", async () => {
     const ctx = database();
     const { instance } = createService(ctx.db);
-    await instance.materializeExplicitChoice({
+    await expect(instance.materializeExplicitChoice({
       ...grantInput, customerId: "customer-a", decision: "GRANTED",
-    });
+    })).resolves.toEqual({ status: "MATERIALISED_GRANTED" });
+    ctx.recordGrantEvidence(ctx.phones[0]!);
     await expect(instance.materializeExplicitChoice({
       ...grantInput, customerId: "customer-a", decision: "REVOKED",
     })).resolves.toEqual({ status: "MATERIALISED_REVOKED" });
     await expect(instance.evaluateStoredRecipient({
-      shopId: "shop-a", customerId: "customer-a", recipient: grantInput.recipient,
-    })).resolves.toEqual({ status: "NOT_AUTHORISED", reason: "NATIVE_CONSENT_NOT_GRANTED" });
+      shopId: "shop-a", customerId: "customer-a", recipient: "447400123456",
+    })).resolves.toEqual({ status: "NOT_AUTHORISED", reason: "CONSENT_NOT_GRANTED_OR_EVIDENCED" });
     expect(ctx.phones[0]).toMatchObject({
       whatsappConsentDecision: "REVOKED",
       whatsappConsentRevision: 2n,
@@ -220,9 +259,10 @@ describe("Shopify checkout consent SQL projection", () => {
   it("keeps first admission, reentry and conversation checks SQL-only", async () => {
     const ctx = database();
     const { instance, readCurrent } = createService(ctx.db);
-    await instance.materializeExplicitChoice({
+    await expect(instance.materializeExplicitChoice({
       ...grantInput, customerId: "customer-a", decision: "GRANTED",
-    });
+    })).resolves.toEqual({ status: "MATERIALISED_GRANTED" });
+    ctx.recordGrantEvidence(ctx.phones[0]!);
     const notices = { notify: vi.fn(async () => "created" as const) };
     const admission = new RecoveryConsentAdmissionService(instance, notices);
     const input = {
@@ -235,5 +275,9 @@ describe("Shopify checkout consent SQL projection", () => {
     await expect(admission.evaluateReentry(input)).resolves.toBe(true);
     expect(readCurrent).not.toHaveBeenCalled();
     expect(notices.notify).not.toHaveBeenCalled();
+    // The old evidence must not authorise a newer phone consent revision.
+    ctx.phones[0]!.whatsappConsentRevision += 1n;
+    await expect(admission.evaluateReentry(input)).resolves.toBe(false);
+    expect(notices.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "NO_VERIFIED_OPT_IN" }));
   });
 });

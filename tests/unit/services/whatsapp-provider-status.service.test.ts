@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
 import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
 
 vi.mock("../../../src/lib/db.js", () => ({ default: {} }));
@@ -97,6 +98,7 @@ function harness(
         ),
     },
     recoveryBasketRoutingTurn: { findUnique: vi.fn(async () => null as Record<string, unknown> | null), update: vi.fn(async () => ({})) },
+    recoveryOutreachRetryIntent: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     recoveryOutreachAttempt: {
       updateMany: vi.fn().mockImplementation(async ({ where, data }: {
         where: { id: string; status: string };
@@ -190,6 +192,109 @@ function harness(
     ),
   };
 }
+
+function statusTransactionError(code: string, message: string) {
+  return Object.assign(new Prisma.PrismaClientKnownRequestError(message, {
+    code, clientVersion: "6.19.3",
+  }), { code, clientVersion: "6.19.3" });
+}
+
+describe("WhatsAppProviderStatusService transaction resilience", () => {
+  it.each([
+    ["P2028", "Transaction already closed: expired transaction"],
+    ["P2028", "Transaction not found"],
+    ["P2034", "Serialization conflict"],
+  ])("restarts a fresh status transaction after %s (%s)", async (code, message) => {
+    const test = harness();
+    const original = statusTransactionError(code, message);
+    const expiredRead = vi.fn().mockRejectedValue(original);
+    test.database.$transaction.mockImplementationOnce(async (operation) => operation({
+      ...test.transaction,
+      conversationMessage: { ...test.transaction.conversationMessage, findUnique: expiredRead },
+    }));
+    const event = { ...baseEvent, status: "FAILED" as const, schemaVersion: 3 as const,
+      failure: { providerCode: "131049" } };
+    await expect(test.service.process(event)).resolves.toBe("applied");
+    expect(test.database.$transaction).toHaveBeenCalledTimes(2);
+    for (const call of test.database.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ isolationLevel: "Serializable", timeout: 15_000 });
+    }
+    expect(expiredRead).toHaveBeenCalledTimes(1);
+    expect(test.transaction.conversationMessage.findUnique).toHaveBeenCalledTimes(2);
+    expect(test.message.status).toBe("FAILED");
+    expect(test.compensation.reconcile).toHaveBeenCalledExactlyOnceWith("wamid-1");
+    expect(test.notification.notify).toHaveBeenCalledTimes(1);
+    const retry = test.records.find(record => record.event === "whatsapp.provider_status.retry");
+    expect(JSON.parse(JSON.stringify(retry))).toMatchObject({ data: {
+      attempt: 1, maxAttempts: 3, retryExhausted: false, reasonCode: code,
+      error: { message }, databaseError: { code },
+    } });
+    expect(test.records.filter(record => record.event === "whatsapp.provider_status.applied")).toHaveLength(1);
+  });
+
+  it("restarts after an expired commit without emitting premature success", async () => {
+    const test = harness();
+    const original = statusTransactionError("P2028", "Transaction already closed at commit");
+    const before = { ...test.message };
+    test.database.$transaction.mockImplementationOnce(async (operation) => {
+      await operation(test.transaction);
+      expect(test.records.some(record => record.event === "whatsapp.provider_status.applied")).toBe(false);
+      expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();
+      // The mock is not a database; explicitly restore the rolled-back writes.
+      Object.assign(test.message, before);
+      test.usageEvents.length = 0;
+      throw original;
+    });
+    await expect(test.service.process(baseEvent)).resolves.toBe("applied");
+    expect(test.database.$transaction).toHaveBeenCalledTimes(2);
+    expect(test.message.status).toBe("DELIVERED");
+    expect(test.usageEvents).toHaveLength(1);
+    expect(test.positiveReachability.fromProviderDelivery).toHaveBeenCalledExactlyOnceWith("wamid-1");
+    expect(test.records.filter(record => record.event === "whatsapp.provider_status.applied")).toHaveLength(1);
+  });
+
+  it("stops at three attempts, logs exhaustion and preserves the last Prisma error", async () => {
+    const test = harness();
+    const first = statusTransactionError("P2028", "Transaction not found");
+    const last = statusTransactionError("P2028", "Transaction expired on final attempt");
+    test.database.$transaction.mockRejectedValueOnce(first).mockRejectedValueOnce(first).mockRejectedValueOnce(last);
+    await expect(test.service.process(baseEvent)).rejects.toBe(last);
+    expect(test.database.$transaction).toHaveBeenCalledTimes(3);
+    expect(test.records.filter(record => record.event === "whatsapp.provider_status.retry")).toHaveLength(2);
+    const failed = test.records.find(record => record.event === "whatsapp.provider_status.failed");
+    expect(JSON.parse(JSON.stringify(failed))).toMatchObject({ data: {
+      attempt: 3, maxAttempts: 3, retryExhausted: true,
+      error: { message: last.message }, databaseError: { code: "P2028" },
+    } });
+    expect(test.records.some(record => record.event === "whatsapp.provider_status.applied")).toBe(false);
+    expect(test.positiveReachability.fromProviderDelivery).not.toHaveBeenCalled();
+    expect(test.compensation.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("does not internally retry a different database error", async () => {
+    const test = harness();
+    const original = statusTransactionError("P2003", "Foreign key constraint failed");
+    test.database.$transaction.mockRejectedValue(original);
+    await expect(test.service.process(baseEvent)).rejects.toBe(original);
+    expect(test.database.$transaction).toHaveBeenCalledTimes(1);
+    expect(test.records.some(record => record.event === "whatsapp.provider_status.retry")).toBe(false);
+  });
+
+  it("does not repeat a committed status transaction for downstream P2028", async () => {
+    const test = harness();
+    const original = statusTransactionError("P2028", "Downstream transaction expired");
+    test.compensation.reconcile.mockRejectedValueOnce(original);
+    const event = { ...baseEvent, status: "FAILED" as const };
+    await expect(test.service.process(event)).rejects.toBe(original);
+    expect(test.database.$transaction).toHaveBeenCalledTimes(1);
+    expect(test.records.some(record => record.event === "whatsapp.provider_status.downstream_failed")).toBe(true);
+    expect(test.records.some(record => record.event === "whatsapp.provider_status.retry")).toBe(false);
+    // The outer provider-status job can replay the durable failure safely.
+    await expect(test.service.process(event)).resolves.toBe("ignored");
+    expect(test.compensation.reconcile).toHaveBeenCalledTimes(2);
+    expect(test.notification.notify).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("WhatsAppProviderStatusService", () => {
   it("does not emit applied when the status transaction fails at commit", async () => {
@@ -333,6 +438,12 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.status).toBe("DELIVERED");
     expect(test.linkedAttempt?.status).toBe("FAILED");
     expect(test.usageEvents).toHaveLength(1);
+    expect(test.transaction.recoveryOutreachRetryIntent.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { failedMessageId: test.message.id, cancelledAt: null },
+      data: { cancelledAt: new Date(baseEvent.occurredAt) },
+    });
+    await test.service.process(baseEvent);
+    expect(test.transaction.recoveryOutreachRetryIntent.updateMany).toHaveBeenCalledTimes(1);
   });
 
   it("does not resurrect FAILED with a late SENT and stores v3 failure evidence", async () => {

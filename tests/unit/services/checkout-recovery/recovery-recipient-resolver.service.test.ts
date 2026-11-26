@@ -35,9 +35,11 @@ describe("RecoveryRecipientResolverService", () => {
       .resolves.toBeNull();
   });
 
-  it("does not return an unbounded or malformed stored recipient", async () => {
-    mocks.stored.mockResolvedValue({ recipient: "123456789012345678901234567890123456" });
-    await expect(new RecoveryRecipientResolverService().resolveForCustomerInShop("guest-a", "shop-a"))
-      .resolves.toBeNull();
+  it.each(["123456789012345678901234567890123456", "0123456789", "1", "44abc7400123456",
+    "+447400123456", "44 7400 123456", ""])("rejects noncanonical stored recipient %s at both entrypoints", async (recipient) => {
+    mocks.stored.mockResolvedValue({ recipient });
+    const resolver = new RecoveryRecipientResolverService();
+    await expect(resolver.resolveForCustomerInShop("guest-a", "shop-a")).resolves.toBeNull();
+    await expect(resolver.resolve({ shop: "shop-a" } as never)).resolves.toBeNull();
   });
 });

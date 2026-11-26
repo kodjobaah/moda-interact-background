@@ -94,15 +94,26 @@ vi.mock("../../../src/lib/redis.js", () => ({ connectionRedis: hoisted.redis }))
 vi.mock("../../../src/lib/db.js", () => ({
   default: {
     shop: { findUniqueOrThrow: vi.fn(async () => ({ id: "shop_1" })), findUnique: hoisted.findShop },
+    customer: { findFirst: vi.fn(async () => ({ id: "customer-1", shopId: "shop_1" })) },
     checkoutRecovery: {
       create: hoisted.createRecovery,
       findFirst: hoisted.findLatestRecovery,
       findUnique: hoisted.findRecovery,
       updateMany: hoisted.updateRecoveryMany,
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (!hoisted.durableRecovery) throw new Error("Missing test recovery");
+        hoisted.durableRecovery = { ...hoisted.durableRecovery, ...data };
+        return hoisted.durableRecovery;
+      }),
     },
     recoveryOutreachAttempt: { findFirst: hoisted.findInitialAttempt },
     whatsAppRecipientReachability: { findUnique: hoisted.findSuppression },
   },
+}));
+vi.mock("../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
+  selectStoredShopifyCheckoutPhone: vi.fn(async () => ({ customerId: "customer-1", customerPhoneId: "phone-1",
+    recipient: "15551234567", source: "customer" })),
 }));
 vi.mock("../../../src/services/customer.service.js", () => ({
   customerService: { resolveCustomer: hoisted.resolveCustomer },
@@ -377,7 +388,7 @@ describe("pending recovery candidate worker", () => {
       consentReceiptAttribute: { kind: "MISSING" as const },
       customer: { shopifyCustomerId: null, phone: "15551234567", email: null, firstName: null, lastName: null },
       lineItems: [],
-      internationalContext: null,
+      internationalContext: { countryCode: "US", currencyCode: "GBP", languageTag: null, languageSource: null, timeZone: null },
     };
     const checkoutOrderGuard = new CheckoutOrderGuardService();
     const materializer = new RecoveryMaterializationService({
@@ -407,7 +418,7 @@ describe("pending recovery candidate worker", () => {
         })),
       },
       recipientResolver: { resolve: vi.fn(async () => "15551234567") },
-      initiate: (seed, generation, recipient) => initiation.handleCheckoutCreated(seed, generation, recipient),
+      initiate: (seed, generation, recipient, customerId) => initiation.handleCheckoutCreated(seed, generation, recipient, undefined, undefined, customerId),
     });
     hoisted.materialize.mockImplementation(async (candidate, options) =>
       materializer.materialize(candidate as never, options as never));

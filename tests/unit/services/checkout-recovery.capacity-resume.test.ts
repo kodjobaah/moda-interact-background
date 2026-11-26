@@ -62,8 +62,8 @@ vi.mock("../../../src/lib/db.js", () => ({
     $transaction: hoisted.transaction,
   },
 }));
-vi.mock("../../../src/services/customer.service.js", () => ({
-  customerService: { resolveCustomer: vi.fn(async () => ({ id: "customer-1" })) },
+vi.mock("../../../src/services/checkout-recovery/recovery-shopify-customer.service.js", () => ({
+  recoveryShopifyCustomerService: { resolve: vi.fn(async () => ({ id: "customer-1", shopId: "shop-1" })) },
 }));
 vi.mock("../../../src/services/customer.phone.service.js", () => ({
   customerPhoneService: {

@@ -18,6 +18,7 @@ type TestCase = {
   humanKind?: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE";
   linkMessage?: boolean;
   initialStatus?: "SENT" | "FAILED" | "DELIVERED" | "READ";
+  outreachStatus?: "NO_RESPONSE" | "WAITING_FOR_RESPONSE";
 };
 
 const suite = process.env.TEST_DATABASE_URL && process.env.MODA_DISPOSABLE_INTEGRATION === "1"
@@ -72,8 +73,11 @@ async function fixture(input: TestCase = {}) {
     id: attemptId, checkoutRecoveryId: recoveryId, recipient: "15551234567",
     sequence: sender === "HUMAN" ? 2 : 1,
     trigger: sender === "HUMAN" ? "NO_RESPONSE_FOLLOW_UP" : "INITIAL",
-    configuredOfferMode: "NONE", status: "NO_RESPONSE",
+    configuredOfferMode: "NONE", status: input.outreachStatus ?? "NO_RESPONSE",
     ...(linked ? { outboundMessageId: messageId } : {}),
+    // WAITING_FOR_RESPONSE represents a confirmed send; use the same sentAt
+    // as the linked ConversationMessage, not a fresh timestamp.
+    ...(input.outreachStatus === "WAITING_FOR_RESPONSE" ? { sentAt: now } : {}),
   } });
   if (sender === "AUTOMATION") {
     await db.usageEvent.create({ data: {
@@ -268,6 +272,7 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
         expect((await f.db.shopEntitlementCounter.findUniqueOrThrow({ where: { id: f.counterId! } })).committedQuantity).toBe(0);
         expect(await f.db.usageEvent.count({ where: { shopId: f.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE" } })).toBe(0);
         expect((await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } })).status).toBe("NO_RESPONSE");
+        expect(await f.db.recoveryOutreachRetryIntent.count({ where: { failedAttemptId: f.attemptId } })).toBe(0);
       } finally { await f.close(); }
     },
   );
@@ -400,11 +405,14 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
 
   it("does not credit a delivered message and never claws back a correction after late delivery", async () => {
     const delivered = await fixture({ initialStatus: "DELIVERED" });
-    const failed = await fixture();
+    const failed = await fixture({ outreachStatus: "WAITING_FOR_RESPONSE" });
     try {
       expect(await delivered.compensate.reconcile(delivered.providerMessageId)).toBe("not-terminal");
       expect((await delivered.db.usageReservation.findUniqueOrThrow({ where: { id: delivered.reservationId } })).compensationUsageEventId).toBeNull();
+      await failed.db.conversationMessage.update({ where: { id: failed.messageId }, data: { providerFailureCode: "131016" } });
       await failed.compensate.reconcile(failed.providerMessageId);
+      const intent = await failed.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: failed.attemptId } });
+      expect(intent).toMatchObject({ policy: "AFTER_COOLDOWN", cancelledAt: null });
       const event = { schemaVersion: 3, providerAccountId: "100001",
         providerPhoneNumberId: "100002", providerMessageId: failed.providerMessageId,
         status: "DELIVERED", occurredAt: new Date().toISOString() };
@@ -412,6 +420,12 @@ suite("ARCH-028 generic recovery delivery compensation (PostgreSQL)", () => {
       expect(await service.process(event)).toBe("applied");
       expect((await failed.db.conversationMessage.findUniqueOrThrow({ where: { id: failed.messageId } })).status).toBe("DELIVERED");
       expect((await failed.db.usageReservation.findUniqueOrThrow({ where: { id: failed.reservationId } })).compensationUsageEventId).not.toBeNull();
+      expect(await failed.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: failed.attemptId } })).toMatchObject({
+        id: intent.id, cancelledAt: new Date(event.occurredAt),
+      });
+      expect(await failed.compensate.reconcile(failed.providerMessageId)).toBe("not-terminal");
+      expect(await failed.db.recoveryOutreachRetryIntent.count({ where: { failedAttemptId: failed.attemptId } })).toBe(1);
+      expect(await delivered.db.recoveryOutreachRetryIntent.count({ where: { failedAttemptId: delivered.attemptId } })).toBe(0);
     } finally { await delivered.close(); await failed.close(); }
   });
 });
@@ -602,22 +616,34 @@ suite("ARCH-028 committed purchased compensation (PostgreSQL)", () => {
       expect(await ordinary.compensate.reconcile(ordinary.providerMessageId)).toBe("not-recovery");
       expect((await ordinary.db.usageReservation.findUniqueOrThrow({ where: { id: ordinary.reservationId } })).compensationUsageEventId).toBeNull();
       expect(await followUp.compensate.reconcile(followUp.providerMessageId)).toBe("restored-spendable");
+      expect(await followUp.db.recoveryOutreachRetryIntent.count({ where: { failedAttemptId: followUp.attemptId } })).toBe(0);
     } finally { await ordinary.close(); await followUp.close(); }
   });
 
   const genericCases = (["SHOPIFY", "WOOCOMMERCE"] as const).flatMap(provider =>
     (["free", "paid", "promotional", "purchased"] as const).map(source => ({ provider, source })));
   it.each(genericCases)("restores $provider $source for marketing delivery failure exactly once", async ({ provider, source }) => {
-    const f = await fixture({ source, provider, initialStatus: "SENT" });
+    const f = await fixture({ source, provider, initialStatus: "SENT", outreachStatus: "WAITING_FOR_RESPONSE" });
     try {
-      await f.db.recoveryOutreachAttempt.update({ where: { id: f.attemptId },
-        data: { status: "WAITING_FOR_RESPONSE", sentAt: (await f.db.conversationMessage.findUniqueOrThrow({ where: { id: f.messageId } })).sentAt } });
       const service = new WhatsAppProviderStatusService(f.db, undefined, 3, f.compensate);
       const event = { schemaVersion: 3 as const, providerAccountId: "100001",
         providerPhoneNumberId: "100002", providerMessageId: f.providerMessageId,
         status: "FAILED" as const, failure: { providerCode: "131049" }, occurredAt: new Date().toISOString() };
       await expect(service.process(event)).resolves.toBe("applied");
+      const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
+      const recovery = await f.db.checkoutRecovery.findUniqueOrThrow({ where: { id: f.recoveryId } });
+      expect(intent).toMatchObject({ failedMessageId: f.messageId, fundingReservationId: f.reservationId,
+        policy: "PROVIDER_POLICY_HOLD", providerFailureCode: "131049", cancelledAt: null,
+        notBeforeAt: new Date(Date.parse(event.occurredAt) + 86_400_000),
+        expectedGeneration: recovery.generation, expectedLastExternalActivityAt: recovery.lastExternalActivityAt,
+      });
       await expect(service.process(event)).resolves.toBe("ignored");
+      expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } })).toMatchObject({
+        id: intent.id, notBeforeAt: intent.notBeforeAt, expectedGeneration: intent.expectedGeneration,
+      });
+      expect(await f.db.recoveryOutreachRetryIntent.count({ where: { failedAttemptId: f.attemptId } })).toBe(1);
+      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(1);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(1);
       const reservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } });
       expect(reservation).toMatchObject({ status: "COMMITTED", compensationReason: "WHATSAPP_DELIVERY_FAILED",
         compensationDisposition: "RESTORED_SPENDABLE", compensationUsageEventId: expect.any(String) });
@@ -644,6 +670,78 @@ suite("ARCH-028 committed purchased compensation (PostgreSQL)", () => {
         status: "FAILED", outboundMessageId: f.messageId,
       });
       expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } })).toMatchObject({ status: "RELEASED", compensationUsageEventId: null });
+      const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
+      expect(intent).toMatchObject({ failedMessageId: f.messageId, fundingReservationId: f.reservationId, providerFailureCode,
+        policy: providerFailureCode === "131049" ? "PROVIDER_POLICY_HOLD" : "REVIEW_REQUIRED" });
+    } finally { await f.close(); }
+  });
+
+  it("enriches a code-less retry decision without changing its identity or charging again", async () => {
+    const f = await fixture({ initialStatus: "SENT", outreachStatus: "WAITING_FOR_RESPONSE" });
+    try {
+      const service = new WhatsAppProviderStatusService(f.db, undefined, 3, f.compensate);
+      const failedAt = new Date();
+      const event = { schemaVersion: 2 as const, providerAccountId: "100001", providerPhoneNumberId: "100002",
+        providerMessageId: f.providerMessageId, status: "FAILED" as const, occurredAt: failedAt.toISOString() };
+      await service.process(event);
+      const original = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
+      expect(original).toMatchObject({ policy: "REVIEW_REQUIRED", notBeforeAt: null, providerFailureCode: null });
+      await service.process({ ...event, schemaVersion: 3, failure: { providerCode: "131016" }, occurredAt: new Date(failedAt.getTime() + 10_000).toISOString() });
+      expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } })).toMatchObject({
+        id: original.id, policy: "AFTER_COOLDOWN", providerFailureCode: "131016", notBeforeAt: new Date(failedAt.getTime() + 300_000),
+      });
+      const reservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } });
+      expect(await f.db.usageEvent.count({ where: { correctionOfUsageEventId: reservation.committedUsageEventId } })).toBe(1);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(1);
+    } finally { await f.close(); }
+  });
+
+  it("uses current runtime settings and preserves the original due time on duplicate receipts", async () => {
+    const f = await fixture({ initialStatus: "SENT", outreachStatus: "WAITING_FOR_RESPONSE" });
+    const select = { recoveryDeliveryTemporaryRetryDelayMinutes: true } as const;
+    const original = await f.db.backgroundRuntimeConfig.findUniqueOrThrow({ where: { id: "default" }, select });
+    try {
+      await f.db.backgroundRuntimeConfig.update({ where: { id: "default" }, data: { recoveryDeliveryTemporaryRetryDelayMinutes: 7 } });
+      const service = new WhatsAppProviderStatusService(f.db, undefined, 3, f.compensate);
+      const event = { schemaVersion: 3 as const, providerAccountId: "100001", providerPhoneNumberId: "100002",
+        providerMessageId: f.providerMessageId, status: "FAILED" as const, failure: { providerCode: "131016" }, occurredAt: new Date().toISOString() };
+      await expect(service.process(event)).resolves.toBe("applied");
+      const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
+      expect(intent).toMatchObject({ policy: "AFTER_COOLDOWN", notBeforeAt: new Date(Date.parse(event.occurredAt) + 7 * 60_000) });
+      await f.db.backgroundRuntimeConfig.update({ where: { id: "default" }, data: { recoveryDeliveryTemporaryRetryDelayMinutes: 29 } });
+      await expect(service.process(event)).resolves.toBe("ignored");
+      expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } })).toMatchObject({ id: intent.id, notBeforeAt: intent.notBeforeAt });
+    } finally {
+      try { await f.db.backgroundRuntimeConfig.update({ where: { id: "default" }, data: original }); }
+      finally { await f.close(); }
+    }
+  });
+
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("restores %s credit even when recycling is disabled", async provider => {
+    const f = await fixture({ provider, initialStatus: "SENT", outreachStatus: "WAITING_FOR_RESPONSE" });
+    const original = await f.db.backgroundRuntimeConfig.findUniqueOrThrow({ where: { id: "default" }, select: { recoveryDeliveryMaxRetries: true } });
+    try {
+      await f.db.backgroundRuntimeConfig.update({ where: { id: "default" }, data: { recoveryDeliveryMaxRetries: 0 } });
+      const service = new WhatsAppProviderStatusService(f.db, undefined, 3, f.compensate);
+      const event = { schemaVersion: 3 as const, providerAccountId: "100001", providerPhoneNumberId: "100002",
+        providerMessageId: f.providerMessageId, status: "FAILED" as const, failure: { providerCode: "131016" }, occurredAt: new Date().toISOString() };
+      await expect(service.process(event)).resolves.toBe("applied");
+      expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } })).toMatchObject({ policy: "REVIEW_REQUIRED", notBeforeAt: null });
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId } })).toMatchObject({ compensationDisposition: "RESTORED_SPENDABLE", compensationUsageEventId: expect.any(String) });
+    } finally {
+      try { await f.db.backgroundRuntimeConfig.update({ where: { id: "default" }, data: original }); }
+      finally { await f.close(); }
+    }
+  });
+
+  it("records a terminal decision for 131026 without re-opening the attempt", async () => {
+    const f = await fixture({ outreachStatus: "WAITING_FOR_RESPONSE" });
+    try {
+      expect(await f.compensate.reconcile(f.providerMessageId)).toBe("restored-spendable");
+      expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } })).toMatchObject({
+        policy: "DO_NOT_RETRY", notBeforeAt: null, providerFailureCode: "131026",
+      });
+      expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } })).toMatchObject({ status: "FAILED" });
     } finally { await f.close(); }
   });
 

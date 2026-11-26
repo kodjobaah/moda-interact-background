@@ -1,7 +1,7 @@
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { UsageReservation } from "@prisma/client";
 import { outreachDeliveryFailureCode } from "../../domain/whatsapp-recipient-failure.js";
-import { requireLineage, type CompensationTransaction, type RecoverySource, type RecoverySourceKind } from "./types.js";
+import { requireLineage, type CompensationTransaction, type RecoverySource, type RecoverySourceKind, type ResolvedRecoverySource } from "./types.js";
 
 export type FailedOutbound = {
   id: string;
@@ -29,7 +29,7 @@ export async function resolveExactRecoverySource(
   message: FailedOutbound,
   shopId: string,
   automatedUsage: AutomatedUsage | null,
-): Promise<RecoverySource | null> {
+): Promise<ResolvedRecoverySource | null> {
   const recovery = message.conversation.checkoutRecovery;
   if (!recovery) return null;
   requireLineage(recovery.shopId === shopId, "conversation/recovery shop mismatch");
@@ -87,7 +87,8 @@ export async function resolveExactRecoverySource(
 
   const attempt = await tx.recoveryOutreachAttempt.findUnique({
     where: { id: attemptId },
-    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true, status: true, sentAt: true },
+    select: { id: true, checkoutRecoveryId: true, outboundMessageId: true, sequence: true, status: true, sentAt: true,
+      initiatedBy: true, customerRespondedAt: true },
   });
   requireLineage(attempt && attempt.checkoutRecoveryId === recovery.id &&
     (attempt.sequence === 1 || attempt.sequence === 2) &&
@@ -123,7 +124,13 @@ export async function resolveExactRecoverySource(
     });
     requireLineage(changed.count === 1, "failed recovery attempt convergence conflict");
   }
-  return source;
+  // Reuse the already-validated attempt read. A delayed failure for an
+  // engaged/no-response attempt still gets compensation, not an automatic
+  // retry decision. Human sends and continuation funding never recycle here.
+  const retryCandidate = message.senderType === "AUTOMATION" &&
+    attempt.initiatedBy !== "HUMAN" && !attempt.customerRespondedAt &&
+    (close || attempt.status === "FAILED");
+  return retryCandidate ? { ...source, retryCandidateAttemptId: attempt.id } : source;
 }
 
 export async function findExactRecoveryReservationSource(

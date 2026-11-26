@@ -45,6 +45,10 @@ const defaults: BackgroundRuntimeConfigSnapshot = {
   merchantCommunicationsQueueGlobalConcurrency: 10,
   billingSubscriptionQueueGlobalConcurrency: 10,
   checkoutRecoveryLifetimeDays: 21,
+  recoveryDeliveryTemporaryRetryDelayMinutes: 5,
+  recoveryDeliveryRateLimitRetryDelayMinutes: 15,
+  recoveryDeliveryMarketingRetryDelayMinutes: 1440,
+  recoveryDeliveryMaxRetries: 3,
   createdAt: new Date(0),
   updatedAt: new Date(0),
 };

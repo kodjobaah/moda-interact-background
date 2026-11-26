@@ -48,7 +48,12 @@ text is not available from the persisted status contract; do not invent it.
    source counter, failed outreach, no actionable follow-up, no fabricated
    recipient suppression, and one merchant support notification.
 
-## Deferred phase 2: safe recycling (not implemented by this patch)
+## Phase 2: safe recycling
+
+The additive retry-decision foundation is described in
+[`whatsapp-recovery-retry-intent.md`](whatsapp-recovery-retry-intent.md).
+Automatic resend execution remains disabled pending the coordinated physical
+attempt/slot migration.
 
 The current `RecoveryOutreachAttempt` has a unique (checkoutRecoveryId,
 sequence) constraint; sequence 1 is initial and sequence 2 is follow-up.

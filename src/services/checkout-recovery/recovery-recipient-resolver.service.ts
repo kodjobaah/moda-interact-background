@@ -2,7 +2,12 @@ import type { RecoveryCheckoutSeed } from "../../events/checkout-events.js";
 import prisma from "../../lib/db.js";
 import { recoveryShopifyCustomerService } from "./recovery-shopify-customer.service.js";
 import { selectStoredShopifyCustomerPhone } from "../shopify-whatsapp-consent/phone-resolution.js";
-import { canonicalizeRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
+import { isCanonicalRecoveryRecipient } from "./recovery-recipient-canonicalization.js";
+
+// The stored selector returns canonical digits, not a raw phone presentation.
+function storedRecipient(recipient: string | undefined): string | null {
+  return isCanonicalRecoveryRecipient(recipient) ? recipient : null;
+}
 
 export class RecoveryRecipientResolverService {
   async resolve(event: RecoveryCheckoutSeed): Promise<string | null> {
@@ -14,12 +19,12 @@ export class RecoveryRecipientResolverService {
     if (!customer) return null;
 
     const selected = await selectStoredShopifyCustomerPhone({ customerId: customer.id, shopId: shop.id });
-    return canonicalizeRecoveryRecipient(selected?.recipient);
+    return storedRecipient(selected?.recipient);
   }
 
   async resolveForCustomerInShop(customerId: string, shopId: string): Promise<string | null> {
     const selected = await selectStoredShopifyCustomerPhone({ customerId, shopId });
-    return canonicalizeRecoveryRecipient(selected?.recipient);
+    return storedRecipient(selected?.recipient);
   }
 }
 

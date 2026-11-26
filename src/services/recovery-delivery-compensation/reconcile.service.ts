@@ -5,6 +5,7 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 import prisma from "../../lib/db.js";
 import { isRecoveryReservationRetryableConflict } from "../recovery-reservation/reservation-lifecycle.js";
 import { classifyWhatsAppProviderFailure, isConfirmedProviderNonDelivery } from "../../domain/whatsapp-recipient-failure.js";
+import { recordRecoveryDeliveryRetryIntent } from "../recovery-delivery-retry/intent.js";
 import { readExactAutomatedUsage, removeExactAutomatedUsage } from "./automated-usage.js";
 import { compensateCommittedSource } from "./committed.js";
 import { resolveExactRecoverySource } from "./lineage.js";
@@ -97,7 +98,7 @@ export class RecoveryDeliveryCompensationService {
         failedAt: true, sentAt: true, deliveredAt: true, readAt: true,
         conversation: {
           select: {
-            shopId: true, checkoutRecovery: { select: { id: true, shopId: true } },
+            shopId: true, checkoutRecovery: { select: { id: true, shopId: true, generation: true, lastExternalActivityAt: true } },
           },
         },
       },
@@ -167,6 +168,17 @@ export class RecoveryDeliveryCompensationService {
     }
     context.stage = "outbound_usage_cleanup";
     await removeExactAutomatedUsage(tx, shopId, message.id, automatedUsage);
+    if (source?.retryCandidateAttemptId && isConfirmedProviderNonDelivery(message) &&
+        message.failedAt && message.conversation.checkoutRecovery) {
+      context.stage = "retry_intent";
+      await recordRecoveryDeliveryRetryIntent(tx, {
+        attemptId: source.retryCandidateAttemptId, messageId: message.id,
+        expectedGeneration: message.conversation.checkoutRecovery.generation,
+        expectedLastExternalActivityAt: message.conversation.checkoutRecovery.lastExternalActivityAt,
+        reservationId: source.reservation.id, providerFailureCode: message.providerFailureCode,
+        failedAt: message.failedAt,
+      });
+    }
     return result;
   }
 }

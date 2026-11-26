@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../../src/lib/db.js", () => ({ default: {} }));
+const storedPhone = vi.hoisted(() => vi.fn());
+vi.mock("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../../src/services/shopify-whatsapp-consent/phone-resolution.js")>(),
+  selectStoredShopifyCheckoutPhone: storedPhone,
+}));
 
 import { CheckoutEventOrchestratorService } from "../../../../src/services/checkout-recovery/checkout-event-orchestrator.service.js";
 import { RecoveryMaterializationService } from "../../../../src/services/checkout-recovery/recovery-materialization.service.js";
@@ -20,6 +25,7 @@ const checkout = {
   abandonedCheckoutUrl: checkoutEvent.abandonedCheckoutUrl,
   createdAt: checkoutEvent.checkoutCreatedAt,
   consentReceiptAttribute: { kind: "MISSING" as const },
+  internationalContext: { countryCode: "GB", currencyCode: "GBP", languageTag: null, languageSource: null, timeZone: null },
   customer: { shopifyCustomerId: "gid://shopify/Customer/123", phone: "+447400123456" },
 };
 
@@ -34,11 +40,16 @@ function scenario() {
   const candidates: Array<Record<string, unknown>> = [];
   const writes = { recovery: vi.fn(), attempt: vi.fn(), charge: vi.fn(), send: vi.fn() };
   const notice = { notify: vi.fn(async () => "created" as const) };
+  // Model the current evidence-backed phone selection. No eligible current or
+  // previously verified phone exists when this fixture's grant is absent.
+  storedPhone.mockReset().mockImplementation(async () => granted && currentRecipient === authorisedRecipient
+    ? { customerId: "customer-1", customerPhoneId: "phone-1", recipient: currentRecipient, source: "customer" }
+    : null);
   const native = {
-    evaluateRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === `+${authorisedRecipient}`
+    evaluateRecipient: vi.fn(),
+    evaluateStoredRecipient: vi.fn(async (input: { recipient: string }) => granted && input.recipient === `+${authorisedRecipient}`
       ? { status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n }
-      : { status: "NOT_AUTHORISED" as const, reason: "NATIVE_CONSENT_NOT_GRANTED" as const }),
-    evaluateStoredRecipient: vi.fn(async () => ({ status: "ALLOWED" as const, customerPhoneId: "phone-1", canonicalRecipient: currentRecipient, consentRevision: 2n, noContactRevision: 0n })),
+      : { status: "NOT_AUTHORISED" as const, reason: "CONSENT_NOT_GRANTED_OR_EVIDENCED" as const }),
   };
   const consent = new RecoveryConsentAdmissionService(native, notice);
   const pending = {
@@ -106,6 +117,7 @@ function scenario() {
     findLatestRecovery: latest as never,
     snapshotBuilder: snapshot as never,
     recipientResolver: recipientResolver as never,
+    noticeMissingRecipient: (shopId, checkoutToken) => consent.notifyMissingRecipient({ shopId, checkoutToken }),
     initiate: initiate as never,
   });
   return {
@@ -114,7 +126,10 @@ function scenario() {
     setGrant: (value: boolean) => { granted = value; },
     recordPaidOrder: () => { paidOrderRecorded = true; },
     setCheckoutCompleted: (date: string) => { currentCheckout = { ...currentCheckout, completedAt: date }; },
-    setCurrentRecipient: (value: string) => { currentRecipient = value; },
+    setCurrentRecipient: (value: string) => {
+      currentRecipient = value;
+      currentCheckout = { ...currentCheckout, customer: { ...currentCheckout.customer, phone: `+${value}` } };
+    },
     setAuthorisedRecipient: (value: string) => { authorisedRecipient = value; },
   };
 }
@@ -129,9 +144,10 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
   it("does nothing on grant alone, then admits only after a separate legitimate checkout event", async () => {
     const ctx = scenario();
     expect(await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent)).toMatchObject({ kind: "pending" });
-    expect((await matureNext(ctx)).outcome).toBe("discarded-admission-denied");
-    expect(ctx.native.evaluateRecipient).toHaveBeenCalledTimes(1);
-    expect(ctx.notice.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "NO_VERIFIED_OPT_IN" }));
+    expect((await matureNext(ctx)).outcome).toBe("deferred-no-recipient");
+    expect(ctx.native.evaluateStoredRecipient).not.toHaveBeenCalled();
+    expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
+    expect(ctx.notice.notify).toHaveBeenCalledWith(expect.objectContaining({ reason: "RECIPIENT_UNVERIFIED" }));
     for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
 
     // Native consent webhook/CustomerPhone projection alone does not invoke the
@@ -140,14 +156,15 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     expect(ctx.candidates).toHaveLength(0);
     expect(ctx.pending.scheduleFromCheckoutUpdated).toHaveBeenCalledTimes(1);
     expect(ctx.pending.scheduleFromCheckoutCreated).not.toHaveBeenCalled();
-    expect(ctx.initiate).toHaveBeenCalledTimes(1);
+    expect(ctx.initiate).not.toHaveBeenCalled();
     for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
 
     expect(await ctx.orchestrator.handleCheckoutUpdatedContract({
       ...checkoutEvent, activityAt: "2026-10-22T11:30:00Z",
     })).toMatchObject({ kind: "pending" });
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
-    expect(ctx.native.evaluateRecipient).toHaveBeenCalledTimes(2);
+    expect(ctx.native.evaluateStoredRecipient).toHaveBeenCalledOnce();
+    expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
     for (const action of Object.values(ctx.writes)) expect(action).toHaveBeenCalledTimes(1);
     expect(ctx.writes.send).toHaveBeenCalledWith("447400123456");
     expect(ctx.candidates).toHaveLength(0);
@@ -187,19 +204,18 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
     expect(await ctx.materialization.materialize(first as never)).toMatchObject({ outcome: "no-op-existing" });
     expect(ctx.initiate).toHaveBeenCalledOnce();
-    expect(ctx.native.evaluateRecipient).toHaveBeenCalledOnce();
+    expect(ctx.native.evaluateStoredRecipient).toHaveBeenCalledOnce();
+    expect(ctx.native.evaluateRecipient).not.toHaveBeenCalled();
     for (const action of Object.values(ctx.writes)) expect(action).toHaveBeenCalledTimes(1);
   });
 
-  it("checks a changed active phone instead of reusing the old phone's consent", async () => {
+  it("does not transfer a prior grant to a changed phone when no eligible stored phone exists", async () => {
     const ctx = scenario();
     ctx.setGrant(true);
     ctx.setCurrentRecipient("447400123457");
     await ctx.orchestrator.handleCheckoutUpdatedContract(checkoutEvent);
-    expect((await matureNext(ctx)).outcome).toBe("discarded-admission-denied");
-    expect(ctx.native.evaluateRecipient).toHaveBeenCalledWith(expect.objectContaining({
-      recipient: "+447400123457",
-    }));
+    expect((await matureNext(ctx)).outcome).toBe("deferred-no-recipient");
+    expect(ctx.native.evaluateStoredRecipient).not.toHaveBeenCalled();
     for (const action of Object.values(ctx.writes)) expect(action).not.toHaveBeenCalled();
 
     // Granting the old number must never authorise the new active recipient.
@@ -209,7 +225,7 @@ describe("ARCH-045 checkout-event-only consent re-evaluation", () => {
       ...checkoutEvent, activityAt: "2026-10-22T11:30:00Z",
     });
     expect((await matureNext(ctx)).outcome).toBe("recovery-created");
-    expect(ctx.native.evaluateRecipient).toHaveBeenLastCalledWith(expect.objectContaining({
+    expect(ctx.native.evaluateStoredRecipient).toHaveBeenLastCalledWith(expect.objectContaining({
       recipient: "+447400123457",
     }));
     expect(ctx.writes.send).toHaveBeenCalledWith("447400123457");
