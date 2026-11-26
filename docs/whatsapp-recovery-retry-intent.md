@@ -100,13 +100,47 @@ ORDER BY i."createdAt" DESC;
 
 ## Remaining activation boundary (phase 2b — not in this patch)
 
-The supplied archive contains Background and its database submodule, not the
-Shopify, API or Admin repositories. Do not remove the old unique sequence key
-or start a retry dispatcher until all readers/writers of that key have been
-migrated together. In particular, use the stable retry intent ID (or a durable
-one-to-one successor mapping) for a *new* physical attempt ID. Never reopen the
+### Phase 2b patch 1 — code-only outreach identity and selection
+
+Retain the existing `(checkoutRecoveryId, sequence)` unique key and the
+original database schema. The trigger identifies the logical outreach slot:
+`INITIAL`, or follow-up (`NO_RESPONSE_FOLLOW_UP`, `POST_WINDOW_FOLLOW_UP`).
+Original attempts retain sequences 1 and 2 respectively. New physical delivery
+retries reserve sequences 3 and above, regardless of the trigger. The retry
+attempt's primary key is `retry_<intent.id>`; never repurpose `initiationKey`.
+The same intent must resolve the same attempt under the existing recovery /
+checkout lock and transaction. Allocate max(sequence, 2) + 1 only for a new
+retry after re-reading under that lock; sequence allocation is not a send permit.
+
+`domain/recovery-outreach-identity.ts` validates the chain from the original
+slot through each exact predecessor intent, failed message and successor ID.
+`services/recovery-delivery-retry/outreach-selection.ts` is its reusable Prisma
+projection. Do not substitute the highest sequence, a failed original or a
+historical successful row for the current physical attempt. Orphan, cross-
+recovery, wrong recipient/trigger, non-automated retry, late positive receipt
+and cancelled predecessor conflicts hold automated selection. An intent without
+a successor is still only a decision. These checks are identity checks, not
+proof of retry eligibility, allowance ownership, funding or a provider permit.
+
+The automated follow-up template reader uses this selector for prior promises.
+It keeps legacy SENT behaviour for original outreach; for a physical retry it
+requires DELIVERED/READ evidence before reusing the actual persisted promise.
+Agent conversation-history selection and moderation are not changed yet. That
+next patch must include only customer-visible outreach, retaining uncertain
+acceptance separately and never treating a failed promise as communicated.
+
+No retry row is created, no queue is registered, and no additional provider
+send or credit charge is permitted by patch 1. Do not deploy retry writers
+until every affected consumer has been migrated together. Never reopen the
 failed attempt, delete its receipt, use the old `recovery-outreach:<attemptId>`
-funding key, or count an initial retry as sequence two.
+funding key, or count an initial retry as sequence two. The initial allowance
+can adopt the successful retry only if no incompatible allowance block already
+exists; existing immutable allowance funding must be explicitly handled or held.
+
+Patch 1 validation: run `node --experimental-strip-types --test scripts/test-recovery-outreach-identity.mjs`, the automated template and original
+outreach unit suites, `npx tsc --noEmit`, the full unit suite and build. The
+selector tests are dependency-free; database concurrency and provider admission
+are not validated by these tests.
 
 Background touchpoints requiring coordinated changes:
 
@@ -139,8 +173,9 @@ Background touchpoints requiring coordinated changes:
 - Coordinate Admin, Shopify and API sequence queries and displays; external
   clients must not treat historical failed sends as the active slot.
 
-Persist a lease and bounded retry budget at the logical slot (recommend one
-additional physical send per slot initially). Reconstruct delayed work from
+Prove a durable claim and bounded retry budget using the existing records
+and current runtime configuration; do not introduce new persistence without
+first establishing a concrete constraint. Reconstruct delayed work from
 PostgreSQL, require a fresh permit, and reserve fresh funding only after all
 final eligibility checks. Explicitly handle configuration repair, policy holds,
 ambiguous acceptance, crash recovery, and exhausted budgets. Validate real

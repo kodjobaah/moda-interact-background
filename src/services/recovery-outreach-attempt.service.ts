@@ -1,6 +1,7 @@
 import { Prisma, RecoveryOutreachStatus, RecoveryOutreachTrigger } from "@prisma/client";
 import prisma from "../lib/db.js";
 import type { RecoveryPolicySnapshot } from "./recovery-policy.service.js";
+import { originalOutreachTrigger, type OriginalOutreachSequence } from "../domain/recovery-outreach-identity.js";
 
 export class RecoveryOutreachAttemptService {
   constructor(private readonly database = prisma) {}
@@ -21,14 +22,12 @@ export class RecoveryOutreachAttemptService {
 
   async getOrCreate(input: {
     recoveryId: string;
-    sequence: 1 | 2;
+    sequence: OriginalOutreachSequence;
     policy: RecoveryPolicySnapshot;
     recipient: string;
   }) {
     const attemptModel = this.requireAttemptModel();
-    const trigger = input.sequence === 1
-      ? RecoveryOutreachTrigger.INITIAL
-      : RecoveryOutreachTrigger.NO_RESPONSE_FOLLOW_UP;
+    const trigger = originalOutreachTrigger(input.sequence);
     return attemptModel.upsert({
       where: {
         checkoutRecoveryId_sequence: {

@@ -2,6 +2,8 @@ import { observedContentHash } from "../../../../src/services/meta-template-mana
 import { readyEvaluation } from "../../fixtures/initial-outreach-evaluation.js";
 import { InitialOutreachEvaluationResultSchema } from "@modainteract/moda-interact-shared/commerce/outreach";
 import { createHash } from "node:crypto";
+import type { OutreachAttemptIdentity } from "../../../../src/domain/recovery-outreach-identity.js";
+import { retryOutreachAttemptId } from "../../../../src/domain/recovery-outreach-identity.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type LogRecord, type StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import { AutomatedRecoveryTemplateService, previousPromise } from
@@ -36,6 +38,15 @@ const basePrepared: PreparedRecoveryTemplate = {
 };
 const policy = { recoveryOfferMode: "NONE" as const,
   fixedShopifyDiscountId: null, offerSnapshot: null };
+const initialAttempt: OutreachAttemptIdentity = {
+  id: "attempt-1", checkoutRecoveryId: "recovery-1", sequence: 1, trigger: "INITIAL",
+  recipient: "15551234567", initiatedBy: null, status: "WAITING_FOR_RESPONSE",
+  sentAt: now, customerRespondedAt: null, outboundMessageId: "message-1",
+  outboundMessage: { id: "message-1", conversationId: "conversation-1", direction: "OUTBOUND",
+    senderType: "AUTOMATION", status: "SENT", providerMessageId: "wamid-1", sentAt: now,
+    deliveredAt: null, readAt: null, failedAt: null },
+  deliveryRetryIntent: null,
+};
 const recovered = {
   id: "recovery-1", shopId: "shop-1", checkoutUrl: "https://shop.test/checkouts/abc",
   generation: 1, currency: "GBP",
@@ -44,7 +55,8 @@ const recovered = {
   lastExternalActivityAt: new Date(now.getTime() - 60_000), expiredAt: null,
   customer: { firstName: "Alice" },
   shop: { id: "shop-1", domain: "shop.test", status: "ACTIVE", defaultLanguageTag: "en-GB" },
-  outreachAttempts: [{ sentAt: now, outboundMessageId: "message-1" }],
+  conversation: { id: "conversation-1" },
+  outreachAttempts: [initialAttempt],
 };
 const storedPromise = (promise: unknown) => JSON.stringify({
   contract: "moda.whatsapp.automated-template-parameters.v1", recoveryPromise: promise,
@@ -486,6 +498,46 @@ describe("ARCH-047 shared automated recovery offer/template coordinator", () => 
       previouslyPromisedOffer: { kind: "CODE_OFFER", providerDiscountId: "provider-offer-1",
         code: "SAVE10", promotionTarget: "CHECKOUT" },
     }));
+  });
+
+  it("reads the delivered retry's promise instead of the failed initial receipt", async () => {
+    const failed: OutreachAttemptIdentity = { ...initialAttempt, status: "FAILED",
+      outboundMessage: { ...initialAttempt.outboundMessage!, status: "FAILED", failedAt: now },
+      deliveryRetryIntent: { id: "intent-1", failedAttemptId: initialAttempt.id,
+        failedMessageId: "message-1", cancelledAt: null } };
+    const retry: OutreachAttemptIdentity = { ...initialAttempt, id: retryOutreachAttemptId("intent-1"),
+      sequence: 3, outboundMessageId: "message-retry",
+      outboundMessage: { ...initialAttempt.outboundMessage!, id: "message-retry",
+        providerMessageId: "wamid-retry", status: "DELIVERED", deliveredAt: now } };
+    const f = fixture({ ...recovered, status: "MESSAGE_SENT", outreachAttempts: [retry, failed] });
+    f.preparer.prepare.mockResolvedValueOnce({ ...basePrepared, purpose: "FOLLOW_UP_NO_OFFER" });
+    f.database.conversationMessage.findUnique.mockResolvedValueOnce({
+      content: storedPromise({ kind: "NO_OFFER" }), status: "DELIVERED", providerMessageId: "wamid-retry",
+      senderType: "AUTOMATION", direction: "OUTBOUND",
+    });
+    expect((await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1", stage: "FOLLOW_UP",
+      policy, conversationLanguageTag: "fr-CA" })).kind).toBe("prepared");
+    expect(f.database.conversationMessage.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "message-retry" },
+    }));
+    expect(f.offers.resolve).toHaveBeenCalledWith(expect.objectContaining({
+      previouslyPromisedOffer: { kind: "NO_OFFER" },
+    }));
+  });
+
+  it("does not use an accepted but unconfirmed retry as a prior promise", async () => {
+    const failed: OutreachAttemptIdentity = { ...initialAttempt, status: "FAILED",
+      outboundMessage: { ...initialAttempt.outboundMessage!, status: "FAILED", failedAt: now },
+      deliveryRetryIntent: { id: "intent-1", failedAttemptId: initialAttempt.id,
+        failedMessageId: "message-1", cancelledAt: null } };
+    const retry: OutreachAttemptIdentity = { ...initialAttempt, id: retryOutreachAttemptId("intent-1"),
+      sequence: 3, outboundMessageId: "message-retry",
+      outboundMessage: { ...initialAttempt.outboundMessage!, id: "message-retry", providerMessageId: "wamid-retry" } };
+    const f = fixture({ ...recovered, status: "MESSAGE_SENT", outreachAttempts: [failed, retry] });
+    expect(await f.service.prepare({ shopId: "shop-1", recoveryId: "recovery-1", stage: "FOLLOW_UP",
+      policy, conversationLanguageTag: "fr-CA" })).toEqual({ kind: "unavailable", reason: "INITIAL_PROMISE_UNAVAILABLE" });
+    expect(f.database.conversationMessage.findUnique).not.toHaveBeenCalled();
+    expect(f.offers.resolve).not.toHaveBeenCalled();
   });
 
   it("retains trusted targets from confirmed receipts without guessing legacy targets", () => {

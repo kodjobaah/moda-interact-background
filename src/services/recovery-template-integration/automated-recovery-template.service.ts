@@ -36,6 +36,8 @@ import {
 } from "./initial-no-offer-fallback.service.js";
 import { classifyInitialOutreachFallback } from "./initial-outreach-fallback-selection.js";
 import { initialOutreachDiagnostic } from "../outbound-whatsapp-admission/outbound-provider-failure.service.js";
+import { selectEffectiveOutreachAttempt, hasConfirmedOutreachDelivery } from "../../domain/recovery-outreach-identity.js";
+import { recoveryOutreachIdentitySelect } from "../recovery-delivery-retry/outreach-selection.js";
 
 export type AutomatedTemplateResult =
   | { kind: "prepared"; prepared: PreparedRecoveryTemplate; send: ReturnType<typeof templateSendFields>;
@@ -63,7 +65,7 @@ function boundedFailure(error: unknown): string {
 }
 
 /** The only supported historical promise is the template input actually stored
- * on a provider-confirmed sequence-one message. Mutable current catalogue or
+ * on the effective initial outreach message. Mutable current catalogue or
  * policy must never be treated as proof of what was sent previously. */
 export function previousPromise(content: string): PreviouslyPromisedOffer | null {
   try {
@@ -330,7 +332,8 @@ export class AutomatedRecoveryTemplateService {
           lastExternalActivityAt: true, expiredAt: true,
           customer: { select: { firstName: true } },
           shop: { select: { id: true, domain: true, status: true, defaultLanguageTag: true } },
-          outreachAttempts: { where: { sequence: 1 }, select: { sentAt: true, outboundMessageId: true } },
+          conversation: { select: { id: true } },
+          outreachAttempts: { select: recoveryOutreachIdentitySelect },
         },
       });
       if (!recovery || recovery.shopId !== input.shopId || recovery.shop.id !== input.shopId ||
@@ -357,13 +360,29 @@ export class AutomatedRecoveryTemplateService {
       let prior: PreviouslyPromisedOffer | undefined;
       let priorOfferSet: unknown;
       if (input.stage === "FOLLOW_UP") {
-        const initial = recovery.outreachAttempts[0];
-        if (!initial?.sentAt || !initial.outboundMessageId) return unavailable("INITIAL_PROMISE_UNAVAILABLE");
+        const selection = selectEffectiveOutreachAttempt({
+          recoveryId: recovery.id, conversationId: recovery.conversation?.id ?? null,
+          slot: "INITIAL", attempts: recovery.outreachAttempts,
+        });
+        if (selection.kind === "conflict") {
+          this.log.warn("recovery_template.outreach_identity_conflict", {
+            shopId: input.shopId, recoveryId: recovery.id, reason: selection.reason,
+          });
+        }
+        if (selection.kind !== "selected") return unavailable("INITIAL_PROMISE_UNAVAILABLE");
+        const initial = selection.current;
+        // Preserve existing SENT compatibility for the original path. A retry
+        // must have positive delivery evidence before its promise is reused.
+        if (!initial.sentAt || !initial.outboundMessageId ||
+            (selection.retryCount > 0 && !hasConfirmedOutreachDelivery(initial, recovery.conversation?.id ?? null))) {
+          return unavailable("INITIAL_PROMISE_UNAVAILABLE");
+        }
         const message = await this.database.conversationMessage.findUnique({
           where: { id: initial.outboundMessageId },
           select: { content: true, status: true, providerMessageId: true, direction: true, senderType: true },
         });
         if (!message || !["SENT", "DELIVERED", "READ"].includes(message.status) ||
+            (selection.retryCount > 0 && !["DELIVERED", "READ"].includes(message.status)) ||
             !message.providerMessageId || message.direction !== "OUTBOUND" ||
             message.senderType !== "AUTOMATION") return unavailable("INITIAL_PROMISE_UNAVAILABLE");
         const parsed = previousPromise(message.content);
