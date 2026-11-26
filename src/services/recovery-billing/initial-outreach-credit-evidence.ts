@@ -50,7 +50,10 @@ export type InitialMessageEvidence = {
   };
 };
 
-export async function readInitialAttempt(
+/** Identity-only read; the funding preflight separately proves the full
+ * current retry chain under the owner lock. Historical settlement must use
+ * readInitialAttempt, which also validates the persisted historical lineage. */
+export async function readInitialAttemptIdentity(
   tx: Transaction,
   input: InitialOutreachCreditIdentity,
 ): Promise<InitialAttemptEvidence> {
@@ -83,6 +86,11 @@ export async function readInitialAttempt(
     attempt.trigger === "INITIAL" &&
     (attempt.sequence === 1 && !attempt.id.startsWith("retry_") || attempt.sequence >= 3),
   "initial attempt/recovery/Shop identity mismatch");
+  return attempt;
+}
+
+export async function readInitialAttempt(tx: Transaction, input: InitialOutreachCreditIdentity): Promise<InitialAttemptEvidence> {
+  const attempt = await readInitialAttemptIdentity(tx, input);
   if (attempt.sequence >= 3) {
     const conversationId = attempt.checkoutRecovery.conversation?.id;
     requireLineage(conversationId, "initial retry conversation missing");

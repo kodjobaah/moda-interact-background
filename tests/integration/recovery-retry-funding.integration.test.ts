@@ -1,3 +1,4 @@
+import { withOneRecoveryTransactionFault } from "./fixtures/recovery-transaction-fault.fixture.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
@@ -86,6 +87,36 @@ suite("Recovery delivery retry funding (PostgreSQL)", () => {
       expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: retry.original.id } })).toEqual(retry.original);
       const sum = await f.db.usageEvent.aggregate({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" }, _sum: { quantity: true } });
       expect(sum._sum.quantity?.toNumber()).toBe(1);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it.each(["rollback", "lost-ack"] as const)("replays %s reservation and settlement without charging twice", async fault => {
+    const f = await createInitialOutreachCreditFixture({ source: fault === "rollback" ? "free" : "purchased", sentAgeMs: 60 * 60_000 });
+    try {
+      const retry = await prepareFailedOriginal(f);
+      const fundingFault = withOneRecoveryTransactionFault(f.db, fault);
+      const billing = new RecoveryBillingService(fundingFault.database);
+      const admission = await billing.admit(retry.request);
+      expect(admission).toMatchObject({ kind: "admitted" });
+      expect(fundingFault.injected()).toBe(true);
+      expect(fundingFault.calls()).toBeGreaterThanOrEqual(2);
+      const reservation = await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId, status: "RESERVED" } });
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(2);
+      const message = await simulatedReceipt(f, retry, true);
+      const settlementFault = withOneRecoveryTransactionFault(f.db, fault);
+      const service = new InitialOutreachCreditService(settlementFault.database, retry.logger);
+      expect(await service.settleConfirmedInitialOutreach({ ...retry.request, outboundMessageId: message.id })).toMatchObject({
+        kind: "settled", disposition: fault === "rollback" ? "committed" : "already-committed", reservationId: reservation.id,
+      });
+      expect(settlementFault.injected()).toBe(true);
+      expect(settlementFault.calls()).toBeGreaterThanOrEqual(2);
+      const committed = await f.db.usageReservation.findUniqueOrThrow({ where: { id: reservation.id } });
+      expect(committed).toMatchObject({ status: "COMMITTED", compensatedAt: null });
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: retry.original.id } })).toEqual(retry.original);
+      const sum = await f.db.usageEvent.aggregate({ where: { shopId: f.shopId, metric: "RECOVERY_CONVERSATION" }, _sum: { quantity: true } });
+      expect(sum._sum.quantity?.toNumber()).toBe(1);
+      expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(2);
+      expect(await f.db.conversationMessage.count({ where: { conversationId: retry.conversation.id } })).toBe(2);
     } finally { await f.close(); }
   }, 60_000);
 

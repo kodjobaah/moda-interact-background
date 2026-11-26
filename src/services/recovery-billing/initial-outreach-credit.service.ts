@@ -18,13 +18,15 @@ import { purchasedRecoveryReservationService } from "../purchased-recovery-reser
 import { findExactRecoveryReservationSource } from "../recovery-delivery-compensation/lineage.js";
 import { readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
 import { RecoveryCompensationLineageError, requireLineage } from "../recovery-delivery-compensation/types.js";
-import { DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES, isRecoveryReservationRetryableConflict } from "../recovery-reservation/reservation-lifecycle.js";
+import { DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES } from "../recovery-reservation/reservation-lifecycle.js";
 import type { ExistingInitialOutreachCredit, ExistingInitialOutreachCreditInput, ConfirmedInitialOutreachCreditInput, ConfirmedInitialOutreachSettlement, RecoveryBillingAdmission } from "./recovery-billing.types.js";
 import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
 import type { CapacityPolicyOutcome } from "./capacity-policy.js";
 import { requireInitialRetryFundingReady } from "../recovery-delivery-retry/funding.js";
 import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diagnostic.js";
-import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialMessage, validateInitialMessageIdentity } from "./initial-outreach-credit-evidence.js";
+import { RecoveryTransactionTiming, SLOW_RECOVERY_TRANSACTION_MS, isReplayableRecoveryTransactionError,
+  recoveryTransactionBackoffMs, transactionFailureDetails, waitForRecoveryTransactionReplay } from "../recovery-delivery-retry/transaction-resilience.js";
+import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialAttemptIdentity, readInitialMessage, validateInitialMessageIdentity, type InitialAttemptEvidence } from "./initial-outreach-credit-evidence.js";
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
 type Database = Pick<PrismaClient, "$transaction">;
@@ -45,34 +47,44 @@ export class InitialOutreachCreditService {
    * keys. Hold the existing recovery owner lock across lookup and reservation;
    * a concurrent replay must reuse the same reservation, not select a new plan.
    * This entrypoint does not create the attempt or grant a provider permit.
+   * The reserve callback is exclusively the existing transaction-bound billing
+   * owners: it may not change recovery/message state or perform external I/O.
    */
   async admitInitialRetry(input: { shopId: string; recoveryId: string; outreachAttemptId: string }, reserve: (tx: Tx) => Promise<CapacityPolicyOutcome>): Promise<CapacityPolicyOutcome> {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       let stage = "identity";
+      const timing = new RecoveryTransactionTiming();
+      const setStage = (value: string) => { stage = value; timing.enter(value); };
       let reservationId: string | undefined;
       let reused = false;
       try {
-        const outcome = await this.database.$transaction(async (tx): Promise<CapacityPolicyOutcome> => {
+        const outcome = await this.database.$transaction(tx => timing.measure(async (): Promise<CapacityPolicyOutcome> => {
           requireLineage(input.outreachAttemptId.startsWith("retry_"), "not a retry funding identity");
           const candidate = { ...input, outboundMessageId: null };
-          const existing = await revalidate(tx, candidate, this.now(), value => { stage = value; });
+          const eligible = await validatePrePermit(tx, candidate, this.now(), setStage);
+          if (eligible.kind === "held") throw new ExistingHoldSignal(eligible.reason);
+          const existing = await revalidateFundingSource(tx, candidate, eligible.attempt, this.now(), setStage);
           if (existing.kind === "held") throw new ExistingHoldSignal(existing.reason);
           if (existing.kind === "admitted") {
             reservationId = existing.reservationId;
             reused = true;
             return { result: { kind: "admitted", admission: existing.admission } };
           }
-          stage = "reserve_retry";
+          setStage("reserve_retry");
           const outcome = await reserve(tx);
           if (outcome.result.kind !== "admitted") return outcome;
-          const checked = await revalidate(tx, candidate, this.now(), value => { stage = value; });
+          // The callback uses only transaction-bound billing owners. The
+          // same Serializable snapshot and owner locks still apply; no new
+          // recovery/message reads or repeated historical chain scans are
+          // needed. Re-read the actual reservation and current source policy.
+          const checked = await revalidateFundingSource(tx, candidate, eligible.attempt, this.now(), setStage);
           requireLineage(checked.kind === "admitted" && checked.admission.sourceKey === outcome.result.admission.sourceKey,
             "retry funding source changed during reservation");
           reservationId = checked.reservationId;
           return { result: { kind: "admitted", admission: checked.admission } };
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         const fields = { shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
-          outreachAttemptId: input.outreachAttemptId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage };
+          outreachAttemptId: input.outreachAttemptId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, transactionAttempt: attempt, ...timing.snapshot() };
         if (outcome.result.kind === "admitted") {
           const evidence = { ...fields, fundingReservationId: reservationId, fundingSource: outcome.result.admission.kind };
           if (reused) this.serviceLogger.debug("recovery.delivery_retry.funding_replayed", evidence);
@@ -84,15 +96,16 @@ export class InitialOutreachCreditService {
       } catch (error) {
         if (error instanceof RecoveryCompensationLineageError || error instanceof ExistingHoldSignal) {
           this.serviceLogger.debug("recovery.retry_credit.held", { ...input, checkoutRecoveryId: input.recoveryId,
-            retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, reason: initialOutreachDiagnostic(error).message,
+            retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, ...timing.snapshot(), reason: initialOutreachDiagnostic(error).message,
             sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
           return { result: { kind: "blocked", reason: "reservation-in-flight" } };
         }
-        if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
+        if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
+          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, maxAttempts: this.maxAttempts, ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(attempt);
           continue;
         }
-        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -105,20 +118,25 @@ export class InitialOutreachCreditService {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       stage = "identity";
       sourceKind = undefined;
+      const timing = new RecoveryTransactionTiming();
+      const setStage = (value: string, kind?: string) => { stage = value; timing.enter(value); if (kind) sourceKind = kind; };
       try {
-        const result = await this.database.$transaction(async (tx) => {
+        const result = await this.database.$transaction(tx => timing.measure(async () => {
           const attemptEvidence = await readInitialAttempt(tx, input);
           const pointer = await readInitialMessage(tx, input.outboundMessageId);
           if (!pointer) throw new HoldSignal("message-not-confirmed");
           if (pointer.conversation.checkoutRecovery?.shopId !== input.shopId) throw new HoldSignal("lineage-conflict");
+          setStage("shop_lock");
           const shops = await tx.$queryRaw<Array<{ id: string; platform: string }>>`SELECT "id", "platform" FROM "commerce"."Shop" WHERE "id"=${input.shopId} FOR KEY SHARE`;
           if (shops.length !== 1) throw new HoldSignal("lineage-conflict");
+          setStage("message_lock");
           await tx.$queryRaw`SELECT "id" FROM "whatsapp"."ConversationMessage" WHERE "id"=${input.outboundMessageId} FOR UPDATE`;
+          setStage("message_evidence");
           const message = await readInitialMessage(tx, input.outboundMessageId);
           if (!message || message.id !== pointer.id || message.providerMessageId !== pointer.providerMessageId || message.conversationId !== pointer.conversationId || message.conversation.shopId !== pointer.conversation.shopId || message.conversation.checkoutRecovery?.id !== input.recoveryId || message.conversation.checkoutRecovery.shopId !== input.shopId) throw new HoldSignal("lineage-conflict");
           const usage = await validateInitialMessageIdentity(tx, input, attemptEvidence, message, false);
           if (!(message.status === "SENT" || message.status === "DELIVERED" || message.status === "READ") || !message.sentAt || message.providerFailureCode || message.failedAt) throw new HoldSignal("message-not-confirmed");
-          stage = "source_lookup";
+          setStage("source_lookup");
           const source = await findExactRecoveryReservationSource(tx, input.shopId, input.outreachAttemptId);
           if (!source) throw new HoldSignal("lineage-conflict");
           const { reservation, kind } = source;
@@ -131,7 +149,7 @@ export class InitialOutreachCreditService {
           if (reservation.status === UsageReservationStatus.RELEASED) throw new HoldSignal("reservation-released", sourceInfo);
           if (reservation.status !== UsageReservationStatus.RESERVED && reservation.status !== UsageReservationStatus.COMMITTED) throw new HoldSignal("lineage-conflict", sourceInfo);
           if (reservation.status === UsageReservationStatus.RESERVED) {
-            stage = "source_commit";
+            setStage("source_commit");
             try {
               const outcome = await commitSource(tx, source, input.shopId, message.sentAt);
               if (!isPositiveOwnerOutcome(outcome, input.shopId, reservation.sourceKey)) throw new HoldSignal("settlement-not-committed", sourceInfo);
@@ -140,14 +158,20 @@ export class InitialOutreachCreditService {
               throw error;
             }
           }
-          stage = "committed_usage_verification";
-          const committedSource = await findExactRecoveryReservationSource(tx, input.shopId, input.outreachAttemptId);
+          setStage("committed_usage_verification");
+          // Already-committed replay has already read the exact source in
+          // this transaction. A new commit must still reread and verify it.
+          const committedSource = reservation.status === UsageReservationStatus.COMMITTED ? source
+            : await findExactRecoveryReservationSource(tx, input.shopId, input.outreachAttemptId);
           if (!committedSource || committedSource.reservation.id !== reservation.id || committedSource.reservation.status !== UsageReservationStatus.COMMITTED) throw new HoldSignal("settlement-not-committed", sourceInfo);
           const committedUsage = await readCommittedRecoveryUsage(tx, committedSource);
           if (committedUsage.provider !== shops[0]!.platform || !committedUsage.quantity.equals(1) || (kind === "paid" && committedUsage.billingPeriodId !== await paidPeriodId(tx, reservation))) throw new HoldSignal("lineage-conflict", sourceInfo);
           if (usage && (usage.sourceType !== "OUTBOUND_AUTOMATED_MESSAGE" || usage.idempotencyKey !== `recovery-outreach:${input.outreachAttemptId}`)) throw new HoldSignal("lineage-conflict", sourceInfo);
           return { kind: "settled", disposition: reservation.status === UsageReservationStatus.COMMITTED ? "already-committed" : "committed", sourceKind: kind, sourceKey: reservation.sourceKey, reservationId: reservation.id, committedUsageEventId: committedUsage.id, outboundMessageId: message.id, sentAt: message.sentAt } as const;
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        const elapsed = timing.snapshot();
+        if (attempt > 1 || elapsed.transactionElapsedMs >= SLOW_RECOVERY_TRANSACTION_MS)
+          this.serviceLogger.debug("recovery.initial_outreach_credit.transaction_completed", { operation: "settleConfirmedInitialOutreach", ...input, attempt, outcome: result.kind, ...elapsed });
         return result;
       } catch (error) {
         if (error instanceof HoldSignal) {
@@ -158,11 +182,12 @@ export class InitialOutreachCreditService {
           this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "settleConfirmedInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           return { kind: "held", reason: "lineage-conflict" };
         }
-        if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(attempt);
           continue;
         }
-        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -175,8 +200,13 @@ export class InitialOutreachCreditService {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       stage = "identity";
       sourceKind = undefined;
+      const timing = new RecoveryTransactionTiming();
+      const setStage = (value: string, kind?: string) => { stage = value; timing.enter(value); if (kind) sourceKind = kind; };
       try {
-        const result = await this.database.$transaction((tx) => revalidate(tx, input, this.now(), (value, kind) => { stage = value; if (kind) sourceKind = kind; }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        const result = await this.database.$transaction(tx => timing.measure(() => revalidate(tx, input, this.now(), setStage)), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        const elapsed = timing.snapshot();
+        if (attempt > 1 || elapsed.transactionElapsedMs >= SLOW_RECOVERY_TRANSACTION_MS)
+          this.serviceLogger.debug("recovery.initial_outreach_credit.transaction_completed", { operation: "revalidateExistingInitialOutreach", ...input, attempt, outcome: result.kind, ...elapsed });
         if (result.kind === "held") this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(result.reservationId ? { reservationId: result.reservationId } : {}), ...(result.sourceKey ? { sourceKey: result.sourceKey } : {}), ...(sourceKind ? { sourceKind } : {}), reason: result.reason });
         return result;
       } catch (error) {
@@ -188,11 +218,12 @@ export class InitialOutreachCreditService {
           this.serviceLogger.warn("recovery.initial_outreach_credit.held", { operation: "revalidateExistingInitialOutreach", stage, ...input, reason: "lineage-conflict", error, ...errorCauseContext(error), ...databaseErrorContext(error) });
           return { kind: "held", reason: "lineage-conflict" };
         }
-        if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(attempt);
           continue;
         }
-        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isRecoveryReservationRetryableConflict(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -253,22 +284,33 @@ function databaseErrorContext(error: unknown): Record<string, unknown> {
   return Object.keys(databaseError).length ? { databaseError } : {};
 }
 
-async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: (stage: string, sourceKind?: string) => void): Promise<ExistingInitialOutreachCredit> {
+type Stage = (stage: string, sourceKind?: string) => void;
+type PrePermit = { kind: "ready"; attempt: InitialAttemptEvidence } | Extract<ExistingInitialOutreachCredit, { kind: "held" }>;
+
+async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: Stage): Promise<ExistingInitialOutreachCredit> {
+  const eligible = await validatePrePermit(tx, input, now, setStage);
+  return eligible.kind === "held" ? eligible : revalidateFundingSource(tx, input, eligible.attempt, now, setStage);
+}
+
+async function validatePrePermit(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: Stage): Promise<PrePermit> {
   setStage("identity");
-  let attempt = await readInitialAttempt(tx, input);
+  let attempt = await readInitialAttemptIdentity(tx, input);
   let historicalMessageIds: string[] = [];
   if (attempt.sequence >= 3) {
     const conversationId = attempt.checkoutRecovery.conversation?.id;
     requireLineage(conversationId, "initial retry conversation missing");
+    setStage("owner_lock");
     const owner = await lockRecoveryContext(tx, conversationId);
     requireLineage(owner?.shopId === input.shopId && owner.recoveryId === input.recoveryId &&
       owner.mode === "AI" && !terminalRecovery(owner.recoveryStatus) && !owner.lastInboundAt && owner.inboundVersion === 0,
     "initial retry owner no longer eligible");
-    attempt = await readInitialAttempt(tx, input);
-    requireLineage(attempt.sequence >= 3, "retry identity changed");
+    setStage("retry_lineage");
+    attempt = await readInitialAttemptIdentity(tx, input);
+    requireLineage(attempt.sequence >= 3 && attempt.checkoutRecovery.conversation?.id === conversationId, "retry identity changed");
     const links = await requireInitialRetryFundingReady(tx, { ...input, conversationId, attemptId: attempt.id, now });
     historicalMessageIds = links.map(link => link.intent.failedMessageId);
   }
+  setStage("message_evidence");
   if (input.outboundMessageId === null) await assertNoInitialMessageEvidence(tx, input, attempt, historicalMessageIds);
   else {
     await tx.$queryRaw`SELECT "id" FROM "whatsapp"."ConversationMessage" WHERE "id"=${input.outboundMessageId} FOR UPDATE`;
@@ -276,6 +318,11 @@ async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now
     if (!message || (attempt.status !== "PENDING" && attempt.status !== "CAPACITY_BLOCKED") || attempt.sentAt || attempt.failureCode || message.status !== "PENDING" || message.providerDispatchKey || message.providerDispatchAdmittedAt || message.providerDispatchControlRevision !== null || message.providerMessageId || message.sentAt || message.deliveredAt || message.readAt || message.providerFailureCode || message.failedAt) return { kind: "held", reason: "message-not-pre-permit" };
     await validateInitialMessageIdentity(tx, input, attempt, message, true);
   }
+  return { kind: "ready", attempt };
+}
+
+async function revalidateFundingSource(tx: Tx, input: ExistingInitialOutreachCreditInput, attempt: InitialAttemptEvidence,
+  now: Date, setStage: Stage): Promise<ExistingInitialOutreachCredit> {
   setStage("source_lookup");
   const source = await findExactRecoveryReservationSource(tx, input.shopId, input.outreachAttemptId);
   if (!source) return input.outboundMessageId === null ? { kind: "absent" } : { kind: "held", reason: "lineage-conflict" };

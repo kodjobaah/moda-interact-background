@@ -119,4 +119,35 @@ describe("recovery delivery retry observability", () => {
     expect(emitted).not.toContain("447700900001");
     expect(emitted).not.toContain("private-value");
   });
+
+  it("rereads the claim after a lost transaction acknowledgement and does not create another attempt", async () => {
+    const f = fixture();
+    const missing = new Prisma.PrismaClientKnownRequestError("Transaction API error: Transaction not found.", { code: "P2028", clientVersion: "6.19.3" });
+    f.transaction.mockImplementationOnce(async work => {
+      await work(f.tx);
+      f.tx.recoveryOutreachAttempt.findMany.mockResolvedValue([f.original, f.successor]);
+      throw missing;
+    });
+    await expect(f.service.claim("intent-1", policy)).resolves.toMatchObject({ kind: "existing", attemptId: "retry_intent-1" });
+    expect(f.transaction).toHaveBeenCalledTimes(2);
+    expect(f.tx.recoveryOutreachAttempt.create).toHaveBeenCalledTimes(1);
+    expect(f.records.some(record => record.event === "recovery.delivery_retry.claimed")).toBe(false);
+    expect(f.records.find(record => record.event === "recovery.delivery_retry.claim_conflict")).toMatchObject({ data: {
+      prismaCode: "P2028", transactionFailureKind: "not-found", transactionAttempt: 1, retryBackoffMs: 50,
+      stageDurationsMs: expect.objectContaining({ owner_lock: expect.any(Number), transaction_commit: expect.any(Number) }),
+    } });
+    expect(f.records.at(-1)).toMatchObject({ event: "recovery.delivery_retry.claim_replayed", data: { transactionAttempt: 2 } });
+  });
+
+  it("stops after three closed-transaction attempts and propagates the original exception", async () => {
+    const f = fixture();
+    const error = new Prisma.PrismaClientKnownRequestError("Transaction API error: Transaction already closed.", { code: "P2028", clientVersion: "6.19.3" });
+    f.transaction.mockRejectedValue(error);
+    await expect(f.service.claim("intent-1", policy)).rejects.toBe(error);
+    expect(f.transaction).toHaveBeenCalledTimes(3);
+    expect(f.tx.recoveryOutreachAttempt.create).not.toHaveBeenCalled();
+    expect(f.records.filter(record => record.event === "recovery.delivery_retry.claim_conflict")).toHaveLength(2);
+    expect(f.records.at(-1)).toMatchObject({ event: "recovery.delivery_retry.claim_failed", data: { retryExhausted: true, transactionAttempt: 3 } });
+  });
+
 });

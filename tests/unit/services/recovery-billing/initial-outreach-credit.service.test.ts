@@ -323,7 +323,7 @@ describe("InitialOutreachCreditService", () => {
       event: "recovery.initial_outreach_credit.held",
       data: {
         reason: "lineage-conflict",
-        stage: "identity",
+        stage: "message_evidence",
         error: {
           name: "RecoveryCompensationLineageError",
           message: expect.stringContaining("initial attempt has existing message or send evidence"),
@@ -331,4 +331,33 @@ describe("InitialOutreachCreditService", () => {
       },
     });
   });
+
+  it("retries an expired database transaction with fresh evidence and the original timeout detail", async () => {
+    const records: LogRecord[] = [];
+    const expired = new Prisma.PrismaClientKnownRequestError(
+      `${"Prisma source excerpt ".repeat(40)}Transaction API error: Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 5000 ms, however 5268 ms passed since the start of the transaction.`,
+      { code: "P2028", clientVersion: Prisma.prismaVersion.client });
+    const tx = transactionForAttempt({ usageReservation: { findMany: async () => [] } });
+    const transaction = vi.fn(databaseFor(tx).$transaction).mockRejectedValueOnce(expired);
+    const service = new InitialOutreachCreditService({ $transaction: transaction } as never, captureLogger(records));
+    await expect(service.revalidateExistingInitialOutreach({ ...input, outboundMessageId: null })).resolves.toEqual({ kind: "absent" });
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(records[0]).toMatchObject({ event: "recovery.initial_outreach_credit.retry", data: {
+      reasonCode: "P2028", transactionFailureKind: "expired", prismaTimeoutMs: 5000, prismaElapsedMs: 5268,
+      transactionErrorMessage: expect.stringContaining("expired transaction"), transactionElapsedMs: expect.any(Number), retryBackoffMs: 50,
+    } });
+    expect(records.at(-1)).toMatchObject({ event: "recovery.initial_outreach_credit.transaction_completed", data: { attempt: 2, outcome: "absent" } });
+  });
+
+  it("does not replay an unrelated transaction API error", async () => {
+    const records: LogRecord[] = [];
+    const error = new Prisma.PrismaClientKnownRequestError("Transaction API error: unsupported interactive transaction operation",
+      { code: "P2028", clientVersion: Prisma.prismaVersion.client });
+    const transaction = vi.fn().mockRejectedValue(error);
+    const service = new InitialOutreachCreditService({ $transaction: transaction } as never, captureLogger(records));
+    await expect(service.revalidateExistingInitialOutreach({ ...input, outboundMessageId: null })).rejects.toBe(error);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(records.at(-1)).toMatchObject({ event: "recovery.initial_outreach_credit.failed", data: { retryExhausted: false } });
+  });
+
 });

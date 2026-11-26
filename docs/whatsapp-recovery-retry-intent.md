@@ -395,3 +395,13 @@ reservations stranded before permit acquisition, and unchanged-hold log
 coalescing. Unknown provider outcomes must remain held for reconciliation.
 API/dashboard projections and full end-to-end validation remain outstanding.
 No schema changes are introduced.
+
+### Transaction resilience (code-only Patch 4b.2.1)
+
+Claiming, retry credit reservation, initial credit preflight and settlement are database-only replayable owners. Each starts a fresh Serializable transaction for a recognised conflict or closed/expired/missing Prisma transaction (P2028), with at most three attempts by default and bounded backoff outside the transaction. Raw-query serialization/deadlock SQLSTATEs 40001/40P01 are eligible only when supplied by Prisma P2010. Unexpected errors propagate unchanged. A lost commit acknowledgement is not a reason to create a new identity: replay rereads the persisted deterministic attempt, exact reservation and usage evidence. No provider request, dispatch permit acquisition or whole execution job is retried by this policy.
+
+The reservation path validates the owner and current historical chain once per locked transaction, then checks the newly created reservation and source policy in that same transaction. The reservation callback is limited to the existing transaction-bound billing owners. Historical settlement retains its full lineage check; a replay of an already committed source does not need to reread that same source. Lock order and all final provider checks remain unchanged. The Prisma timeout is not increased.
+
+Claim and reservation outcomes and failed/replayed transactions include monotonic `transactionElapsedMs` and `stageDurationsMs`. The `owner_lock`, `shop_lock` and `message_lock` stages include round trips and lock waiting, not just PostgreSQL execution. `transaction_acquire` and `transaction_commit` expose acquisition and commit-acknowledgement time. For recognized P2028 failures the bounded redacted transaction error and parsed timeout/elapsed fields are recorded separately from the source excerpt. Slow or recovered settlement and preflight transactions emit `recovery.initial_outreach_credit.transaction_completed`. The disposable integration fixtures simulate both rollback and lost commit acknowledgement against actual PostgreSQL; neither invokes a provider.
+
+Automatic retry execution remains unregistered. This correction does not prove production performance or fresh provider dispatch readiness.

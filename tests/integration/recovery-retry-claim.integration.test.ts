@@ -1,3 +1,4 @@
+import { withOneRecoveryTransactionFault } from "./fixtures/recovery-transaction-fault.fixture.js";
 import { initialRetryExecutionPorts, InitialDeliveryRetryExecutionService } from "../../src/services/recovery-delivery-retry/execution.js";
 import { expectedInitialRetryDispatchKey } from "../../src/services/recovery-delivery-retry/provider-dispatch-key.js";
 import { RecoveryBillingService } from "../../src/services/recovery-billing.service.js";
@@ -75,6 +76,22 @@ suite("Initial delivery retry durable claims", () => {
         .toMatchObject({ checkoutRecoveryId: f.recoveryId, sequence: 3, trigger: "INITIAL", status: "PENDING", outboundMessageId: null });
       // Crash/restart: the same intent can be rediscovered, and the claim replays.
       expect(await new InitialDeliveryRetryClaimService(f.db).claim(s.intent.id, policy)).toMatchObject({ kind: "existing", sequence: 3 });
+      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(2);
+      await noFinancialOrProviderChanges(f, s);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it.each(["rollback", "lost-ack"] as const)("replays a %s claim with exactly one durable successor", async fault => {
+    const f = await createInitialOutreachCreditFixture({ sentAgeMs: 60 * 60_000 });
+    try {
+      const s = await failure(f);
+      const injected = withOneRecoveryTransactionFault(f.db, fault);
+      const service = new InitialDeliveryRetryClaimService(injected.database);
+      expect(await service.claim(s.intent.id, policy)).toMatchObject({
+        kind: fault === "rollback" ? "claimed" : "existing", attemptId: retryOutreachAttemptId(s.intent.id), sequence: 3,
+      });
+      expect(injected.injected()).toBe(true);
+      expect(injected.calls()).toBeGreaterThanOrEqual(2);
       expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(2);
       await noFinancialOrProviderChanges(f, s);
     } finally { await f.close(); }
