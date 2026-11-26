@@ -150,7 +150,10 @@ describe("RecoveryOutreachFinalizationService initial Support notice wiring", ()
   });
 
   it("emits safe source and cause evidence through the Shared logger and rethrows the original error", async () => {
-    expect(sharedPackageJson.version).toBe("6.1.0");
+    const declared = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string> };
+    const pin = declared.dependencies["@modainteract/moda-interact-shared"];
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(sharedPackageJson.version).toBe(pin);
     expect(sharedLoggerResolution).toContain("@modainteract/moda-interact-shared");
     const cause = Object.assign(new Error("database unreachable for phone +447000111222"), {
       code: "P1001", clientVersion: "6.19.3",

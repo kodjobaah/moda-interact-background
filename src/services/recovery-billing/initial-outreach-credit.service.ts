@@ -23,6 +23,7 @@ import type { ExistingInitialOutreachCredit, ExistingInitialOutreachCreditInput,
 import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
 import type { CapacityPolicyOutcome } from "./capacity-policy.js";
 import { requireInitialRetryFundingReady } from "../recovery-delivery-retry/funding.js";
+import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diagnostic.js";
 import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialMessage, validateInitialMessageIdentity } from "./initial-outreach-credit-evidence.js";
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
@@ -48,31 +49,50 @@ export class InitialOutreachCreditService {
   async admitInitialRetry(input: { shopId: string; recoveryId: string; outreachAttemptId: string }, reserve: (tx: Tx) => Promise<CapacityPolicyOutcome>): Promise<CapacityPolicyOutcome> {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       let stage = "identity";
+      let reservationId: string | undefined;
+      let reused = false;
       try {
-        return await this.database.$transaction(async (tx): Promise<CapacityPolicyOutcome> => {
+        const outcome = await this.database.$transaction(async (tx): Promise<CapacityPolicyOutcome> => {
           requireLineage(input.outreachAttemptId.startsWith("retry_"), "not a retry funding identity");
           const candidate = { ...input, outboundMessageId: null };
           const existing = await revalidate(tx, candidate, this.now(), value => { stage = value; });
           if (existing.kind === "held") throw new ExistingHoldSignal(existing.reason);
-          if (existing.kind === "admitted") return { result: { kind: "admitted", admission: existing.admission } };
+          if (existing.kind === "admitted") {
+            reservationId = existing.reservationId;
+            reused = true;
+            return { result: { kind: "admitted", admission: existing.admission } };
+          }
           stage = "reserve_retry";
           const outcome = await reserve(tx);
           if (outcome.result.kind !== "admitted") return outcome;
           const checked = await revalidate(tx, candidate, this.now(), value => { stage = value; });
           requireLineage(checked.kind === "admitted" && checked.admission.sourceKey === outcome.result.admission.sourceKey,
             "retry funding source changed during reservation");
+          reservationId = checked.reservationId;
           return { result: { kind: "admitted", admission: checked.admission } };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        const fields = { shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
+          outreachAttemptId: input.outreachAttemptId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage };
+        if (outcome.result.kind === "admitted") {
+          const evidence = { ...fields, fundingReservationId: reservationId, fundingSource: outcome.result.admission.kind };
+          if (reused) this.serviceLogger.debug("recovery.delivery_retry.funding_replayed", evidence);
+          else this.serviceLogger.info("recovery.delivery_retry.funding_reserved", evidence);
+        } else {
+          this.serviceLogger.debug("recovery.retry_credit.held", { ...fields, reason: outcome.result.reason });
+        }
+        return outcome;
       } catch (error) {
         if (error instanceof RecoveryCompensationLineageError || error instanceof ExistingHoldSignal) {
-          this.serviceLogger.warn("recovery.retry_credit.held", { ...input, stage, error, ...databaseErrorContext(error) });
+          this.serviceLogger.debug("recovery.retry_credit.held", { ...input, checkoutRecoveryId: input.recoveryId,
+            retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, reason: initialOutreachDiagnostic(error).message,
+            sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
           return { result: { kind: "blocked", reason: "reservation-in-flight" } };
         }
         if (isRecoveryReservationRetryableConflict(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, stage, attempt, error, ...databaseErrorContext(error) });
+          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
           continue;
         }
-        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, stage, attempt, error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
         throw error;
       }
     }

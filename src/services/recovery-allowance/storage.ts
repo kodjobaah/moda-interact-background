@@ -1,6 +1,9 @@
 import { releaseReservedSource } from "../recovery-delivery-compensation/reserved.js";
 import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
 import { randomUUID } from "node:crypto";
+import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
+import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diagnostic.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { ConversationAllowanceBlock, Prisma } from "@prisma/client";
 import { lockRecoveryContext, readRecoveryWindowEvidence, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
@@ -12,6 +15,7 @@ import { retryFundingLineage } from "../../domain/recovery-retry-funding-lineage
 import { retryFundingIdentitySelect, readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
 import { verifyRetryPredecessorFunding } from "../recovery-delivery-retry/funding.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
+const retryAllowanceLogger = createLogger({ serviceName: "moda-messaging-worker", environment: resolveDeploymentEnvironmentName() });
 type Tx = Prisma.TransactionClient;
 export type AllowanceLimits = {
     outboundHardLimit: number;
@@ -35,34 +39,56 @@ export async function adoptInitial(tx: Tx, conversationId: string, limits: Allow
     if (existing && !hasRetry)
         return existing;
     let initial: { id: string; outboundMessageId: string | null; sentAt: Date | null } | null;
-    if (hasRetry) {
-        const attempts = await tx.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: context.recoveryId }, select: retryFundingIdentitySelect });
-        const selection = selectEffectiveOutreachAttempt({ recoveryId: context.recoveryId, conversationId, slot: "INITIAL", attempts });
-        if (selection.kind !== "selected" || selection.retryCount === 0 || !hasConfirmedOutreachDelivery(selection.current, conversationId))
-            throw new AllowanceHeld("initial-retry-delivery-unproven");
-        initial = selection.current;
-        const links = retryFundingLineage({ recoveryId: context.recoveryId, conversationId, attemptId: initial.id, attempts });
-        if (!links)
-            throw new AllowanceHeld("initial-retry-lineage-unproven");
-        await verifyRetryPredecessorFunding(tx, context.shopId, links);
-    } else {
-        initial = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: context.recoveryId, sequence: 1 } } });
+    const retryFields: Record<string, unknown> = { shopId: context.shopId, checkoutRecoveryId: context.recoveryId, conversationId };
+    try {
+        if (hasRetry) {
+            const attempts = await tx.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: context.recoveryId }, select: retryFundingIdentitySelect });
+            const selection = selectEffectiveOutreachAttempt({ recoveryId: context.recoveryId, conversationId, slot: "INITIAL", attempts });
+            if (selection.kind !== "selected" || selection.retryCount === 0)
+                throw new AllowanceHeld("initial-retry-delivery-unproven");
+            initial = selection.current;
+            Object.assign(retryFields, { outreachAttemptId: initial.id, retryIntentId: initial.id.slice("retry_".length),
+                sequence: selection.current.sequence, outboundMessageId: initial.outboundMessageId });
+            if (!hasConfirmedOutreachDelivery(selection.current, conversationId))
+                throw new AllowanceHeld("initial-retry-delivery-unproven");
+            const links = retryFundingLineage({ recoveryId: context.recoveryId, conversationId, attemptId: initial.id, attempts });
+            if (!links)
+                throw new AllowanceHeld("initial-retry-lineage-unproven");
+            await verifyRetryPredecessorFunding(tx, context.shopId, links);
+        } else {
+            initial = await tx.recoveryOutreachAttempt.findUnique({ where: { checkoutRecoveryId_sequence: { checkoutRecoveryId: context.recoveryId, sequence: 1 } } });
+        }
+        if (!initial?.outboundMessageId || !initial.sentAt)
+            throw new AllowanceHeld("original-funding-unproven");
+        const message = await tx.conversationMessage.findUnique({ where: { id: initial.outboundMessageId } });
+        if (!message || message.conversationId !== conversationId || !message.providerMessageId || !message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status) || message.failedAt)
+            throw new AllowanceHeld("original-receipt-unproven");
+        const source = await findExactRecoveryReservationSource(tx, context.shopId, initial.id);
+        if (!source || source.reservation.status !== "COMMITTED" || source.reservation.compensationUsageEventId)
+            throw new AllowanceHeld("original-funding-unproven");
+        await readCommittedRecoveryUsage(tx, source);
+        if (existing) {
+            if (existing.creditReservationId !== source.reservation.id)
+                throw new AllowanceHeld("initial-retry-existing-allowance");
+            if (hasRetry) retryAllowanceLogger.debug("recovery.delivery_retry.allowance_replayed", {
+                ...retryFields, fundingReservationId: source.reservation.id, allowanceBlockId: existing.id,
+            });
+            return existing;
+        }
+        const block = await tx.conversationAllowanceBlock.create({ data: { id: randomUUID(), shopId: context.shopId, conversationId, ordinal: 0, fundingKind: "INITIAL", state: "ACTIVE", creditReservationId: source.reservation.id, hardMessageLimit: limits.outboundHardLimit, terminalReservedSlots: limits.terminalMessageReservedSlots } });
+        // The outer owner may still roll back. Do not label this as committed.
+        if (hasRetry) retryAllowanceLogger.debug("recovery.delivery_retry.allowance_adoption_prepared", {
+            ...retryFields, fundingReservationId: source.reservation.id, allowanceBlockId: block.id,
+            transactionState: "uncommitted",
+        });
+        return block;
+    } catch (error) {
+        if (hasRetry) {
+            if (error instanceof AllowanceHeld) retryAllowanceLogger.debug("recovery.delivery_retry.allowance_held", { ...retryFields, reason: error.reason });
+            else retryAllowanceLogger.error("recovery.delivery_retry.allowance_failed", { ...retryFields, sourceError: initialOutreachDiagnostic(error) });
+        }
+        throw error;
     }
-    if (!initial?.outboundMessageId || !initial.sentAt)
-        throw new AllowanceHeld("original-funding-unproven");
-    const message = await tx.conversationMessage.findUnique({ where: { id: initial.outboundMessageId } });
-    if (!message || message.conversationId !== conversationId || !message.providerMessageId || !message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status) || message.failedAt)
-        throw new AllowanceHeld("original-receipt-unproven");
-    const source = await findExactRecoveryReservationSource(tx, context.shopId, initial.id);
-    if (!source || source.reservation.status !== "COMMITTED" || source.reservation.compensationUsageEventId)
-        throw new AllowanceHeld("original-funding-unproven");
-    await readCommittedRecoveryUsage(tx, source);
-    if (existing) {
-        if (existing.creditReservationId !== source.reservation.id)
-            throw new AllowanceHeld("initial-retry-existing-allowance");
-        return existing;
-    }
-    return tx.conversationAllowanceBlock.create({ data: { id: randomUUID(), shopId: context.shopId, conversationId, ordinal: 0, fundingKind: "INITIAL", state: "ACTIVE", creditReservationId: source.reservation.id, hardMessageLimit: limits.outboundHardLimit, terminalReservedSlots: limits.terminalMessageReservedSlots } });
 }
 export async function currentAllowance(tx: Tx, conversationId: string, limits: AllowanceLimits) {
     await lockRecoveryContext(tx, conversationId);

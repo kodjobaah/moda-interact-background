@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { createLogger, type LogRecord } from "@modainteract/moda-interact-shared/logging";
+import { InitialOutreachCreditService } from "../../src/services/recovery-billing/initial-outreach-credit.service.js";
 import { retryOutreachAttemptId } from "../../src/domain/recovery-outreach-identity.js";
 import { RecoveryBillingService } from "../../src/services/recovery-billing.service.js";
 import { RecoveryDeliveryCompensationService } from "../../src/services/recovery-delivery-compensation/reconcile.service.js";
@@ -19,16 +21,23 @@ async function prepareFailedOriginal(f: Fixture, providerFailureCode = "131016",
   const allowance = withAllowance ? await f.db.$transaction(tx => adoptInitial(tx, conversation.id, limits)) : null;
   await f.db.conversationMessage.update({ where: { id: f.messageId }, data: { status: "FAILED", providerFailureCode,
     failedAt: new Date(f.sentAt.getTime() + 1_000) } });
-  const compensation = new RecoveryDeliveryCompensationService(f.db);
+  const records: LogRecord[] = [];
+  const logger = createLogger({ serviceName: "recovery-test", environment: "test", sink: record => records.push(record) });
+  const compensation = new RecoveryDeliveryCompensationService(f.db, () => new Date(), logger);
   expect(await compensation.reconcile(f.providerMessageId)).toBe("restored-spendable");
   const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
+  expect(records).toContainEqual(expect.objectContaining({ level: "info", event: "recovery.delivery_retry.intent_recorded", data: expect.objectContaining({
+    shopId: f.shopId, checkoutRecoveryId: f.recoveryId, conversationId: conversation.id, retryIntentId: intent.id,
+    failedAttemptId: f.attemptId, failedMessageId: f.messageId, fundingReservationId: intent.fundingReservationId,
+    providerFailureCode, policy: intent.policy, compensationOutcome: "restored-spendable",
+  }) }));
   const retryId = retryOutreachAttemptId(intent.id);
   await f.db.recoveryOutreachAttempt.create({ data: { id: retryId, checkoutRecoveryId: f.recoveryId,
     sequence: 3, trigger: "INITIAL", recipient: "15551234567", configuredOfferMode: "NONE" } });
   const original = await f.db.usageReservation.findUniqueOrThrow({ where: { id: f.reservationId! } });
   expect(original.compensationUsageEventId).toBeTruthy();
   const request = { shopId: f.shopId, recoveryId: f.recoveryId, outreachAttemptId: retryId };
-  return { conversation, intent, retryId, request, original, allowance, compensation,
+  return { conversation, intent, retryId, request, original, allowance, compensation, records, logger,
     billing: new RecoveryBillingService(f.db) };
 }
 
@@ -59,6 +68,13 @@ suite("Recovery delivery retry funding (PostgreSQL)", () => {
       expect(results[1].admission.sourceKey).toBe(results[0].admission.sourceKey);
       const fresh = await f.db.usageReservation.findFirstOrThrow({ where: { shopId: f.shopId, status: "RESERVED" } });
       expect(fresh.id).not.toBe(retry.original.id);
+      // A pre-existing durable reservation is replayed, not newly charged.
+      const retryCredit = new InitialOutreachCreditService(f.db, retry.logger);
+      const replay = await retryCredit.admitInitialRetry(retry.request, async () => { throw new Error("must not reserve again"); });
+      expect(replay.result.kind).toBe("admitted");
+      expect(retry.records).toContainEqual(expect.objectContaining({ event: "recovery.delivery_retry.funding_replayed", data: expect.objectContaining({
+        retryIntentId: retry.intent.id, outreachAttemptId: retry.retryId, fundingReservationId: fresh.id,
+      }) }));
       expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(2);
       const message = await simulatedReceipt(f, retry, true);
       const input = { ...retry.request, outboundMessageId: message.id };

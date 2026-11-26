@@ -434,6 +434,7 @@ describe("WhatsAppProviderStatusService", () => {
     expect(test.message.status).toBe("FAILED");
     expect(test.linkedAttempt?.status).toBe("FAILED");
 
+    test.transaction.recoveryOutreachRetryIntent.updateMany.mockResolvedValueOnce({ count: 1 });
     await test.service.process(baseEvent);
     expect(test.message.status).toBe("DELIVERED");
     expect(test.linkedAttempt?.status).toBe("FAILED");
@@ -444,6 +445,10 @@ describe("WhatsAppProviderStatusService", () => {
     });
     await test.service.process(baseEvent);
     expect(test.transaction.recoveryOutreachRetryIntent.updateMany).toHaveBeenCalledTimes(1);
+    const cancellations = test.records.filter(record => record.event === "recovery.delivery_retry.cancelled");
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0]).toMatchObject({ level: "info", data: { shopId: "shop-1", failedMessageId: "message-1",
+      failedAttemptId: "attempt-1", providerMessageId: "wamid-1", reason: "late-positive-delivery", count: 1 } });
   });
 
   it("does not resurrect FAILED with a late SENT and stores v3 failure evidence", async () => {

@@ -1,21 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 
-// Compile only the two dependency-free domain modules, outside the repository.
+// Compile only the dependency-free domain modules, outside the repository.
 // No database URL, Redis, provider credentials or installed Prisma are needed.
 const directory = mkdtempSync(join(tmpdir(), "moda-retry-funding-"));
 const domain = fileURLToPath(new URL("../src/domain/", import.meta.url));
 try {
   writeFileSync(join(directory, "package.json"), '{"type":"module"}\n');
-  execFileSync("tsc", ["--strict", "--noUncheckedIndexedAccess", "--exactOptionalPropertyTypes",
+  // Prefer the repository dependency, even when node was invoked directly.
+  const localCompiler = fileURLToPath(new URL("../node_modules/.bin/tsc", import.meta.url));
+  execFileSync(existsSync(localCompiler) ? localCompiler : "tsc", ["--strict", "--noUncheckedIndexedAccess", "--exactOptionalPropertyTypes",
     "--target", "ES2022", "--module", "ES2022", "--moduleResolution", "bundler",
     "--skipLibCheck", "--outDir", directory, join(domain, "recovery-outreach-identity.ts"),
-    join(domain, "recovery-retry-funding-lineage.ts")], { cwd: directory, stdio: "inherit" });
+    join(domain, "recovery-retry-funding-lineage.ts"), join(domain, "recovery-retry-claim.ts")], { cwd: directory, stdio: "inherit" });
 } catch (error) {
   rmSync(directory, { recursive: true, force: true });
   throw error;
@@ -23,6 +25,7 @@ try {
 after(() => rmSync(directory, { recursive: true, force: true }));
 const { retryFundingLineage } = await import(pathToFileURL(join(directory, "recovery-retry-funding-lineage.js")).href);
 const { selectEffectiveOutreachAttempt } = await import(pathToFileURL(join(directory, "recovery-outreach-identity.js")).href);
+const { planInitialRetryClaim } = await import(pathToFileURL(join(directory, "recovery-retry-claim.js")).href);
 const now = new Date("2026-11-26T01:00:00Z");
 function failed(id, sequence, intentId, trigger = "INITIAL") {
   return {
@@ -107,4 +110,61 @@ test("supports historical automated follow-up funding without admitting a follow
     successor("retry_follow", 5, "NO_RESPONSE_FOLLOW_UP")];
   assert.equal(lineage(attempts, "retry_follow")?.[0].predecessor.id, "follow-up");
   assert.equal(lineage(attempts, "follow-up"), null);
+});
+
+const claimPlan = (attempts, intentId = "first") => planInitialRetryClaim({
+  recoveryId: "recovery", conversationId: "conversation", attempts, intentId,
+});
+test("plans the first claim without mutating historical rows", () => {
+  const attempts = [failed("original", 1, "first")];
+  const before = structuredClone(attempts);
+  const plan = claimPlan(attempts);
+  assert.equal(plan.kind, "new");
+  assert.equal(plan.attemptId, "retry_first");
+  assert.equal(plan.sequence, 3);
+  assert.equal(plan.links[0].intent.fundingReservationId, "reservation-original");
+  assert.deepEqual(attempts, before);
+});
+test("replays the exact pending claim and advances only from the latest failed predecessor", () => {
+  const first = failed("original", 1, "first");
+  const replay = claimPlan([first, successor("retry_first", 3)]);
+  assert.equal(replay.kind, "existing");
+  assert.equal(replay.sequence, 3);
+  const history = [first, failed("retry_first", 3, "second")];
+  assert.equal(claimPlan(history).kind, "held");
+  const next = claimPlan(history, "second");
+  assert.equal(next.kind, "new");
+  assert.equal(next.sequence, 4);
+  assert.equal(next.links.length, 2);
+});
+test("holds cancelled, replied-to, late delivered, and non-automated predecessors", () => {
+  for (const mutate of [a => { a.deliveryRetryIntent.cancelledAt = now; },
+    a => { a.customerRespondedAt = now; }, a => { a.outboundMessage.deliveredAt = now; },
+    a => { a.outboundMessage.senderType = "HUMAN"; }, a => { a.outboundMessage.sentAt = null; }]) {
+    const original = failed("original", 1, "first");
+    mutate(original);
+    assert.equal(claimPlan([original]).kind, "held");
+  }
+});
+test("holds an initial retry if the normal follow-up slot exists", () => {
+  const original = failed("original", 1, "first");
+  const follow = successor("follow", 2, "NO_RESPONSE_FOLLOW_UP");
+  assert.deepEqual(claimPlan([original, follow]), { kind: "held", reason: "follow-up-present" });
+});
+test("never treats an accepted or failed successor as a fresh claim", () => {
+  const original = failed("original", 1, "first");
+  const admitted = successor("retry_first", 3);
+  admitted.status = "WAITING_FOR_RESPONSE";
+  assert.deepEqual(claimPlan([original, admitted]), { kind: "held", reason: "already-progressed" });
+  assert.equal(claimPlan([original, failed("retry_first", 3, "second")]).kind, "held");
+});
+test("holds orphan successors, duplicate slots, wrong intent IDs and invalid ownership", () => {
+  const original = failed("original", 1, "first");
+  assert.equal(claimPlan([original, successor("retry_other", 3)]).kind, "held");
+  assert.equal(claimPlan([original, successor("retry_first", 1)]).kind, "held");
+  assert.equal(claimPlan([original], "unknown").kind, "held");
+  assert.equal(claimPlan([original], "bad:id").kind, "held");
+  const other = successor("retry_first", 3);
+  other.recipient = "different";
+  assert.equal(claimPlan([original, other]).kind, "held");
 });

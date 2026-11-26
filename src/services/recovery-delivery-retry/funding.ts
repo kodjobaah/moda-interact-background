@@ -39,7 +39,20 @@ export async function requireInitialRetryFundingReady(tx: CompensationTransactio
   shopId: string; recoveryId: string; conversationId: string; attemptId: string; now: Date;
 }): Promise<readonly RetryFundingLink[]> {
   const links = await requireCurrentInitialRetry(tx, input);
-  const latest = links.at(-1)!;
+  await requireInitialRetryPredecessorReady(tx, input, links);
+  return links;
+}
+
+/** Shared policy/funding gate for a locked, validated initial retry chain.
+ * The claim planner constructs the proposed successor in memory first; the
+ * funding owner validates the actual persisted successor before reservation.
+ * Neither call grants a provider permit.
+ */
+export async function requireInitialRetryPredecessorReady(tx: CompensationTransaction, input: {
+  shopId: string; recoveryId: string; conversationId: string; now: Date;
+}, links: readonly RetryFundingLink[]): Promise<void> {
+  const latest = links.at(-1);
+  requireLineage(latest, "initial retry predecessor missing");
   const intent = await tx.recoveryOutreachRetryIntent.findUnique({ where: { id: latest.intent.id } });
   const recovery = await tx.checkoutRecovery.findUnique({ where: { id: input.recoveryId }, select: {
     shopId: true, generation: true, lastExternalActivityAt: true,
@@ -50,12 +63,17 @@ export async function requireInitialRetryFundingReady(tx: CompensationTransactio
     recoveryDeliveryMarketingRetryDelayMinutes: true,
     recoveryDeliveryMaxRetries: true,
   } });
-  requireLineage(recovery?.shopId === input.shopId && intent && !intent.cancelledAt &&
-    intent.expectedGeneration === recovery.generation &&
-    intent.expectedLastExternalActivityAt.getTime() === recovery.lastExternalActivityAt.getTime() &&
-    intent.policy === "AFTER_COOLDOWN" && intent.notBeforeAt &&
-    isValidRecoveryDeliveryRetryConfig(config) && links.length <= config.recoveryDeliveryMaxRetries,
-  "initial retry policy, generation or budget is held");
+  requireLineage(recovery?.shopId === input.shopId && intent &&
+    intent.failedAttemptId === latest.predecessor.id && intent.failedMessageId === latest.intent.failedMessageId &&
+    intent.fundingReservationId === latest.intent.fundingReservationId, "initial retry intent identity mismatch");
+  requireLineage(!intent.cancelledAt, "initial retry intent cancelled");
+  requireLineage(intent.expectedGeneration === recovery.generation &&
+    intent.expectedLastExternalActivityAt.getTime() === recovery.lastExternalActivityAt.getTime(),
+  "initial retry checkout generation or activity changed");
+  requireLineage(intent.policy === "AFTER_COOLDOWN" && intent.notBeforeAt,
+    `initial retry policy held: ${intent.policy}`);
+  requireLineage(isValidRecoveryDeliveryRetryConfig(config), "initial retry runtime configuration invalid");
+  requireLineage(links.length <= config.recoveryDeliveryMaxRetries, "initial retry budget exhausted");
   const failedMessage = await tx.conversationMessage.findUnique({
     where: { id: latest.intent.failedMessageId }, select: { providerFailureCode: true },
   });
@@ -73,5 +91,4 @@ export async function requireInitialRetryFundingReady(tx: CompensationTransactio
     Math.max(intent.notBeforeAt.getTime(), currentDecision.notBeforeAt.getTime()) <= input.now.getTime(),
   "initial retry cooldown is held");
   await verifyRetryPredecessorFunding(tx, input.shopId, links);
-  return links;
 }

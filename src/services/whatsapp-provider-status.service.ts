@@ -80,10 +80,12 @@ export class WhatsAppProviderStatusService {
   ): Promise<ProviderStatusOutcome> {
     const occurredAt = new Date(event.occurredAt);
     let ownedStatus = false;
-    let appliedInfo: { messageId: string; status: string; outcome: string } | null = null;
+    let appliedInfo: { messageId: string; status: string; outcome: string; providerMessageId: string; providerFailureCode: string | null; shopId: string } | null = null;
+    const cancellation: { evidence: Record<string, unknown> | null } = { evidence: null };
 
     const outcome = await this.withRetry(event, () => this.database.$transaction(async (transaction) => {
       appliedInfo = null;
+      cancellation.evidence = null;
       ownedStatus = false;
       const pointer = await transaction.conversationMessage.findUnique({
         where: { providerMessageId: event.providerMessageId },
@@ -259,10 +261,13 @@ export class WhatsAppProviderStatusService {
         // The same message lock serializes this with compensation/intent creation.
         // Positive delivery is stronger evidence: invalidate an unexecuted plan.
         if (wasFailed && message.recoveryOutreachAttempt) {
-          await transaction.recoveryOutreachRetryIntent.updateMany({
+          const cancelled = await transaction.recoveryOutreachRetryIntent.updateMany({
             where: { failedMessageId: message.id, cancelledAt: null },
             data: { cancelledAt: occurredAt },
           });
+          if (cancelled.count) cancellation.evidence = { shopId, failedMessageId: message.id,
+            failedAttemptId: message.recoveryOutreachAttempt.id, providerMessageId: event.providerMessageId,
+            cancelledAt: occurredAt.toISOString(), reason: "late-positive-delivery", count: cancelled.count };
         }
         await transaction.usageEvent.upsert({
           where: { idempotencyKey: deliveredUsageKey(message.id) },
@@ -284,6 +289,9 @@ export class WhatsAppProviderStatusService {
       appliedInfo = {
         messageId: message.id,
         status: event.status,
+        providerMessageId: event.providerMessageId,
+        providerFailureCode: persistedFailureCode,
+        shopId,
         outcome:
           !lifecycleChanged && !becameDelivered && !attemptConverged && !commandConverged
             ? "ignored"
@@ -298,6 +306,7 @@ export class WhatsAppProviderStatusService {
     }));
 
     if (appliedInfo) this.serviceLogger.info("whatsapp.provider_status.applied", appliedInfo);
+    if (cancellation.evidence) this.serviceLogger.info("recovery.delivery_retry.cancelled", cancellation.evidence);
 
     // Never perform credit accounting inside provider-status convergence. Retry
     // even if the FAILED row was already persisted in an earlier job attempt.

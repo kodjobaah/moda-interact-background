@@ -18,7 +18,7 @@ type RetryIntentInput = {
 export async function recordRecoveryDeliveryRetryIntent(
   tx: CompensationTransaction,
   input: RetryIntentInput,
-): Promise<void> {
+) {
   // Read the current authoritative singleton, not the runtime service's
   // last-good cache. Missing settings yield an inert REVIEW_REQUIRED intent.
   // Database errors remain transactional errors and follow existing retries.
@@ -44,7 +44,7 @@ export async function recordRecoveryDeliveryRetryIntent(
       expectedLastExternalActivityAt: input.expectedLastExternalActivityAt,
     },
     update: {},
-    select: { id: true, failedMessageId: true, fundingReservationId: true, providerFailureCode: true, cancelledAt: true },
+    select: { id: true, failedMessageId: true, fundingReservationId: true, providerFailureCode: true, cancelledAt: true, policy: true, notBeforeAt: true },
   });
   requireLineage(intent.failedMessageId === input.messageId && intent.fundingReservationId === input.reservationId,
     "retry decision immutable identity mismatch");
@@ -56,5 +56,7 @@ export async function recordRecoveryDeliveryRetryIntent(
       data: { providerFailureCode: input.providerFailureCode, ...decision },
     });
     requireLineage(enriched.count === 1, "retry decision enrichment conflict");
+    return { ...intent, providerFailureCode: input.providerFailureCode, ...decision };
   }
+  return intent;
 }

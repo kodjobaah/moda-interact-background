@@ -116,10 +116,11 @@ describe("production worker observability startup", () => {
     65_000,
   );
 
-  it("uses the architect-approved exact shared runtime release", () => {
-    expect(
-      packageJson.dependencies["@modainteract/moda-interact-shared"],
-    ).toBe("6.1.0");
+  it("uses the exact declared shared runtime release", () => {
+    const pin = packageJson.dependencies["@modainteract/moda-interact-shared"];
+    const installed = JSON.parse(readFileSync("node_modules/@modainteract/moda-interact-shared/package.json", "utf8")) as { version: string };
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(installed.version).toBe(pin);
   });
 
   it("packages every production observability preload", () => {

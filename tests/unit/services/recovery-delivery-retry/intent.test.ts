@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { decideRecoveryOutreachRetry } from "../../../../src/domain/recovery-outreach-retry-policy.js";
 import { recordRecoveryDeliveryRetryIntent } from "../../../../src/services/recovery-delivery-retry/intent.js";
 import type { CompensationTransaction } from "../../../../src/services/recovery-delivery-compensation/types.js";
 
@@ -18,7 +19,8 @@ const config = {
 function fixture(settings: typeof config | null) {
   const findUnique = vi.fn().mockResolvedValue(settings);
   const upsert = vi.fn().mockResolvedValue({ id: "intent", failedMessageId: input.messageId,
-    fundingReservationId: input.reservationId, providerFailureCode: input.providerFailureCode, cancelledAt: null });
+    fundingReservationId: input.reservationId, providerFailureCode: input.providerFailureCode, cancelledAt: null,
+    ...decideRecoveryOutreachRetry(input.providerFailureCode, input.failedAt, settings) });
   const updateMany = vi.fn().mockResolvedValue({ count: 1 });
   const tx = { backgroundRuntimeConfig: { findUnique }, recoveryOutreachRetryIntent: { upsert, updateMany } } as unknown as CompensationTransaction;
   return { tx, findUnique, upsert, updateMany };
@@ -35,7 +37,7 @@ describe("recovery retry intent runtime configuration", () => {
     expect(f.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { failedAttemptId: input.attemptId },
       create: expect.objectContaining({ policy: "AFTER_COOLDOWN", notBeforeAt: new Date(failedAt.getTime() + 7 * 60_000) }), update: {} }));
     f.findUnique.mockResolvedValue({ ...config, recoveryDeliveryTemporaryRetryDelayMinutes: 29 });
-    await recordRecoveryDeliveryRetryIntent(f.tx, input);
+    await expect(recordRecoveryDeliveryRetryIntent(f.tx, input)).resolves.toMatchObject({ policy: "AFTER_COOLDOWN", notBeforeAt: new Date(failedAt.getTime() + 7 * 60_000) });
     expect(f.upsert).toHaveBeenLastCalledWith(expect.objectContaining({ update: {} }));
     expect(f.updateMany).not.toHaveBeenCalled();
   });
@@ -43,7 +45,7 @@ describe("recovery retry intent runtime configuration", () => {
   it.each([null, { ...config, recoveryDeliveryMaxRetries: 0 }, { ...config, recoveryDeliveryTemporaryRetryDelayMinutes: -1 }])(
     "records an inert decision rather than throwing when configuration is missing, disabled or invalid", async settings => {
       const f = fixture(settings);
-      await expect(recordRecoveryDeliveryRetryIntent(f.tx, input)).resolves.toBeUndefined();
+      await expect(recordRecoveryDeliveryRetryIntent(f.tx, input)).resolves.toMatchObject({ policy: "REVIEW_REQUIRED", notBeforeAt: null });
       expect(f.upsert).toHaveBeenCalledWith(expect.objectContaining({
         create: expect.objectContaining({ policy: "REVIEW_REQUIRED", notBeforeAt: null }), update: {},
       }));

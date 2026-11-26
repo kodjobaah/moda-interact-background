@@ -19,6 +19,10 @@ const logger = createLogger({ serviceName: "moda-recovery-worker", environment: 
 // Compensation can acquire several related accounting locks in one transaction.
 // Bound this owner independently of Prisma's global five-second default.
 const COMPENSATION_TRANSACTION_TIMEOUT_MS = 15_000;
+type CompensationLogContext = {
+  stage: string;
+  retryEvidence?: Record<string, unknown>;
+};
 
 /**
  * Correct a terminal failure using the durable provider-message identity. This
@@ -43,15 +47,21 @@ export class RecoveryDeliveryCompensationService {
   private async withRetry(identity: { providerMessageId: string } | { messageId: string }) {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const context = { stage: "identity" };
+      const context: CompensationLogContext = { stage: "identity" };
       try {
-        return await this.database.$transaction(
+        const outcome = await this.database.$transaction(
           (tx) => this.reconcileLocked(tx, identity, context),
           {
             isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
             timeout: COMPENSATION_TRANSACTION_TIMEOUT_MS,
           },
         );
+        // This evidence is emitted only after the transaction commits. An
+        // intent remains a decision, not a provider send or a scheduled job.
+        if (context.retryEvidence) this.serviceLogger.info("recovery.delivery_retry.intent_recorded", {
+          ...context.retryEvidence, compensationOutcome: outcome,
+        });
+        return outcome;
       } catch (error) {
         const retryable = isRetryableCompensationError(error);
         const fields = { operation: "reconcile", ...identity, stage: context.stage, attempt, maxAttempts,
@@ -70,7 +80,7 @@ export class RecoveryDeliveryCompensationService {
   private async reconcileLocked(
     tx: CompensationTransaction,
     identity: { providerMessageId: string } | { messageId: string },
-    context: { stage: string },
+    context: CompensationLogContext,
   ): Promise<RecoveryDeliveryCompensationOutcome> {
     context.stage = "identity";
     const pointer = await tx.conversationMessage.findUnique({
@@ -171,13 +181,21 @@ export class RecoveryDeliveryCompensationService {
     if (source?.retryCandidateAttemptId && isConfirmedProviderNonDelivery(message) &&
         message.failedAt && message.conversation.checkoutRecovery) {
       context.stage = "retry_intent";
-      await recordRecoveryDeliveryRetryIntent(tx, {
+      const intent = await recordRecoveryDeliveryRetryIntent(tx, {
         attemptId: source.retryCandidateAttemptId, messageId: message.id,
         expectedGeneration: message.conversation.checkoutRecovery.generation,
         expectedLastExternalActivityAt: message.conversation.checkoutRecovery.lastExternalActivityAt,
         reservationId: source.reservation.id, providerFailureCode: message.providerFailureCode,
         failedAt: message.failedAt,
       });
+      context.retryEvidence = {
+        shopId, checkoutRecoveryId: message.conversation.checkoutRecovery.id, conversationId: message.conversationId,
+        failedAttemptId: source.retryCandidateAttemptId, failedMessageId: message.id,
+        providerMessageId: message.providerMessageId, providerFailureCode: intent.providerFailureCode,
+        fundingReservationId: source.reservation.id, fundingSource: source.kind,
+        retryIntentId: intent.id, policy: intent.policy, notBeforeAt: intent.notBeforeAt?.toISOString(),
+        cancelledAt: intent.cancelledAt?.toISOString(),
+      };
     }
     return result;
   }

@@ -91,6 +91,7 @@ export function admissionHarness({
     },
     recoveryOutreachAttempt: {
       findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
     },
     conversation: {
       findUnique: vi.fn().mockResolvedValue({
@@ -141,10 +142,13 @@ export function admissionHarness({
     },
   };
   const queryRawUnsafe = vi.fn(async (statement: string, ...parameters: unknown[]): Promise<Array<Record<string, unknown>>> => {
+    if (statement.includes('FROM "whatsapp"."Conversation" c') && statement.includes('JOIN "commerce"."CheckoutRecovery" r'))
+      return recoveryLinked ? [{ id: "conversation-1", shopId: "shop-1", recoveryId: "recovery-1",
+        checkoutToken: "checkout-1", recoveryStatus, mode: "AI", revision: 0, inboundVersion: 0, lastInboundAt: null }] : [];
     if (statement.includes('FROM "commerce"."Shop"') && statement.includes('FOR UPDATE'))
-      return [{ status: "ACTIVE" }];
+      return [{ id: "shop-1", status: "ACTIVE" }];
     if (statement.includes('FROM "whatsapp"."Conversation"') && statement.includes('FOR UPDATE'))
-      return [{ controlRevision: 0 }];
+      return [{ id: "conversation-1", controlRevision: 0 }];
     if (statement.includes('FROM "whatsapp"."ConversationMessage"'))
       return [{
         status: "PENDING",

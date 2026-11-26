@@ -213,6 +213,39 @@ Validate with `node --test scripts/test-recovery-retry-funding.mjs` and the
 new disposable `recovery-retry-funding.integration.test.ts`, plus existing
 initial-outreach settlement, recovery allowance and compensation suites.
 
+### Patch 4a: durable discovery and initial retry claim (not activated)
+
+- Scan due `AFTER_COOLDOWN` initial retry intents in bounded, ordered keyset
+  pages. PostgreSQL remains the durable source; each later sweep begins again
+  at the oldest due key. Already claimed intents are not excluded from recovery
+  after restart. Policy-held, cancelled and follow-up intents are not dispatched.
+- Under the existing serializable Shop -> Conversation owner transaction,
+  validate the current exact failed predecessor, all historical reservations,
+  the persisted and current cooldown/budget, unchanged activity/generation,
+  current checkout lifetime, merchant status, absence of customer inbound,
+  local STOP, existing allowance and follow-up slot. Reject stale generations.
+  Require the existing open sender assignment and matching failed message's
+  persisted account and phone stamps. Never allocate another sender.
+- The read-only `inspect` method returns an eligible *claim*, not a send
+  authorization. `claim` creates the deterministic sequence >=3 PENDING row
+  once, using a caller-resolved offer policy, or returns the existing clean
+  claim. Conflicting, progressed, or unlinked evidence remains held. A prior
+  outbound usage event prevents this path from treating the attempt as fresh.
+  A claim does not reserve credits, produce a message, or obtain a permit.
+- Neither method is wired to a production worker, CLI or queue. This is an
+  internal seam for the activation patch; the current legacy sequence-one
+  readers cannot safely consume an automatically created retry. The eventual
+  dispatcher must refresh Shopify checkout authority / Woo persisted state,
+  current verified consent, effective policy, sender configuration and offer
+  eligibility, and enforce the exact claim at the final provider fence. Do
+  not invoke `claim` from production before these changes and validation.
+- Initial claims only; follow-up retry funding and dispatch remain held.
+- Fix the focused funding test runner to prefer the repository TypeScript
+  compiler; retain PATH fallback for dependency-free development environments.
+
+Validate the focused claim/funding domain tests, `recovery-retry-claim.integration.test.ts`
+with disposable PostgreSQL/Redis and the Patch 3 funding/settlement suites.
+
 ### Remaining activation work
 
 Background touchpoints requiring coordinated changes:
@@ -270,3 +303,36 @@ reachability and notification integration suites with `--testTimeout=60000`.
 Run all unit tests, lint, build and `git diff --check` before commit. Verify
 that compensation still occurs for code-less and unknown failures and that
 no resend/fresh charge is made by 2a.
+
+### Retry observability before worker activation
+
+Use the existing Shared structured logger, not an additional telemetry sink.
+Correlate the original failed message/attempt, persisted retry intent, physical
+successor, recovery, shop, conversation and exact credit reservation where known.
+No recipient phone, token, checkout token, template content or basket payload is
+added to the retry events. Exception diagnostics use the existing bounded,
+redacted initial-outreach projection and preserve the original thrown error.
+
+`recovery.delivery_retry.intent_recorded` (info) records the persisted decision
+and compensation outcome after the compensation transaction commits. Replays
+report the stored decision, not a new calculated cooldown. A late positive
+receipt emits `recovery.delivery_retry.cancelled` only when a row was actually
+cancelled and the status transaction committed. The existing
+`whatsapp.provider_status.applied` includes the provider message and failure IDs.
+
+`discovered`, `evaluation_started`, `eligible`, `eligibility_held`, `claim_held`,
+`claim_replayed`, `funding_replayed`, and normal funding holds are debug-level
+observations under the existing retry event namespace (`recovery.retry_credit`
+for existing credit holds). Discovery logs a bounded nonempty page, never every
+idle poll. `claimed` and `funding_reserved` are info only after commit.
+Conflicts are warnings and unexpected exceptions are errors with stage and
+source diagnostic; original exceptions propagate. An allowance adoption is
+logged as `allowance_adoption_prepared` with `transactionState: uncommitted`,
+because its enclosing owner transaction may still roll back; reuse and held
+allowance checks are diagnostic events. These logs are not financial authority.
+
+There is no retry polling worker or provider send in this patch. When activating
+polling, coalesce repeated unchanged holds across polling cycles; the present
+patch does not provide cross-process log deduplication or a worker-level summary.
+Log offer preparation, outbound admission, provider acceptance and final
+settlement at their actual boundaries when the dispatcher is implemented.
