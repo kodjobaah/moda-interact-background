@@ -71,7 +71,7 @@ export async function runAiTurnThroughBackgroundMocks(
   // retain this original revision even if takeover/resume happens mid-model.
   await f.changeOwner("HUMAN", "AI", 1);
   const pendingAt = new Date(Date.now() - 60_000);
-  await f.addInitialOutreach();
+  const allowance = await f.addFundedInitialAllowance();
   await f.db.conversationMessage.create({ data: {
     conversationId: f.conversationId, direction: "INBOUND", senderType: "CUSTOMER",
     providerMessageId: `arch040-ai-inbound-${randomUUID()}`,
@@ -85,7 +85,7 @@ export async function runAiTurnThroughBackgroundMocks(
   } });
   const prepared = await f.db.conversationMessage.create({ data: {
     conversationId: f.conversationId, senderType: "AGENT", direction: "OUTBOUND",
-    status: "PENDING", content: "Pending model reply",
+    status: "PENDING", content: "Pending model reply", allowanceBlockId: allowance.id,
   } });
   const sender = new OutboundMessageDeliveryService(
     f.db,

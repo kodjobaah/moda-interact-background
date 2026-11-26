@@ -43,15 +43,27 @@ const suite=process.env.TEST_DATABASE_URL&&process.env.REDIS_URL&&process.env.MO
 const answer='  Original authored body\nhttps://other.example/product\nUnchanged trailing spaces.  ';
 const prepared:PreparedWrapper={schemaVersion:1,family:'MODA_CONVERSATION_WRAPPER',responseSlot:'response.body',header:[{kind:'text',value:'Our custom welcome: '},{kind:'variable',name:'shop.name'},{kind:'text',value:'\nVisit the store: '},{kind:'variable',name:'shop.websiteUrl'}],body:[{kind:'responseSlot',name:'response.body'}],footer:[],conditionals:[{when:'checkout.available',tokens:[{kind:'text',value:'\nCustom checkout footer\n'},{kind:'variable',name:'checkout.url'}]}]};
 async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=true,assess=true,producer=false,leaseMs=180000,profile?:typeof profiles[number],websiteFooter=false){
- const f=await humanDispatchFixture(`arch075v2-${label}`,{checkoutLifetimeDays:7,recipient:'447400123456'});
+ const f=await humanDispatchFixture(`arch075v2-${label}`,{checkoutLifetimeDays:7,recipient:'447400123456',pooledSender:true});
  let billingPlanId:string|undefined;let adminId:string|undefined;const definitionIds:string[]=[];
- const cleanup=async()=>{await f.db.whatsAppConversationWrapperActiveSlot.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateLocale.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateDefinition.deleteMany({where:{id:{in:definitionIds}}});if(adminId)await f.db.platformAdmin.delete({where:{id:adminId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});if(billingPlanId)await f.db.billingPlan.delete({where:{id:billingPlanId}});await f.close();};
+ const cleanup=async()=>{try{await f.db.whatsAppConversationWrapperActiveSlot.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateLocale.deleteMany({where:{definitionId:{in:definitionIds}}});await f.db.whatsAppTemplateDefinition.deleteMany({where:{id:{in:definitionIds}}});if(adminId)await f.db.platformAdmin.delete({where:{id:adminId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});if(billingPlanId)await f.db.billingPlan.delete({where:{id:billingPlanId}});}finally{await f.close({preserveConsentEvidence:true});}};
  try{
   await f.db.conversation.update({where:{id:f.conversationId},data:{languageTag:"en"}});
   const domain=`${f.shopId}.example.test`.toLowerCase(),url=`https://${domain}/checkouts/trusted`;
   await f.db.shop.update({where:{id:f.shopId},data:{onboardingCompleted:true,defaultLanguageTag:"en"}});await f.db.shopBrand.create({data:{shopId:f.shopId,brandName:'  Common Shop Name  '}});
   const customer=await f.db.customer.create({data:{shopId:f.shopId,shopifyCustomerId:'gid://shopify/Customer/123456789',phone:`+${f.recipient}`}});const observed=new Date();
-  const phone=await f.db.customerPhone.create({data:{customerId:customer.id,phone:`+${f.recipient}`,whatsappCanonicalPhone:f.recipient,whatsappPhoneVerifiedAt:observed,whatsappConsentDecision:'GRANTED',whatsappConsentSource:'SHOPIFY_NATIVE',whatsappConsentVerifiedAt:observed,whatsappConsentProviderObservedAt:observed,whatsappConsentRevision:1n,whatsappConsentDecisionSequence:1n}});
+  // A Shopify-native decision and its matching receipt evidence must commit together.
+  const phone=await f.db.$transaction(async tx=>{
+   const record=await tx.customerPhone.create({data:{customerId:customer.id,phone:`+${f.recipient}`,whatsappCanonicalPhone:f.recipient,whatsappPhoneVerifiedAt:observed,whatsappConsentDecision:'GRANTED',whatsappConsentSource:'SHOPIFY_NATIVE',whatsappConsentVerifiedAt:observed,whatsappConsentProviderObservedAt:observed,whatsappConsentRevision:1n,whatsappConsentDecisionSequence:1n}});
+   const eventId=`common-layout-consent-${randomUUID()}`;
+   await tx.whatsAppConsentEvidence.create({data:{
+    shopId:f.shopId,installationId:null,eventId,customerId:customer.id,customerPhoneId:record.id,
+    canonicalPhone:f.recipient,purpose:'WHATSAPP_CHECKOUT_RECOVERY',decision:'GRANT',
+    decisionAt:observed,decisionSequence:1n,phoneConsentRevision:1n,
+    payloadDigest:Buffer.from(digest(stableJson({eventId,phoneId:record.id,recipient:f.recipient,decision:'GRANT',observedAt:observed.toISOString()})),'hex'),
+    disclosureText:'Receive WhatsApp checkout recovery messages.',disclosureVersion:'1',disclosureLocale:'en',
+   }});
+   return record;
+  });
   await f.db.checkoutRecovery.update({where:{id:f.recoveryId},data:{checkoutUrl:url,customerId:customer.id}});
   const billingPlan=await f.db.billingPlan.create({data:{shopifyPlanHandle:`free-${randomUUID()}`,name:'Free common plan',kind:'FREE'}});billingPlanId=billingPlan.id;
   await f.db.subscription.create({data:{shopId:f.shopId,planId:billingPlan.id,status:'ACTIVE',observedShopifyPlanHandle:billingPlan.shopifyPlanHandle}});await f.db.shopEntitlementCounter.create({data:{shopId:f.shopId,counter:'LIFETIME_FREE_RECOVERY_CREDITS',grantedQuantity:5,committedQuantity:0,reservedQuantity:0}});
@@ -69,7 +81,7 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=tr
   const commonRef:CommonRecoveryLayoutReference={schemaVersion:1,definitionId:published.definition.id,sourceHash:published.definition.sourceHash,localeId:published.locale.id,languageTag:'en',contentHash:published.locale.contentHash!,prepared:profile?{...savedPrepared,...templateProfile(profile)}:savedPrepared};
   const variables=commonLayoutVariables(f.shopId,domain,'  Common Shop Name  ',url)!;const boundaries=renderCommonLayoutBoundaries(commonRef,variables,answer,f.shopId,f.conversationId)!;
   const common:CommonLayoutReceipt={schemaVersion:2,kind:'RECOVERY_COMMON_LAYOUT',shopId:f.shopId,commonRef,variables,boundaries};const body=commonLayoutBody(common);
-  const commandId=await f.addCommand({textBody:answer});const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:`initial-${randomUUID()}`}});
+  const commandId=await f.addCommand({textBody:answer});const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});
   // The ongoing recovery is funded by its exact, confirmed initial outreach.
   // Exercise the real Free ledger lifecycle rather than fabricate an allowance.
   const initialCredit = new FreeRecoveryReservationService(f.db);
@@ -86,7 +98,9 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',freezeGroup=tr
    const reserved=await new OutboundAdmissionReservationService(f.db).reserve({shopId:f.shopId,conversationId:f.conversationId,idempotencyKey:`v2-${randomUUID()}`,senderType:'AGENT'});if(reserved.kind!=='admitted')throw new Error('normal admission refused');expect(reserved.executionScope).toBe('general');messageId=reserved.messageId;await f.db.conversationMessage.update({where:{id:messageId},data:{content:body}});
   }
   const plan=buildRecoveryMultipartDeliveryPlan({checkoutUrl:url,parts:[{role:'HEADER',plan:{schemaVersion:1,kind:'TEXT',body:boundaries.header+boundaries.footer}},{role:'ANSWER',plan:{schemaVersion:1,kind:'TEXT',body:boundaries.body+boundaries.footer}}]});const now=new Date();
-  const source:FrozenMultipart={schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId,body,checkoutUrl:url,recipient:f.recipient,recoveryId:f.recoveryId,actor,receipt:{sourceKind:actor==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId:command?.id??messageId,shopId:f.shopId,conversationId:f.conversationId,controlRevision:revision,inboundVersion:actor==='HUMAN'?0:1,firstPair:null},recoveryShopHeader:common,policyRef:null,command,sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},plan,planDigest:digestRecoveryMultipartDeliveryPlan(plan,sha256),frozenAt:now.toISOString(),deadlineAt:deliveryDeadline(now).toISOString()};
+  const assignment=await f.db.recoverySenderAssignment.findUniqueOrThrow({where:{conversationId:f.conversationId},include:{route:{include:{thread:{include:{sender:true}}}}}});
+  const sender={providerAccountId:assignment.route.thread.sender.providerAccountId,providerPhoneNumberId:assignment.route.providerPhoneNumberId};
+  const source:FrozenMultipart={schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId,body,checkoutUrl:url,recipient:f.recipient,recoveryId:f.recoveryId,actor,receipt:{sourceKind:actor==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId:command?.id??messageId,shopId:f.shopId,conversationId:f.conversationId,controlRevision:revision,inboundVersion:actor==='HUMAN'?0:1,firstPair:null},recoveryShopHeader:common,policyRef:null,command,sender,plan,planDigest:digestRecoveryMultipartDeliveryPlan(plan,sha256),frozenAt:now.toISOString(),deadlineAt:deliveryDeadline(now).toISOString()};
   const provider={sendWhatsAppText:vi.fn(async()=>({providerMessageId:`v2-${randomUUID()}`})),sendWhatsAppImage:vi.fn(async()=>({providerMessageId:`image-${randomUUID()}`}))};
   const engine=new RecoveryMultipartDeliveryEngine(f.db,provider,new OutboundSendFenceService(f.db,recoveryRuntimeEligibility),async()=>{},undefined,{preflight:async()=>({kind:'allowed',snapshot:{customerPhoneId:phone.id,canonicalRecipient:f.recipient,consentRevision:1n,noContactRevision:0n}})});
   if(freezeGroup)await engine.freeze(source);
@@ -109,10 +123,10 @@ async function registeredCommon(f:Awaited<ReturnType<typeof fixture>>){
  const locale=await f.db.whatsAppTemplateLocale.create({data:{definitionId:definition.id,languageTag:'en',providerLanguageCode:'en_GB',status:'REVIEWED',contentHash:hash,reviewedAt:new Date(),reviewedByAdminId:owner.createdByAdminId,localeAst:{authoring:{commonLayout:f.common.commonRef}}}});
  const components=[{type:'BODY' as const,text:'Custom shop {{1}}\nWebsite {{2}}\nYour basket {{3}}'}],bindings={header:[],body:[{position:1,variable:'shop.name'},{position:2,variable:'shop.websiteUrl'},{position:3,variable:'checkout.url'}],buttons:[]};
  const providerId=String(BigInt('0x'+randomUUID().replaceAll('-','').slice(0,20)));
- const registration=await f.db.whatsAppTemplateMetaRegistration.create({data:{localeId:locale.id,wabaId:'account',providerTemplateName:name,providerLanguageCode:'en_GB',category:'MARKETING',componentsSnapshot:components,parameterBindingsSnapshot:bindings,submittedContentHash:hash,providerTemplateId:providerId,submissionState:'SUBMITTED',providerStatus:'APPROVED',lastObservedContentHash:observedContentHash(components),lastObservedCategory:'MARKETING',lastReconciledAt:new Date(Date.now()-1000)}});
- const variant=await f.db.whatsAppTemplateVariant.create({data:{shopId:f.shopId,providerAccountId:'account',purpose:'INITIAL_NO_OFFER',languageTag:'en',providerLanguageCode:'en_GB',providerTemplateName:name,providerTemplateId:providerId,metaRegistrationId:registration.id,status:'APPROVED',enabled:true}});
+ const registration=await f.db.whatsAppTemplateMetaRegistration.create({data:{localeId:locale.id,wabaId:f.source.sender.providerAccountId,providerTemplateName:name,providerLanguageCode:'en_GB',category:'MARKETING',componentsSnapshot:components,parameterBindingsSnapshot:bindings,submittedContentHash:hash,providerTemplateId:providerId,submissionState:'SUBMITTED',providerStatus:'APPROVED',lastObservedContentHash:observedContentHash(components),lastObservedCategory:'MARKETING',lastReconciledAt:new Date(Date.now()-1000)}});
+ const variant=await f.db.whatsAppTemplateVariant.create({data:{shopId:f.shopId,providerAccountId:f.source.sender.providerAccountId,purpose:'INITIAL_NO_OFFER',languageTag:'en',providerLanguageCode:'en_GB',providerTemplateName:name,providerTemplateId:providerId,metaRegistrationId:registration.id,status:'APPROVED',enabled:true}});
  const parameters={header:[],body:[f.common.variables['shop.name'],f.common.variables['shop.websiteUrl'],f.common.variables['checkout.url']]};
- const identity:FinalTemplateIdentity={shopId:f.shopId,senderWabaId:'account',purpose:'INITIAL_NO_OFFER',variantId:variant.id,registrationId:registration.id,definitionId:definition.id,providerTemplateId:providerId,providerTemplateName:name,providerLanguageCode:'en_GB',submittedContentHash:hash,bindingFingerprint:hash,commonLayout:{reference:f.common.commonRef,variables:f.common.variables,parameters}};
+ const identity:FinalTemplateIdentity={shopId:f.shopId,senderWabaId:f.source.sender.providerAccountId,purpose:'INITIAL_NO_OFFER',variantId:variant.id,registrationId:registration.id,definitionId:definition.id,providerTemplateId:providerId,providerTemplateName:name,providerLanguageCode:'en_GB',submittedContentHash:hash,bindingFingerprint:hash,commonLayout:{reference:f.common.commonRef,variables:f.common.variables,parameters}};
  return {identity,parameters,close:async()=>{await f.db.whatsAppTemplateVariant.delete({where:{id:variant.id}});await f.db.whatsAppTemplateMetaRegistration.delete({where:{id:registration.id}});await f.db.whatsAppTemplateLocale.delete({where:{id:locale.id}});await f.db.whatsAppTemplateDefinition.delete({where:{id:definition.id}});}};
 }
 
@@ -143,7 +157,7 @@ async function ingressCustomer(f:Awaited<ReturnType<typeof fixture>>,text:string
  vi.spyOn(recoveryRoutingService,'resolveInboundMessage').mockResolvedValue({kind:'resolved',mode:'active',shopId:f.shopId,conversationId:f.conversationId,checkoutRecoveryId:f.recoveryId} as never);
  vi.spyOn(recoveryRoutingService,'isCurrentActiveRoute').mockResolvedValue(true);
  const providerMessageId=`test-inbound-${randomUUID()}`;
- await processRoutedInboundMessage({schemaVersion:1,provider:'whatsapp',providerAccountId:'account',providerPhoneNumberId:'phone',providerMessageId,customerPhone:f.recipient,contextMessageId:null,occurredAt:new Date().toISOString(),content:{type:'text',text}}, {},createLogger({serviceName:'disposable-handback',environment:'test',sink:()=>{}}),enqueue);
+ await processRoutedInboundMessage({schemaVersion:1,provider:'whatsapp',...f.source.sender,providerMessageId,customerPhone:f.recipient,contextMessageId:null,occurredAt:new Date().toISOString(),content:{type:'text',text}}, {},createLogger({serviceName:'disposable-handback',environment:'test',sink:()=>{}}),enqueue);
  return f.db.conversationMessage.findUniqueOrThrow({where:{providerMessageId}});
 }
 suite('ARCH075 real v2 common source reader and HUMAN frozen compatibility',()=>{

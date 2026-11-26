@@ -25,6 +25,8 @@ import { FollowUpClaimCancellationService } from "../../../src/services/recovery
 import { RecoveryFollowUpBillingService, type PersistedFollowUpReservation } from
   "../../../src/services/recovery-conversation/recovery-follow-up-billing.service.js";
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { currentAllowance } from "../../../src/services/recovery-allowance/storage.js";
 import { startPooledHumanDispatchMocks } from "./recovery-human-sender.fixture.js";
 
 export async function humanDispatchFixture(
@@ -44,6 +46,7 @@ export async function humanDispatchFixture(
     ? recipientOrOptions
     : recipientOrOptions?.recipient ?? "15551234567";
   const administratorIds: string[] = [];
+  const billingPlanIds: string[] = [];
   await db.shop.create({ data: { id: shopId, domain: `${shopId}.example.test`, status: "ACTIVE" } });
   await db.checkoutRecovery.create({ data: {
     id: recoveryId, shopId, checkoutToken: `${recoveryId}-checkout`,
@@ -227,6 +230,40 @@ export async function humanDispatchFixture(
       conversationId, sentAt);
   }
 
+  /** The emulator's prepared AI admission still requires a real, previously
+   * funded initial allowance at the production final-send fence. */
+  async function addFundedInitialAllowance() {
+    if (!pooled) throw new Error("Funded emulator admission requires a pooled sender");
+    await addInitialOutreach();
+    const attempt = await db.recoveryOutreachAttempt.findFirstOrThrow({
+      where: { checkoutRecoveryId: recoveryId, sequence: 1 },
+    });
+    const plan = await db.billingPlan.create({ data: {
+      shopifyPlanHandle: `moderation-fixture-${randomUUID()}`, name: "Funded AI fixture", kind: "FREE",
+    } });
+    billingPlanIds.push(plan.id);
+    await db.subscription.create({ data: {
+      shopId, planId: plan.id, status: "ACTIVE", observedShopifyPlanHandle: plan.shopifyPlanHandle,
+    } });
+    await db.shopEntitlementCounter.create({ data: {
+      shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 5,
+    } });
+    await db.platformBillingPolicy.upsert({ where: { id: "default" }, update: {}, create: {
+      id: "default", absoluteOutboundHardLimit: 20, defaultWarningPercent: 80,
+      defaultOutboundSoftLimit: 10, defaultOutboundHardLimit: 20, terminalMessageReservedSlots: 1,
+    } });
+    const credits = new FreeRecoveryReservationService(db);
+    const sourceKey = createRecoveryIdempotencyKey(shopId, `recovery-outreach:${attempt.id}`);
+    const input = { shopId, sourceKey, quantity: 1 };
+    const reserved = await credits.reserve(input);
+    if (reserved.kind !== "reserved") throw new Error(`Fixture credit reserve: ${reserved.kind}`);
+    const committed = await credits.commit(input);
+    if (committed.kind !== "committed") throw new Error(`Fixture credit commit: ${committed.kind}`);
+    return db.$transaction(tx => currentAllowance(tx, conversationId, {
+      outboundHardLimit: 20, terminalMessageReservedSlots: 1,
+    }));
+  }
+
   async function addMerchantFollowUpCommand(
     templateName = "recovery_follow_up", persistedKey?: string | null, publicKey?: string,
   ) {
@@ -292,11 +329,19 @@ export async function humanDispatchFixture(
     startAimock: mocks.startAimock,
     durableEligibility, preparation: createPreparation(),
     persistedAllowModeration: persistedAllowModeration, dispatcher,
-    addCommand, addInitialOutreach, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
-    async close() {
+    addCommand, addInitialOutreach, addFundedInitialAllowance, addMerchantFollowUpCommand, changeOwner, suspendShop, commandState,
+    async close(options: { preserveConsentEvidence?: boolean } = {}) {
       try {
-        await db.shop.delete({ where: { id: shopId } });
+        if (options.preserveConsentEvidence) {
+          // Evidence and its customer/phone parents are append-only and live
+          // until the disposable database is destroyed. Remove the test's
+          // recovery so pending commands and pooled routes do not leak.
+          await db.checkoutRecovery.delete({ where: { id: recoveryId } });
+        } else {
+          await db.shop.delete({ where: { id: shopId } });
+        }
         await pooledFixture?.cleanupAfterOwnerDeletion();
+        for (const id of billingPlanIds) await db.billingPlan.delete({ where: { id } });
         for (const id of administratorIds) await db.platformAdmin.delete({ where: { id } });
       } finally {
         try { await mocks.close(); }

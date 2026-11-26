@@ -52,8 +52,8 @@ suite("ARCH-047 BG009 PostgreSQL moderation digest and crashed-lease replay", ()
     };
   }
 
-  it("rejects a raw-body moderation digest when the frozen customer-visible body differs", async () => {
-    const f = await humanDispatchFixture("bg009-raw-digest-denied");
+  it("persists a raw-body assessment but requires ALLOW for the frozen body at final dispatch", async () => {
+    const f = await humanDispatchFixture("bg009-raw-digest-denied", { pooledSender: true });
     let cleanup: (() => Promise<void>) | undefined;
     try {
       cleanup = await withPublishedWrapper(f);
@@ -75,24 +75,79 @@ suite("ARCH-047 BG009 PostgreSQL moderation digest and crashed-lease replay", ()
         VALUES (${id},${f.shopId},${f.conversationId},'HUMAN_COMMAND',${commandId},
           ${digestValue},'TEXT','omni-moderation-latest',${moderationConfig().policyVersion},
           statement_timestamp())`;
-      // This must fail in PostgreSQL itself, independent of the TypeScript reader.
-      await expect(insertPending(randomUUID(), sha256Text(raw)))
-        .rejects.toThrow(/ARCH040 moderation HUMAN text digest mismatch/);
+      // The Database subject guard no longer compares HUMAN_TEXT digests.
+      // Persist a historical ALLOW for the wrong bytes using the real lease
+      // transition; do not bypass the production final-send fence.
+      const rawAssessmentId = randomUUID();
+      expect(await insertPending(rawAssessmentId, sha256Text(raw))).toBe(1);
+      const moderationLease = randomUUID();
+      expect(await f.db.$executeRaw`
+        UPDATE "whatsapp"."ConversationModerationAssessment"
+        SET "decision"='CHECKING', "attemptCount"=1, "leaseToken"=${moderationLease},
+            "leaseExpiresAt"=statement_timestamp()+interval '5 minutes', "updatedAt"=statement_timestamp()
+        WHERE "id"=${rawAssessmentId} AND "decision"='PENDING'`).toBe(1);
+      const completion = await f.db.$queryRaw<Array<{ allowed: boolean }>>`
+        SELECT "whatsapp".arch040_moderation_complete(
+          ${rawAssessmentId},${moderationLease},'ALLOW',
+          'omni-moderation-latest',false,'{}'::jsonb,'{}'::jsonb,NULL,NULL,NULL
+        ) AS allowed`;
+      expect(completion).toEqual([{ allowed: true }]);
+      const moderation = f.persistedAllowModeration();
+      const subject = { kind: "HUMAN_COMMAND" as const, commandId };
+      const policyVersion = moderationConfig().policyVersion;
+      await expect(moderation.assessText({ subject, shopId: f.shopId,
+        conversationId: f.conversationId, effectiveText: raw,
+        inputKind: "TEXT", policyVersion, now: new Date(),
+      })).rejects.toThrow(/moderation_content_identity_mismatch/);
+      const fence = new OutboundSendFenceService(f.db, f.durableEligibility);
+      const admit = () => fence.admitFinalSend({
+        senderType: "HUMAN", conversationId: f.conversationId, shopId: f.shopId,
+        recoveryId: f.recoveryId, expectedControlRevision: 1, commandId,
+        leaseToken: claim!.leaseToken, recipient: f.recipient, now: new Date(),
+      });
+      const assertNotAdmitted = async () => {
+        expect(await moderation.requireCurrentAllowance({ subject,
+          effectiveText: frozen.body, policyVersion })).toBe(false);
+        expect(await admit()).toEqual({ kind: "suppressed", reason: "moderation_content_stale" });
+        expect(await f.commandState(commandId)).toMatchObject({
+          state: "CLAIMED", providerDispatchKey: null, outboundMessageId: null,
+        });
+        expect(await f.db.conversationMessage.count({ where: {
+          conversationId: f.conversationId, senderType: "HUMAN",
+        } })).toBe(0);
+      };
+      await assertNotAdmitted();
+      const preparedAssessmentId = randomUUID();
+      expect(await insertPending(preparedAssessmentId, sha256Text(frozen.body))).toBe(1);
+      expect(await f.db.conversationModerationAssessment.findUniqueOrThrow({
+        where: { id: preparedAssessmentId },
+      })).toMatchObject({ decision: "PENDING", contentSha256: sha256Text(frozen.body) });
+      await assertNotAdmitted();
+      expect((await moderation.assessText({ subject, shopId: f.shopId,
+        conversationId: f.conversationId, effectiveText: frozen.body,
+        inputKind: "TEXT", policyVersion, now: new Date(),
+      })).kind).toBe("allow");
+      expect(await moderation.requireCurrentAllowance({ subject,
+        effectiveText: frozen.body, policyVersion })).toBe(true);
+      await expect(f.db.merchantConversationSendCommand.update({
+        where: { id: commandId }, data: { preparedTextBody: "Changed after moderation" },
+      })).rejects.toThrow(/prepared HUMAN content is immutable/);
+      const permit = await admit();
+      expect(permit).toMatchObject({ kind: "admitted", messageContent: frozen.body });
+      if (permit.kind !== "admitted") throw new Error(`Expected final permit: ${permit.reason}`);
+      expect(await f.db.conversationMessage.findUniqueOrThrow({ where: { id: permit.messageId } }))
+        .toMatchObject({ content: frozen.body, senderType: "HUMAN", status: "PENDING" });
       expect(await f.db.conversationModerationAssessment.count({
         where: { merchantSendCommandId: commandId },
-      })).toBe(0);
-      expect(await insertPending(randomUUID(), sha256Text(frozen.body))).toBe(1);
-      expect((await f.db.conversationModerationAssessment.findFirstOrThrow({
-        where: { merchantSendCommandId: commandId },
-      })).contentSha256).toBe(sha256Text(frozen.body));
+      })).toBe(2);
       expect(f.provider.sendWhatsAppText).not.toHaveBeenCalled();
-    } finally { if (cleanup) await cleanup(); await f.close(); }
+    } finally { try { if (cleanup) await cleanup(); } finally { await f.close(); } }
   }, 120_000);
 
   it.each(["STOP", "HUMAN_CONTROL_LOSS"] as const)(
     "reclaims frozen bytes after a worker crash but %s prevents final dispatch",
     async (loss) => {
-      const f = await humanDispatchFixture(`bg009-reclaim-${loss}`, { recipient: "447400123456" });
+      const f = await humanDispatchFixture(`bg009-reclaim-${loss}`, { recipient: "447400123456", pooledSender: true });
       let cleanup: (() => Promise<void>) | undefined;
       try {
         cleanup = await withPublishedWrapper(f);
@@ -182,7 +237,7 @@ suite("ARCH-047 BG009 PostgreSQL moderation digest and crashed-lease replay", ()
         expect(await f.db.conversationMessage.count({ where: {
           conversationId: f.conversationId, senderType: "HUMAN",
         } })).toBe(0);
-      } finally { if (cleanup) await cleanup(); await f.close(); }
+      } finally { try { if (cleanup) await cleanup(); } finally { await f.close(); } }
     }, 120_000,
   );
 });

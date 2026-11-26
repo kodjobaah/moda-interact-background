@@ -125,7 +125,7 @@ async function createRecoveryTurnBoundary(
 
 suite("ARCH-040 HUMAN and AI control handover regression", () => {
   it("uses Background-local Aimock and WhatsApp emulator for an allowed AI recovery reply", async () => {
-    const f = await humanDispatchFixture("aimock-allowed-ai-turn");
+    const f = await humanDispatchFixture("aimock-allowed-ai-turn", { pooledSender: true });
     try {
       const result = await runAiTurnThroughBackgroundMocks(f, { takeoverThenResume: false });
       expect(result.aimockJournal).toEqual(expect.objectContaining({
@@ -144,7 +144,7 @@ suite("ARCH-040 HUMAN and AI control handover regression", () => {
   }, 120_000);
 
   it("uses Background-local Aimock to prove takeover/resume suppresses an in-flight AI reply", async () => {
-    const f = await humanDispatchFixture("aimock-stale-ai-turn");
+    const f = await humanDispatchFixture("aimock-stale-ai-turn", { pooledSender: true });
     try {
       const result = await runAiTurnThroughBackgroundMocks(f, { takeoverThenResume: true });
       expect(result.aimockJournal).toEqual(expect.objectContaining({ requestCount: 1, matchedCount: 1 }));

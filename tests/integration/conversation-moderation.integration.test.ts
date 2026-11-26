@@ -18,7 +18,7 @@ const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
   process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 
 async function moderatedFixture(name: string, options: { blockedTexts?: string[] } = {}) {
-  const f = await humanDispatchFixture(name);
+  const f = await humanDispatchFixture(name, { pooledSender: true });
   try {
     const aimock = await startArch040ModerationAimock(options);
     return {
