@@ -132,7 +132,8 @@ export interface WooOutreachDependencies {
   resumedSettlement: WooResumedSettlementPort;
   sender: WooGuardedInitialSender;
   finalize: {
-    /** Finalize a confirmed initial only; MUST NOT schedule sequence 2. */
+    /** Finalize a confirmed initial and schedule its configured follow-up. */
+    ensureScheduledFollowUp(recoveryId: string): Promise<void>;
     confirmed(input: {
       recovery: WooOutreachRecovery;
       attempt: WooInitialAttempt;
@@ -224,7 +225,6 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
     if (outcome.kind === "provider-uncertain")
       throw new Error("WOO_INITIAL_PROVIDER_OUTCOME_UNCERTAIN");
     if (outcome.kind === "provider-confirmed") {
-      if (attempt.followUpDueAt !== null) throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
       const message = outcome.message;
       if (!message.sentAt || !["SENT", "DELIVERED", "READ"].includes(message.status))
         throw new Error("WOO_CONFIRMED_PROVIDER_MESSAGE_INVALID");
@@ -290,8 +290,13 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
               throw new Error("WOO_CONFIRMED_PROVIDER_WITH_TERMINAL_ATTEMPT");
             if (previous.outboundMessageId === persisted.id && previous.sentAt &&
               ["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(previous.status) &&
-              fresh.status !== "DETECTED")
+              fresh.status !== "DETECTED") {
+              if (previous.followUpDueAt) {
+                state.stage = "schedule-follow-up";
+                await this.deps.finalize.ensureScheduledFollowUp(recoveryId);
+              }
               return this.enqueueOutcome(state, "already-initialized");
+            }
             // Meta has already sent: enqueue ONLY to finish durable credit/attempt
             // finalization. processInitial reconciles SENT before fresh eligibility.
             state.stage = "enqueue-confirmed-finalization";
@@ -351,8 +356,13 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
               throw new Error("WOO_CONFIRMED_PROVIDER_WITH_TERMINAL_ATTEMPT");
             if (attempt.outboundMessageId === prior.id && attempt.sentAt &&
               ["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(attempt.status) &&
-              fresh.status !== "DETECTED")
+              fresh.status !== "DETECTED") {
+              if (attempt.followUpDueAt) {
+                state.stage = "schedule-follow-up";
+                await this.deps.finalize.ensureScheduledFollowUp(recoveryId);
+              }
               return this.dispatchOutcome(state, "already-initialized");
+            }
             // A confirmed send MUST be charged even if a paid order arrived
             // afterwards; replays finalize it, never re-send it.
             const finalization = await this.finalizeExisting(fresh, attempt, prior, state);
@@ -558,7 +568,9 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
     recovery: WooOutreachRecovery, attempt: WooInitialAttempt,
     message: WooConfirmedMessage, state: RunState,
   ): Promise<Awaited<ReturnType<WooOutreachDependencies["finalize"]["confirmed"]>>> {
-    if (attempt.followUpDueAt !== null) throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
+    if (attempt.followUpDueAt !== null && (attempt.outboundMessageId !== message.id ||
+      attempt.sentAt?.getTime() !== message.sentAt.getTime()))
+      throw new Error("WOO_INITIAL_ATTEMPT_CONFLICT");
     state.stage = "verify-confirmed-message-owner";
     const conversation = await this.deps.conversations.getOrCreate(recovery.id);
     if (message.conversationId !== conversation.id)

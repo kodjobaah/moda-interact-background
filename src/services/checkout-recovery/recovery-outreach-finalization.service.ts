@@ -35,6 +35,19 @@ type ConfirmedMessage = {
   sentAt: Date;
 };
 
+/** Use the confirmed provider send time, never the time a replay executes. */
+export function initialFollowUpDeadline(
+  attempt: { outboundMessageId?: string | null; sentAt?: Date | null; followUpDueAt?: Date | null },
+  message: { id: string; sentAt: Date },
+  policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null },
+): Date | null {
+  if (attempt.outboundMessageId === message.id && attempt.sentAt?.getTime() === message.sentAt.getTime())
+    return attempt.followUpDueAt ?? null;
+  return policy?.followUpEnabled && policy.followUpDelayMinutes
+    ? new Date(message.sentAt.getTime() + policy.followUpDelayMinutes * 60_000)
+    : null;
+}
+
 export class RecoveryOutreachFinalizationService {
   constructor(
     private readonly billingService: RecoveryBillingService = recoveryBillingService,
@@ -91,13 +104,7 @@ export class RecoveryOutreachFinalizationService {
         return { kind: "held", reason: "lineage-conflict" };
       }
 
-      const alreadyFinalized = input.attempt.outboundMessageId === input.message.id &&
-        input.attempt.sentAt?.getTime() === input.message.sentAt.getTime();
-      const followUpDueAt = alreadyFinalized
-        ? input.attempt.followUpDueAt
-        : input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
-          ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
-          : null;
+      const followUpDueAt = initialFollowUpDeadline(input.attempt, input.message, input.policy);
 
       stage = "support_notice";
       await this.initialOutreachFinalizer.finalizeConfirmedInitial({
@@ -144,16 +151,7 @@ export class RecoveryOutreachFinalizationService {
     policy?: { followUpEnabled: boolean; followUpDelayMinutes: number | null };
   }) {
     const initial = input.attempt.sequence === 1 || input.attempt.sequence >= 3 && isInitialRetryId(input.attempt.id);
-    const alreadyFinalized = initial &&
-      input.attempt.outboundMessageId === input.message.id &&
-      input.attempt.sentAt?.getTime() === input.message.sentAt.getTime();
-    const followUpDueAt = initial
-      ? alreadyFinalized ? input.attempt.followUpDueAt ?? null : (
-          input.policy?.followUpEnabled && input.policy.followUpDelayMinutes
-            ? new Date(input.message.sentAt.getTime() + input.policy.followUpDelayMinutes * 60_000)
-            : null
-        )
-      : null;
+    const followUpDueAt = initial ? initialFollowUpDeadline(input.attempt, input.message, input.policy) : null;
 
     if (initial) {
       const result = await this.finalizeConfirmedInitialOutreach({

@@ -132,7 +132,7 @@ function makeFixture() {
     },
     sender: { sendInitial: send as unknown as WooOutreachDependencies["sender"]["sendInitial"],
       findExistingAdmission: existing },
-    finalize: { confirmed: finalize },
+    finalize: { confirmed: finalize, ensureScheduledFollowUp: vi.fn(async () => {}) },
     enqueue: { initial: enqueue },
   };
   return {
@@ -742,7 +742,20 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("never authorises a Woo follow-up when a historic initial attempt has a due date", async () => {
+  it("republishes the persisted follow-up deadline on initial replay without another send or charge", async () => {
+    const f = makeFixture();
+    await expect(f.service.processInitial("recovery")).resolves.toMatchObject({ kind: "sent" });
+    f.setAttempt({ ...f.attempt!, followUpDueAt: new Date("2026-10-24T01:15:00Z") });
+    await expect(f.service.processInitial("recovery")).resolves.toMatchObject({ kind: "already-initialized" });
+    await expect(f.service.enqueueInitial("recovery")).resolves.toMatchObject({ kind: "already-initialized" });
+    expect(f.deps.finalize.ensureScheduledFollowUp).toHaveBeenCalledTimes(2);
+    expect(f.deps.finalize.ensureScheduledFollowUp).toHaveBeenLastCalledWith("recovery");
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.admit).toHaveBeenCalledTimes(1);
+    expect(f.finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rejects an unsent Woo initial attempt with an inconsistent follow-up deadline", async () => {
     const f = makeFixture();
     f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
       sentAt: null, outboundMessageId: null, followUpDueAt: new Date() });

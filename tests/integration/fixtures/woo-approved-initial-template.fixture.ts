@@ -19,6 +19,7 @@ function stableJson(value: unknown): string {
 
 export async function seedApprovedInitialWooTemplateRegistration(
   db: PrismaClient, shopId: string, shopUrl: string, includeCheckoutItemsBinding = true,
+  senderWabaId = WOO_TEST_SENDER_WABA,
 ): Promise<FinalTemplateIdentity> {
   const components = [
     { type: "BODY", text: includeCheckoutItemsBinding
@@ -58,7 +59,7 @@ export async function seedApprovedInitialWooTemplateRegistration(
     reviewedAt: new Date(Date.now() - 60_000),
   } });
   const registration = await db.whatsAppTemplateMetaRegistration.create({ data: {
-    localeId: locale.id, wabaId: WOO_TEST_SENDER_WABA,
+    localeId: locale.id, wabaId: senderWabaId,
     providerTemplateName: name, providerLanguageCode: "en_GB",
     category: "MARKETING", componentsSnapshot: components,
     parameterBindingsSnapshot: bindings, submittedContentHash: contentHash,
@@ -67,14 +68,14 @@ export async function seedApprovedInitialWooTemplateRegistration(
     lastReconciledAt: new Date(Date.now() - 30_000),
   } });
   const variant = await db.whatsAppTemplateVariant.create({ data: {
-    shopId, providerAccountId: WOO_TEST_SENDER_WABA,
+    shopId, providerAccountId: senderWabaId,
     purpose: "INITIAL_NO_OFFER", languageTag: "en-GB",
     providerLanguageCode: "en_GB", providerTemplateName: name,
     providerTemplateId: providerId, metaRegistrationId: registration.id,
     status: "APPROVED", enabled: true,
   } });
   return {
-    shopId, senderWabaId: WOO_TEST_SENDER_WABA, purpose: "INITIAL_NO_OFFER",
+    shopId, senderWabaId, purpose: "INITIAL_NO_OFFER",
     variantId: variant.id, registrationId: registration.id, definitionId: definition.id,
     providerTemplateId: providerId, providerTemplateName: name,
     providerLanguageCode: "en_GB", submittedContentHash: contentHash,

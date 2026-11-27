@@ -1,6 +1,11 @@
 import { effectiveInitialForFollowUp } from "../recovery-delivery-retry/effective-initial.js";
 import { recoveryAllowanceService, type RecoveryAllowanceService } from "../recovery-allowance/renewal.service.js";
 import prisma from "../../lib/db.js";
+import { connectionRedis } from "../../lib/redis.js";
+import { WooCheckoutLeaseGuard } from "../pending-recovery-candidate/checkout-order-guard.service.js";
+import { WooOrderTerminalEvidenceStore } from "../woocommerce-recovery/woo-order-reconciliation.service.js";
+import type { WooObservedOrderStateReader } from "../woocommerce-recovery/contracts.js";
+import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
 import { outboundWhatsAppAdmissionService } from "../outbound-whatsapp-admission.service.js";
 import { isSynchronousRecipientFailure } from "../whatsapp-provider-rejection.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
@@ -32,26 +37,34 @@ export class RecoveryOutreachFollowUpProcessorService {
     private readonly ownership = new AiTurnOwnershipService(),
     private readonly storedConsent: StoredRecoveryConsentReader = recoveryStoredConsentService,
     private readonly allowance: Pick<RecoveryAllowanceService,"limits"|"beginFollowUp"|"attachFollowUp"> = recoveryAllowanceService,
+    private readonly wooLock: Pick<WooCheckoutLeaseGuard, "withCheckoutLock"> = new WooCheckoutLeaseGuard(),
+    private readonly wooOrders: WooObservedOrderStateReader = new WooOrderTerminalEvidenceStore(connectionRedis),
   ) {}
 
   async process(recoveryId: string) {
     const lockTarget = await prisma.checkoutRecovery.findUnique({
       where: { id: recoveryId },
-      select: { shopId: true, checkoutToken: true },
+      select: { shopId: true, checkoutToken: true, shop: { select: { platform: true } } },
     });
     if (!lockTarget) return { kind: "suppressed", reason: "missing-recovery" } as const;
-    return pendingRecoveryCandidateService.withCheckoutLock(
+    const woo = lockTarget.shop.platform === "WOOCOMMERCE";
+    const checkoutLock = woo ? this.wooLock : pendingRecoveryCandidateService;
+    return checkoutLock.withCheckoutLock(
       lockTarget.shopId,
       lockTarget.checkoutToken,
       async () => {
         const recovery = await prisma.checkoutRecovery.findUnique({
           where: { id: recoveryId },
           include: {
-            shop: { select: { domain: true, status: true } },
+            shop: { select: { domain: true, status: true, platform: true } },
             outreachAttempts: { orderBy: { sequence: "asc" } },
             conversation: true,
           },
         });
+        if (recovery && (recovery.shopId !== lockTarget.shopId || recovery.checkoutToken !== lockTarget.checkoutToken ||
+            recovery.shop.platform !== lockTarget.shop.platform)) {
+          return { kind: "suppressed", reason: "checkout-owner-changed" } as const;
+        }
         const initial = recovery ? await effectiveInitialForFollowUp(prisma, recoveryId, recovery.conversation?.id ?? null, recovery.outreachAttempts) : undefined;
         if (!recovery || !initial || !initial.sentAt || !initial.followUpDueAt || initial.followUpDueAt > new Date() || !recovery.conversation) {
           return { kind: "suppressed", reason: "not-due" } as const;
@@ -69,6 +82,9 @@ export class RecoveryOutreachFollowUpProcessorService {
         if (["COMPLETED", "EXPIRED", "CANCELLED"].includes(recovery.status)) {
           return { kind: "suppressed", reason: "terminal" } as const;
         }
+        if (woo && (await this.wooOrders.read({ shopId: recovery.shopId, checkoutToken: recovery.checkoutToken })).kind !== "none-observed") {
+          return { kind: "suppressed", reason: "observed-order-terminal" } as const;
+        }
         if (recovery.outreachAttempts.some((item) => item.sequence === 2 && item.status === "WAITING_FOR_RESPONSE")) {
           return { kind: "suppressed", reason: "already-sent" } as const;
         }
@@ -83,7 +99,9 @@ export class RecoveryOutreachFollowUpProcessorService {
           return { kind: "suppressed", reason: "engaged" } as const;
         }
         const recipient = recovery.customerId
-          ? await recoveryRecipientResolverService.resolveForCustomerInShop(recovery.customerId, recovery.shopId)
+          ? woo
+            ? await wooRecoveryConsentReader.resolveStoredRecipient(recovery.customerId, recovery.shopId)
+            : await recoveryRecipientResolverService.resolveForCustomerInShop(recovery.customerId, recovery.shopId)
           : null;
         if (!recipient) return { kind: "suppressed", reason: "no-recipient" } as const;
         const suppression = await recoveryRecipientSuppressionAdmissionService.evaluate(

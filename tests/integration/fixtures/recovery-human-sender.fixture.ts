@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { RecoverySenderPoolService, type RecoverySenderIdentity } from "../../../src/services/recovery-sender-pool/sender-pool.service.js";
 import { startArch040BackgroundMocks } from "./arch040-background-mocks.fixture.js";
@@ -11,7 +12,10 @@ export async function startPooledHumanDispatchMocks(db: PrismaClient, owner: {
   if (process.env.MODA_DISPOSABLE_INTEGRATION !== "1") {
     throw new Error("Pooled sender fixture requires disposable integration infrastructure");
   }
-  const providerAccountId = "918273645546372819";
+  // The disposable database is shared across integration files. Historical
+  // retry receipts may retain a registered sender; never overwrite that row.
+  const providerAccountId = BigInt(`0x${owner.conversationId.replaceAll("-", "")}`).toString();
+  const pooledPhoneNumberId = String(randomInt(70_000_000_000_000, 80_000_000_000_000));
   const standalonePhoneNumberId = "15550123457";
   let mocks: Awaited<ReturnType<typeof startArch040BackgroundMocks>> | undefined;
   let allocatedSender: RecoverySenderIdentity | undefined;
@@ -29,7 +33,7 @@ export async function startPooledHumanDispatchMocks(db: PrismaClient, owner: {
       update: {},
     });
     mocks = await startArch040BackgroundMocks({ rowId: configuration.id,
-      version: configuration.version, providerAccountId, standalonePhoneNumberId });
+      version: configuration.version, providerAccountId, standalonePhoneNumberId, pooledPhoneNumberId });
     await db.backgroundRuntimeConfig.upsert({ where: { id: "default" },
       create: { id: "default", checkoutRecoveryLifetimeDays: 21 }, update: {} });
     await db.whatsAppPoolSender.create({ data: {
@@ -41,9 +45,9 @@ export async function startPooledHumanDispatchMocks(db: PrismaClient, owner: {
       conversationId: owner.conversationId, canonicalRecipient: owner.recipient,
     });
     if (allocation.kind !== "assigned") throw new Error(`Fixture sender allocation failed: ${allocation.kind}`);
+    if (allocation.sender.providerPhoneNumberId !== ownedPoolPhoneId ||
+        allocation.sender.providerAccountId !== providerAccountId) throw new Error("Fixture sender identity mismatch");
     allocatedSender = allocation.sender;
-    if (allocatedSender.providerPhoneNumberId !== ownedPoolPhoneId ||
-        allocatedSender.providerAccountId !== providerAccountId) throw new Error("Fixture sender identity mismatch");
     return { mocks, cleanupAfterOwnerDeletion };
   } catch (error) {
     try {

@@ -32,7 +32,7 @@ type OutboundMessage = {
  * runtime dependency on system-test are permitted.
  */
 export class Arch040WhatsAppEmulator {
-  readonly phoneNumberId = "15550123456";
+  constructor(readonly phoneNumberId = "15550123456") {}
   readonly messages: OutboundMessage[] = [];
   private readonly host = "127.0.0.1";
   private readonly apiVersion = "v25.0";

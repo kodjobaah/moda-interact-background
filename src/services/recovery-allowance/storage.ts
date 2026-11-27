@@ -6,7 +6,7 @@ import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-envir
 import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diagnostic.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { ConversationAllowanceBlock, Prisma } from "@prisma/client";
-import { lockRecoveryContext, readRecoveryWindowEvidence, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
+import { lockRecoveryContext, readRecoveryWindowEvidence, terminalRecovery, type RecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
 import { customerWindow, CUSTOMER_WINDOW_MS } from "../recovery-conversation/recovery-follow-up-policy.service.js";
 import { findExactRecoveryReservationSource, findExactReservationSource } from "../recovery-delivery-compensation/lineage.js";
 import { readCommittedCorrectionReplay, readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
@@ -29,9 +29,22 @@ export class AllowanceHeld extends Error {
 /** Adopt the original or positively delivered initial retry. Never rebind an
  * existing allowance reservation, even if a later physical send succeeded. */
 export async function adoptInitial(tx: Tx, conversationId: string, limits: AllowanceLimits): Promise<ConversationAllowanceBlock> {
+    const context = await requireAllowanceOwner(tx, conversationId);
+    return adoptInitialUnderOwnerLock(tx, context, limits);
+}
+
+async function requireAllowanceOwner(tx: Tx, conversationId: string): Promise<RecoveryContext> {
     const context = await lockRecoveryContext(tx, conversationId);
     if (!context)
         throw new AllowanceHeld("owner-unavailable");
+    return context;
+}
+
+// Private helpers accept only a context acquired in this transaction. Keep
+// the Shop -> Conversation lock until commit, but do not acquire/read it again
+// at each layer. All funding and delivery evidence is still read under it.
+async function adoptInitialUnderOwnerLock(tx: Tx, context: RecoveryContext, limits: AllowanceLimits): Promise<ConversationAllowanceBlock> {
+    const conversationId = context.id;
     const existing = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, fundingKind: "INITIAL" } });
     const hasRetry = await tx.recoveryOutreachAttempt.findFirst({
         where: { checkoutRecoveryId: context.recoveryId, sequence: { gte: 3 }, trigger: "INITIAL" }, select: { id: true },
@@ -91,8 +104,13 @@ export async function adoptInitial(tx: Tx, conversationId: string, limits: Allow
     }
 }
 export async function currentAllowance(tx: Tx, conversationId: string, limits: AllowanceLimits) {
-    await lockRecoveryContext(tx, conversationId);
-    await adoptInitial(tx, conversationId, limits);
+    const context = await requireAllowanceOwner(tx, conversationId);
+    return currentAllowanceUnderOwnerLock(tx, context, limits);
+}
+
+async function currentAllowanceUnderOwnerLock(tx: Tx, context: RecoveryContext, limits: AllowanceLimits) {
+    const conversationId = context.id;
+    await adoptInitialUnderOwnerLock(tx, context, limits);
     const open = await tx.conversationAllowanceBlock.findFirst({ where: { conversationId, state: { in: ["PENDING", "ACTIVE"] } }, orderBy: { ordinal: "desc" } });
     if (open)
         return open;
@@ -130,7 +148,7 @@ export async function createSuccessor(tx: Tx, input: {
         throw new AllowanceHeld("contact-blocked");
     if (input.kind === "CONTINUATION" && (!await hasCurrentContinuation(tx, context.id, input.expectedInboundVersion ?? -1) || context.mode !== "AI" || context.revision !== input.expectedControlRevision || context.inboundVersion !== input.expectedInboundVersion || !customerWindow(evidence.verifiedInboundAt, input.now).open))
         throw new AllowanceHeld("continuation-not-current");
-    const current = await currentAllowance(tx, context.id, input.limits);
+    const current = await currentAllowanceUnderOwnerLock(tx, context, input.limits);
     if (current.state === "PENDING") {
         if (current.fundingKind !== input.kind)
             throw new AllowanceHeld("another-funding-intent");

@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
     recoveryOutreachAttempt: { findUnique: vi.fn() },
   },
   lock: { withCheckoutLock: vi.fn() },
+  wooLock: { withCheckoutLock: vi.fn() },
+  wooOrders: { read: vi.fn() },
+  wooRecipient: { resolveStoredRecipient: vi.fn() },
   outbound: { getProviderAccountId: vi.fn(), sendTemplate: vi.fn(), findExistingAdmission: vi.fn() },
   automated: { prepare: vi.fn() },
   eligibility: { evaluate: vi.fn() },
@@ -30,6 +33,7 @@ vi.mock("../../../../src/lib/db.js", () => ({ default: mocks.prisma }));
 vi.mock("../../../../src/services/pending-recovery-candidate.service.js", () => ({
   pendingRecoveryCandidateService: mocks.lock,
 }));
+vi.mock("../../../../src/services/woocommerce-recovery-consent.service.js", () => ({ wooRecoveryConsentReader: mocks.wooRecipient }));
 vi.mock("../../../../src/services/outbound-whatsapp-admission.service.js", () => ({
   outboundWhatsAppAdmissionService: mocks.outbound,
 }));
@@ -62,7 +66,7 @@ const recovery = {
   checkoutToken: "checkout-1",
   customerId: "customer-1",
   status: "MESSAGE_SENT",
-  shop: { domain: "shop.test", status: "ACTIVE" },
+  shop: { domain: "shop.test", status: "ACTIVE", platform: "SHOPIFY" },
   outreachAttempts: [{ id: "attempt-1", sequence: 1, status: "WAITING_FOR_RESPONSE", sentAt, followUpDueAt: dueAt, outboundMessageId: "message-1" }],
   conversation: { id: "conversation-1", languageTag: "fr-CA", countryCode: "CA" },
   customer: { phone: "+15551234567" },
@@ -91,20 +95,24 @@ function createProcessor(billingOverrides: Partial<RecoveryBillingService> = {})
   };
   return {
     allowance,
-    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never,allowance),
+    processor: new RecoveryOutreachFollowUpProcessorService(billing, finalizer, mocks.claim as never, ownership as never, mocks.consent as never,allowance, mocks.wooLock, mocks.wooOrders),
     billing,
   };
 }
 
 function setRecovery(value: unknown = recovery) {
   mocks.prisma.checkoutRecovery.findUnique
-    .mockResolvedValueOnce({ shopId: "shop-1", checkoutToken: "checkout-1" })
+    .mockResolvedValueOnce({ shopId: "shop-1", checkoutToken: "checkout-1",
+      shop: { platform: (value as typeof recovery | null)?.shop?.platform ?? "SHOPIFY" } })
     .mockResolvedValueOnce(value);
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.lock.withCheckoutLock.mockImplementation(async (_shopId, _checkoutToken, callback) => callback());
+  mocks.wooLock.withCheckoutLock.mockImplementation(async (_shopId, _checkoutToken, callback) => callback());
+  mocks.wooOrders.read.mockResolvedValue({ kind: "none-observed" });
+  mocks.wooRecipient.resolveStoredRecipient.mockResolvedValue("15551234567");
   mocks.prisma.checkoutRecovery.findUnique.mockResolvedValue(null);
   mocks.prisma.checkoutRecovery.updateMany.mockResolvedValue({ count: 1 });
   mocks.prisma.conversationMessage.findFirst.mockResolvedValue(null);
@@ -147,6 +155,47 @@ beforeEach(() => {
 });
 
 describe("RecoveryOutreachFollowUpProcessorService", () => {
+  const wooRecovery = { ...recovery, shop: { ...recovery.shop, platform: "WOOCOMMERCE" } };
+
+  it("dispatches a Woo follow-up through the same claim, allowance and billing path", async () => {
+    setRecovery(wooRecovery);
+    const { processor, billing, allowance } = createProcessor();
+    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "sent", attemptId: attempt.id });
+    expect(mocks.wooLock.withCheckoutLock).toHaveBeenCalledWith("shop-1", "checkout-1", expect.any(Function));
+    expect(mocks.lock.withCheckoutLock).not.toHaveBeenCalled();
+    expect(mocks.wooOrders.read).toHaveBeenCalledWith({ shopId: "shop-1", checkoutToken: "checkout-1" });
+    expect(mocks.wooRecipient.resolveStoredRecipient).toHaveBeenCalledWith("customer-1", "shop-1");
+    expect(mocks.recipientResolver.resolveForCustomerInShop).not.toHaveBeenCalled();
+    expect(mocks.consent.preflight).toHaveBeenCalledWith({ shopId: "shop-1", recoveryId: recovery.id, recipient: attempt.recipient });
+    expect(mocks.claim.claimSequenceTwo).toHaveBeenCalledWith(expect.objectContaining({ initiator: "scheduled_no_response", recoveryId: recovery.id, recipient: attempt.recipient }));
+    expect(allowance.beginFollowUp).toHaveBeenCalledOnce();
+    expect(billing.admit).toHaveBeenCalledOnce();
+    expect(mocks.outbound.sendTemplate).toHaveBeenCalledOnce();
+    expect(billing.commitSuccessfulInitiation).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ kind: "order-paid", orderId: "woo-order" }, { kind: "ambiguous", reason: "conflicting-events" }])(
+    "suppresses Woo observed order evidence before claiming or charging: $kind", async (order) => {
+      setRecovery(wooRecovery);
+      mocks.wooOrders.read.mockResolvedValueOnce(order);
+      const { processor, billing } = createProcessor();
+      await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "observed-order-terminal" });
+      expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
+      expect(billing.admit).not.toHaveBeenCalled();
+      expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not claim or send when current Woo consent is denied", async () => {
+    setRecovery(wooRecovery);
+    mocks.consent.preflight.mockResolvedValueOnce({ kind: "denied", reason: "stored-consent-denied" });
+    const { processor, billing } = createProcessor();
+    await expect(processor.process(recovery.id)).resolves.toEqual({ kind: "suppressed", reason: "stored-consent-denied" });
+    expect(mocks.claim.claimSequenceTwo).not.toHaveBeenCalled();
+    expect(billing.admit).not.toHaveBeenCalled();
+    expect(mocks.outbound.sendTemplate).not.toHaveBeenCalled();
+  });
+
   it("suppresses a missing recovery before acquiring a checkout lock", async () => {
     const { processor } = createProcessor();
 

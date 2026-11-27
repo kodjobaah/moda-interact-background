@@ -9,7 +9,7 @@ const sentAt = new Date(now.getTime() - 2 * 60 * 60_000);
 const context = {id:"conversation",shopId:"shop",recoveryId:"recovery",checkoutToken:"checkout",
   recoveryStatus:"MESSAGE_SENT",mode:"HUMAN",revision:1,lastInboundAt:now};
 
-type Evidence = { initialAttemptId:string;recipient:string;initialSentAt:Date|null;
+type Evidence = { platform: "SHOPIFY" | "WOOCOMMERCE"; initialAttemptId:string;recipient:string;initialSentAt:Date|null;
   followUpDueAt:Date|null;verifiedInboundAt:Date|null };
 function harness(evidence: Evidence | null, fakeContext = context) {
   const queries: string[] = [];
@@ -36,7 +36,7 @@ function harness(evidence: Evidence | null, fakeContext = context) {
   return {db:db as unknown as RecoveryDatabase, queries};
 }
 const evidence = (overrides: Partial<Evidence> = {}): Evidence => ({
-  initialAttemptId:"initial",recipient:"15551234567",initialSentAt:sentAt,
+  platform:"SHOPIFY",initialAttemptId:"initial",recipient:"15551234567",initialSentAt:sentAt,
   followUpDueAt:new Date(now.getTime() - 1),verifiedInboundAt:null,...overrides,
 });
 
@@ -96,4 +96,20 @@ describe("ARCH-040-BACKGROUND-008 verified recovery policy", () => {
     expect(claim).toEqual({kind:"claimed",attemptId:"attempt",billingSource:"recovery-outreach:attempt"});
     expect(test.queries.some(sql=>sql.includes('FOR UPDATE OF initial'))).toBe(true);
   });
+
+  it.each(["SHOPIFY", "WOOCOMMERCE"] as const)("enforces the same merchant deadline for %s", async (platform) => {
+    const due = harness(evidence({ platform, initialSentAt: new Date(now.getTime()-15*60_000), followUpDueAt: now }));
+    const policy = new RecoveryFollowUpPolicyService(due.db);
+    expect(await policy.validateHumanFollowUp({ conversationId:"conversation", expectedRevision:1, now })).toEqual({ kind:"allowed" });
+    expect(await policy.claimSequenceTwo({ initiator:"merchant_post_window", recoveryId:"recovery", expectedRevision:1,
+      initiationKey:"key",recipient:"15551234567",now })).toEqual({ kind:"claimed", attemptId:"attempt", billingSource:"recovery-outreach:attempt" });
+    const disabled = harness(evidence({ platform, initialSentAt: new Date(now.getTime()-48*60*60_000), followUpDueAt:null }));
+    const disabledPolicy = new RecoveryFollowUpPolicyService(disabled.db);
+    expect(await disabledPolicy.validateHumanFollowUp({ conversationId:"conversation", expectedRevision:1, now }))
+      .toEqual({ kind:"suppressed", reason:"follow-up-not-due" });
+    expect(await disabledPolicy.claimSequenceTwo({ initiator:"merchant_post_window", recoveryId:"recovery", expectedRevision:1,
+      initiationKey:"key",recipient:"15551234567",now })).toEqual({ kind:"suppressed", reason:"follow-up-not-due" });
+    expect(disabled.queries.some(sql=>sql.includes('INSERT INTO "commerce"."RecoveryOutreachAttempt"'))).toBe(false);
+  });
+
 });

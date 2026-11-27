@@ -294,7 +294,7 @@ export class OutboundSendFenceService {
           return { kind: "suppressed", reason: "customer-window-closed" } as const;
         if (command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
           if (open) return { kind: "suppressed", reason: "customer-window-open" } as const;
-          if (!followUpDue(evidence, permitNow, "merchant_post_window"))
+          if (!followUpDue(evidence, permitNow))
             return { kind: "suppressed", reason: "follow-up-not-due" } as const;
           if (evidence.recipient !== input.recipient)
             return { kind: "suppressed", reason: "recipient-mismatch" } as const;

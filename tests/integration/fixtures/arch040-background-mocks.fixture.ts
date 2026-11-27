@@ -17,8 +17,9 @@ import { Arch040WhatsAppEmulator } from "./arch040-whatsapp-emulator.fixture.js"
  */
 export async function startArch040BackgroundMocks(senderConfiguration?: {
   rowId: string; version: number; providerAccountId: string; standalonePhoneNumberId: string;
+  pooledPhoneNumberId?: string;
 }) {
-  const whatsapp = new Arch040WhatsAppEmulator();
+  const whatsapp = new Arch040WhatsAppEmulator(senderConfiguration?.pooledPhoneNumberId);
   await whatsapp.start();
   const values = { ...whatsapp.environment,
     WHATSAPP_BUSINESS_ACCOUNT_ID: senderConfiguration?.providerAccountId ?? "arch040-test-business-account" };

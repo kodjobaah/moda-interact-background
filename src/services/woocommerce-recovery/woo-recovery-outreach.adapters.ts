@@ -1,5 +1,6 @@
 import { recoverySenderPoolService } from "../recovery-sender-pool/sender-pool.service.js";
 import prisma from "../../lib/db.js";
+import { initialFollowUpDeadline, RecoveryOutreachFinalizationService } from "../checkout-recovery/recovery-outreach-finalization.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryBillingService } from "../recovery-billing.service.js";
@@ -29,6 +30,7 @@ export function createWooRecoveryOutreachService(input: {
   enqueue: WooOutreachDependencies["enqueue"];
   logger: StructuredLogger;
 }): WooRecoveryOutreachService {
+  const followUpFinalizer = new RecoveryOutreachFinalizationService();
   return new WooRecoveryOutreachService({
     logger: input.logger,
     coordinator: input.coordinator,
@@ -135,13 +137,16 @@ export function createWooRecoveryOutreachService(input: {
     },
     resumedSettlement: new WooResumedOutreachSettlementAdapter(),
     finalize: {
+      ensureScheduledFollowUp: (recoveryId) => followUpFinalizer.ensureScheduledInitialFollowUp(recoveryId),
       async confirmed({ recovery, attempt, message }) {
-        if (attempt.sequence !== 1 || attempt.followUpDueAt !== null)
-          throw new Error("WOO_FOLLOW_UP_NOT_ALLOWED");
+        const alreadyFinalized = attempt.outboundMessageId === message.id &&
+          attempt.sentAt?.getTime() === message.sentAt.getTime();
+        if (attempt.sequence !== 1 || (attempt.followUpDueAt !== null && !alreadyFinalized))
+          throw new Error("WOO_INITIAL_ATTEMPT_CONFLICT");
         if (message.conversationId !== (await prisma.conversation.findUnique({
           where: { checkoutRecoveryId: recovery.id }, select: { id: true },
         }))?.id) throw new Error("WOO_INITIAL_MESSAGE_CONVERSATION_MISMATCH");
-        let stage: "billing" | "support_notice" | "recovery_status" = "billing";
+        let stage: "billing" | "policy" | "support_notice" | "recovery_status" | "follow_up" = "billing";
         try {
           const settlement = await recoveryBillingService.settleConfirmedInitialOutreach({
             shopId: recovery.shopId,
@@ -154,6 +159,9 @@ export function createWooRecoveryOutreachService(input: {
             settlement.sentAt.getTime() !== message.sentAt.getTime()) {
             return { kind: "held", reason: "lineage-conflict" };
           }
+          stage = "policy";
+          const policy = alreadyFinalized ? undefined : await recoveryPolicyService.resolve(recovery.shopId);
+          const followUpDueAt = initialFollowUpDeadline(attempt, message, policy);
           stage = "support_notice";
           await recoveryInitialOutreachSupportNoticeService.finalizeConfirmedInitial({
             shopId: recovery.shopId,
@@ -161,7 +169,7 @@ export function createWooRecoveryOutreachService(input: {
             outreachAttemptId: attempt.id,
             outboundMessageId: message.id,
             sentAt: settlement.sentAt,
-            followUpDueAt: null,
+            followUpDueAt,
           });
           stage = "recovery_status";
           const transitioned = await prisma.checkoutRecovery.updateMany({
@@ -178,6 +186,8 @@ export function createWooRecoveryOutreachService(input: {
               throw new Error("WOO_CONFIRMED_RECOVERY_STATUS_CONFLICT");
             }
           }
+          stage = "follow_up";
+          if (followUpDueAt) await followUpFinalizer.ensureScheduledInitialFollowUp(recovery.id, message.conversationId);
           return { kind: "finalized", outboundMessageId: message.id, sentAt: settlement.sentAt };
         } catch (error) {
           try {

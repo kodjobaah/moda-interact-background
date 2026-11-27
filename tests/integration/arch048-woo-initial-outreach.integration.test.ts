@@ -1,5 +1,9 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
+import { Queue } from "bullmq";
+import { RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, createRecoveryOutreachFollowUpJobId } from "../../src/domain/recovery-outreach-follow-up.js";
+import { recoveryOutreachFollowUpService } from "../../src/services/recovery-outreach-follow-up.service.js";
+import { RecoveryFollowUpPolicyService } from "../../src/services/recovery-conversation/recovery-follow-up-policy.service.js";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
 import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
@@ -130,6 +134,57 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({ kind: "already-initialized" });
     expect(a.providerRequests).toBe(1);
     expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+  }, 90_000);
+
+  it("publishes one configured Woo follow-up, restores a missing job, and claims only one due slot", async () => {
+    const a = f!;
+    await a.db.shopSettings.update({ where: { shopId: a.shopId }, data: {
+      followUpEnabled: true, followUpDelayMinutes: 60,
+    } });
+    const queue = new Queue(RECOVERY_OUTREACH_FOLLOW_UP_QUEUE, { connection: a.redis });
+    let jobId: string | undefined;
+    try {
+      await expect(a.service.enqueueInitial(a.recoveryId)).resolves.toMatchObject({ kind: "queued" });
+      await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({ kind: "sent" });
+      const initial = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: {
+        checkoutRecoveryId_sequence: { checkoutRecoveryId: a.recoveryId, sequence: 1 },
+      } });
+      expect(initial.sentAt).not.toBeNull();
+      const due = new Date(initial.sentAt!.getTime() + 60 * 60_000);
+      expect(initial.followUpDueAt).toEqual(due);
+      const jobData = { checkoutRecoveryId: a.recoveryId, sequence: 2 as const };
+      jobId = createRecoveryOutreachFollowUpJobId(jobData, due);
+      const job = await queue.getJob(jobId);
+      expect(job?.data).toEqual(jobData);
+      expect(await job?.getState()).toBe("delayed");
+      await job!.remove();
+      // Replaying a confirmed initial must repair publication, not contact the
+      // provider again, create a new attempt or calculate a new due time.
+      await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({ kind: "already-initialized" });
+      await expect(a.service.enqueueInitial(a.recoveryId)).resolves.toMatchObject({ kind: "already-initialized" });
+      expect((await queue.getJob(jobId))?.data).toEqual(jobData);
+      expect((await queue.getJobs(["delayed", "waiting"])).filter(item => item.data.checkoutRecoveryId === a.recoveryId)).toHaveLength(1);
+      expect(a.providerRequests).toBe(1);
+      expect(await a.db.usageReservation.count({ where: { shopId: a.shopId } })).toBe(1);
+      expect(await a.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: a.recoveryId, sequence: 2 } })).toBe(0);
+
+      const policy = new RecoveryFollowUpPolicyService(a.db);
+      const claim = { recoveryId: a.recoveryId, initiator: "scheduled_no_response" as const,
+        initiationKey: `scheduled-no-response:${a.recoveryId}`, recipient: initial.recipient };
+      await expect(policy.claimSequenceTwo({ ...claim, now: new Date(due.getTime() - 1) }))
+        .resolves.toEqual({ kind: "suppressed", reason: "follow-up-not-due" });
+      expect(await a.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: a.recoveryId, sequence: 2 } })).toBe(0);
+      // Advance only the policy clock, not durable timestamps or test timeouts.
+      await expect(policy.claimSequenceTwo({ ...claim, now: due })).resolves.toMatchObject({ kind: "claimed" });
+      await expect(policy.claimSequenceTwo({ ...claim, now: due })).resolves.toEqual({ kind: "suppressed", reason: "already-claimed" });
+      expect(await a.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: a.recoveryId, sequence: 2 } })).toBe(1);
+      expect(a.providerRequests).toBe(1);
+      expect(await a.db.usageReservation.count({ where: { shopId: a.shopId } })).toBe(1);
+    } finally {
+      if (jobId) await (await queue.getJob(jobId))?.remove();
+      await queue.close();
+      await recoveryOutreachFollowUpService.close();
+    }
   }, 90_000);
 
   it("keeps shared-sender confirmed sends and quoted replies isolated by merchant", async () => {

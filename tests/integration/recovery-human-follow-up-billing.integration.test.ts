@@ -9,7 +9,7 @@ const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
 
 suite("ARCH-040 HUMAN follow-up credit release and repair", () => {
   it("releases reserved recovery credit when suspension wins after billing but before permit", async () => {
-    const f = await humanDispatchFixture("suspension-after-credit");
+    const f = await humanDispatchFixture("suspension-after-credit", { pooledSender: true });
     try {
       const { commandId, attemptId } = await f.addMerchantFollowUpCommand();
       // Billing admission must have a real durable reservation. BG007, not the

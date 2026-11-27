@@ -120,15 +120,17 @@ suite("ARCH-040-BACKGROUND-008 verified window and configured due-time admission
       const prepare = async () => (await f.db.conversationMessage.create({data:{
         conversationId:f.conversationId,direction:"OUTBOUND",senderType:"AUTOMATION",status:"PENDING",content:"Prepared",
       }})).id;
+      const proactive=await f.initialMarketing();
       const textId=await prepare();
       const text=await f.fence.admitFinalSend({senderType:"AUTOMATION",deliveryKind:"TEXT",
         conversationId:f.conversationId,shopId:f.shopId,recoveryId:f.recoveryId,
-        expectedControlRevision:2,messageId:textId,recipient:f.recipient,now:f.now});
+        expectedControlRevision:2,messageId:textId,recipient:f.recipient,now:f.now,proactive});
       expect(text).toEqual({kind:"suppressed",reason:"no-initial-outreach"});
       const templateId=await prepare();
+      const initialOutreach=await f.fundInitialPermit(templateId);
       const template=await f.fence.admitFinalSend({senderType:"AUTOMATION",deliveryKind:"TEMPLATE",
         conversationId:f.conversationId,shopId:f.shopId,recoveryId:f.recoveryId,
-        expectedControlRevision:2,messageId:templateId,recipient:f.recipient,now:f.now});
+        expectedControlRevision:2,messageId:templateId,recipient:f.recipient,now:f.now,proactive,initialOutreach});
       expect(template.kind).toBe("admitted");
     } finally { await f.close(); }
   },60_000);

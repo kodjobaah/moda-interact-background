@@ -19,11 +19,7 @@ export function customerWindow(lastVerifiedInbound: Date | null, now: Date) {
     now.getTime() < closesAt.getTime(), closesAt };
 }
 
-export function followUpDue(evidence: RecoveryWindowEvidence, now: Date, initiator: FollowUpInitiation): boolean {
-  if (initiator === "merchant_post_window" && evidence.platform === "WOOCOMMERCE") {
-    if (!evidence.initialSentAt || now.getTime() - evidence.initialSentAt.getTime() < CUSTOMER_WINDOW_MS) return false;
-    if (!evidence.followUpDueAt) return evidence.verifiedInboundAt === null;
-  }
+export function followUpDue(evidence: RecoveryWindowEvidence, now: Date): boolean {
   return evidence.followUpDueAt !== null && evidence.followUpDueAt <= now;
 }
 
@@ -55,7 +51,7 @@ export class RecoveryFollowUpPolicyService {
       return { kind: "suppressed", reason: "no-initial-outreach" } as const;
     if (customerWindow(evidence.verifiedInboundAt, input.now).open)
       return { kind: "suppressed", reason: "customer-window-open" } as const;
-    if (!followUpDue(evidence, input.now, "merchant_post_window"))
+    if (!followUpDue(evidence, input.now))
       return { kind: "suppressed", reason: "follow-up-not-due" } as const;
     return { kind: "allowed" } as const;
   }
@@ -120,7 +116,7 @@ export class RecoveryFollowUpPolicyService {
         return { kind: "suppressed", reason: "recipient-mismatch" } as const;
       if (input.initiator === "merchant_post_window" && customerWindow(evidence.verifiedInboundAt, input.now).open)
         return { kind: "suppressed", reason: "customer-window-open" } as const;
-      if (!followUpDue(evidence, input.now, input.initiator))
+      if (!followUpDue(evidence, input.now))
         return { kind: "suppressed", reason: "follow-up-not-due" } as const;
       if (input.initiator === "scheduled_no_response") {
         const inbound = await first<{ id: string }>(tx, `

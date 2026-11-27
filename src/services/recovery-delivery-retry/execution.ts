@@ -283,9 +283,9 @@ export class InitialDeliveryRetryExecutionService {
     const key = expectedInitialRetryDispatchKey(recovery.shop.platform, scope.shopId, attempt.id);
     if (!key || progress.message.providerDispatchKey !== key || !progress.message.providerDispatchAdmittedAt || progress.message.providerDispatchControlRevision === null ||
         progress.message.conversationId !== recovery.conversation?.id) return held("retry-provider-permit-mismatch");
-    // Woo retains its initial-only policy. For Shopify persist the normal
-    // follow-up deadline; scheduling remains in the existing finalizer.
-    const policy = recovery.shop.platform === "SHOPIFY" && !attempt.outboundMessageId ? await this.ports.policy.resolve(scope.shopId) : undefined;
+    // Both platforms share the same configured deadline. The existing
+    // finalizer requires positive delivery evidence before scheduling a retry's follow-up.
+    const policy = !attempt.outboundMessageId ? await this.ports.policy.resolve(scope.shopId) : undefined;
     const result = await this.ports.finalizer.finalizeConfirmedInitialOutreach({ recovery, attempt,
       message: progress.message, ...(policy ? { policy } : {}) });
     if (result.kind === "held") return held(`settlement:${result.reason}`);

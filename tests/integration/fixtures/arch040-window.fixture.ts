@@ -1,35 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
-import { MerchantSendCommandService } from "../../../src/services/recovery-conversation/merchant-send-command.service.js";
+import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
+import { moderationConfig } from "../../../src/services/conversation-moderation/moderation-policy.js";
 import { OutboundSendFenceService } from "../../../src/services/recovery-conversation/outbound-send-fence.service.js";
-import { RecoveryFollowUpPolicyService } from "../../../src/services/recovery-conversation/recovery-follow-up-policy.service.js";
+import { approvedMerchantFollowUpFixture } from "./arch047-human-follow-up.fixture.js";
+import { seedApprovedInitialWooTemplateRegistration } from "./woo-approved-initial-template.fixture.js";
 
-/** Disposable PostgreSQL fixture; no provider, Redis or synthetic fake rows. */
+/** Disposable SQL permit fixture. Reuse the existing loopback infrastructure
+ * and real persisted prerequisites; never submit a provider message here. */
 export async function recoveryWindowFixture(name: string) {
-  const db = new PrismaClient({ datasourceUrl: process.env.TEST_DATABASE_URL! });
-  const shopId = `arch040-b008-${name}-${randomUUID()}`;
-  const conversationId = randomUUID();
-  const recoveryId = randomUUID();
-  const recipient = "15551234567";
+  // Reuse the existing registered-sender, approved-template and funded
+  // follow-up fixture. No provider submission is made by these SQL tests.
+  const seeded = await approvedMerchantFollowUpFixture(`window-${name}`);
+  const { f, identity } = seeded;
+  const { db, shopId, conversationId, recoveryId, recipient, commands, followUps: policy } = f;
   const now = new Date(Date.now() - 2_000);
-  await db.shop.create({ data: { id: shopId, domain: `${shopId}.test`, status: "ACTIVE" } });
-  await db.checkoutRecovery.create({ data: {
-    id: recoveryId, shopId, checkoutToken: `checkout-${recoveryId}`,
-    lastExternalActivityAt: now, status: "MESSAGE_SENT",
-  } });
-  await db.conversation.create({ data: { id: conversationId, checkoutRecoveryId: recoveryId,
-    type: "RECOVERY", lastInboundAt: now } });
-  await db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation"
-      SET "controlMode"='HUMAN',"controlRevision"=1,"controlChangedAt"=statement_timestamp()
-      WHERE "id"=$1`, conversationId);
-    await tx.$executeRawUnsafe(`INSERT INTO "whatsapp"."ConversationControlEvent"
-      ("id","conversationId","fromMode","toMode","fromRevision","toRevision")
-      VALUES ($1,$2,'AI','HUMAN',0,1)`, randomUUID(), conversationId);
-  });
-  const policy = new RecoveryFollowUpPolicyService(db);
-  const commands = new MerchantSendCommandService(db);
   const fence = new OutboundSendFenceService(db, async () => null, () => now);
+  let initialTemplate: Awaited<ReturnType<typeof seedApprovedInitialWooTemplateRegistration>> | undefined;
+  try {
+    await db.conversation.update({ where: { id: conversationId }, data: { lastInboundAt: now } });
+  } catch (error) {
+    await seeded.cleanup();
+    throw error;
+  }
 
   async function seedInitial(sentAt: Date, followUpDueAt: Date | null) {
     const messageId = randomUUID();
@@ -37,6 +29,9 @@ export async function recoveryWindowFixture(name: string) {
     await db.conversationMessage.create({ data: {
       id: messageId, conversationId, direction: "OUTBOUND", senderType: "AUTOMATION",
       status: "SENT", content: "initial", sentAt, createdAt: sentAt,
+      providerMessageId: `wamid-window-${randomUUID()}`,
+      dispatchProviderAccountId: identity.senderWabaId,
+      dispatchProviderPhoneNumberId: f.whatsapp.phoneNumberId,
     } });
     await db.$executeRawUnsafe(`INSERT INTO "commerce"."RecoveryOutreachAttempt"
       ("id","checkoutRecoveryId","recipient","sequence","trigger","status",
@@ -55,39 +50,104 @@ export async function recoveryWindowFixture(name: string) {
   async function command(kind: "HUMAN_TEXT" | "RECOVERY_FOLLOW_UP_TEMPLATE", attemptId?: string,
     initiationKey = randomUUID()) {
     const id = randomUUID();
+    if (kind === "RECOVERY_FOLLOW_UP_TEMPLATE") {
+      if (!attemptId) throw new Error("Fixture follow-up attempt missing");
+      await seeded.reserveFollowUp(attemptId);
+    }
     await db.$executeRawUnsafe(`INSERT INTO "whatsapp"."MerchantConversationSendCommand"
       ("id","shopId","conversationId","idempotencyKey","payloadSha256",
-       "expectedControlRevision","kind","recipientSnapshot","textBody","templateName",
+       "expectedControlRevision","followUpClaimKey","kind","recipientSnapshot","textBody","templateName",
        "templateLanguageCode","recoveryOutreachAttemptId")
-      VALUES ($1,$2,$3,$4,$5,1,$6::"whatsapp"."MerchantConversationSendKind",
-       $7,$8,$9,$10,$11)`, id, shopId, conversationId, initiationKey,
-      createHash("sha256").update(id).digest("hex"), kind, recipient,
+      VALUES ($1,$2,$3,$4,$5,1,$6,$7::"whatsapp"."MerchantConversationSendKind",
+       $8,$9,$10,$11,$12)`, id, shopId, conversationId, initiationKey,
+      createHash("sha256").update(id).digest("hex"),
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? initiationKey : null, kind, recipient,
       kind === "HUMAN_TEXT" ? "Hello" : null,
-      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "followup_template" : null,
-      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? "en" : null, attemptId ?? null);
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? identity.providerTemplateName : null,
+      kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? identity.providerLanguageCode : null, attemptId ?? null);
     const leased = (await commands.claimDueHumanCommands({ limit: 20, now: new Date() }))
       .find((candidate) => candidate.id === id);
     if (!leased) throw new Error(`Fixture failed to lease command ${id}`);
+    if (kind === "HUMAN_TEXT") {
+      const loaded = await commands.loadClaimedCommand(id, leased.leaseToken);
+      if (loaded.kind !== "claimed") throw new Error(`Fixture command refused: ${loaded.reason}`);
+      const frozen = await f.preparation.freeze(loaded.command, leased.leaseToken);
+      if (frozen.kind !== "frozen") throw new Error(`Fixture preparation refused: ${frozen.reason}`);
+      const assessed = await f.persistedAllowModeration().assessText({
+        subject: { kind: "HUMAN_COMMAND", commandId: id }, shopId, conversationId,
+        effectiveText: frozen.body, inputKind: "TEXT", policyVersion: moderationConfig().policyVersion,
+        now: new Date(),
+      });
+      if (assessed.kind !== "allow") throw new Error(`Fixture moderation refused: ${assessed.kind}`);
+    }
     return { id, token: leased.leaseToken, initiationKey };
   }
   async function permit(id: string, token: string) {
+    const row = await db.merchantConversationSendCommand.findUniqueOrThrow({ where: { id } });
     return fence.admitFinalSend({ senderType: "HUMAN", conversationId, recoveryId,
-      shopId, commandId: id, leaseToken: token, expectedControlRevision: 1, recipient, now });
-  }
-  async function aiMode() {
-    await db.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe(`SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE`, shopId);
-      await tx.$queryRawUnsafe(`SELECT "id" FROM "whatsapp"."Conversation" WHERE "id"=$1 FOR UPDATE`, conversationId);
-      await tx.$executeRawUnsafe(`UPDATE "whatsapp"."Conversation"
-        SET "controlMode"='AI',"controlRevision"=2,"controlChangedAt"=statement_timestamp()
-        WHERE "id"=$1`, conversationId);
-      await tx.$executeRawUnsafe(`INSERT INTO "whatsapp"."ConversationControlEvent"
-        ("id","conversationId","fromMode","toMode","fromRevision","toRevision")
-        VALUES ($1,$2,'HUMAN','AI',1,2)`, randomUUID(), conversationId);
+      shopId, commandId: id, leaseToken: token, expectedControlRevision: 1, recipient, now,
+      ...(row.kind === "RECOVERY_FOLLOW_UP_TEMPLATE" ? {
+        deliveryKind: "TEMPLATE" as const, proactive: {
+          consent: null, verifiedCategory: "MARKETING" as const,
+          templateName: identity.providerTemplateName, languageCode: identity.providerLanguageCode,
+          templateRegistration: identity,
+        },
+      } : {}),
     });
   }
+  async function aiMode() { await f.changeOwner("HUMAN", "AI", 1); }
+  // The existing test intentionally probes the verified-window gate with
+  // AUTOMATION/TEXT. Supply valid marketing metadata to reach that gate,
+  // then exercise actual initial template admission rather than a bare row.
+  async function initialMarketing() {
+    if (!initialTemplate) {
+      initialTemplate = await seedApprovedInitialWooTemplateRegistration(
+        db, shopId, `https://${shopId}.example.test`, true, identity.senderWabaId,
+      );
+    }
+    return { consent: null, verifiedCategory: "MARKETING" as const,
+      templateName: initialTemplate.providerTemplateName,
+      languageCode: initialTemplate.providerLanguageCode,
+      templateRegistration: initialTemplate };
+  }
+  async function fundInitialPermit(messageId: string) {
+    return db.$transaction(async tx => {
+      await tx.checkoutRecovery.update({ where: { id: recoveryId }, data: { status: "DETECTED" } });
+      const attempt = await tx.recoveryOutreachAttempt.create({ data: {
+        checkoutRecoveryId: recoveryId, sequence: 1, trigger: "INITIAL", recipient,
+        status: "PENDING", configuredOfferMode: "NONE",
+      } });
+      const idempotencyKey = `recovery-outreach:${attempt.id}`;
+      const sourceKey = createRecoveryIdempotencyKey(shopId, idempotencyKey);
+      const counter = await tx.shopEntitlementCounter.create({ data: {
+        shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS", grantedQuantity: 1, reservedQuantity: 1,
+      } });
+      await tx.usageReservation.create({ data: {
+        shopId, counterId: counter.id, sourceKey, quantity: 1, status: "RESERVED",
+      } });
+      await tx.usageEvent.create({ data: {
+        shopId, provider: "SHOPIFY", metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
+        sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: messageId, idempotencyKey,
+      } });
+      const message = await tx.conversationMessage.findUniqueOrThrow({ where: { id: messageId } });
+      return { outreachAttemptId: attempt.id, idempotencyKey,
+        recoveryCreditSourceKey: sourceKey, expectedContent: message.content };
+    });
+  }
+  async function close() {
+    try {
+      if (initialTemplate) {
+        const registration = await db.whatsAppTemplateMetaRegistration.findUniqueOrThrow({ where: { id: initialTemplate.registrationId } });
+        const definition = await db.whatsAppTemplateDefinition.findUniqueOrThrow({ where: { id: initialTemplate.definitionId } });
+        await db.whatsAppTemplateVariant.delete({ where: { id: initialTemplate.variantId } });
+        await db.whatsAppTemplateMetaRegistration.delete({ where: { id: registration.id } });
+        await db.whatsAppTemplateLocale.delete({ where: { id: registration.localeId } });
+        await db.whatsAppTemplateDefinition.delete({ where: { id: definition.id } });
+        await db.platformAdmin.delete({ where: { id: definition.createdByAdminId } });
+      }
+    } finally { await seeded.cleanup(); }
+  }
   return { db, shopId, recoveryId, conversationId, recipient, now, policy, fence,
-    seedInitial, inbound, command, permit, aiMode,
-    async close() { try { await db.shop.delete({ where: { id: shopId } }); } finally { await db.$disconnect(); } },
+    seedInitial, inbound, command, permit, aiMode, initialMarketing, fundInitialPermit, close,
   };
 }
