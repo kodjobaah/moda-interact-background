@@ -1,5 +1,6 @@
 import type { StructuredLogger } from "@modainteract/moda-interact-shared/logging";
 import type { InitialDeliveryRetryExecutionService } from "./execution.js";
+import type { ScheduledFollowUpRetryExecutionService } from "./follow-up-execution.js";
 import type { ScheduledFollowUpRetryReconciliationService } from "./follow-up-reconciliation.js";
 import { initialOutreachDiagnostic } from "./error-diagnostic.js";
 
@@ -7,6 +8,7 @@ export const retryWorkerEnabled = (value: string | undefined): boolean => value 
 
 type Executor = Pick<InitialDeliveryRetryExecutionService, "runDuePage" | "reconcileClaimedPage">;
 type FollowUpReconciler = Pick<ScheduledFollowUpRetryReconciliationService, "reconcilePage">;
+type FollowUpExecutor = Pick<ScheduledFollowUpRetryExecutionService, "runDuePage">;
 type DueCursor = NonNullable<Parameters<Executor["runDuePage"]>[0]["after"]>;
 
 /** PostgreSQL is the durable work list. Cursors are only fair, bounded scan
@@ -21,12 +23,14 @@ export class RecoveryDeliveryRetrySweep {
   private dueCursor: DueCursor | undefined;
   private reconcileCursor: string | undefined;
   private followUpReconcileCursor: string | undefined;
+  private followUpDueCursor: DueCursor | undefined;
 
   constructor(private readonly executor: Executor, private readonly log: StructuredLogger,
     private readonly intervalMs = 60_000, private readonly pageSize = 5,
-    private readonly followUpReconciler?: FollowUpReconciler) {
+    private readonly followUpReconciler?: FollowUpReconciler, private readonly followUpExecutor?: FollowUpExecutor) {
     if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 250)
       throw new RangeError("Invalid recovery delivery retry sweep configuration");
+    if (followUpExecutor && !followUpReconciler) throw new Error("Follow-up retry execution requires reconciliation");
   }
 
   start(): this {
@@ -61,6 +65,7 @@ export class RecoveryDeliveryRetrySweep {
     let reconciled = 0;
     let followUpReconciled = 0;
     let due = 0;
+    let followUpDue = 0;
     let errors = 0;
     try {
       const page = await this.executor.reconcileClaimedPage({ limit: this.pageSize,
@@ -72,9 +77,8 @@ export class RecoveryDeliveryRetrySweep {
       errors++;
       this.log.error("recovery.delivery_retry.sweep_page_failed", { stage: "reconcile", sourceError: initialOutreachDiagnostic(error) });
     }
-    // Reconcile existing follow-up funding before discovery. This scan does
-    // not discover or send any new follow-up retries; the initial-only due
-    // scan is intentionally unchanged until execution is connected.
+    // Reconcile existing follow-up funding before either discovery page.
+    // The executor also reconciles the individual block before any permit.
     if (!this.stopped && this.followUpReconciler) {
       try {
         const page = await this.followUpReconciler.reconcilePage({ limit: this.pageSize,
@@ -99,8 +103,20 @@ export class RecoveryDeliveryRetrySweep {
         this.log.error("recovery.delivery_retry.sweep_page_failed", { stage: "discover", sourceError: initialOutreachDiagnostic(error) });
       }
     }
-    if (due || reconciled || followUpReconciled || errors) this.log.debug("recovery.delivery_retry.sweep_completed", {
-      due, reconciled, ...(this.followUpReconciler ? { followUpReconciled } : {}), errors, elapsedMs: Math.round(performance.now() - start),
+    if (!this.stopped && this.followUpExecutor) {
+      try {
+        const page = await this.followUpExecutor.runDuePage({ limit: this.pageSize,
+          ...(this.followUpDueCursor ? { after: this.followUpDueCursor } : {}) });
+        this.followUpDueCursor = page.next ?? undefined;
+        followUpDue = page.outcomes.length;
+        errors += page.outcomes.filter(item => item.kind === "error").length;
+      } catch (error) {
+        errors++;
+        this.log.error("recovery.delivery_retry.sweep_page_failed", { stage: "follow-up-discover", sourceError: initialOutreachDiagnostic(error) });
+      }
+    }
+    if (due || reconciled || followUpReconciled || followUpDue || errors) this.log.debug("recovery.delivery_retry.sweep_completed", {
+      due, reconciled, ...(this.followUpReconciler ? { followUpReconciled } : {}), ...(this.followUpExecutor ? { followUpDue } : {}), errors, elapsedMs: Math.round(performance.now() - start),
     });
   }
 

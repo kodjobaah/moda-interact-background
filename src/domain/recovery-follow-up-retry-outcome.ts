@@ -42,6 +42,8 @@ export function classifyFollowUpRetryOpening(message: RetryOpeningEvidence | nul
   }
   if (m.sentAt || m.deliveredAt || m.readAt) return "conflict";
   if (m.status === "FAILED" && m.failedAt && terminalFailureCode === "PROVIDER_REJECTED") return "rejected";
+  if (m.status === "FAILED" && m.failedAt && m.providerFailureCode === "131026" &&
+      terminalFailureCode === "WHATSAPP_RECIPIENT_UNDELIVERABLE") return "non-delivery";
   // Includes FAILED without definitive rejection evidence, timeout, and crash.
   return "unknown";
 }

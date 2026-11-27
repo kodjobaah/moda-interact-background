@@ -146,3 +146,22 @@ test("shutdown waits for follow-up reconciliation without starting discovery", a
   await Promise.all([first, closed]);
   assert.equal(discoveries, 0);
 });
+
+test("follow-up discovery requires its reconciler and uses an independent bounded cursor", async () => {
+  const calls = [];
+  const followUpCursor = { id: "follow-up-intent", notBeforeAt: new Date(1) };
+  const initialCursor = { id: "initial-intent", notBeforeAt: new Date(2) };
+  const executor = { reconcileClaimedPage: empty,
+    async runDuePage(input) { calls.push(["initial-due", input]); return { outcomes: [], next: input.after ? null : initialCursor }; } };
+  const followUps = { async runDuePage(input) { calls.push(["follow-up-due", input]); return { outcomes: [], next: input.after ? null : followUpCursor }; } };
+  assert.throws(() => new RecoveryDeliveryRetrySweep(executor, recordingLogger(), 60_000, 5, undefined, followUps), /requires reconciliation/);
+  const worker = new RecoveryDeliveryRetrySweep(executor, recordingLogger(), 60_000, 5,
+    { async reconcilePage(input) { calls.push(["follow-up-reconcile", input]); return empty(); } }, followUps);
+  for (let i = 0; i < 3; i++) await worker.runOnce();
+  assert.deepEqual(calls, [
+    ["follow-up-reconcile", { limit: 5 }], ["initial-due", { limit: 5 }], ["follow-up-due", { limit: 5 }],
+    ["follow-up-reconcile", { limit: 5 }], ["initial-due", { limit: 5, after: initialCursor }], ["follow-up-due", { limit: 5, after: followUpCursor }],
+    ["follow-up-reconcile", { limit: 5 }], ["initial-due", { limit: 5 }], ["follow-up-due", { limit: 5 }],
+  ]);
+  await worker.close();
+});

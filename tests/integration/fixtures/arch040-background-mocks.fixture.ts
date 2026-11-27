@@ -48,7 +48,7 @@ export async function startArch040BackgroundMocks(senderConfiguration?: {
     },
   );
 
-  type Fault = "timeout" | "provider-rejected";
+  type Fault = "timeout" | "provider-rejected" | "recipient-undeliverable";
   let nextFault: Fault | null = null;
   let hold: { entered: () => void; released: Promise<void> } | null = null;
   const requests: Array<{ type: string }> = [];
@@ -69,8 +69,9 @@ export async function startArch040BackgroundMocks(senderConfiguration?: {
     const fault = nextFault;
     nextFault = null;
     if (fault === "timeout") throw new Error("mock WhatsApp transport timeout (provider outcome unknown)");
-    if (fault === "provider-rejected") {
-      return new Response(JSON.stringify({ error: { message: "verified provider rejection" } }), {
+    if (fault === "provider-rejected" || fault === "recipient-undeliverable") {
+      return new Response(JSON.stringify({ error: { message: "verified provider rejection",
+        ...(fault === "recipient-undeliverable" ? { code: 131026 } : {}) } }), {
         status: 400, headers: { "content-type": "application/json" },
       });
     }

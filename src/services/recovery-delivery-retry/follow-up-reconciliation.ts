@@ -6,6 +6,11 @@ import { classifyFollowUpRetryOpening } from "../../domain/recovery-follow-up-re
 import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
 import { notifyAllowanceBoundary, allowanceUsage } from "../recovery-allowance/storage.js";
 import { findExactRecoveryReservationSource } from "../recovery-delivery-compensation/lineage.js";
+import { RecipientReachabilityFailureService } from "../recipient-reachability-failure.service.js";
+import { RecipientReachabilityStore } from "../recipient-reachability-store.js";
+import { RecoveryDeliveryMerchantNotificationService } from "../recovery-delivery-merchant-notification.service.js";
+import { RecoveryDeliverySupportMessageService } from "../recovery-delivery-support-message.service.js";
+import { recoveryDeliveryNoticeSourceKey } from "../recovery-delivery-notification-content.js";
 import { readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
 import { RecoveryDeliveryCompensationService } from "../recovery-delivery-compensation/reconcile.service.js";
 import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
@@ -24,7 +29,7 @@ import { isReplayableRecoveryTransactionError, recoveryTransactionBackoffMs, tra
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
 type Tx = Prisma.TransactionClient;
-type Database = Pick<PrismaClient, "$transaction" | "conversationAllowanceBlock">;
+type Database = Pick<PrismaClient, "$transaction" | "conversationAllowanceBlock" | "conversationMessage" | "merchantSupportMessage" | "$queryRaw" | "platformBillingPolicy">;
 type Result = { kind: "held" | "ready" | "unchanged"; reason: string } |
   { kind: "settled" | "cancelled"; reservationId: string } |
   { kind: "compensated"; messageId: string; disposition: string };
@@ -81,7 +86,9 @@ export class ScheduledFollowUpRetryReconciliationService {
   async reconcilePage(input: { limit: number; afterId?: string }) {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 250 || input.afterId === "")
       throw new RangeError("Invalid follow-up retry reconciliation page");
-    const blocks = await this.db.conversationAllowanceBlock.findMany({ where: { state: "PENDING",
+    const blocks = await this.db.conversationAllowanceBlock.findMany({ where: { OR: [{ state: "PENDING" }, { state: "CANCELLED", messages: { some: {
+      direction: "OUTBOUND", senderType: "AUTOMATION", status: "FAILED", providerMessageId: null, providerFailureCode: "131026",
+    } } }],
       id: { startsWith: FOLLOW_UP_RETRY_BLOCK_PREFIX, ...(input.afterId ? { gt: input.afterId } : {}) } },
       select: { id: true }, orderBy: { id: "asc" }, take: input.limit });
     const outcomes: Array<{ blockId: string; kind: Result["kind"] | "error" }> = [];
@@ -98,6 +105,10 @@ export class ScheduledFollowUpRetryReconciliationService {
   private async compensate(messageId: string): Promise<Result> {
     const disposition = await new RecoveryDeliveryCompensationService(this.db, this.clock, this.log).reconcileMessage(messageId);
     if (disposition === "purchased-compensation-required") return { kind: "held", reason: "provider-failure-compensation-deferred" };
+    const reachability = await new RecipientReachabilityFailureService(this.db, new RecipientReachabilityStore(this.db))
+      .afterCorrection({ messageId }, disposition);
+    await new RecoveryDeliveryMerchantNotificationService(this.db, new RecoveryDeliverySupportMessageService(this.db, this.clock))
+      .notify({ messageId }, disposition, reachability);
     return disposition === "not-terminal" || disposition === "not-recovery"
       ? { kind: "held", reason: "provider-failure-evidence-changed" }
       : { kind: "compensated", messageId, disposition };
@@ -109,7 +120,14 @@ export class ScheduledFollowUpRetryReconciliationService {
     const owner = await lockRecoveryContext(tx, pointer.conversationId);
     if (!owner || owner.shopId !== pointer.shopId) return held("owner-mismatch");
     const block = await tx.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: blockId } });
-    if (block.state !== "PENDING") return { kind: "unchanged", reason: `block-${block.state.toLowerCase()}` };
+    // A crash after synchronous 131026 compensation but before reachability
+    // and support writes leaves a cancelled block. Replay those idempotent
+    // post-commit owners until its durable notice exists.
+    const cancelled = block.state === "CANCELLED";
+    if (cancelled && !await tx.conversationMessage.findFirst({ where: { allowanceBlockId: blockId,
+      direction: "OUTBOUND", senderType: "AUTOMATION", status: "FAILED", providerMessageId: null,
+      providerFailureCode: "131026" }, select: { id: true } })) return { kind: "unchanged", reason: "block-cancelled" };
+    if (block.state !== "PENDING" && !cancelled) return { kind: "unchanged", reason: `block-${block.state.toLowerCase()}` };
     if (block.shopId !== owner.shopId || block.conversationId !== owner.id || block.fundingKind !== "FOLLOW_UP" ||
         !block.creditReservationId || !block.predecessorId || !block.repairDeadlineAt || block.repairLeaseToken || block.repairLeaseUntil)
       return held("block-ownership-conflict");
@@ -164,6 +182,14 @@ export class ScheduledFollowUpRetryReconciliationService {
         select: { dispatchProviderAccountId: true, dispatchProviderPhoneNumberId: true } });
       if (history.length !== links.length || history.some(m => m.dispatchProviderAccountId !== message.dispatchProviderAccountId ||
           m.dispatchProviderPhoneNumberId !== message.dispatchProviderPhoneNumberId)) return held("provider-sender-conflict");
+    }
+    if (cancelled) {
+      if (evidence !== "non-delivery" || !message || message.providerMessageId || message.providerFailureCode !== "131026" ||
+          terminalFailure !== "WHATSAPP_RECIPIENT_UNDELIVERABLE" || source.reservation.status !== "RELEASED")
+        return { kind: "unchanged", reason: "block-cancelled" };
+      if (await tx.merchantSupportMessage.findUnique({ where: { sourceKey: recoveryDeliveryNoticeSourceKey(owner.shopId, owner.recoveryId, message.id) }, select: { id: true } }))
+        return { kind: "unchanged", reason: "recipient-failure-notified" };
+      return { kind: "provider-failure", messageId: message.id };
     }
     const now = this.clock();
     const terminal = terminalRecovery(recovery.status) || !!recovery.completedAt || !!recovery.expiredAt;

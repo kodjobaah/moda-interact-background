@@ -27,8 +27,8 @@ type Result = { kind: "held"; reason: string } | {
 };
 const held = (reason: string): Result => ({ kind: "held", reason });
 
-/** SQL-only claim + fresh reservation + allowance pin. No runtime caller yet.
- * Future execution must hold the platform checkout lease, perform current
+/** SQL-only claim + fresh reservation + allowance pin.
+ * Execution must hold the platform checkout lease, perform current
  * stored-consent, order, recipient and template preflight BEFORE invoking this
  * owner, then obtain the separate final provider permit. Nothing here sends,
  * commits a credit or marks a message accepted. A lost transaction ACK can

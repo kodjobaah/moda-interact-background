@@ -7,10 +7,10 @@ import { RecoveryDeliveryCompensationService } from "../../../src/services/recov
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 import { createInitialOutreachCreditFixture } from "./arch056-initial-outreach-credit.fixture.js";
 
-export async function prepareCompensatedFollowUp(source: "free" | "purchased") {
+export async function prepareCompensatedFollowUp(source: "free" | "purchased", recipient = "15551234567") {
   // The fixture uses Shopify for free and WooCommerce for purchased initial
   // funding. Historical acceptance is seeded; no provider is called.
-  const f = await createInitialOutreachCreditFixture({ source, sentAgeMs: 60 * 60_000 });
+  const f = await createInitialOutreachCreditFixture({ source, recipient, sentAgeMs: 60 * 60_000 });
   try {
     expect(await f.service.settleConfirmedInitialOutreach({ shopId: f.shopId, recoveryId: f.recoveryId,
       outreachAttemptId: f.attemptId, outboundMessageId: f.messageId })).toMatchObject({ kind: "settled" });
@@ -44,7 +44,7 @@ export async function prepareCompensatedFollowUp(source: "free" | "purchased") {
       direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT", content: "Scheduled follow-up fixture",
       providerMessageId, sentAt, allowanceBlockId: block.id } });
     await f.db.recoveryOutreachAttempt.create({ data: { id: attemptId, checkoutRecoveryId: f.recoveryId, sequence: 2,
-      trigger: "NO_RESPONSE_FOLLOW_UP", status: "WAITING_FOR_RESPONSE", recipient: "15551234567", configuredOfferMode: "NONE",
+      trigger: "NO_RESPONSE_FOLLOW_UP", status: "WAITING_FOR_RESPONSE", recipient, configuredOfferMode: "NONE",
       initiatedBy: "AUTOMATION", initiationKey: `scheduled-no-response:${f.recoveryId}`, claimedAt: sentAt,
       sentAt, outboundMessageId: message.id } });
     await f.db.usageEvent.create({ data: { shopId: f.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
@@ -53,17 +53,17 @@ export async function prepareCompensatedFollowUp(source: "free" | "purchased") {
     expect(await new RecoveryDeliveryCompensationService(f.db).reconcile(providerMessageId)).toBe("restored-spendable");
     const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: attemptId } });
     expect(intent).toMatchObject({ policy: "AFTER_COOLDOWN", fundingReservationId: reservation.id, failedMessageId: message.id });
-    return { f, conversation, initial, attemptId, reservation, block, message, intent, failedAt };
+    return { f, conversation, initial, attemptId, reservation, block, message, intent, failedAt, recipient };
   } catch (error) {
     await f.close();
     throw error;
   }
 }
 
-export async function registerHistoricalSender(f: Awaited<ReturnType<typeof prepareCompensatedFollowUp>>) {
-  const phone = BigInt(`0x${randomUUID().replace(/-/g, "")}`).toString();
-  const account = "918273645546372819";
-  const recipient = "15551234567";
+export async function registerHistoricalSender(f: Awaited<ReturnType<typeof prepareCompensatedFollowUp>>, identity?: { phone: string; account: string }) {
+  const phone = identity?.phone ?? BigInt(`0x${randomUUID().replace(/-/g, "")}`).toString();
+  const account = identity?.account ?? "918273645546372819";
+  const recipient = f.recipient;
   await f.f.db.whatsAppPoolSender.create({ data: { providerPhoneNumberId: phone, providerAccountId: account,
     verifiedAt: f.f.sentAt, allocationEnabled: false } });
   const thread = await f.f.db.recoverySenderThread.create({ data: { canonicalRecipient: recipient, providerPhoneNumberId: phone, openedAt: f.f.sentAt } });

@@ -4,6 +4,7 @@ import { InitialDeliveryRetryExecutionService, initialRetryExecutionPorts } from
 import { RecoveryDeliveryRetrySweep, retryWorkerEnabled } from "../services/recovery-delivery-retry/sweep.js";
 import { retrySweepLogger } from "../services/recovery-delivery-retry/sweep-logging.js";
 import { ScheduledFollowUpRetryReconciliationService } from "../services/recovery-delivery-retry/follow-up-reconciliation.js";
+import { ScheduledFollowUpRetryExecutionService, scheduledFollowUpRetryExecutionPorts } from "../services/recovery-delivery-retry/follow-up-execution.js";
 import prisma from "../lib/db.js";
 
 /** Explicit deployment opt-in; a missing value or typo cannot activate live
@@ -18,5 +19,6 @@ export function createRecoveryDeliveryRetryWorker() {
   const sweepLog = retrySweepLogger(log);
   const executor = new InitialDeliveryRetryExecutionService(prisma, initialRetryExecutionPorts(), sweepLog);
   const reconciler = new ScheduledFollowUpRetryReconciliationService(prisma, undefined, sweepLog);
-  return new RecoveryDeliveryRetrySweep(executor, log, 60_000, 5, reconciler).start();
+  const followUps = new ScheduledFollowUpRetryExecutionService(prisma, scheduledFollowUpRetryExecutionPorts(), sweepLog);
+  return new RecoveryDeliveryRetrySweep(executor, log, 60_000, 5, reconciler, followUps).start();
 }

@@ -19,8 +19,9 @@ function stableJson(value: unknown): string {
 
 export async function seedApprovedInitialWooTemplateRegistration(
   db: PrismaClient, shopId: string, shopUrl: string, includeCheckoutItemsBinding = true,
-  senderWabaId = WOO_TEST_SENDER_WABA,
+  senderWabaId = WOO_TEST_SENDER_WABA, purpose: "INITIAL" | "FOLLOW_UP" = "INITIAL",
 ): Promise<FinalTemplateIdentity> {
+  const variantPurpose = purpose === "INITIAL" ? "INITIAL_NO_OFFER" : "FOLLOW_UP_NO_OFFER";
   const components = [
     { type: "BODY", text: includeCheckoutItemsBinding
       ? "{{1}}: {{2}}. Your checkout is waiting. Reply to this message with text or a voice note (up to two minutes)."
@@ -47,7 +48,7 @@ export async function seedApprovedInitialWooTemplateRegistration(
     email: `woo-template-${suffix}@example.invalid`,
   } });
   const definition = await db.whatsAppTemplateDefinition.create({ data: {
-    kind: "META_RECOVERY", purpose: "INITIAL", offerType: "NO_OFFER",
+    kind: "META_RECOVERY", purpose, offerType: "NO_OFFER",
     providerTemplateName: name, category: "MARKETING",
     sourceLanguageTag: "en-GB", astSchemaVersion: 1,
     sourceHash: contentHash, status: "PUBLISHED",
@@ -69,13 +70,13 @@ export async function seedApprovedInitialWooTemplateRegistration(
   } });
   const variant = await db.whatsAppTemplateVariant.create({ data: {
     shopId, providerAccountId: senderWabaId,
-    purpose: "INITIAL_NO_OFFER", languageTag: "en-GB",
+    purpose: variantPurpose, languageTag: "en-GB",
     providerLanguageCode: "en_GB", providerTemplateName: name,
     providerTemplateId: providerId, metaRegistrationId: registration.id,
     status: "APPROVED", enabled: true,
   } });
   return {
-    shopId, senderWabaId, purpose: "INITIAL_NO_OFFER",
+    shopId, senderWabaId, purpose: variantPurpose,
     variantId: variant.id, registrationId: registration.id, definitionId: definition.id,
     providerTemplateId: providerId, providerTemplateName: name,
     providerLanguageCode: "en_GB", submittedContentHash: contentHash,

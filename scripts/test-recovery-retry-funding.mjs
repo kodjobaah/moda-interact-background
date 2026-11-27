@@ -423,3 +423,12 @@ test("negative provider receipts and later positive receipts are not confused", 
   assert.equal(classifyOpening({ ...failed, status: "READ", readAt: now }), "accepted");
   assert.equal(classifyOpening({ ...failed, readAt: now }), "unknown");
 });
+
+
+test("synchronous recipient failure requires exact persisted 131026 evidence and a permit", () => {
+  const failure = { ...admittedOpening, status: "FAILED", failedAt: now, providerFailureCode: "131026" };
+  assert.equal(classifyOpening(failure, "WHATSAPP_RECIPIENT_UNDELIVERABLE"), "non-delivery");
+  assert.equal(classifyOpening(failure), "unknown");
+  assert.equal(classifyOpening({ ...failure, providerFailureCode: "131016" }, "WHATSAPP_RECIPIENT_UNDELIVERABLE"), "unknown");
+  assert.equal(classifyOpening({ ...preparedOpening, status: "FAILED", failedAt: now, providerFailureCode: "131026" }, "WHATSAPP_RECIPIENT_UNDELIVERABLE"), "conflict");
+});

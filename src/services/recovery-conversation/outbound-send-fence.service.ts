@@ -358,6 +358,14 @@ export class OutboundSendFenceService {
         if (!await hasExactInitialCredit(tx, { shopId: context.shopId, idempotencyKey: followUpRetry.idempotencyKey,
           sourceKey: followUpRetry.recoveryCreditSourceKey, allowPaid: true, clock: this.clock }))
           return { kind: "suppressed", reason: "allowance-opening-unavailable" } as const;
+        const assessment = await first<{ id: string }>(tx, `
+          SELECT "id" FROM "whatsapp"."ConversationModerationAssessment"
+          WHERE "conversationMessageId"=$1 AND "conversationId"=$2 AND "shopId"=$3
+            AND "subject"='AUTOMATION_MESSAGE' AND "inputKind"='TEXT' AND "decision"='ALLOW'
+            AND "contentSha256"=$4 AND "policyVersion"=$5 LIMIT 1`,
+          input.messageId, context.id, context.shopId,
+          createHash("sha256").update(followUpRetry.expectedContent, "utf8").digest("hex"), moderationConfig().policyVersion);
+        if (!assessment) return { kind: "suppressed", reason: "moderation_content_stale" } as const;
         followUpPermit = gate;
         retrySender = gate.sender;
       }
