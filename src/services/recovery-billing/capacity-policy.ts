@@ -1,6 +1,11 @@
-import { EffectiveBillingPolicyError, type EffectiveBillingPolicy, type EffectiveBillingPolicyResolver } from "../effective-billing-policy.service.js";
-import { PostContractRecoveryPolicyError, type PostContractRecoveryPolicyResolver } from "../post-contract-recovery-policy.service.js";
-import type { RecoveryCapacityAdmissionService } from "./recovery-capacity-admission.service.js";
+import type { Prisma } from "@prisma/client";
+import { freeRecoveryReservationService } from "../free-recovery-reservation.service.js";
+import { purchasedRecoveryReservationService } from "../purchased-recovery-reservation.service.js";
+import { paidIncludedRecoveryReservationService } from "../paid-included-recovery-reservation.service.js";
+import { promotionalRecoveryReservationService } from "../promotional-recovery-reservation.service.js";
+import { EffectiveBillingPolicyError, type EffectiveBillingPolicy, EffectiveBillingPolicyResolver } from "../effective-billing-policy.service.js";
+import { PostContractRecoveryPolicyError, PostContractRecoveryPolicyResolver } from "../post-contract-recovery-policy.service.js";
+import { RecoveryCapacityAdmissionService } from "./recovery-capacity-admission.service.js";
 import type { RecoveryBillingAdmissionResult } from "./recovery-billing.types.js";
 
 const CHECKOUT_RECOVERY_FEATURE_KEY = "checkout_recovery";
@@ -84,4 +89,22 @@ export async function admitRecoveryCapacityWithPolicy(
   }
 
   return { result: admission };
+}
+
+/** Existing billing source owners, bound to the caller's single transaction.
+ * Never invokes a nested transaction, provider or notification. */
+export function admitRetryCapacityInTransaction(tx: Prisma.TransactionClient,
+  input: { shopId: string; recoveryId: string; outreachAttemptId: string }, sourceKey: string): Promise<CapacityPolicyOutcome> {
+  return admitRecoveryCapacityWithPolicy(input, sourceKey, {
+    policyResolver: new EffectiveBillingPolicyResolver(tx),
+    postContractPolicyResolver: new PostContractRecoveryPolicyResolver(tx),
+    capacityAdmission: new RecoveryCapacityAdmissionService(
+      { reserve: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value),
+        reservePostContract: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value, true) },
+      { reserve: value => purchasedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+      { reserve: value => paidIncludedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+      { reserve: value => promotionalRecoveryReservationService.reserveInExistingTransaction(tx, value) },
+    ),
+    retry: true,
+  });
 }

@@ -64,3 +64,37 @@ export function proveFollowUpRetryAllowance(input: {
   }
   return { kind: "proven", initialBlockId: initial.id, failedBlockId };
 }
+
+/** The attempt and reservation own this block permanently. Never reuse the
+ * sequence-two block or rebind a cancelled allowance. */
+export const followUpRetryBlockId = (attemptId: string) => `allowance_${attemptId}`;
+
+type PendingAllowanceEvidence = FollowUpRetryAllowanceEvidence & { repairDeadlineAt: Date | null };
+type ProvenAllowance = Extract<FollowUpRetryAllowanceLineage, { kind: "proven" }>;
+
+/** A replay may have exactly one new, still-empty funded block. Its credit
+ * is supplied by the exact reservation reader under the same owner locks.
+ * Progressed, expired, leased or unrelated blocks are held for reconciliation. */
+export function proveFundedFollowUpRetryAllowance(input: {
+  shopId: string; conversationId: string; initialReservationId: string;
+  links: readonly RetryFundingLink[]; blocks: readonly PendingAllowanceEvidence[];
+  attemptId: string; reservationId: string; now: Date;
+}): (ProvenAllowance & { blockId: string }) | { kind: "held"; reason: "funded-allowance" | Extract<FollowUpRetryAllowanceLineage, { kind: "held" }>["reason"] } {
+  const blockId = followUpRetryBlockId(input.attemptId);
+  const matching = input.blocks.filter(b => b.id === blockId);
+  const block = matching[0];
+  const historical = input.blocks.filter(b => b.id !== blockId);
+  if (!block || matching.length !== 1 || block.shopId !== input.shopId || block.conversationId !== input.conversationId ||
+      block.fundingKind !== "FOLLOW_UP" || block.state !== "PENDING" || !input.reservationId ||
+      block.creditReservationId !== input.reservationId || historical.some(b => b.creditReservationId === input.reservationId) ||
+      block.outboundMessageIds.length || block.repairLeaseToken || block.repairLeaseUntil ||
+      !block.repairAt || !block.repairDeadlineAt || block.repairDeadlineAt <= input.now ||
+      block.repairAt > block.repairDeadlineAt || !Number.isFinite(input.now.getTime()) ||
+      !Number.isSafeInteger(block.ordinal) || historical.some(b => b.ordinal >= block.ordinal)) {
+    return { kind: "held", reason: "funded-allowance" };
+  }
+  const proof = proveFollowUpRetryAllowance({ ...input, blocks: historical });
+  if (proof.kind === "held") return proof;
+  if (block.predecessorId !== proof.initialBlockId) return { kind: "held", reason: "funded-allowance" };
+  return { ...proof, blockId };
+}

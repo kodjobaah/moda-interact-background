@@ -27,7 +27,7 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 const { retryFundingLineage } = await import(pathToFileURL(join(directory, "recovery-retry-funding-lineage.js")).href);
 const { selectEffectiveOutreachAttempt } = await import(pathToFileURL(join(directory, "recovery-outreach-identity.js")).href);
 const { planInitialRetryClaim, planScheduledFollowUpRetryClaim } = await import(pathToFileURL(join(directory, "recovery-retry-claim.js")).href);
-const { proveFollowUpRetryAllowance } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-allowance.js")).href);
+const { proveFollowUpRetryAllowance, proveFundedFollowUpRetryAllowance, followUpRetryBlockId } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-allowance.js")).href);
 const now = new Date("2026-11-26T01:00:00Z");
 function failed(id, sequence, intentId, trigger = "INITIAL") {
   return {
@@ -299,5 +299,51 @@ test("holds unreconciled allowance consumption, pending work and different fundi
     f => { f.blocks.push(allowance("unrelated", 2, "unrelated-reservation", "unrelated-message")); }]) {
     const fixture = allowanceFixture(); mutate(fixture);
     assert.equal(proveFollowUpRetryAllowance(fixture).kind, "held");
+  }
+});
+
+function fundedAllowanceFixture(repeated = false) {
+  const fixture = allowanceFixture(repeated);
+  const attemptId = repeated ? "retry_second_follow" : "retry_follow_intent";
+  const pending = { ...allowance(followUpRetryBlockId(attemptId), repeated ? 3 : 2, "fresh-reservation", "unused"),
+    state: "PENDING", outboundMessageIds: [], repairAt: now, repairDeadlineAt: new Date(now.getTime() + 60_000) };
+  return { ...fixture, attemptId, reservationId: "fresh-reservation", now,
+    blocks: [...fixture.blocks.map(b => ({ ...b, repairDeadlineAt: null })), pending] };
+}
+test("funded replay proves the new block without reopening or rewriting a historical block", () => {
+  for (const repeated of [false, true]) {
+    const fixture = fundedAllowanceFixture(repeated);
+    const before = structuredClone(fixture);
+    assert.deepEqual(proveFundedFollowUpRetryAllowance(fixture), { kind: "proven", initialBlockId: "initial-block",
+      failedBlockId: repeated ? "second-failed-block" : "failed-block", blockId: followUpRetryBlockId(fixture.attemptId) });
+    assert.equal(proveFollowUpRetryAllowance(fixture).kind, "held");
+    assert.deepEqual(fixture, before);
+  }
+});
+test("funded replay holds unrelated, missing, duplicate or misowned allowance blocks", () => {
+  for (const mutate of [f => { f.blocks.pop(); }, f => { f.blocks.at(-1).id = "different"; },
+    f => { f.blocks.push({ ...f.blocks.at(-1) }); }, f => { f.blocks.at(-1).shopId = "foreign"; },
+    f => { f.blocks.at(-1).conversationId = "foreign"; }, f => { f.blocks.at(-1).ordinal = 1; },
+    f => { f.blocks.at(-1).predecessorId = "failed-block"; }, f => { f.blocks.at(-1).fundingKind = "CONTINUATION"; },
+    f => { f.blocks.push({ ...allowance("unrelated", 5, "other-reservation", "other-message"), repairDeadlineAt: null }); }]) {
+    const f = fundedAllowanceFixture(); mutate(f);
+    assert.equal(proveFundedFollowUpRetryAllowance(f).kind, "held");
+  }
+});
+test("funded replay cannot reuse a compensated credit or another retry's reservation", () => {
+  for (const mutate of [f => { f.reservationId = "reservation-follow"; f.blocks.at(-1).creditReservationId = f.reservationId; },
+    f => { f.blocks.at(-1).creditReservationId = null; }, f => { f.reservationId = "different"; },
+    f => { f.blocks[0].creditReservationId = f.reservationId; }]) {
+    const f = fundedAllowanceFixture(); mutate(f);
+    assert.equal(proveFundedFollowUpRetryAllowance(f).kind, "held");
+  }
+});
+test("funded replay holds expired, progressed, cancelled or leased work", () => {
+  for (const mutate of [f => { f.blocks.at(-1).repairDeadlineAt = now; }, f => { f.blocks.at(-1).repairAt = null; },
+    f => { f.blocks.at(-1).repairAt = new Date(now.getTime() + 120_000); }, f => { f.blocks.at(-1).repairLeaseToken = "lease"; },
+    f => { f.blocks.at(-1).repairLeaseUntil = new Date(now.getTime() + 1000); }, f => { f.blocks.at(-1).outboundMessageIds = ["prepared"]; },
+    f => { f.blocks.at(-1).state = "ACTIVE"; }, f => { f.blocks.at(-1).state = "CANCELLED"; }]) {
+    const f = fundedAllowanceFixture(); mutate(f);
+    assert.equal(proveFundedFollowUpRetryAllowance(f).kind, "held");
   }
 });

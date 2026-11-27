@@ -1,5 +1,4 @@
 import {
-  BillingPeriodStatus,
   Prisma,
   UsageReservationStatus,
 } from "@prisma/client";
@@ -9,8 +8,6 @@ import {
   type StructuredLogger,
 } from "@modainteract/moda-interact-shared/logging";
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
-import { EffectiveBillingPolicyResolver, EffectiveBillingPolicyError } from "../effective-billing-policy.service.js";
-import { PostContractRecoveryPolicyResolver, PostContractRecoveryPolicyError } from "../post-contract-recovery-policy.service.js";
 import { freeRecoveryReservationService } from "../free-recovery-reservation.service.js";
 import { paidIncludedRecoveryReservationService, PaidIncludedRecoveryReservationError } from "../paid-included-recovery-reservation.service.js";
 import { promotionalRecoveryReservationService } from "../promotional-recovery-reservation.service.js";
@@ -19,7 +16,7 @@ import { findExactRecoveryReservationSource } from "../recovery-delivery-compens
 import { readCommittedRecoveryUsage } from "../recovery-delivery-compensation/committed-usage.js";
 import { RecoveryCompensationLineageError, requireLineage } from "../recovery-delivery-compensation/types.js";
 import { DEFAULT_RECOVERY_RESERVATION_TRANSACTION_RETRIES } from "../recovery-reservation/reservation-lifecycle.js";
-import type { ExistingInitialOutreachCredit, ExistingInitialOutreachCreditInput, ConfirmedInitialOutreachCreditInput, ConfirmedInitialOutreachSettlement, RecoveryBillingAdmission } from "./recovery-billing.types.js";
+import type { ExistingInitialOutreachCredit, ExistingInitialOutreachCreditInput, ConfirmedInitialOutreachCreditInput, ConfirmedInitialOutreachSettlement } from "./recovery-billing.types.js";
 import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/recovery-conversation.sql.js";
 import type { CapacityPolicyOutcome } from "./capacity-policy.js";
 import { requireInitialRetryFundingReady } from "../recovery-delivery-retry/funding.js";
@@ -27,18 +24,15 @@ import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diag
 import { serializeRetryFunding } from "../recovery-delivery-retry/funding-admission-gate.js";
 import { RecoveryTransactionTiming, SLOW_RECOVERY_TRANSACTION_MS, isReplayableRecoveryTransactionError,
   recoveryTransactionBackoffMs, transactionFailureDetails, waitForRecoveryTransactionReplay } from "../recovery-delivery-retry/transaction-resilience.js";
+import { ExistingHoldSignal, paidPeriodId, readReservedRecoveryFunding } from "./reserved-recovery-funding.js";
 import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialAttemptIdentity, readInitialMessage, validateInitialMessageIdentity, type InitialAttemptEvidence } from "./initial-outreach-credit-evidence.js";
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
 type Database = Pick<PrismaClient, "$transaction">;
 type Tx = Prisma.TransactionClient;
 type HoldReason = Extract<ConfirmedInitialOutreachSettlement, { kind: "held" }>["reason"];
-type ExistingHoldReason = Extract<ExistingInitialOutreachCredit, { kind: "held" }>["reason"];
 class HoldSignal extends Error {
   constructor(readonly reason: HoldReason, readonly source?: { reservationId: string; sourceKey: string }, readonly original?: unknown) { super(reason); }
-}
-class ExistingHoldSignal extends Error {
-  constructor(readonly reason: ExistingHoldReason, readonly source?: { reservationId: string; sourceKey: string }, readonly original?: unknown) { super(reason); }
 }
 
 export class InitialOutreachCreditService {
@@ -69,7 +63,7 @@ export class InitialOutreachCreditService {
           const candidate = { ...input, outboundMessageId: null };
           const eligible = await validatePrePermit(tx, candidate, this.now(), setStage);
           if (eligible.kind === "held") throw new ExistingHoldSignal(eligible.reason);
-          const existing = await revalidateFundingSource(tx, candidate, eligible.attempt, this.now(), setStage);
+          const existing = await readReservedRecoveryFunding(tx, candidate, eligible.attempt.sequence >= 3, this.now(), setStage);
           if (existing.kind === "held") throw new ExistingHoldSignal(existing.reason);
           if (existing.kind === "admitted") {
             reservationId = existing.reservationId;
@@ -83,7 +77,7 @@ export class InitialOutreachCreditService {
           // same Serializable snapshot and owner locks still apply; no new
           // recovery/message reads or repeated historical chain scans are
           // needed. Re-read the actual reservation and current source policy.
-          const checked = await revalidateFundingSource(tx, candidate, eligible.attempt, this.now(), setStage);
+          const checked = await readReservedRecoveryFunding(tx, candidate, eligible.attempt.sequence >= 3, this.now(), setStage);
           requireLineage(checked.kind === "admitted" && checked.admission.sourceKey === outcome.result.admission.sourceKey,
             "retry funding source changed during reservation");
           reservationId = checked.reservationId;
@@ -254,11 +248,6 @@ function isPositiveOwnerOutcome(outcome: { kind: string; reservation?: { shopId:
   return (outcome.kind === "committed" || outcome.kind === "already-committed") && outcome.reservation?.shopId === shopId && outcome.reservation.sourceKey === sourceKey && outcome.reservation.status === "COMMITTED" && outcome.reservation.quantity === 1 && !!outcome.reservation.committedUsageEventId;
 }
 
-async function paidPeriodId(tx: Tx, reservation: { billingPeriodEntitlementCounterId: string | null }): Promise<string | null> {
-  if (!reservation.billingPeriodEntitlementCounterId) return null;
-  return (await tx.billingPeriodEntitlementCounter.findUnique({ where: { id: reservation.billingPeriodEntitlementCounterId }, select: { billingPeriodId: true } }))?.billingPeriodId ?? null;
-}
-
 function conflictCode(error: unknown): string {
   return error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "internal-concurrency-conflict";
 }
@@ -298,7 +287,7 @@ type PrePermit = { kind: "ready"; attempt: InitialAttemptEvidence } | Extract<Ex
 
 async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: Stage): Promise<ExistingInitialOutreachCredit> {
   const eligible = await validatePrePermit(tx, input, now, setStage);
-  return eligible.kind === "held" ? eligible : revalidateFundingSource(tx, input, eligible.attempt, now, setStage);
+  return eligible.kind === "held" ? eligible : readReservedRecoveryFunding(tx, input, eligible.attempt.sequence >= 3, now, setStage);
 }
 
 async function validatePrePermit(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: Stage): Promise<PrePermit> {
@@ -331,45 +320,4 @@ async function validatePrePermit(tx: Tx, input: ExistingInitialOutreachCreditInp
     await validateInitialMessageIdentity(tx, input, attempt, message, true);
   }
   return { kind: "ready", attempt };
-}
-
-async function revalidateFundingSource(tx: Tx, input: ExistingInitialOutreachCreditInput, attempt: InitialAttemptEvidence,
-  now: Date, setStage: Stage): Promise<ExistingInitialOutreachCredit> {
-  setStage("source_lookup");
-  const source = await findExactRecoveryReservationSource(tx, input.shopId, input.outreachAttemptId);
-  if (!source) return input.outboundMessageId === null ? { kind: "absent" } : { kind: "held", reason: "lineage-conflict" };
-  setStage("source_lookup", source.kind);
-  const reservation = source.reservation;
-  if (reservation.status !== UsageReservationStatus.RESERVED) return { kind: "held", reason: "reservation-not-reserved", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (reservation.expiresAt && reservation.expiresAt <= now) return { kind: "held", reason: "reservation-expired", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (reservation.committedUsageEventId || reservation.compensationUsageEventId || reservation.compensationReason || reservation.compensationDisposition || reservation.compensatedAt) return { kind: "held", reason: "lineage-conflict", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  setStage("policy");
-  let policy;
-  try { policy = await new EffectiveBillingPolicyResolver(tx).resolve(input.shopId); }
-  catch (error) {
-    if (error instanceof EffectiveBillingPolicyError && error.reason === "NO_CONTRACT") {
-      try { policy = await new PostContractRecoveryPolicyResolver(tx).resolve(input.shopId); }
-      catch (postError) { if (postError instanceof PostContractRecoveryPolicyError && (postError.reason === "CONTRACT_REQUIRED" || postError.reason === "SHOP_UNAVAILABLE")) throw new ExistingHoldSignal("contract-required", { reservationId: reservation.id, sourceKey: reservation.sourceKey }, postError); throw postError; }
-    } else if (error instanceof EffectiveBillingPolicyError && error.reason === "SUBSCRIPTION_FROZEN") throw new ExistingHoldSignal("subscription-frozen", { reservationId: reservation.id, sourceKey: reservation.sourceKey }, error);
-    else if (error instanceof EffectiveBillingPolicyError && (error.reason === "SHOP_UNAVAILABLE" || error.reason === "UNMAPPED_PLAN")) throw new ExistingHoldSignal("contract-required", { reservationId: reservation.id, sourceKey: reservation.sourceKey }, error);
-    else throw error;
-  }
-  if ("features" in policy && !policy.features.has("checkout_recovery")) return { kind: "held", reason: "feature-unavailable", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (policy.newRecoveriesPaused || (attempt.sequence >= 3 && policy.automatedWhatsappPaused)) return { kind: "held", reason: "paused", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (source.kind === "paid" && (!('planKind' in policy) || policy.planKind !== "PAID_METERED" || policy.subscriptionStatus === "FROZEN" || policy.billingPeriod?.phase !== "ACTIVE" || policy.billingPeriod.status !== BillingPeriodStatus.OPEN || policy.billingPeriod.id !== await paidPeriodId(tx, reservation))) return { kind: "held", reason: "paid-period-not-current", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (source.kind === "promotional" && !await promotionalRecoveryReservationService.isReservedSourceEligibleInExistingTransaction(tx, { shopId: input.shopId, reservationId: reservation.id, sourceKey: reservation.sourceKey, now })) return { kind: "held", reason: "source-policy-mismatch", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  if (source.kind === "purchased") {
-    const [counter, lot] = await Promise.all([
-      tx.shopEntitlementCounter.findUnique({ where: { id: reservation.counterId! }, select: { reservedQuantity: true } }),
-      tx.recoveryCreditPurchase.findUnique({ where: { id: reservation.purchasedCreditPurchaseId! }, select: { status: true, reservedAmount: true } }),
-    ]);
-    if (!counter || counter.reservedQuantity < reservation.quantity || !lot || (lot.status !== "ACTIVE" && lot.status !== "WITHDRAWN") || lot.reservedAmount < reservation.quantity) return { kind: "held", reason: "source-policy-mismatch", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  }
-  if (source.kind === "free") {
-    const counter = await tx.shopEntitlementCounter.findUnique({ where: { id: reservation.counterId! }, select: { reservedQuantity: true } });
-    if (!counter || counter.reservedQuantity < reservation.quantity) return { kind: "held", reason: "source-policy-mismatch", reservationId: reservation.id, sourceKey: reservation.sourceKey };
-  }
-  const kind = source.kind === "free" ? "lifetime-free" : source.kind;
-  const admission: RecoveryBillingAdmission = { kind, sourceKey: reservation.sourceKey, policy } as RecoveryBillingAdmission;
-  return { kind: "admitted", admission, reservationId: reservation.id };
 }

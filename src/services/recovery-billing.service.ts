@@ -4,7 +4,6 @@ import prisma from "../lib/db.js";
 import {
   effectiveBillingPolicyResolver,
   EffectiveBillingPolicyError,
-  EffectiveBillingPolicyResolver,
   type EffectiveBillingPolicy,
 } from "./effective-billing-policy.service.js";
 import { freeRecoveryReservationService } from "./free-recovery-reservation.service.js";
@@ -14,7 +13,6 @@ import { promotionalRecoveryReservationService } from "./promotional-recovery-re
 import {
   postContractRecoveryPolicyResolver,
   PostContractRecoveryPolicyError,
-  PostContractRecoveryPolicyResolver,
 } from "./post-contract-recovery-policy.service.js";
 import {
   RecoveryCapacityExhaustionNotificationService,
@@ -22,7 +20,7 @@ import {
 } from "./recovery-billing/recovery-capacity-exhaustion-notification.service.js";
 import { RecoveryCapacityAdmissionService } from "./recovery-billing/recovery-capacity-admission.service.js";
 import { RecoveryReservationLifecycleService } from "./recovery-billing/recovery-reservation-lifecycle.service.js";
-import { admitRecoveryCapacityWithPolicy } from "./recovery-billing/capacity-policy.js";
+import { admitRecoveryCapacityWithPolicy, admitRetryCapacityInTransaction } from "./recovery-billing/capacity-policy.js";
 import { InitialOutreachCreditService } from "./recovery-billing/initial-outreach-credit.service.js";
 import type {
   ConfirmedInitialOutreachCreditInput,
@@ -138,17 +136,7 @@ export class RecoveryBillingService {
 
     const outcome = input.outreachAttemptId?.startsWith("retry_")
       ? await this.initialOutreachCredit.admitInitialRetry({ ...input, outreachAttemptId: input.outreachAttemptId }, (tx) =>
-          admitRecoveryCapacityWithPolicy(input, sourceKey, {
-            policyResolver: new EffectiveBillingPolicyResolver(tx),
-            postContractPolicyResolver: new PostContractRecoveryPolicyResolver(tx),
-            capacityAdmission: new RecoveryCapacityAdmissionService(
-              { reserve: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value), reservePostContract: value => freeRecoveryReservationService.reserveInExistingTransaction(tx, value, true) },
-              { reserve: value => purchasedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
-              { reserve: value => paidIncludedRecoveryReservationService.reserveInExistingTransaction(tx, value) },
-              { reserve: value => promotionalRecoveryReservationService.reserveInExistingTransaction(tx, value) },
-            ),
-            retry: true,
-          }))
+          admitRetryCapacityInTransaction(tx, { ...input, outreachAttemptId: input.outreachAttemptId! }, sourceKey))
       : await admitRecoveryCapacityWithPolicy(input, sourceKey, {
           policyResolver: this.policyResolver, postContractPolicyResolver: this.postContractPolicyResolver,
           capacityAdmission: this.capacityAdmission,
