@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createLogger } from "@modainteract/moda-interact-shared/logging";
 import { RecoveryPolicyService } from "../../src/services/recovery-policy.service.js";
 import { prepareCompensatedFollowUp, registerHistoricalSender } from "./fixtures/follow-up-retry.fixture.js";
+import { expectPurchasedCreditEvidence, expectPurchasedRetryDelta, readPurchasedRetryLedger } from "./fixtures/follow-up-retry-purchased.fixture.js";
 import { startArch040BackgroundMocks } from "./fixtures/arch040-background-mocks.fixture.js";
 import { seedApprovedInitialWooTemplateRegistration, WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import { recordWooDecision } from "./fixtures/woo-initial-send-fence.fixture.js";
@@ -30,14 +31,20 @@ const suite = process.env.TEST_DATABASE_URL && process.env.TEST_REDIS_URL && pro
 // are isolated; no billing, dispatch fence or settlement is stubbed.
 suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
   it.each([
-    { source: "free", recipient: "447400123491", outcome: "accepted" },
-    { source: "purchased", recipient: "447400123492", outcome: "accepted" },
-    { source: "free", recipient: "447400123493", outcome: "timeout" },
-    { source: "purchased", recipient: "447400123494", outcome: "timeout" },
-    { source: "free", recipient: "447400123495", outcome: "provider-rejected" },
-    { source: "purchased", recipient: "447400123496", outcome: "recipient-undeliverable" },
-  ] as const)("$source $outcome: dispatches at most once across restart", async ({ source, recipient, outcome }) => {
-    const t = await prepareCompensatedFollowUp(source, recipient);
+    { source: "free", recipient: "447400123491", outcome: "accepted", followUpFunding: "free" },
+    { source: "purchased", recipient: "447400123492", outcome: "accepted", followUpFunding: "free" },
+    { source: "free", recipient: "447400123493", outcome: "timeout", followUpFunding: "free" },
+    { source: "purchased", recipient: "447400123494", outcome: "timeout", followUpFunding: "free" },
+    { source: "free", recipient: "447400123495", outcome: "provider-rejected", followUpFunding: "free" },
+    { source: "purchased", recipient: "447400123496", outcome: "recipient-undeliverable", followUpFunding: "free" },
+    { source: "free", recipient: "447400123501", outcome: "accepted", followUpFunding: "purchased" },
+    { source: "purchased", recipient: "447400123502", outcome: "accepted", followUpFunding: "purchased" },
+    { source: "free", recipient: "447400123503", outcome: "timeout", followUpFunding: "purchased" },
+    { source: "purchased", recipient: "447400123504", outcome: "timeout", followUpFunding: "purchased" },
+    { source: "free", recipient: "447400123505", outcome: "provider-rejected", followUpFunding: "purchased" },
+    { source: "purchased", recipient: "447400123506", outcome: "provider-rejected", followUpFunding: "purchased" },
+  ] as const)("initial $source / historical follow-up $followUpFunding / $outcome: dispatches at most once across restart", async ({ source, recipient, outcome, followUpFunding }) => {
+    const t = await prepareCompensatedFollowUp(source, recipient, followUpFunding);
     const { f } = t;
     let mocks: Awaited<ReturnType<typeof startArch040BackgroundMocks>> | undefined;
     try {
@@ -71,7 +78,7 @@ suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
         create: { environment: "test", key: "messaging.sender", value: { fixture: true }, version: 1 },
         update: { value: { fixture: true }, version: 1 } });
       // Sender inventory survives individual tests in the disposable database.
-      // These six distinct synthetic recipients define distinct numeric sender IDs
+      // Distinct synthetic recipients define distinct numeric sender IDs
       // in a test-only range, separate from the standalone and other pooled fixtures.
       const pooledPhoneNumberId = `94${recipient}`;
       mocks = await startArch040BackgroundMocks({ rowId: config.id, version: config.version,
@@ -101,6 +108,15 @@ suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
             { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "retry-checkout" }] }] } };
       vi.spyOn(ports.template, "prepare").mockResolvedValue({ kind: "prepared", prepared, send: templateSendFields(prepared, { kind: "NO_OFFER" }) });
       expect(await listDueScheduledFollowUpRetries(f.db, { now: new Date(), limit: 250 })).toContainEqual({ id: t.intent.id, notBeforeAt: t.intent.notBeforeAt });
+      const purchaseLotId = followUpFunding === "purchased" ? t.reservation.purchasedCreditPurchaseId : null;
+      const purchasedBefore = followUpFunding === "purchased" ? await readPurchasedRetryLedger(f) : undefined;
+      if (purchasedBefore) {
+        if (!purchaseLotId) throw new Error("Historical follow-up must have purchased funding");
+        expectPurchasedCreditEvidence(purchasedBefore, t.reservation.id, purchaseLotId, f.provider, "corrected");
+        expect(purchasedBefore.counter.grantedQuantity - purchasedBefore.counter.committedQuantity - purchasedBefore.counter.reservedQuantity - purchasedBefore.counter.refundingQuantity).toBe(1);
+        expect(purchasedBefore.free.grantedQuantity - purchasedBefore.free.committedQuantity - purchasedBefore.free.reservedQuantity).toBe(0);
+        expect(purchasedBefore.lots.find(lot => lot.id === purchaseLotId)).toMatchObject({ provider: f.provider, currentAmount: 1, reservedAmount: 0, status: "ACTIVE" });
+      }
       // Timeout cases also exercise resumption after the funding transaction.
       const funded = outcome === "timeout" ? await new ScheduledFollowUpRetryFundingService(f.db).claimAndFund(scope) : undefined;
       if (funded && funded.kind !== "funded") throw new Error(`Expected funded retry, received ${funded.kind}`);
@@ -116,6 +132,7 @@ suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
         expect((await mocks.whatsapp.waitForMessageCount(1))[0]?.body).toMatchObject({ type: "template", template: { name: identity.providerTemplateName } });
       }
       expect(mocks.requests).toEqual([{ type: "template" }]);
+      const purchasedBeforeRestart = purchasedBefore ? await readPurchasedRetryLedger(f) : undefined;
       const restarted = new ScheduledFollowUpRetryExecutionService(f.db, ports, log);
       expect(await restarted.execute(t.intent.id)).toMatchObject(outcome === "timeout" ? { kind: "held", reason: "opening-unknown" }
         : { kind: "unchanged", reason: outcome === "accepted" ? "block-active" : outcome === "recipient-undeliverable" ? "recipient-failure-notified" : "block-cancelled" });
@@ -125,6 +142,13 @@ suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
       if (funded && funded.kind === "funded") expect(block.creditReservationId).toBe(funded.reservationId);
       const credit = await f.db.usageReservation.findUniqueOrThrow({ where: { id: block.creditReservationId! } });
       expect(credit.status).toBe(outcome === "accepted" ? "COMMITTED" : outcome === "timeout" ? "RESERVED" : "RELEASED");
+      if (purchasedBefore && purchaseLotId) {
+        const ledger = await readPurchasedRetryLedger(f);
+        const state = outcome === "accepted" ? "committed" : outcome === "timeout" ? "reserved" : "released";
+        expect(ledger).toEqual(purchasedBeforeRestart);
+        expectPurchasedCreditEvidence(ledger, credit.id, purchaseLotId, f.provider, state);
+        expectPurchasedRetryDelta(purchasedBefore, ledger, purchaseLotId, credit.id, state);
+      }
       const message = await f.db.conversationMessage.findFirstOrThrow({ where: { allowanceBlockId: block.id } });
       expect(message).toMatchObject({ senderType: "AUTOMATION", providerDispatchKey: expect.any(String), dispatchProviderPhoneNumberId: mocks.whatsapp.phoneNumberId,
         status: outcome === "accepted" ? "SENT" : outcome === "timeout" ? "PENDING" : "FAILED" });
@@ -145,6 +169,15 @@ suite("Scheduled follow-up retry through the local WhatsApp emulator", () => {
         expect(await new RecoveryDeliveryCompensationService(f.db).reconcile(message.providerMessageId!)).toBe("restored-spendable");
         expect(await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: attemptId } })).toMatchObject({ fundingReservationId: credit.id, failedMessageId: message.id });
         expect(await f.db.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: block.id } })).toMatchObject({ state: "CANCELLED" });
+        if (purchasedBefore && purchaseLotId) {
+          const corrected = await readPurchasedRetryLedger(f);
+          expectPurchasedCreditEvidence(corrected, credit.id, purchaseLotId, f.provider, "corrected");
+          expectPurchasedRetryDelta(purchasedBefore, corrected, purchaseLotId, credit.id, "corrected");
+          // Reprocessing the same definitive delivery failure cannot restore a
+          // second credit or create another negative usage event.
+          expect(await new RecoveryDeliveryCompensationService(f.db).reconcile(message.providerMessageId!)).toBe("restored-spendable");
+          expect(await readPurchasedRetryLedger(f)).toEqual(corrected);
+        }
         expect(mocks.requests).toHaveLength(1);
       }
     } finally {

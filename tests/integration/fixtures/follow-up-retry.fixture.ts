@@ -6,8 +6,10 @@ import { lockRecoveryContext } from "../../../src/services/recovery-conversation
 import { RecoveryDeliveryCompensationService } from "../../../src/services/recovery-delivery-compensation/reconcile.service.js";
 import { FreeRecoveryReservationService } from "../../../src/services/free-recovery-reservation.service.js";
 import { createInitialOutreachCreditFixture } from "./arch056-initial-outreach-credit.fixture.js";
+import { reserveAndCommitPurchasedFollowUp } from "./follow-up-retry-purchased.fixture.js";
 
-export async function prepareCompensatedFollowUp(source: "free" | "purchased", recipient = "15551234567") {
+export async function prepareCompensatedFollowUp(source: "free" | "purchased", recipient = "15551234567",
+  followUpFunding: "free" | "purchased" = "free") {
   // The fixture uses Shopify for free and WooCommerce for purchased initial
   // funding. Historical acceptance is seeded; no provider is called.
   const f = await createInitialOutreachCreditFixture({ source, recipient, sentAgeMs: 60 * 60_000 });
@@ -24,15 +26,19 @@ export async function prepareCompensatedFollowUp(source: "free" | "purchased", r
     const providerMessageId = `wamid-${randomUUID()}`;
     // Establish a second historical reservation, then use the real credit
     // owner to commit it. This is fixture data, not retry admission.
-    const reservation = await f.db.$transaction(async tx => {
-      const counter = await tx.shopEntitlementCounter.update({
-        where: { shopId_counter: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
-        data: { grantedQuantity: { increment: 1 }, reservedQuantity: { increment: 1 }, version: { increment: 1 } },
-      });
-      return tx.usageReservation.create({ data: { shopId: f.shopId, counterId: counter.id,
-        sourceKey, quantity: 1, status: "RESERVED" } });
-    });
-    expect(await new FreeRecoveryReservationService(f.db).commit({ shopId: f.shopId, sourceKey })).toMatchObject({ kind: "committed" });
+    const reservation = followUpFunding === "purchased"
+      ? await reserveAndCommitPurchasedFollowUp(f, sourceKey)
+      : await f.db.$transaction(async tx => {
+          const counter = await tx.shopEntitlementCounter.update({
+            where: { shopId_counter: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
+            data: { grantedQuantity: { increment: 1 }, reservedQuantity: { increment: 1 }, version: { increment: 1 } },
+          });
+          return tx.usageReservation.create({ data: { shopId: f.shopId, counterId: counter.id,
+            sourceKey, quantity: 1, status: "RESERVED" } });
+        });
+    if (followUpFunding === "free") {
+      expect(await new FreeRecoveryReservationService(f.db).commit({ shopId: f.shopId, sourceKey })).toMatchObject({ kind: "committed" });
+    }
     const block = await f.db.$transaction(async tx => {
       await lockRecoveryContext(tx, conversation.id);
       await tx.conversationAllowanceBlock.update({ where: { id: initial.id }, data: { state: "CLOSED" } });
