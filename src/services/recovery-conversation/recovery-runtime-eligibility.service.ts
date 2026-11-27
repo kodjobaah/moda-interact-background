@@ -6,6 +6,7 @@ import { shopExecutionEligibilityService } from "../shop-execution-eligibility.s
 import { first } from "./recovery-conversation.sql.js";
 import type { DurableEligibility } from "./outbound-send-fence.service.js";
 import { checkFinalStoredRecoveryConsent } from "./recovery-stored-consent.service.js";
+import { checkFinalWooStoredRecoveryConsent } from "./woo-stored-recovery-consent-fence.js";
 
 export const recoveryRuntimeEligibility: DurableEligibility = async (tx, input, context) => {
   const current = await first<{
@@ -32,12 +33,11 @@ export const recoveryRuntimeEligibility: DurableEligibility = async (tx, input, 
     },
   }, "recovery");
   if (!execution.allowed) return execution.reason.toLowerCase().replaceAll("_", "-");
-  if (current.platform === "SHOPIFY" && input.proactive) {
+  if (input.proactive) {
     // The Shop lock was acquired by OutboundSendFenceService. A withdrawal,
     // phone swap or STOP between preflight and this SQL permit invalidates it.
-    const denial = await checkFinalStoredRecoveryConsent(
-      tx, context, input.recipient, input.proactive.consent ?? undefined,
-    );
+    const checkConsent = current.platform === "WOOCOMMERCE" ? checkFinalWooStoredRecoveryConsent : checkFinalStoredRecoveryConsent;
+    const denial = await checkConsent(tx, context, input.recipient, input.proactive.consent ?? undefined);
     if (denial) return denial;
   }
   if (input.senderType !== "HUMAN") {

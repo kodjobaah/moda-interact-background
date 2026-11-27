@@ -90,7 +90,7 @@ export class RecoveryMultipartDeliveryEngine {
     const part = parts.find(p=>p.state==='PREPARED');
     if (!part) return parts.some(p=>p.state==='ADMITTED')?'already-attempted':'waiting';
     if (part.ordinal && !['DELIVERED','READ'].includes(parts[part.ordinal-1]!.state)) return 'waiting';
-    const consent=await this.consent.preflight({shopId:source.receipt.shopId,recoveryId:source.recoveryId,recipient:source.recipient});
+    const consent=await this.consent.preflight({shopId:source.receipt.shopId,recoveryId:source.recoveryId,recipient:source.recipient,purpose:'multipart-reply'});
     if(consent.kind!=='allowed'){await this.cancelTail(source,'multipart_consent_refused');return 'cancelled';}
     const permit = await this.fence.admitProviderDispatch({senderType:source.actor,shopId:source.receipt.shopId,conversationId:source.receipt.conversationId,
       recoveryId:source.recoveryId,expectedControlRevision:source.receipt.controlRevision,

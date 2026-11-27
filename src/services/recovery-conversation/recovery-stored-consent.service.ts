@@ -8,6 +8,9 @@ import {
   type ShopifyWhatsAppConsentServicePort,
 } from "../shopify-whatsapp-consent.service.js";
 import { rows, type RecoveryContext, type SqlTransaction } from "./recovery-conversation.sql.js";
+import {
+  wooRecoveryConsentReader, type WooRecoveryConsentReaderPort, type WooRecoveryConsentSnapshot,
+} from "../woocommerce-recovery-consent.service.js";
 
 /** A pre-provider snapshot, deliberately not a persistent permission token.
  * The final Shop-locked SQL fence checks the same phone and both revisions.
@@ -17,6 +20,9 @@ export type StoredRecoveryConsentSnapshot = {
   canonicalRecipient: string;
   consentRevision: bigint;
   noContactRevision: bigint;
+  /** Present only for WooCommerce; its installation and decision identity are
+   * required again inside the shared proactive dispatch transaction. */
+  woo?: WooRecoveryConsentSnapshot;
 };
 
 export type StoredRecoveryConsentDecision =
@@ -35,19 +41,44 @@ export class RecoveryStoredConsentService {
     private readonly shopify: Pick<ShopifyWhatsAppConsentServicePort, "evaluateStoredRecipient"> =
       new ShopifyWhatsAppConsentService(),
     private readonly logger: Pick<StructuredLogger, "info" | "warn" | "error"> = storedConsentLogger,
+    private readonly woo: Pick<WooRecoveryConsentReaderPort, "evaluateStoredRecipient"> = wooRecoveryConsentReader,
   ) {}
 
-  /** No Shopify GraphQL read: new checkout verification belongs to BG002. */
-  async preflight(input: { shopId: string; recoveryId: string; recipient: string }): Promise<StoredRecoveryConsentDecision> {
+  /** No provider read: new checkout verification belongs to admission. The
+   * existing multipart reply path is not proactive marketing. Preserve its
+   * Woo service-window/STOP policy; Shopify keeps its existing consent check. */
+  async preflight(input: { shopId: string; recoveryId: string; recipient: string;
+    purpose?: "multipart-reply" }): Promise<StoredRecoveryConsentDecision> {
+    let platform: string | undefined;
     try {
       const recovery = await this.database.checkoutRecovery.findUnique({
         where: { id: input.recoveryId },
         select: { shopId: true, customerId: true, shop: { select: { platform: true } } },
       });
       if (!recovery || recovery.shopId !== input.shopId) return { kind: "denied", reason: "recovery-unavailable" };
-      // WooCommerce's separately owned ARCH-046 policy is not replaced with
-      // an invented Shopify-native consent requirement.
-      if (recovery.shop.platform === "WOOCOMMERCE") return { kind: "allowed", snapshot: null };
+      platform = recovery.shop.platform;
+      if (recovery.shop.platform === "WOOCOMMERCE") {
+        if (input.purpose === "multipart-reply") return { kind: "allowed", snapshot: null };
+        if (!recovery.customerId) return { kind: "denied", reason: "stored-consent-unavailable" };
+        const canonical = canonicalWhatsAppSender(input.recipient);
+        if (!canonical) return { kind: "denied", reason: "recipient-unverified" };
+        const decision = await this.woo.evaluateStoredRecipient({
+          shopId: input.shopId, customerId: recovery.customerId, recipient: `+${canonical}`,
+        });
+        if (decision.status !== "ALLOWED") return {
+          kind: "denied", reason: decision.status === "UNAVAILABLE" ? "stored-consent-unavailable" : "stored-consent-denied",
+        };
+        const snapshot = decision.snapshot;
+        if (decision.canonicalRecipient !== canonical || snapshot.canonicalRecipient !== canonical ||
+            snapshot.shopId !== input.shopId || snapshot.customerId !== recovery.customerId ||
+            snapshot.customerPhoneId !== decision.customerPhoneId ||
+            snapshot.consentRevision !== decision.consentRevision || snapshot.noContactRevision !== decision.noContactRevision)
+          return { kind: "denied", reason: "recipient-changed" };
+        return { kind: "allowed", snapshot: {
+          customerPhoneId: snapshot.customerPhoneId, canonicalRecipient: snapshot.canonicalRecipient,
+          consentRevision: snapshot.consentRevision, noContactRevision: snapshot.noContactRevision, woo: snapshot,
+        } };
+      }
       if (recovery.shop.platform !== "SHOPIFY" || !recovery.customerId)
         return { kind: "denied", reason: "stored-consent-unavailable" };
       const canonical = canonicalWhatsAppSender(input.recipient);
@@ -67,7 +98,7 @@ export class RecoveryStoredConsentService {
         noContactRevision: decision.noContactRevision,
       } };
     } catch (error) {
-      this.logger.error("shopify.consent.outbound.blocked", {
+      this.logger.error(platform === "WOOCOMMERCE" ? "woocommerce.consent.outbound.blocked" : "shopify.consent.outbound.blocked", {
         shopId: input.shopId,
         recoveryId: input.recoveryId,
         operation: "proactive_final_send",
@@ -102,7 +133,7 @@ export async function checkFinalStoredRecoveryConsent(
   recipient: string,
   snapshot: StoredRecoveryConsentSnapshot | undefined,
 ): Promise<string | null> {
-  if (!snapshot) return "stored-consent-snapshot-missing";
+  if (!snapshot || snapshot.woo) return "stored-consent-snapshot-missing";
   const canonical = canonicalWhatsAppSender(recipient);
   if (!canonical || canonical !== snapshot.canonicalRecipient) return "recipient-changed";
   const phones = await rows<PhoneFenceRow>(tx, `

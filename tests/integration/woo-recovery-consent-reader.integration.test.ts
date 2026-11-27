@@ -7,6 +7,11 @@ import {
   type WooRecoveryConsentReadInput,
 } from "../../src/services/woocommerce-recovery-consent.service.js";
 
+import { RecoveryStoredConsentService } from "../../src/services/recovery-conversation/recovery-stored-consent.service.js";
+import { lockRecoveryContext } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
+import { recoveryRuntimeEligibility } from "../../src/services/recovery-conversation/recovery-runtime-eligibility.service.js";
+import type { DispatchInput } from "../../src/services/recovery-conversation/outbound-send-fence.service.js";
+
 const url = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = url && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 const PHONE = "+447400123456";
@@ -73,6 +78,67 @@ const status = (result: Awaited<ReturnType<WooRecoveryConsentReader["evaluateRec
   result.status === "ALLOWED" ? "ALLOWED" : `${result.status}:${result.reason}`;
 
 describeWithDatabase("ARCH-046 Woo consent reader against migrated PostgreSQL", () => {
+  it("requires the Woo snapshot in the shared proactive final SQL eligibility for both actors", async () => {
+    const db = new PrismaClient({ datasourceUrl: url! });
+    try {
+      const { shop, installation } = await makeShop(db);
+      const { customer, phone } = await makeCustomer(db, shop.id);
+      const recovery = await db.checkoutRecovery.create({ data: {
+        shopId: shop.id, customerId: customer.id, checkoutToken: randomUUID(), status: "MESSAGE_SENT",
+        lastExternalActivityAt: new Date(),
+      } });
+      const conversation = await db.conversation.create({ data: {
+        checkoutRecoveryId: recovery.id, shopId: shop.id, type: "RECOVERY",
+      } });
+      const plan = await db.billingPlan.create({ data: {
+        shopifyPlanHandle: `woo-proactive-${randomUUID()}`, name: "Woo proactive fixture", kind: "FREE",
+      } });
+      await db.subscription.create({ data: { shopId: shop.id, status: "ACTIVE", planId: plan.id,
+        observedShopifyPlanHandle: plan.shopifyPlanHandle } });
+      const message = await db.conversationMessage.create({ data: {
+        conversationId: conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION", status: "PENDING", content: "fixture",
+      } });
+      await db.usageEvent.create({ data: { shopId: shop.id, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
+        idempotencyKey: `woo-consent-${randomUUID()}`, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id } });
+      const consent = new RecoveryStoredConsentService(db, undefined, undefined, new WooRecoveryConsentReader(db));
+      const input = { shopId: shop.id, recoveryId: recovery.id, recipient: DIGITS };
+      await expect(consent.preflight(input)).resolves.toEqual({ kind: "denied", reason: "stored-consent-denied" });
+      const grant = { shopId: shop.id, installationId: installation.id, customerId: customer.id, phoneId: phone.id };
+      await decision(db, { ...grant, kind: "GRANT", sequence: 1 });
+      const permission = await consent.preflight(input);
+      expect(permission.kind).toBe("allowed");
+      if (permission.kind !== "allowed" || !permission.snapshot?.woo) throw new Error("WOO_CONSENT_SNAPSHOT_MISSING");
+      const snapshot = permission.snapshot;
+      const check = (senderType: "HUMAN" | "AUTOMATION", evidence: typeof snapshot | null) => db.$transaction(async tx => {
+        const context = await lockRecoveryContext(tx, conversation.id);
+        if (!context) throw new Error("WOO_FIXTURE_CONTEXT_MISSING");
+        const request: DispatchInput = { ...input, conversationId: conversation.id, senderType,
+          expectedControlRevision: context.revision, messageId: message.id, now: new Date(),
+          proactive: { consent: evidence, verifiedCategory: "MARKETING", templateName: "fixture", languageCode: "en_GB" },
+        };
+        return recoveryRuntimeEligibility(tx, request, context);
+      });
+      for (const actor of ["HUMAN", "AUTOMATION"] as const) {
+        await expect(check(actor, null)).resolves.toBe("stored-consent-snapshot-missing");
+        await expect(check(actor, snapshot)).resolves.toBeNull();
+      }
+      const duplicate = await makeCustomer(db, shop.id, "07400 123456");
+      await expect(check("AUTOMATION", snapshot)).resolves.toBe("woo-recipient-ambiguous");
+      await db.customerPhone.update({ where: { id: duplicate.phone.id }, data: { endedAt: new Date() } });
+      await expect(check("AUTOMATION", snapshot)).resolves.toBeNull();
+      await db.customerPhone.update({ where: { id: phone.id }, data: {
+        whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP",
+        whatsappNoContactAt: new Date(), whatsappNoContactRevision: { increment: 1 },
+      } });
+      for (const actor of ["HUMAN", "AUTOMATION"] as const)
+        await expect(check(actor, snapshot)).resolves.toBe("woo-consent-changed");
+      await expect(consent.preflight(input)).resolves.toEqual({ kind: "denied", reason: "stored-consent-denied" });
+      // These checks run only the SQL eligibility component: no message permit
+      // or provider request may be made here.
+      expect((await db.conversationMessage.findUniqueOrThrow({ where: { id: message.id } })).providerDispatchKey).toBeNull();
+    } finally { await db.$disconnect(); }
+  }, 90_000);
+
   it("reads one verified active phone, never inherits another shop's grant, denies same-shop duplicates and national ambiguity", async () => {
     const db = new PrismaClient({ datasourceUrl: url! });
     try {

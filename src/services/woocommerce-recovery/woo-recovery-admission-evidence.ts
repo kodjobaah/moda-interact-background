@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Prisma } from "@prisma/client";
+import { matchesRegisteredPhone } from "../whatsapp-contact-opt-out/phone.js";
 import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
 import type { WooBasketEvidence, WooPendingCandidate } from "./contracts.js";
 import type { WooActivityWatermark } from "./woo-activity-watermark.store.js";
@@ -130,13 +131,13 @@ function currentConsentStillValid(
 /** Lock the current recipient/consent/installation rows until the INSERT commits.
  * No external reads or queue/Redis traffic occur in this transaction. */
 export async function confirmCurrentWooConsent(
-  tx: Prisma.TransactionClient,
+  tx: Pick<Prisma.TransactionClient, "$queryRaw"> | Pick<Prisma.TransactionClient, "$queryRawUnsafe">,
   shopId: string,
   snapshot: WooRecoveryConsentSnapshot,
   observedEmail: string | undefined,
   expectedSite?: { canonicalSiteUrl: string; shopDomain: string },
 ): Promise<boolean> {
-  const fences = await tx.$queryRaw<AdmissionFenceRow[]>(Prisma.sql`
+  const statement = Prisma.sql`
           SELECT cp."id" AS "customerPhoneId", cp."customerId", c."shopId" AS "customerShopId",
             c."email" AS "customerEmail", cp."whatsappCanonicalPhone" AS "canonicalPhone", cp."endedAt",
             s."status"::text AS "shopStatus", s."platform"::text AS "shopPlatform",
@@ -161,6 +162,35 @@ export async function confirmCurrentWooConsent(
           WHERE cp."id" = ${snapshot.customerPhoneId} AND c."id" = ${snapshot.customerId}
             AND s."id" = ${shopId}
           FOR SHARE OF cp, c, s, i
-  `);
+  `;
+  const fences = "$queryRaw" in tx ? await tx.$queryRaw<AdmissionFenceRow[]>(statement)
+    : await tx.$queryRawUnsafe<AdmissionFenceRow[]>(statement.text, ...statement.values);
   return fences.length === 1 && currentConsentStillValid(fences[0], snapshot, observedEmail, expectedSite);
+}
+
+/** Same bounded shop-scoped ambiguity fence for initial and proactive sends. */
+export async function confirmUniqueWooRecipient(
+  tx: Pick<Prisma.TransactionClient, "$queryRawUnsafe">,
+  shopId: string, snapshot: WooRecoveryConsentSnapshot,
+): Promise<boolean> {
+  // CustomerPhone has no shop+canonical uniqueness constraint. A second
+  // matching active registration cannot borrow this recipient's opt-in.
+  // Include legacy null-canonical numbers, bounded as in BG001's reader.
+  const candidates = await tx.$queryRawUnsafe<Array<{
+    id: string; phone: string; whatsappCanonicalPhone: string | null;
+    defaultCountryCode: string | null;
+  }>>(`
+    SELECT cp."id",cp."phone",cp."whatsappCanonicalPhone",s."defaultCountryCode"
+    FROM "commerce"."CustomerPhone" cp
+    JOIN "commerce"."Customer" c ON c."id"=cp."customerId"
+    JOIN "commerce"."Shop" s ON s."id"=c."shopId"
+    WHERE c."shopId"=$1 AND cp."endedAt" IS NULL
+      AND (cp."whatsappCanonicalPhone"=$2 OR cp."whatsappCanonicalPhone" IS NULL
+           OR cp."phone" IN ($3,$2))
+    ORDER BY cp."id" LIMIT 251 FOR SHARE OF cp`,
+    shopId, snapshot.canonicalRecipient, `+${snapshot.canonicalRecipient}`);
+  if (candidates.length > 250) return false;
+  const matching = candidates.filter((candidate) =>
+    matchesRegisteredPhone(candidate, snapshot.canonicalRecipient, candidate.defaultCountryCode));
+  return matching.length === 1 && matching[0]?.id === snapshot.customerPhoneId;
 }

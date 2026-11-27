@@ -10,9 +10,9 @@ import { createLogger, type StructuredLogger } from "@modainteract/moda-interact
 import { resolveDeploymentEnvironmentName } from "../../runtime/deployment-environment.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { WooRecoveryConsentSnapshot } from "../woocommerce-recovery-consent.service.js";
-import { canonicalWhatsAppSender, matchesRegisteredPhone } from "../whatsapp-contact-opt-out/phone.js";
+import { canonicalWhatsAppSender } from "../whatsapp-contact-opt-out/phone.js";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
-import { confirmCurrentWooConsent } from "./woo-recovery-admission-evidence.js";
+import { confirmCurrentWooConsent, confirmUniqueWooRecipient } from "./woo-recovery-admission-evidence.js";
 import {
   isCheckoutRecoveryWithinLifetime,
   parseCheckoutRecoveryLifetimeDays,
@@ -170,26 +170,7 @@ export class WooInitialSendFenceService {
       if (await this.noContact(tx, { shopId: input.shopId, recipient: input.recipient }))
         return { kind: "suppressed", reason: "woo-local-no-contact" };
 
-      // CustomerPhone has no shop+canonical uniqueness constraint. A second
-      // matching active registration cannot borrow this recipient's opt-in.
-      // Include legacy null-canonical numbers, bounded as in BG001's reader.
-      const candidates = await tx.$queryRawUnsafe<Array<{
-        id: string; phone: string; whatsappCanonicalPhone: string | null;
-        defaultCountryCode: string | null;
-      }>>(`
-        SELECT cp."id",cp."phone",cp."whatsappCanonicalPhone",s."defaultCountryCode"
-        FROM "commerce"."CustomerPhone" cp
-        JOIN "commerce"."Customer" c ON c."id"=cp."customerId"
-        JOIN "commerce"."Shop" s ON s."id"=c."shopId"
-        WHERE c."shopId"=$1 AND cp."endedAt" IS NULL
-          AND (cp."whatsappCanonicalPhone"=$2 OR cp."whatsappCanonicalPhone" IS NULL
-               OR cp."phone" IN ($3,$2))
-        ORDER BY cp."id" LIMIT 251 FOR SHARE OF cp`,
-        input.shopId, input.consent.canonicalRecipient, `+${input.consent.canonicalRecipient}`);
-      if (candidates.length > 250) return { kind: "suppressed", reason: "woo-recipient-ambiguous" };
-      const matching = candidates.filter((candidate) =>
-        matchesRegisteredPhone(candidate, input.consent.canonicalRecipient, candidate.defaultCountryCode));
-      if (matching.length !== 1 || matching[0]?.id !== input.consent.customerPhoneId)
+      if (!await confirmUniqueWooRecipient(tx, input.shopId, input.consent))
         return { kind: "suppressed", reason: "woo-recipient-ambiguous" };
 
       const usage = await tx.$queryRawUnsafe<Array<{ sourceId: string | null; shopId: string; metric: string; sourceType: string; quantity: unknown }>>(`

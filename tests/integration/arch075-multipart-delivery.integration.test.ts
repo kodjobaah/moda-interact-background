@@ -1,5 +1,8 @@
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
+import { createHash,randomInt,randomUUID } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
+import { createRecoveryIdempotencyKey } from '@modainteract/moda-interact-shared/billing';
+import { FreeRecoveryReservationService } from '../../src/services/free-recovery-reservation.service.js';
 import { describe,it,expect,vi } from 'vitest';
 import { buildRecoveryMultipartDeliveryPlan,digestRecoveryMultipartDeliveryPlan,type RecoveryMultipartDeliveryPart } from '@modainteract/moda-interact-shared/commerce/presentation';
 import { humanDispatchFixture } from './fixtures/recovery-human-dispatch.fixture.js';
@@ -17,18 +20,35 @@ import { verifiedReadyConversationBrandImage } from '../../src/services/shop-bra
 import { WhatsAppServiceError } from '../../src/services/whatsapp.service.js';
 const suite=process.env.TEST_DATABASE_URL&&process.env.REDIS_URL&&process.env.MODA_DISPOSABLE_INTEGRATION==='1'?describe:describe.skip;
 const answer='Here is your complete product answer. Nothing is truncated.';
+async function recordConsentEvidence(tx:Prisma.TransactionClient,input:{shopId:string;customerId:string;phoneId:string;recipient:string;decision:'GRANT'|'REVOKE';observedAt:Date;revision:bigint}){
+ const eventId=randomUUID();
+ const payloadDigest=createHash('sha256').update(JSON.stringify({eventId,shopId:input.shopId,customerId:input.customerId,phoneId:input.phoneId,recipient:input.recipient,decision:input.decision,observedAt:input.observedAt.toISOString(),revision:input.revision.toString()})).digest();
+ await tx.whatsAppConsentEvidence.create({data:{shopId:input.shopId,installationId:null,eventId,customerId:input.customerId,customerPhoneId:input.phoneId,
+  canonicalPhone:input.recipient,purpose:'WHATSAPP_CHECKOUT_RECOVERY',decision:input.decision,decisionAt:input.observedAt,decisionSequence:input.revision,phoneConsentRevision:input.revision,
+  payloadDigest:Uint8Array.from(payloadDigest),disclosureText:'Receive WhatsApp checkout recovery messages.',disclosureVersion:'1',disclosureLocale:'en-GB'}});
+}
 async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',three=false,logo=false){
- const f=await humanDispatchFixture(`arch075-${label}`,{checkoutLifetimeDays:7,recipient:'447400123456'});
- let planId:string|undefined;let configId:string|undefined;
+ const f=await humanDispatchFixture(`arch075-${label}`,{checkoutLifetimeDays:7,recipient:'447400123456',pooledSender:true});
+ let planId:string|undefined;let configId:string|undefined;let hasConsentEvidence=false;
+ const cleanup=async()=>{
+  try{if(configId)await f.db.platformConfiguration.deleteMany({where:{id:configId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});if(planId)await f.db.billingPlan.delete({where:{id:planId}});}
+  finally{await f.close({preserveConsentEvidence:hasConsentEvidence});}
+ };
  try {
  const domain=`${f.shopId}.example.test`.toLowerCase();const url=`https://${domain}/checkouts/trusted`;
  await f.db.shop.update({where:{id:f.shopId},data:{onboardingCompleted:true}});
  await f.db.shopBrand.create({data:{shopId:f.shopId,brandName:'Recovery Store'}});
  await f.db.checkoutRecovery.update({where:{id:f.recoveryId},data:{checkoutUrl:url}});
- const customer=await f.db.customer.create({data:{shopId:f.shopId,phone:`+${f.recipient}`}});
+ const customer=await f.db.customer.create({data:{shopId:f.shopId,shopifyCustomerId:'gid://shopify/Customer/123456789',phone:`+${f.recipient}`}});
  const consentAt=new Date();
- const phone=await f.db.customerPhone.create({data:{customerId:customer.id,phone:`+${f.recipient}`,whatsappCanonicalPhone:f.recipient,
-  whatsappPhoneVerifiedAt:consentAt,whatsappConsentDecision:'GRANTED',whatsappConsentSource:'SHOPIFY_NATIVE',whatsappConsentVerifiedAt:consentAt,whatsappConsentProviderObservedAt:consentAt,whatsappConsentRevision:1n,whatsappConsentDecisionSequence:1n}});
+ // The database requires the current Shopify permission and its evidence to commit together.
+ const phone=await f.db.$transaction(async tx=>{
+  const record=await tx.customerPhone.create({data:{customerId:customer.id,phone:`+${f.recipient}`,whatsappCanonicalPhone:f.recipient,
+   whatsappPhoneVerifiedAt:consentAt,whatsappConsentDecision:'GRANTED',whatsappConsentSource:'SHOPIFY_NATIVE',whatsappConsentVerifiedAt:consentAt,whatsappConsentProviderObservedAt:consentAt,whatsappConsentRevision:1n,whatsappConsentDecisionSequence:1n}});
+  await recordConsentEvidence(tx,{shopId:f.shopId,customerId:customer.id,phoneId:record.id,recipient:f.recipient,decision:'GRANT',observedAt:consentAt,revision:1n});
+  return record;
+ });
+ hasConsentEvidence=true;
  await f.db.checkoutRecovery.update({where:{id:f.recoveryId},data:{customerId:customer.id}});
  const billingPlan=await f.db.billingPlan.create({data:{shopifyPlanHandle:`free-${randomUUID()}`,name:'Free multipart plan',kind:'FREE'}});
  planId=billingPlan.id;
@@ -37,7 +57,14 @@ async function fixture(label:string,actor:'AGENT'|'HUMAN'='AGENT',three=false,lo
  await f.db.platformBillingPolicy.upsert({where:{id:'default'},create:{absoluteOutboundHardLimit:20,defaultWarningPercent:80,defaultOutboundSoftLimit:10,defaultOutboundHardLimit:20,terminalMessageReservedSlots:1},update:{absoluteOutboundHardLimit:20,defaultWarningPercent:80,defaultOutboundSoftLimit:10,defaultOutboundHardLimit:20,terminalMessageReservedSlots:1,globalPauseAutomatedWhatsapp:false}});
  const commandId=await f.addCommand({textBody:answer});
  const initial=await f.db.recoveryOutreachAttempt.findFirstOrThrow({where:{checkoutRecoveryId:f.recoveryId,sequence:1}});
- await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{providerMessageId:`initial-${randomUUID()}`}});
+ const assignment=await f.db.recoverySenderAssignment.findUniqueOrThrow({where:{conversationId:f.conversationId},include:{route:{include:{thread:{include:{sender:true}}}}}});
+ const sender={providerAccountId:assignment.route.thread.sender.providerAccountId,providerPhoneNumberId:assignment.route.providerPhoneNumberId};
+ // Historical receipt and frozen multipart source must name the allocated sender.
+ await f.db.conversationMessage.update({where:{id:initial.outboundMessageId!},data:{dispatchProviderAccountId:sender.providerAccountId,dispatchProviderPhoneNumberId:sender.providerPhoneNumberId}});
+ const initialCredit=new FreeRecoveryReservationService(f.db);
+ const initialSourceKey=createRecoveryIdempotencyKey(f.shopId,`recovery-outreach:${initial.id}`);
+ expect((await initialCredit.reserve({shopId:f.shopId,sourceKey:initialSourceKey,quantity:1})).kind).toBe('reserved');
+ expect((await initialCredit.commit({shopId:f.shopId,sourceKey:initialSourceKey,quantity:1})).kind).toBe('committed');
 let command:FrozenMultipart['command']=null;let revision=2;let body:string;let messageId:string;
  const header=verifiedRecoveryShopHeader(f.shopId,domain,'Recovery Store')!;
  if(actor==='HUMAN'){
@@ -72,7 +99,7 @@ let command:FrozenMultipart['command']=null;let revision=2;let body:string;let m
  const plan=buildRecoveryMultipartDeliveryPlan({parts,checkoutUrl:url});const now=new Date();let clock=now;
  const source:FrozenMultipart={schemaVersion:1,kind:'RECOVERY_MULTIPART_PREPARATION',messageId,body,checkoutUrl:url,recipient:f.recipient,recoveryId:f.recoveryId,actor,
   receipt:{sourceKind:actor==='HUMAN'?'HUMAN_COMMAND':'MESSAGE',sourceId:command?.id??messageId,shopId:f.shopId,conversationId:f.conversationId,controlRevision:revision,inboundVersion:actor==='HUMAN'?0:1,firstPair:three?{productId,variantId:null}:null},
-  recoveryShopHeader:header,policyRef,command,sender:{providerAccountId:'account',providerPhoneNumberId:'phone'},plan,planDigest:digestRecoveryMultipartDeliveryPlan(plan,sha256),frozenAt:now.toISOString(),deadlineAt:deliveryDeadline(now).toISOString()};
+  recoveryShopHeader:header,policyRef,command,sender,plan,planDigest:digestRecoveryMultipartDeliveryPlan(plan,sha256),frozenAt:now.toISOString(),deadlineAt:deliveryDeadline(now).toISOString()};
  const provider={sendWhatsAppText:vi.fn(async()=>({providerMessageId:`arch075-meta-${randomUUID()}`})),sendWhatsAppImage:vi.fn(async()=>({providerMessageId:`arch075-meta-${randomUUID()}`}))};
  const schedule=vi.fn(async()=>{});
  const consent={preflight:vi.fn(async()=>({kind:'allowed' as const,snapshot:{customerPhoneId:phone.id,canonicalRecipient:f.recipient,consentRevision:1n,noContactRevision:0n}}))};
@@ -84,8 +111,8 @@ let command:FrozenMultipart['command']=null;let revision=2;let body:string;let m
  const status=async(ordinal:number,state:'SENT'|'DELIVERED'|'READ'|'FAILED'='DELIVERED',sender=source.sender)=>{
   const part=(await list())[ordinal]!;if(!part.providerMessageId)throw new Error('part not ACK');return engine.observe({schemaVersion:2,providerAccountId:sender.providerAccountId,providerPhoneNumberId:sender.providerPhoneNumberId,providerMessageId:part.providerMessageId,status:state,occurredAt:new Date().toISOString()});
  };
- return {...f,engine,source,provider,schedule,list,root,status,phoneId:phone.id,advance:(ms:number)=>{clock=new Date(now.getTime()+ms);},close:async()=>{if(configId)await f.db.platformConfiguration.deleteMany({where:{id:configId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});await f.db.billingPlan.delete({where:{id:billingPlan.id}});await f.close();}};
- } catch(error) {if(configId)await f.db.platformConfiguration.deleteMany({where:{id:configId}});await f.db.subscription.deleteMany({where:{shopId:f.shopId}});if(planId)await f.db.billingPlan.delete({where:{id:planId}});await f.close();throw error;}
+ return {...f,engine,source,provider,schedule,list,root,status,phoneId:phone.id,advance:(ms:number)=>{clock=new Date(now.getTime()+ms);},close:cleanup};
+ } catch(error) {await cleanup();throw error;}
 }
 suite('ARCH075 real PostgreSQL ordered delivery engine',()=>{
  it('concurrent freeze/continuation spends one logical normal Free admission and waits for DELIVERED, not ACK',async()=>{const f=await fixture('ordered');try{
@@ -104,13 +131,27 @@ suite('ARCH075 real PostgreSQL ordered delivery engine',()=>{
   expect(await f.status(0,'FAILED',{providerAccountId:'foreign',providerPhoneNumberId:'phone'})).toBe(false);expect((await f.list())[0]!.state).toBe('READ');
   expect(await resolveMultipartQuote(f.db,{...f.source.sender,providerMessageId:id})).toMatchObject({kind:'matched',conversationId:f.conversationId,recipient:f.recipient});
   expect(await resolveMultipartQuote(f.db,{providerAccountId:'foreign',providerPhoneNumberId:'phone',providerMessageId:id})).toEqual({kind:'invalid'});
-  const router=new RecoveryRoutingService(f.db,{isShopExecutionActive:async()=>true},{resolveSender:async()=>f.source.sender});
+  const router=new RecoveryRoutingService(f.db,{isShopExecutionActive:async()=>true});
   const event={schemaVersion:1 as const,provider:'whatsapp' as const,...f.source.sender,providerMessageId:`incoming-${randomUUID()}`,customerPhone:f.recipient,contextMessageId:id,occurredAt:new Date().toISOString(),content:{type:'text' as const,text:'More details please'}};
-  expect(await router.resolveInboundMessage(event)).toMatchObject({kind:'resolved',conversationId:f.conversationId,shopId:f.shopId});
+  const originalRoute=await router.resolveInboundMessage(event);
+  expect(originalRoute).toMatchObject({kind:'resolved',mode:'active',conversationId:f.conversationId,checkoutRecoveryId:f.recoveryId,shopId:f.shopId,
+   senderEvidence:{...f.source.sender,canonicalRecipient:f.recipient,referenceProviderMessageId:id}});
   expect(await router.resolveInboundMessage({...event,providerAccountId:'foreign-account'})).toEqual({kind:'ignored'});
-  expect(await router.resolveInboundMessage({...event,customerPhone:'14155550123'})).toMatchObject({kind:'guidance',reason:'INVALID_REFERENCE'});
-  const rotated=new RecoveryRoutingService(f.db,{isShopExecutionActive:async()=>true},{resolveSender:async()=>({providerAccountId:'new-account',providerPhoneNumberId:'new-phone'})});
-  expect(await rotated.resolveInboundMessage(event)).toEqual({kind:'ignored'});
+  // ARCH-076: a foreign recipient must not obtain routing guidance or ownership from another customer's quote.
+  expect(await router.resolveInboundMessage({...event,customerPhone:'14155550123'})).toEqual({kind:'ignored'});
+  // The router now reads durable inventory and assignments, not a singleton sender resolver.
+  const otherSender=await f.db.whatsAppPoolSender.create({data:{providerAccountId:f.source.sender.providerAccountId,
+   providerPhoneNumberId:String(randomInt(80_000_000_000_000,90_000_000_000_000)),verifiedAt:new Date(Date.now()-60_000),allocationEnabled:true,priority:2147483647}});
+  try{
+   const otherIdentity={providerAccountId:otherSender.providerAccountId,providerPhoneNumberId:otherSender.providerPhoneNumberId};
+   expect(await resolveMultipartQuote(f.db,{...otherIdentity,providerMessageId:id})).toEqual({kind:'invalid'});
+   expect(await router.resolveInboundMessage({...event,...otherIdentity})).toEqual({kind:'ignored'});
+   expect(await f.status(0,'FAILED',otherIdentity)).toBe(false);expect((await f.list())[0]!.state).toBe('READ');
+   // Draining the original phone stops new allocations, not replies to its immutable assignment.
+   await f.db.whatsAppPoolSender.update({where:{providerPhoneNumberId:f.source.sender.providerPhoneNumberId},data:{allocationEnabled:false}});
+   expect(await router.resolveInboundMessage(event)).toEqual(originalRoute);
+   expect(await router.resolveInboundMessage({...event,...otherIdentity})).toEqual({kind:'ignored'});
+  }finally{await f.db.whatsAppPoolSender.delete({where:{providerPhoneNumberId:otherSender.providerPhoneNumberId}});}
   expect((await f.root()).sentAt).toBeNull();
  }finally{await f.close();}},120000);
  it('a duplicate header callback during next image HTTP does not cancel third answer',async()=>{const f=await fixture('in-flight', 'AGENT',true);try{
@@ -123,7 +164,13 @@ suite('ARCH075 real PostgreSQL ordered delivery engine',()=>{
   await f.engine.continue(f.source.messageId);await f.status(0);
   if(variant==='control')await f.changeOwner('AI','HUMAN',2);
   if(variant==='inbound')await f.db.conversation.update({where:{id:f.conversationId},data:{inboundVersion:2}});
-  if(variant==='consent'){const observedAt=new Date();await f.db.customerPhone.update({where:{id:f.phoneId},data:{whatsappConsentDecision:'REVOKED',whatsappConsentRevision:2n,whatsappConsentDecisionSequence:2n,whatsappConsentProviderObservedAt:observedAt,whatsappConsentVerifiedAt:observedAt}});}
+  if(variant==='consent'){
+   const observedAt=new Date();
+   await f.db.$transaction(async tx=>{
+    const phone=await tx.customerPhone.update({where:{id:f.phoneId},data:{whatsappConsentDecision:'REVOKED',whatsappConsentRevision:2n,whatsappConsentDecisionSequence:2n,whatsappConsentProviderObservedAt:observedAt,whatsappConsentVerifiedAt:observedAt}});
+    await recordConsentEvidence(tx,{shopId:f.shopId,customerId:phone.customerId,phoneId:phone.id,recipient:f.recipient,decision:'REVOKE',observedAt,revision:2n});
+   });
+  }
   if(variant==='STOP')await f.db.customerPhone.update({where:{id:f.phoneId},data:{whatsappNoContact:true,whatsappNoContactReason:'CUSTOMER_STOP',whatsappNoContactAt:new Date(),whatsappNoContactRevision:{increment:1}}});
   if(variant==='name')await f.db.shopBrand.update({where:{shopId:f.shopId},data:{brandName:'Renamed'}});
   expect(await f.engine.continue(f.source.messageId)).toBe('cancelled');expect(f.provider.sendWhatsAppText).toHaveBeenCalledTimes(1);expect((await f.list())[0]!.state).toBe('DELIVERED');expect((await f.list())[1]!.state).toBe('CANCELLED');expect((await f.root()).status).toBe('FAILED');

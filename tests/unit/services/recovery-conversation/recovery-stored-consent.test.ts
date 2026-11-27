@@ -81,6 +81,7 @@ describe("final stored CustomerPhone recovery consent fence", () => {
 describe("recovery proactive stored-only preflight", () => {
   const findUnique = vi.fn();
   const evaluateStoredRecipient = vi.fn();
+  const evaluateWooRecipient = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   beforeEach(() => {
     vi.resetAllMocks();
@@ -91,6 +92,7 @@ describe("recovery proactive stored-only preflight", () => {
     { checkoutRecovery: { findUnique } } as never,
     { evaluateStoredRecipient } as never,
     logger,
+    { evaluateStoredRecipient: evaluateWooRecipient },
   );
   it("uses stored Shopify permission and returns the revision snapshot", async () => {
     await expect(make().preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: "+447400123456" }))
@@ -111,10 +113,42 @@ describe("recovery proactive stored-only preflight", () => {
       error: originalError,
     }));
   });
-  it("does not invent Shopify-native grants for WooCommerce", async () => {
-    findUnique.mockResolvedValueOnce({ shopId: "shop-a", customerId: "woo-a", shop: { platform: "WOOCOMMERCE" } });
-    await expect(make().preflight({ shopId: "shop-a", recoveryId: "recovery-a", recipient: "+447400123456" }))
+  const wooInput = { shopId: "shop-a", recoveryId: "recovery-a", recipient: "447400123456" };
+  const woo = { ...snapshot, shopId: "shop-a", customerId: "woo-a", installationId: "install-a",
+    credentialVersion: 2, consentDecisionSequence: 3n };
+  function useWoo() {
+    findUnique.mockResolvedValue({ shopId: "shop-a", customerId: "woo-a", shop: { platform: "WOOCOMMERCE" } });
+    evaluateWooRecipient.mockResolvedValue({ status: "ALLOWED", ...snapshot, snapshot: woo });
+  }
+  it("requires and carries the exact Woo consent/installation snapshot for proactive messages", async () => {
+    useWoo();
+    await expect(make().preflight(wooInput)).resolves.toEqual({ kind: "allowed", snapshot: { ...snapshot, woo } });
+    expect(evaluateWooRecipient).toHaveBeenCalledWith({ shopId: "shop-a", customerId: "woo-a", recipient: "+447400123456" });
+    expect(evaluateStoredRecipient).not.toHaveBeenCalled();
+    await expect(checkFinalStoredRecoveryConsent(fence([]).tx as never, context, wooInput.recipient,
+      { ...snapshot, woo })).resolves.toBe("stored-consent-snapshot-missing");
+  });
+  it.each([
+    ["NOT_AUTHORISED", "stored-consent-denied"], ["AMBIGUOUS", "stored-consent-denied"],
+    ["UNAVAILABLE", "stored-consent-unavailable"],
+  ])("denies Woo preflight %s without consulting Shopify", async (status, reason) => {
+    useWoo();
+    evaluateWooRecipient.mockResolvedValueOnce({ status, reason: "FIXTURE_DENIAL" });
+    await expect(make().preflight(wooInput)).resolves.toEqual({ kind: "denied", reason });
+    expect(evaluateStoredRecipient).not.toHaveBeenCalled();
+  });
+  it("denies mismatched Woo snapshot ownership and missing recovery customer", async () => {
+    useWoo();
+    evaluateWooRecipient.mockResolvedValueOnce({ status: "ALLOWED", ...snapshot, snapshot: { ...woo, customerId: "other" } });
+    await expect(make().preflight(wooInput)).resolves.toEqual({ kind: "denied", reason: "recipient-changed" });
+    findUnique.mockResolvedValueOnce({ shopId: "shop-a", customerId: null, shop: { platform: "WOOCOMMERCE" } });
+    await expect(make().preflight(wooInput)).resolves.toEqual({ kind: "denied", reason: "stored-consent-unavailable" });
+  });
+  it("preserves Woo multipart replies without issuing a marketing consent snapshot", async () => {
+    useWoo();
+    await expect(make().preflight({ ...wooInput, purpose: "multipart-reply" }))
       .resolves.toEqual({ kind: "allowed", snapshot: null });
+    expect(evaluateWooRecipient).not.toHaveBeenCalled();
     expect(evaluateStoredRecipient).not.toHaveBeenCalled();
   });
 });

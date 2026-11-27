@@ -8,7 +8,7 @@ const suite = process.env.TEST_DATABASE_URL && process.env.REDIS_URL &&
 
 suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   it("missing sender config defers before permit and records a safe operational incident", async () => {
-    const f = await humanDispatchFixture("sender-preflight-incident");
+    const f = await humanDispatchFixture("sender-preflight-incident", { recipient: "447400123456", pooledSender: true });
     try {
       const commandId = await f.addCommand();
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
@@ -31,7 +31,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("incident reporter observes original sender-config exception after a durable UNKNOWN", async () => {
-    const f = await humanDispatchFixture("sender-missing-incident");
+    const f = await humanDispatchFixture("sender-missing-incident", { recipient: "447400123456", pooledSender: true });
     try {
       const commandId = await f.addCommand();
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
@@ -52,7 +52,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("blocks Meta after a shop suspension commits between screening and final admission", async () => {
-    const f = await humanDispatchFixture("suspension-admission");
+    const f = await humanDispatchFixture("suspension-admission", { recipient: "447400123456", pooledSender: true });
     try {
       const id = await f.addCommand();
       const claim = (await f.commands.claimDueHumanCommands({ limit: 1, now: new Date() }))[0]!;
@@ -80,7 +80,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("two real dispatcher replicas lease a single command and submit exactly one Meta request", async () => {
-    const f = await humanDispatchFixture("two-replicas");
+    const f = await humanDispatchFixture("two-replicas", { recipient: "447400123456", pooledSender: true });
     try {
       const id = await f.addCommand();
       const replicaA = f.dispatcher();
@@ -122,7 +122,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("Redis rate denial stops final durable admission and prevents a second Meta submission", async () => {
-    const f = await humanDispatchFixture("screening-rate");
+    const f = await humanDispatchFixture("screening-rate", { recipient: "447400123456", pooledSender: true });
     try {
       const firstId = await f.addCommand();
       const secondId = await f.addCommand();
@@ -149,7 +149,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("denies queued HUMAN text after the verified customer window expires without template substitution", async () => {
-    const f = await humanDispatchFixture("expired-human-window");
+    const f = await humanDispatchFixture("expired-human-window", { recipient: "447400123456", pooledSender: true });
     try {
       const commandId = await f.addCommand({ seedVerifiedInbound: false });
       const expiredInboundAt = new Date(Date.now() - 25 * 60 * 60_000);
@@ -178,7 +178,7 @@ suite("ARCH-040 HUMAN dispatcher: admission, concurrency and delivery", () => {
   }, 60_000);
 
   it("dispatches producer-neutral commands identically with one HUMAN message per command", async () => {
-    const f = await humanDispatchFixture("producer-neutral-parity");
+    const f = await humanDispatchFixture("producer-neutral-parity", { recipient: "447400123456", pooledSender: true });
     try {
       const commandIds = [await f.addCommand(), await f.addCommand()];
       const service = f.dispatcher();
