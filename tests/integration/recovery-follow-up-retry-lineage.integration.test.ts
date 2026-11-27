@@ -1,69 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import { describe, expect, it } from "vitest";
-import { adoptInitial, exactBlockSource } from "../../src/services/recovery-allowance/storage.js";
+import { checkScheduledFollowUpRetryPermit, followUpRetryDispatchKey } from "../../src/services/recovery-delivery-retry/follow-up-permit.js";
+import { RecoveryAllowanceService } from "../../src/services/recovery-allowance/renewal.service.js";
+import { OutboundAdmissionReservationService } from "../../src/services/outbound-whatsapp-admission/outbound-admission-reservation.service.js";
+import { exactBlockSource } from "../../src/services/recovery-allowance/storage.js";
 import { lockRecoveryContext } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
-import { RecoveryDeliveryCompensationService } from "../../src/services/recovery-delivery-compensation/reconcile.service.js";
 import { inspectScheduledFollowUpRetryLineage } from "../../src/services/recovery-delivery-retry/follow-up-lineage.js";
 import { ScheduledFollowUpRetryFundingService } from "../../src/services/recovery-delivery-retry/follow-up-funding.js";
 import { withOneRecoveryTransactionFault } from "./fixtures/recovery-transaction-fault.fixture.js";
 import { FreeRecoveryReservationService } from "../../src/services/free-recovery-reservation.service.js";
-import { createInitialOutreachCreditFixture } from "./fixtures/arch056-initial-outreach-credit.fixture.js";
+import { prepareCompensatedFollowUp, registerHistoricalSender } from "./fixtures/follow-up-retry.fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 
-async function prepareCompensatedFollowUp(source: "free" | "purchased") {
-  // The fixture uses Shopify for free and WooCommerce for purchased initial
-  // funding. Historical acceptance is seeded; no provider is called.
-  const f = await createInitialOutreachCreditFixture({ source, sentAgeMs: 60 * 60_000 });
-  try {
-    expect(await f.service.settleConfirmedInitialOutreach({ shopId: f.shopId, recoveryId: f.recoveryId,
-      outreachAttemptId: f.attemptId, outboundMessageId: f.messageId })).toMatchObject({ kind: "settled" });
-    const conversation = await f.db.conversation.findUniqueOrThrow({ where: { checkoutRecoveryId: f.recoveryId } });
-    await f.db.recoveryOutreachAttempt.update({ where: { id: f.attemptId }, data: { status: "NO_RESPONSE" } });
-    const initial = await f.db.$transaction(tx => adoptInitial(tx, conversation.id, { outboundHardLimit: 20, terminalMessageReservedSlots: 1 }));
-    const attemptId = randomUUID();
-    const sourceKey = createRecoveryIdempotencyKey(f.shopId, `recovery-outreach:${attemptId}`);
-    const sentAt = new Date(f.sentAt.getTime() + 30 * 60_000);
-    const failedAt = new Date(sentAt.getTime() + 1_000);
-    const providerMessageId = `wamid-${randomUUID()}`;
-    // Establish a second historical reservation, then use the real credit
-    // owner to commit it. This is fixture data, not retry admission.
-    const reservation = await f.db.$transaction(async tx => {
-      const counter = await tx.shopEntitlementCounter.update({
-        where: { shopId_counter: { shopId: f.shopId, counter: "LIFETIME_FREE_RECOVERY_CREDITS" } },
-        data: { grantedQuantity: { increment: 1 }, reservedQuantity: { increment: 1 }, version: { increment: 1 } },
-      });
-      return tx.usageReservation.create({ data: { shopId: f.shopId, counterId: counter.id,
-        sourceKey, quantity: 1, status: "RESERVED" } });
-    });
-    expect(await new FreeRecoveryReservationService(f.db).commit({ shopId: f.shopId, sourceKey })).toMatchObject({ kind: "committed" });
-    const block = await f.db.$transaction(async tx => {
-      await lockRecoveryContext(tx, conversation.id);
-      await tx.conversationAllowanceBlock.update({ where: { id: initial.id }, data: { state: "CLOSED" } });
-      return tx.conversationAllowanceBlock.create({ data: { shopId: f.shopId, conversationId: conversation.id,
-        ordinal: 1, fundingKind: "FOLLOW_UP", state: "ACTIVE", predecessorId: initial.id,
-        creditReservationId: reservation.id, hardMessageLimit: 20, terminalReservedSlots: 1 } });
-    });
-    const message = await f.db.conversationMessage.create({ data: { conversationId: conversation.id,
-      direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT", content: "Scheduled follow-up fixture",
-      providerMessageId, sentAt, allowanceBlockId: block.id } });
-    await f.db.recoveryOutreachAttempt.create({ data: { id: attemptId, checkoutRecoveryId: f.recoveryId, sequence: 2,
-      trigger: "NO_RESPONSE_FOLLOW_UP", status: "WAITING_FOR_RESPONSE", recipient: "15551234567", configuredOfferMode: "NONE",
-      initiatedBy: "AUTOMATION", initiationKey: `scheduled-no-response:${f.recoveryId}`, claimedAt: sentAt,
-      sentAt, outboundMessageId: message.id } });
-    await f.db.usageEvent.create({ data: { shopId: f.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
-      provider: f.provider, idempotencyKey: `recovery-outreach:${attemptId}`, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id } });
-    await f.db.conversationMessage.update({ where: { id: message.id }, data: { status: "FAILED", failedAt, providerFailureCode: "131016" } });
-    expect(await new RecoveryDeliveryCompensationService(f.db).reconcile(providerMessageId)).toBe("restored-spendable");
-    const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: attemptId } });
-    expect(intent).toMatchObject({ policy: "AFTER_COOLDOWN", fundingReservationId: reservation.id, failedMessageId: message.id });
-    return { f, conversation, initial, attemptId, reservation, block, message, intent, failedAt };
-  } catch (error) {
-    await f.close();
-    throw error;
-  }
-}
 
 suite("Scheduled follow-up retry lineage (PostgreSQL)", () => {
   it.each(["free", "purchased"] as const)("proves the compensated follow-up on the %s initial-credit fixture without creating a successor", async source => {
@@ -93,20 +43,6 @@ suite("Scheduled follow-up retry lineage (PostgreSQL)", () => {
   }, 60_000);
 });
 
-async function registerHistoricalSender(f: Awaited<ReturnType<typeof prepareCompensatedFollowUp>>) {
-  const phone = BigInt(`0x${randomUUID().replace(/-/g, "")}`).toString();
-  const account = "918273645546372819";
-  const recipient = "15551234567";
-  await f.f.db.whatsAppPoolSender.create({ data: { providerPhoneNumberId: phone, providerAccountId: account,
-    verifiedAt: f.f.sentAt, allocationEnabled: false } });
-  const thread = await f.f.db.recoverySenderThread.create({ data: { canonicalRecipient: recipient, providerPhoneNumberId: phone, openedAt: f.f.sentAt } });
-  const route = await f.f.db.recoverySenderRoute.create({ data: { shopId: f.f.shopId, threadId: thread.id,
-    canonicalRecipient: recipient, providerPhoneNumberId: phone, openedAt: f.f.sentAt } });
-  await f.f.db.recoverySenderAssignment.create({ data: { conversationId: f.conversation.id, routeId: route.id, assignedAt: f.f.sentAt } });
-  await f.f.db.conversationMessage.update({ where: { id: f.message.id }, data: {
-    dispatchProviderAccountId: account, dispatchProviderPhoneNumberId: phone,
-  } });
-}
 
 suite("Scheduled follow-up retry funding (PostgreSQL; no provider dispatch)", () => {
   it.each(["free", "purchased"] as const)("atomically claims and funds one retry for the %s initial-credit fixture and replays the exact tuple", async source => {
@@ -171,6 +107,77 @@ suite("Scheduled follow-up retry funding (PostgreSQL; no provider dispatch)", ()
       await f.db.shopSettings.update({ where: { shopId: f.shopId }, data: { followUpEnabled: false, followUpDelayMinutes: null } });
       await expect(funding.claimAndFund(scope)).resolves.toEqual({ kind: "held", reason: "follow-up-disabled" });
       expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: fresh.id } })).toEqual(fresh);
+    } finally { await f.close(); }
+  }, 60_000);
+});
+
+
+suite("Scheduled follow-up retry permit readiness (PostgreSQL; no provider dispatch)", () => {
+  it.each(["free", "purchased"] as const)("keeps the %s retry block exclusive and validates its exact prepared opener", async source => {
+    const fixture = await prepareCompensatedFollowUp(source);
+    const { f, conversation, intent } = fixture;
+    try {
+      const scope = { shopId: f.shopId, recoveryId: f.recoveryId, conversationId: conversation.id, intentId: intent.id };
+      const due = new Date(Math.max(Date.now(), intent.notBeforeAt!.getTime() + 1));
+      await f.db.shopSettings.create({ data: { shopId: f.shopId, followUpEnabled: true, followUpDelayMinutes: 30 } });
+      await registerHistoricalSender(fixture);
+      const funding = await new ScheduledFollowUpRetryFundingService(f.db, () => due).claimAndFund(scope);
+      expect(funding.kind).toBe("funded");
+      if (funding.kind === "held") throw new Error(`Funding held: ${funding.reason}`);
+      const originalBlock = await f.db.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: funding.blockId } });
+      const originalReservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: funding.reservationId } });
+      const allowance = new RecoveryAllowanceService(f.db, undefined, () => due);
+      await expect(allowance.attachFollowUp({ id: funding.blockId, token: "foreign" }, funding.admission.sourceKey))
+        .rejects.toThrow("follow-up-retry-owner-required");
+      await expect(new OutboundAdmissionReservationService(f.db).reserve({ shopId: f.shopId, conversationId: conversation.id,
+        idempotencyKey: `ordinary-${randomUUID()}`, senderType: "AGENT", content: "Ordinary reply" }))
+        .resolves.toEqual({ kind: "suppressed", reason: "allowance-funding-held" });
+      await allowance.reconcileConversation(conversation.id);
+      expect(await f.db.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: funding.blockId } })).toEqual(originalBlock);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: funding.reservationId } })).toEqual(originalReservation);
+      const content = "Prepared follow-up descriptor";
+      // A prepared opener is seeded for the SQL readiness check. The worker is
+      // still initial-only; this test does not mock provider delivery or claim it.
+      const prepared = await f.db.conversationMessage.create({ data: { conversationId: conversation.id, direction: "OUTBOUND",
+        senderType: "AUTOMATION", status: "PENDING", allowanceBlockId: funding.blockId, content } });
+      const usage = await f.db.usageEvent.create({ data: { shopId: f.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
+        provider: f.provider, idempotencyKey: `recovery-outreach:${funding.attemptId}`, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: prepared.id } });
+      const input = { ...scope, attemptId: funding.attemptId, messageId: prepared.id, recipient: "15551234567",
+        expectedContent: content, sourceKey: funding.admission.sourceKey, now: due };
+      const check = (overrides: Partial<typeof input> = {}) => f.db.$transaction(async tx => {
+        const owner = await lockRecoveryContext(tx, conversation.id);
+        if (!owner) throw new Error("Fixture owner missing");
+        return checkScheduledFollowUpRetryPermit(tx, owner, { ...input, ...overrides });
+      });
+      await expect(check()).resolves.toMatchObject({ kind: "ready", blockId: funding.blockId,
+        dispatchKey: followUpRetryDispatchKey(funding.attemptId) });
+      await expect(check({ expectedContent: "Different" })).resolves.toEqual({ kind: "held", reason: "retry-prepared-message-mismatch" });
+      await expect(check({ sourceKey: "foreign" })).resolves.toEqual({ kind: "held", reason: "retry-reservation-mismatch" });
+      await f.db.usageEvent.update({ where: { id: usage.id }, data: { quantity: 2 } });
+      await expect(check()).resolves.toEqual({ kind: "held", reason: "retry-outbound-usage-mismatch" });
+      await f.db.usageEvent.update({ where: { id: usage.id }, data: { quantity: 1 } });
+      await f.db.shopSettings.update({ where: { shopId: f.shopId }, data: { followUpEnabled: false, followUpDelayMinutes: null } });
+      await expect(check()).resolves.toEqual({ kind: "held", reason: "follow-up-disabled" });
+      await f.db.shopSettings.update({ where: { shopId: f.shopId }, data: { followUpEnabled: true, followUpDelayMinutes: 30 } });
+      // A second bound message is never a new opener; the prepared original is held too.
+      const other = await f.db.conversationMessage.create({ data: { conversationId: conversation.id, direction: "OUTBOUND",
+        senderType: "AUTOMATION", status: "PENDING", allowanceBlockId: funding.blockId, content } });
+      await expect(check()).resolves.toEqual({ kind: "held", reason: "funded-allowance" });
+      await f.db.conversationMessage.delete({ where: { id: other.id } });
+      const ready = await check();
+      expect(ready.kind).toBe("ready");
+      if (ready.kind !== "ready") throw new Error(`Permit held: ${ready.reason}`);
+      // Persisted permit evidence is not a send outcome. No replay through the
+      // readiness check or legacy repair can release or activate this block.
+      await f.db.conversationMessage.update({ where: { id: prepared.id }, data: {
+        providerDispatchKey: followUpRetryDispatchKey(funding.attemptId), providerDispatchAdmittedAt: due,
+        providerDispatchControlRevision: conversation.controlRevision,
+        dispatchProviderAccountId: ready.sender.providerAccountId, dispatchProviderPhoneNumberId: ready.sender.providerPhoneNumberId,
+      } });
+      await expect(check()).resolves.toEqual({ kind: "held", reason: "retry-prepared-message-mismatch" });
+      await allowance.reconcileConversation(conversation.id);
+      expect(await f.db.conversationAllowanceBlock.findUniqueOrThrow({ where: { id: funding.blockId } })).toEqual(originalBlock);
+      expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: funding.reservationId } })).toEqual(originalReservation);
     } finally { await f.close(); }
   }, 60_000);
 });

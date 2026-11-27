@@ -18,7 +18,7 @@ try {
     "--target", "ES2022", "--module", "ES2022", "--moduleResolution", "bundler",
     "--skipLibCheck", "--outDir", directory, join(domain, "recovery-outreach-identity.ts"),
     join(domain, "recovery-retry-funding-lineage.ts"), join(domain, "recovery-retry-claim.ts"),
-    join(domain, "recovery-follow-up-retry-allowance.ts")], { cwd: directory, stdio: "inherit" });
+    join(domain, "recovery-follow-up-retry-allowance.ts"), join(domain, "recovery-follow-up-retry-outcome.ts")], { cwd: directory, stdio: "inherit" });
 } catch (error) {
   rmSync(directory, { recursive: true, force: true });
   throw error;
@@ -27,7 +27,7 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 const { retryFundingLineage } = await import(pathToFileURL(join(directory, "recovery-retry-funding-lineage.js")).href);
 const { selectEffectiveOutreachAttempt } = await import(pathToFileURL(join(directory, "recovery-outreach-identity.js")).href);
 const { planInitialRetryClaim, planScheduledFollowUpRetryClaim } = await import(pathToFileURL(join(directory, "recovery-retry-claim.js")).href);
-const { proveFollowUpRetryAllowance, proveFundedFollowUpRetryAllowance, followUpRetryBlockId } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-allowance.js")).href);
+const { proveFollowUpRetryAllowance, proveFundedFollowUpRetryAllowance, followUpRetryBlockId, isFollowUpRetryBlock, followUpRetryAttemptId } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-allowance.js")).href);
 const now = new Date("2026-11-26T01:00:00Z");
 function failed(id, sequence, intentId, trigger = "INITIAL") {
   return {
@@ -346,4 +346,80 @@ test("funded replay holds expired, progressed, cancelled or leased work", () => 
     const f = fundedAllowanceFixture(); mutate(f);
     assert.equal(proveFundedFollowUpRetryAllowance(f).kind, "held");
   }
+});
+
+
+test("retry allowance namespace can never be confused with a legacy allowance", () => {
+  assert.equal(isFollowUpRetryBlock("normal-allowance"), false);
+  assert.equal(followUpRetryAttemptId("normal-allowance"), null);
+  for (const id of ["retry_follow_intent", "retry_" + "a".repeat(100)]) {
+    const blockId = followUpRetryBlockId(id);
+    assert.equal(isFollowUpRetryBlock(blockId), true);
+    assert.equal(followUpRetryAttemptId(blockId), id);
+  }
+  // Even corrupt identities in the reserved namespace cannot enter legacy repair.
+  for (const id of ["allowance_retry_", "allowance_retry_bad/id", "allowance_retry_" + "a".repeat(101)]) {
+    assert.equal(isFollowUpRetryBlock(id), true);
+    assert.equal(followUpRetryAttemptId(id), null);
+  }
+});
+
+test("only the exact prepared opener permits a funded retry readiness proof", () => {
+  const fixture = fundedAllowanceFixture();
+  assert.equal(proveFundedFollowUpRetryAllowance({ ...fixture, preparedMessageId: "opener" }).kind, "held");
+  fixture.blocks.at(-1).outboundMessageIds = ["opener"];
+  assert.equal(proveFundedFollowUpRetryAllowance(fixture).kind, "held"); // unchanged funding replay contract
+  assert.equal(proveFundedFollowUpRetryAllowance({ ...fixture, preparedMessageId: "opener" }).kind, "proven");
+  for (const preparedMessageId of ["", "foreign"]) {
+    assert.equal(proveFundedFollowUpRetryAllowance({ ...fixture, preparedMessageId }).kind, "held");
+  }
+  fixture.blocks.at(-1).outboundMessageIds.push("another");
+  assert.equal(proveFundedFollowUpRetryAllowance({ ...fixture, preparedMessageId: "opener" }).kind, "held");
+});
+
+test("prepared opener cannot bypass the current credit and block lineage checks", () => {
+  for (const mutate of [f => { f.blocks.at(-1).state = "ACTIVE"; }, f => { f.blocks.at(-1).repairDeadlineAt = now; },
+    f => { f.blocks.at(-1).repairLeaseToken = "lease"; }, f => { f.blocks.at(-1).creditReservationId = "foreign"; },
+    f => { f.blocks[1].outboundMessageIds.push("other-consumption"); }]) {
+    const fixture = fundedAllowanceFixture(true);
+    fixture.blocks.at(-1).outboundMessageIds = ["opener"];
+    mutate(fixture);
+    assert.equal(proveFundedFollowUpRetryAllowance({ ...fixture, preparedMessageId: "opener" }).kind, "held");
+  }
+});
+
+const { classifyFollowUpRetryOpening } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-outcome.js")).href);
+const preparedOpening = { status: "PENDING", providerDispatchKey: null, providerDispatchAdmittedAt: null,
+  providerDispatchControlRevision: null, dispatchProviderAccountId: null, dispatchProviderPhoneNumberId: null,
+  providerMessageId: null, sentAt: null, deliveredAt: null, readAt: null, failedAt: null, providerFailureCode: null };
+const admittedOpening = { ...preparedOpening, providerDispatchKey: "retry-permit", providerDispatchAdmittedAt: now,
+  providerDispatchControlRevision: 0, dispatchProviderAccountId: "account", dispatchProviderPhoneNumberId: "phone" };
+const classifyOpening = (message, code) => classifyFollowUpRetryOpening(message, "retry-permit", code);
+
+test("follow-up reconciliation distinguishes unprepared, prepared and pre-provider refused work", () => {
+  assert.equal(classifyOpening(null), "unprepared");
+  assert.equal(classifyOpening(preparedOpening), "prepared");
+  assert.equal(classifyOpening({ ...preparedOpening, status: "FAILED" }), "refused");
+  assert.equal(classifyOpening({ ...preparedOpening, sentAt: now }), "conflict");
+  assert.equal(classifyOpening({ ...preparedOpening, dispatchProviderAccountId: "account" }), "conflict");
+});
+test("a retry permit or FAILED without definitive rejection evidence stays unknown", () => {
+  assert.equal(classifyOpening(admittedOpening), "unknown");
+  assert.equal(classifyOpening({ ...admittedOpening, status: "FAILED", failedAt: now }), "unknown");
+  assert.equal(classifyOpening({ ...admittedOpening, status: "FAILED", failedAt: now }, "PROVIDER_REJECTED"), "rejected");
+  assert.equal(classifyOpening({ ...admittedOpening, providerDispatchKey: "foreign" }), "conflict");
+  assert.equal(classifyOpening({ ...admittedOpening, providerDispatchControlRevision: -1 }), "conflict");
+});
+test("provider acceptance requires exact permit and durable message identity", () => {
+  assert.equal(classifyOpening({ ...admittedOpening, status: "SENT", sentAt: now }), "conflict");
+  assert.equal(classifyOpening({ ...admittedOpening, status: "SENT", providerMessageId: "wamid", sentAt: now }), "accepted");
+  assert.equal(classifyOpening({ ...admittedOpening, status: "SENT", providerMessageId: "wamid", sentAt: now, providerFailureCode: "131026" }), "unknown");
+  assert.equal(classifyOpening({ ...preparedOpening, status: "SENT", providerMessageId: "wamid", sentAt: now }), "conflict");
+});
+test("negative provider receipts and later positive receipts are not confused", () => {
+  const failed = { ...admittedOpening, status: "FAILED", providerMessageId: "wamid", sentAt: now, failedAt: now };
+  assert.equal(classifyOpening(failed), "non-delivery");
+  assert.equal(classifyOpening({ ...failed, status: "DELIVERED", deliveredAt: now }), "accepted");
+  assert.equal(classifyOpening({ ...failed, status: "READ", readAt: now }), "accepted");
+  assert.equal(classifyOpening({ ...failed, readAt: now }), "unknown");
 });

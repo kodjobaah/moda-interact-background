@@ -17,7 +17,10 @@ import { requireInitialRetryPredecessorReady } from "./funding.js";
 export async function inspectScheduledFollowUpRetryLineage(tx: Prisma.TransactionClient, input: {
   shopId: string; recoveryId: string; conversationId: string; intentId: string; now: Date;
   fundedReservationId?: string;
+  /** Only the explicit final permit may supply the exact prepared opener. */
+  preparedMessageId?: string;
 }) {
+  if (input.preparedMessageId !== undefined && !input.fundedReservationId) return { kind: "held" as const, reason: "funded-claim-missing" };
   const attempts = await tx.recoveryOutreachAttempt.findMany({
     where: { checkoutRecoveryId: input.recoveryId }, select: retryFundingIdentitySelect,
   });

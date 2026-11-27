@@ -1,3 +1,5 @@
+import { isFollowUpRetryBlock } from "../../domain/recovery-follow-up-retry-allowance.js";
+import { checkScheduledFollowUpRetryPermit, type FollowUpRetryPermitCheck } from "../recovery-delivery-retry/follow-up-permit.js";
 import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
 import { checkDispatchSender, readDispatchSenderSnapshot } from "../recovery-sender-pool/dispatch-sender.js";
@@ -62,6 +64,14 @@ export type DispatchInput = {
   /** Explicitly distinguish approved Meta templates from automated free text. */
   deliveryKind?: "TEXT" | "IMAGE" | "TEMPLATE";
   deliveryPlan?: ConversationMediaDeliveryPlan; presentationReceipt?: ConversationDeliveryReceipt;
+  /** Server-only scope for a funded physical follow-up retry. Legacy
+   * automated and merchant follow-ups continue to use their sequence-two path. */
+  followUpRetry?: {
+    outreachAttemptId: string;
+    idempotencyKey: string;
+    recoveryCreditSourceKey: string;
+    expectedContent: string;
+  };
   initialOutreach?: {
     outreachAttemptId: string;
     idempotencyKey: string;
@@ -102,6 +112,12 @@ export class OutboundSendFenceService {
         input.deliveryKind !== "TEMPLATE" || !input.proactive ||
         input.initialOutreach.idempotencyKey !== `recovery-outreach:${input.initialOutreach.outreachAttemptId}`))
       return { kind: "suppressed", reason: "invalid-initial-scope" };
+    if (input.followUpRetry && (input.initialOutreach || input.senderType !== "AUTOMATION" ||
+        input.deliveryKind !== "TEMPLATE" || !input.proactive?.templateRegistration?.purpose.startsWith("FOLLOW_UP_") ||
+        input.expectedContent !== input.followUpRetry.expectedContent || input.multipartPartId || input.deliveryPlan ||
+        input.commandId || input.leaseToken || input.productContextUpdate ||
+        input.followUpRetry.idempotencyKey !== `recovery-outreach:${input.followUpRetry.outreachAttemptId}`))
+      return { kind: "suppressed", reason: "invalid-follow-up-retry-scope" };
     if (input.productContextUpdate && (input.senderType !== 'AGENT' || !['TEXT', 'IMAGE'].includes(input.deliveryKind ?? '') ||
         input.expectedInboundVersion === undefined || !input.expectedContent))
       return { kind: 'suppressed', reason: 'product-context-invalid-scope' };
@@ -225,6 +241,8 @@ export class OutboundSendFenceService {
       if (furtherDenial) return { kind: "suppressed", reason: furtherDenial } as const;
 
       const initial = input.initialOutreach;
+      const followUpRetry = input.followUpRetry;
+      let followUpPermit: Extract<FollowUpRetryPermitCheck, { kind: "ready" }> | undefined;
       const retry = !!initial && isInitialRetryId(initial.outreachAttemptId);
       let retrySender: WhatsAppSenderIdentity | undefined;
       if (initial) {
@@ -330,12 +348,25 @@ export class OutboundSendFenceService {
           context.inboundVersion !== input.expectedInboundVersion)
         return { kind: "suppressed", reason: "stale-inbound-version" } as const;
 
+      if (followUpRetry) {
+        const gate = await checkScheduledFollowUpRetryPermit(tx as Prisma.TransactionClient, context, {
+          shopId: context.shopId, recoveryId: context.recoveryId, conversationId: context.id,
+          attemptId: followUpRetry.outreachAttemptId, messageId: input.messageId!, recipient: input.recipient,
+          expectedContent: followUpRetry.expectedContent, sourceKey: followUpRetry.recoveryCreditSourceKey, now: this.clock(),
+        });
+        if (gate.kind === "held") return { kind: "suppressed", reason: gate.reason } as const;
+        if (!await hasExactInitialCredit(tx, { shopId: context.shopId, idempotencyKey: followUpRetry.idempotencyKey,
+          sourceKey: followUpRetry.recoveryCreditSourceKey, allowPaid: true, clock: this.clock }))
+          return { kind: "suppressed", reason: "allowance-opening-unavailable" } as const;
+        followUpPermit = gate;
+        retrySender = gate.sender;
+      }
       const sender = await checkDispatchSender(tx, { snapshot: senderSnapshot, conversationId: context.id, recipient: input.recipient, recovery: true, expectedSender: retrySender ?? input.expectedSender });
       if (!sender || (retrySender && input.expectedSender && (input.expectedSender.providerAccountId !== sender.providerAccountId || input.expectedSender.providerPhoneNumberId !== sender.providerPhoneNumberId)) || (input.proactive?.templateRegistration && input.proactive.templateRegistration.senderWabaId !== sender.providerAccountId)) return {kind: "suppressed", reason: "sender-assignment-unavailable"} as const;
       // Every newly admitted recovery action is pinned to its immutable funded
       // block. Historical initial messages are deliberately not rewritten.
       let followUpBlockId: string | null = null;
-      if (!initial) {
+      if (!initial && !followUpPermit) {
         const block = command?.kind === "RECOVERY_FOLLOW_UP_TEMPLATE"
           ? await first<{id:string;state:string;fundingKind:string;sourceKey:string;creditReservationId:string;logicalSource:string;reservationStatus:string;compensated:string|null}>(tx, `
             SELECT b."id",b."state"::text,b."fundingKind"::text,r."sourceKey",r."status"::text AS "reservationStatus",r."compensationUsageEventId" AS "compensated",b."creditReservationId", $3::text AS "logicalSource"
@@ -354,6 +385,8 @@ export class OutboundSendFenceService {
               (block.state!=="PENDING"&&block.reservationStatus!=="COMMITTED"))
             return {kind:"suppressed",reason:"allowance-funding-unavailable"} as const;
           if (block.state === "PENDING") {
+            if (isFollowUpRetryBlock(block.id))
+              return { kind: "suppressed", reason: "follow-up-retry-owner-required" } as const;
             if(input.messageId && await cancelReopenedContinuation(tx as Prisma.TransactionClient,block.id,input.messageId))
               return {kind:"suppressed",reason:"allowance-capacity-reopened"} as const;
             const other = await first<{id:string}>(tx, `SELECT "id" FROM "whatsapp"."ConversationMessage"
@@ -379,6 +412,7 @@ export class OutboundSendFenceService {
       }
       const dispatchKey = input.senderType === "HUMAN"
         ? `arch040-human-${createHash("sha256").update(input.commandId!).digest("hex")}`
+        : followUpPermit ? followUpPermit.dispatchKey
         : retry ? `recovery-retry-${createHash("sha256").update(initial!.outreachAttemptId).digest("hex")}`
         : `arch040-auto-${createHash("sha256").update(input.messageId!).digest("hex")}`;
       const messageId = input.senderType === "HUMAN" ? randomUUID() : input.messageId!;
@@ -455,12 +489,19 @@ export class OutboundSendFenceService {
         WHERE "id"=$1 AND "conversationId"=$4 AND "direction"='OUTBOUND'
           AND "senderType"=$5::"whatsapp"."MessageSenderType"
           AND "providerDispatchKey" IS NULL AND "status"='PENDING'
-          ${initial ? `AND "content"=$6 AND "providerDispatchAdmittedAt" IS NULL
+          ${initial || followUpPermit ? `AND "content"=$6 AND "providerDispatchAdmittedAt" IS NULL
             AND "providerDispatchControlRevision" IS NULL AND "providerMessageId" IS NULL
             AND "sentAt" IS NULL AND "deliveredAt" IS NULL AND "readAt" IS NULL AND "failedAt" IS NULL` : `AND ($6::text IS NULL OR "content"=$6)`}
+          ${followUpPermit ? `AND "allowanceBlockId"=$9 AND "providerFailureCode" IS NULL
+            AND "dispatchProviderAccountId" IS NULL AND "dispatchProviderPhoneNumberId" IS NULL
+            AND EXISTS (SELECT 1 FROM billing."ConversationAllowanceBlock" b
+              WHERE b.id=$9 AND b."conversationId"=$4 AND b.state='PENDING'
+                AND b."repairDeadlineAt">statement_timestamp() AND b."repairAt" IS NOT NULL
+                AND b."repairLeaseToken" IS NULL AND b."repairLeaseUntil" IS NULL)` : ""}
         RETURNING "providerDispatchAdmittedAt"`,
         messageId, dispatchKey, context.revision, context.id, input.senderType,
-        initial ? initial.expectedContent : input.expectedContent ?? null, sender.providerAccountId, sender.providerPhoneNumberId);
+        initial ? initial.expectedContent : followUpRetry ? followUpRetry.expectedContent : input.expectedContent ?? null,
+        sender.providerAccountId, sender.providerPhoneNumberId, ...(followUpPermit ? [followUpPermit.blockId] : []));
       if (!message.length) return { kind: "suppressed", reason: "already-admitted-or-sent" } as const;
       if (input.productContextUpdate) {
         await commitAdmittedProductContext(tx, {
@@ -475,6 +516,11 @@ export class OutboundSendFenceService {
       // The transaction has rolled back both permit and context before suppression.
       if (error instanceof ProductContextAdmissionError)
         return { kind: 'suppressed', reason: 'product-context-conflict' };
+      if (input.followUpRetry) logger.error("recovery.delivery_retry.follow_up_sql_permit_failed", {
+        shopId: input.shopId, recoveryId: input.recoveryId, conversationId: input.conversationId,
+        attemptId: input.followUpRetry.outreachAttemptId, messageId: input.messageId,
+        stage: "final_permit", sourceError: initialOutreachDiagnostic(error),
+      });
       if (input.initialOutreach) logger.error("recovery.initial_outreach.sql_permit.failed", {
         shopId: input.shopId, recoveryId: input.recoveryId, conversationId: input.conversationId,
         attemptId: input.initialOutreach.outreachAttemptId, messageId: input.messageId,

@@ -1,3 +1,4 @@
+import { isInitialRetryId } from "./recovery-outreach-identity.js";
 import type { RetryFundingLink } from "./recovery-retry-funding-lineage.js";
 
 /** A projection of persisted ownership, not a mutable allowance or permission.
@@ -69,6 +70,23 @@ export function proveFollowUpRetryAllowance(input: {
  * sequence-two block or rebind a cancelled allowance. */
 export const followUpRetryBlockId = (attemptId: string) => `allowance_${attemptId}`;
 
+/** Reserve this namespace for the dedicated follow-up retry owner. Legacy
+ * allowance IDs are generated independently (UUIDs). Malformed reserved IDs
+ * are held too, never treated as a legacy sequence-two allowance. */
+export const FOLLOW_UP_RETRY_BLOCK_PREFIX = "allowance_retry_";
+export const isFollowUpRetryBlock = (blockId: string): boolean => blockId.startsWith(FOLLOW_UP_RETRY_BLOCK_PREFIX);
+export function followUpRetryAttemptId(blockId: string): string | null {
+  const attemptId = blockId.slice("allowance_".length);
+  return isFollowUpRetryBlock(blockId) && isInitialRetryId(attemptId) ? attemptId : null;
+}
+
+/** The funding owner expects an empty block; only final admission may prove
+ * a prepared opener. No generic message can become the funded opener. */
+export function exactFollowUpRetryOpening(ids: readonly string[], preparedMessageId?: string): boolean {
+  return preparedMessageId === undefined ? ids.length === 0
+    : !!preparedMessageId && ids.length === 1 && ids[0] === preparedMessageId;
+}
+
 type PendingAllowanceEvidence = FollowUpRetryAllowanceEvidence & { repairDeadlineAt: Date | null };
 type ProvenAllowance = Extract<FollowUpRetryAllowanceLineage, { kind: "proven" }>;
 
@@ -78,7 +96,7 @@ type ProvenAllowance = Extract<FollowUpRetryAllowanceLineage, { kind: "proven" }
 export function proveFundedFollowUpRetryAllowance(input: {
   shopId: string; conversationId: string; initialReservationId: string;
   links: readonly RetryFundingLink[]; blocks: readonly PendingAllowanceEvidence[];
-  attemptId: string; reservationId: string; now: Date;
+  attemptId: string; reservationId: string; now: Date; preparedMessageId?: string;
 }): (ProvenAllowance & { blockId: string }) | { kind: "held"; reason: "funded-allowance" | Extract<FollowUpRetryAllowanceLineage, { kind: "held" }>["reason"] } {
   const blockId = followUpRetryBlockId(input.attemptId);
   const matching = input.blocks.filter(b => b.id === blockId);
@@ -87,7 +105,7 @@ export function proveFundedFollowUpRetryAllowance(input: {
   if (!block || matching.length !== 1 || block.shopId !== input.shopId || block.conversationId !== input.conversationId ||
       block.fundingKind !== "FOLLOW_UP" || block.state !== "PENDING" || !input.reservationId ||
       block.creditReservationId !== input.reservationId || historical.some(b => b.creditReservationId === input.reservationId) ||
-      block.outboundMessageIds.length || block.repairLeaseToken || block.repairLeaseUntil ||
+      !exactFollowUpRetryOpening(block.outboundMessageIds, input.preparedMessageId) || block.repairLeaseToken || block.repairLeaseUntil ||
       !block.repairAt || !block.repairDeadlineAt || block.repairDeadlineAt <= input.now ||
       block.repairAt > block.repairDeadlineAt || !Number.isFinite(input.now.getTime()) ||
       !Number.isSafeInteger(block.ordinal) || historical.some(b => b.ordinal >= block.ordinal)) {

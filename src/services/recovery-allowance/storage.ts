@@ -1,3 +1,4 @@
+import { followUpRetryAttemptId, isFollowUpRetryBlock } from "../../domain/recovery-follow-up-retry-allowance.js";
 import { releaseReservedSource } from "../recovery-delivery-compensation/reserved.js";
 import { readExactAutomatedUsage, removeExactAutomatedUsage } from "../recovery-delivery-compensation/automated-usage.js";
 import { randomUUID } from "node:crypto";
@@ -150,7 +151,7 @@ export async function createSuccessor(tx: Tx, input: {
         throw new AllowanceHeld("continuation-not-current");
     const current = await currentAllowanceUnderOwnerLock(tx, context, input.limits);
     if (current.state === "PENDING") {
-        if (current.fundingKind !== input.kind)
+        if (isFollowUpRetryBlock(current.id) || current.fundingKind !== input.kind)
             throw new AllowanceHeld("another-funding-intent");
         return { block: current, context };
     }
@@ -189,7 +190,16 @@ export async function readBlockSource(tx: Tx, block: ConversationAllowanceBlock)
     // The canonical key can be bounded/hashed, so compare generated keys
     // rather than parsing the attempt ID from the persisted key.
     let logical: string;
-    if (block.fundingKind === "CONTINUATION") {
+    if (isFollowUpRetryBlock(block.id)) {
+        const attemptId = followUpRetryAttemptId(block.id);
+        if (!attemptId || block.fundingKind !== "FOLLOW_UP") return null;
+        const attempt = await tx.recoveryOutreachAttempt.findUnique({ where: { id: attemptId },
+            select: { checkoutRecoveryId: true, sequence: true, trigger: true, initiatedBy: true } });
+        if (!attempt || attempt.checkoutRecoveryId !== conversation.checkoutRecoveryId || attempt.sequence < 3 ||
+            attempt.trigger !== "NO_RESPONSE_FOLLOW_UP" || attempt.initiatedBy !== "AUTOMATION") return null;
+        await readRetryFundingLineage(tx, { recoveryId: conversation.checkoutRecoveryId, conversationId: block.conversationId, attemptId });
+        logical = createRecoveryIdempotencyKey(block.shopId, `recovery-outreach:${attemptId}`);
+    } else if (block.fundingKind === "CONTINUATION") {
         logical = allowanceSourceKey(block.shopId, block.id);
     } else {
         const sequence = block.fundingKind === "INITIAL" ? 1 : 2;

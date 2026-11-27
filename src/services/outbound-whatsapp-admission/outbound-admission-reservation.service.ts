@@ -1,3 +1,4 @@
+import { isFollowUpRetryBlock } from "../../domain/recovery-follow-up-retry-allowance.js";
 import { isInitialRetryId } from "../../domain/recovery-outreach-identity.js";
 import { checkInitialRetryPermit } from "../recovery-delivery-retry/initial-permit.js";
 import { readRetryFundingLineage } from "../recovery-delivery-retry/funding-lineage.js";
@@ -276,6 +277,7 @@ export class OutboundAdmissionReservationService {
       const block=await currentAllowance(transaction,input.conversationId,policy);
       if(block.state==="EXHAUSTED"||block.state==="CANCELLED")return {kind:"suppressed",reason:"allowance-exhausted"};
       if(block.state==="PENDING"){
+        if(isFollowUpRetryBlock(block.id))return {kind:"suppressed",reason:"allowance-funding-held"};
         const source=await exactBlockSource(transaction,block);
         if(!source||source.reservation.status!=="RESERVED"||await transaction.conversationMessage.count({where:{allowanceBlockId:block.id}})>0)
           return {kind:"suppressed",reason:"allowance-funding-held"};

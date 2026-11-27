@@ -6,7 +6,8 @@ import { retryOutreachAttemptId } from "../../domain/recovery-outreach-identity.
 import { followUpRetryBlockId } from "../../domain/recovery-follow-up-retry-allowance.js";
 import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
 import { CUSTOMER_WINDOW_MS } from "../recovery-conversation/recovery-follow-up-policy.service.js";
-import { isCheckoutRecoveryWithinLifetime } from "../recovery-lifetime/checkout-recovery-lifetime.js";
+import { scheduledFollowUpRetryOwnerDenial, readScheduledFollowUpRetrySender, scheduledFollowUpRetryClaimKey,
+  type ScheduledFollowUpRetryScope } from "./follow-up-eligibility.js";
 import { RecoveryCompensationLineageError, requireLineage } from "../recovery-delivery-compensation/types.js";
 import { ExistingHoldSignal, readReservedRecoveryFunding } from "../recovery-billing/reserved-recovery-funding.js";
 import { admitRetryCapacityInTransaction } from "../recovery-billing/capacity-policy.js";
@@ -19,13 +20,12 @@ import { RecoveryTransactionTiming, isReplayableRecoveryTransactionError, recove
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
 type Tx = Prisma.TransactionClient;
-type Scope = { shopId: string; recoveryId: string; conversationId: string; intentId: string };
+type Scope = ScheduledFollowUpRetryScope;
 type Result = { kind: "held"; reason: string } | {
   kind: "funded" | "existing"; attemptId: string; sequence: number; blockId: string; reservationId: string;
   admission: RecoveryBillingAdmission;
 };
 const held = (reason: string): Result => ({ kind: "held", reason });
-const retryClaimKey = (intentId: string) => `scheduled-no-response-retry:${intentId}`;
 
 /** SQL-only claim + fresh reservation + allowance pin. No runtime caller yet.
  * Future execution must hold the platform checkout lease, perform current
@@ -85,23 +85,8 @@ export class ScheduledFollowUpRetryFundingService {
     if (locked.length !== 1) return held("recovery-unavailable");
     const now = this.clock();
     timing.enter("recovery_eligibility");
-    const recovery = await tx.checkoutRecovery.findUniqueOrThrow({ where: { id: scope.recoveryId }, select: {
-      shopId: true, checkoutToken: true, generation: true, status: true, completedAt: true, expiredAt: true,
-      lastExternalActivityAt: true, admissionBlockReason: true, shop: { select: { status: true, platform: true } },
-    } });
-    const config = await tx.backgroundRuntimeConfig.findUnique({ where: { id: "default" }, select: { checkoutRecoveryLifetimeDays: true } });
-    if (!config || recovery.shopId !== scope.shopId || recovery.shop.status !== "ACTIVE" ||
-        !["SHOPIFY", "WOOCOMMERCE"].includes(recovery.shop.platform) || recovery.status !== "MESSAGE_SENT" || recovery.completedAt || recovery.expiredAt ||
-        recovery.admissionBlockReason === "WHATSAPP_RECIPIENT_SUPPRESSED" || !isCheckoutRecoveryWithinLifetime({
-          now, lastExternalActivityAt: recovery.lastExternalActivityAt, checkoutRecoveryLifetimeDays: config.checkoutRecoveryLifetimeDays,
-        })) return held("recovery-ineligible");
-    if (await tx.checkoutRecovery.findFirst({ where: { shopId: scope.shopId, checkoutToken: recovery.checkoutToken,
-      generation: { gt: recovery.generation } }, select: { id: true } })) return held("newer-generation");
-    const [settings, override] = await Promise.all([
-      tx.shopSettings.findUnique({ where: { shopId: scope.shopId }, select: { followUpEnabled: true } }),
-      tx.shopRecoveryPolicyOverride.findUnique({ where: { shopId: scope.shopId }, select: { followUpEnabled: true, expiresAt: true } }),
-    ]);
-    if (!(override && (!override.expiresAt || override.expiresAt > now) ? override : settings)?.followUpEnabled) return held("follow-up-disabled");
+    const denial = await scheduledFollowUpRetryOwnerDenial(tx, scope, owner, now);
+    if (denial) return held(denial);
 
     const attemptId = retryOutreachAttemptId(scope.intentId);
     const creditScope = { ...scope, outreachAttemptId: attemptId, outboundMessageId: null };
@@ -120,17 +105,17 @@ export class ScheduledFollowUpRetryFundingService {
     const predecessor = historicalAttempts.get(plan.links.at(-1)!.predecessor.id);
     if (!predecessor || plan.links.some((link, index) => {
       const attempt = historicalAttempts.get(link.predecessor.id);
-      const key = index === 0 ? `scheduled-no-response:${scope.recoveryId}` : retryClaimKey(plan.links[index - 1]!.intent.id);
+      const key = index === 0 ? `scheduled-no-response:${scope.recoveryId}` : scheduledFollowUpRetryClaimKey(plan.links[index - 1]!.intent.id);
       return !attempt?.claimedAt || attempt.initiationKey !== key;
     })) return held("scheduled-claim-identity");
     if (plan.kind === "existing") {
       const attempt = await tx.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: attemptId } });
-      if (attempt.status !== "PENDING" || attempt.initiationKey !== retryClaimKey(scope.intentId) || !attempt.claimedAt || attempt.closedAt || attempt.failureCode || attempt.followUpDueAt)
+      if (attempt.status !== "PENDING" || attempt.initiationKey !== scheduledFollowUpRetryClaimKey(scope.intentId) || !attempt.claimedAt || attempt.closedAt || attempt.failureCode || attempt.followUpDueAt)
         return held("claim-not-clean");
     }
     if (await tx.usageEvent.findUnique({ where: { idempotencyKey: `recovery-outreach:${attemptId}` }, select: { id: true } })) return held("outbound-progress-exists");
     timing.enter("sender_assignment");
-    if (!await senderMatchesHistory(tx, scope, plan.recipient, plan.links.map(l => l.intent.failedMessageId), now)) return held("sender-identity-changed");
+    if (!await readScheduledFollowUpRetrySender(tx, scope, plan.recipient, plan.links.map(l => l.intent.failedMessageId), now)) return held("sender-identity-changed");
     if (retained.kind === "admitted") {
       requireLineage(inspected.fundedBlockId, "follow-up retry funded block missing");
       return { kind: "existing", attemptId, sequence: plan.sequence, blockId: inspected.fundedBlockId,
@@ -153,7 +138,7 @@ export class ScheduledFollowUpRetryFundingService {
     // block exists for the legacy sequence-two repair lookup to misidentify.
     await tx.recoveryOutreachAttempt.create({ data: {
       id: attemptId, checkoutRecoveryId: scope.recoveryId, sequence: plan.sequence, trigger: "NO_RESPONSE_FOLLOW_UP",
-      status: "PENDING", recipient: plan.recipient, initiatedBy: "AUTOMATION", initiationKey: retryClaimKey(scope.intentId), claimedAt: now,
+      status: "PENDING", recipient: plan.recipient, initiatedBy: "AUTOMATION", initiationKey: scheduledFollowUpRetryClaimKey(scope.intentId), claimedAt: now,
       configuredOfferMode: predecessor.configuredOfferMode, fixedShopifyDiscountId: predecessor.fixedShopifyDiscountId,
       offerSnapshot: predecessor.offerSnapshot === null ? Prisma.JsonNull : predecessor.offerSnapshot as Prisma.InputJsonValue,
     } });
@@ -166,19 +151,4 @@ export class ScheduledFollowUpRetryFundingService {
     } });
     return { kind: "funded", attemptId, sequence: plan.sequence, blockId: block.id, reservationId: checked.reservationId, admission: checked.admission };
   }
-}
-
-async function senderMatchesHistory(tx: Tx, scope: Scope, recipient: string, messageIds: string[], now: Date) {
-  const assignment = await tx.recoverySenderAssignment.findUnique({ where: { conversationId: scope.conversationId }, select: {
-    releasedAt: true, route: { select: { closedAt: true, shopId: true, canonicalRecipient: true, providerPhoneNumberId: true,
-      thread: { select: { closedAt: true, sender: { select: { providerAccountId: true, verifiedAt: true } } } } } },
-  } });
-  const route = assignment?.route;
-  if (!assignment || assignment.releasedAt || !route || route.closedAt || route.thread.closedAt || route.shopId !== scope.shopId ||
-      route.canonicalRecipient !== recipient.replace(/^\+/, "") || route.thread.sender.verifiedAt > now) return false;
-  const messages = await tx.conversationMessage.findMany({ where: { id: { in: messageIds } }, select: {
-    dispatchProviderAccountId: true, dispatchProviderPhoneNumberId: true,
-  } });
-  return messages.length === messageIds.length && messages.every(m => m.dispatchProviderAccountId === route.thread.sender.providerAccountId &&
-    m.dispatchProviderPhoneNumberId === route.providerPhoneNumberId);
 }

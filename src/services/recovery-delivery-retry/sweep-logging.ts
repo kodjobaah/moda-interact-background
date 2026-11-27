@@ -6,7 +6,7 @@ const REPEATED_DEBUG = new Set([
   "recovery.delivery_retry.eligibility_held", "recovery.delivery_retry.claim_held",
   "recovery.delivery_retry.claim_replayed", "recovery.delivery_retry.permit_held",
   "recovery.delivery_retry.execution_held", "recovery.delivery_retry.offer_revalidated",
-  "recovery.delivery_retry.dispatch_held",
+  "recovery.delivery_retry.dispatch_held", "recovery.delivery_retry.follow_up_reconciliation_held",
 ]);
 
 /** Coalesce unchanged per-intent diagnostics from polling, not exceptions or

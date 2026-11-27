@@ -3,6 +3,7 @@ import { resolveDeploymentEnvironmentName } from "../runtime/deployment-environm
 import { InitialDeliveryRetryExecutionService, initialRetryExecutionPorts } from "../services/recovery-delivery-retry/execution.js";
 import { RecoveryDeliveryRetrySweep, retryWorkerEnabled } from "../services/recovery-delivery-retry/sweep.js";
 import { retrySweepLogger } from "../services/recovery-delivery-retry/sweep-logging.js";
+import { ScheduledFollowUpRetryReconciliationService } from "../services/recovery-delivery-retry/follow-up-reconciliation.js";
 import prisma from "../lib/db.js";
 
 /** Explicit deployment opt-in; a missing value or typo cannot activate live
@@ -14,6 +15,8 @@ export function createRecoveryDeliveryRetryWorker() {
     return null;
   }
   log.info("recovery.delivery_retry.worker_enabled", { platforms: ["SHOPIFY", "WOOCOMMERCE"] });
-  const executor = new InitialDeliveryRetryExecutionService(prisma, initialRetryExecutionPorts(), retrySweepLogger(log));
-  return new RecoveryDeliveryRetrySweep(executor, log).start();
+  const sweepLog = retrySweepLogger(log);
+  const executor = new InitialDeliveryRetryExecutionService(prisma, initialRetryExecutionPorts(), sweepLog);
+  const reconciler = new ScheduledFollowUpRetryReconciliationService(prisma, undefined, sweepLog);
+  return new RecoveryDeliveryRetrySweep(executor, log, 60_000, 5, reconciler).start();
 }

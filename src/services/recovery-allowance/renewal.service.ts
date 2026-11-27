@@ -1,3 +1,4 @@
+import { FOLLOW_UP_RETRY_BLOCK_PREFIX, isFollowUpRetryBlock } from "../../domain/recovery-follow-up-retry-allowance.js";
 import { isConfirmedProviderNonDelivery } from "../../domain/whatsapp-recipient-failure.js";
 import { randomUUID } from "node:crypto";
 import { hasLocalNoContact } from "../whatsapp-contact-opt-out/local-no-contact.js";
@@ -57,6 +58,7 @@ export class RecoveryAllowanceService {
   const blockId=intent.id;
   await this.database.$transaction(async tx=>{
    const block=await tx.conversationAllowanceBlock.findUniqueOrThrow({where:{id:blockId}});
+   if(isFollowUpRetryBlock(block.id))throw new AllowanceHeld("follow-up-retry-owner-required");
    await lockRecoveryContext(tx,block.conversationId);
    if(block.repairLeaseToken!==intent.token||!block.repairLeaseUntil||block.repairLeaseUntil<=this.clock())throw new AllowanceHeld("follow-up-funding-lease-lost");
    const conversation=await tx.conversation.findUniqueOrThrow({where:{id:block.conversationId},select:{checkoutRecoveryId:true}});
@@ -127,7 +129,9 @@ export class RecoveryAllowanceService {
   });
  }
  async repairPass(limit=100){
-  const due=await this.database.conversationAllowanceBlock.findMany({where:{state:"PENDING",repairAt:{lte:this.clock()},OR:[{repairLeaseUntil:null},{repairLeaseUntil:{lte:this.clock()}}]},orderBy:[{repairAt:"asc"},{id:"asc"}],take:limit,select:{id:true}});
+  // Dedicated retry blocks require exact attempt/message reconciliation. Do
+  // not let the legacy repair scan consume its page with deferred retry work.
+  const due=await this.database.conversationAllowanceBlock.findMany({where:{state:"PENDING",NOT:{id:{startsWith:FOLLOW_UP_RETRY_BLOCK_PREFIX}},repairAt:{lte:this.clock()},OR:[{repairLeaseUntil:null},{repairLeaseUntil:{lte:this.clock()}}]},orderBy:[{repairAt:"asc"},{id:"asc"}],take:limit,select:{id:true}});
   for(const row of due){
    try{await this.reconcileBlock(row.id);}
    catch(error){logger.error("recovery.allowance.repair_failed",{blockId:row.id,error});}
@@ -139,6 +143,10 @@ export class RecoveryAllowanceService {
    const pointer=await tx.conversationAllowanceBlock.findUnique({where:{id}});if(!pointer)return null;
    const context=await lockRecoveryContext(tx,pointer.conversationId);if(!context)return null;
    const block=await tx.conversationAllowanceBlock.findUniqueOrThrow({where:{id}});if(block.state!=="PENDING")return null;
+   // Until the retry execution/reconciliation owner is connected, these
+   // blocks are inert. Never attach sequence-two credit, release unknown
+   // provider outcomes or activate a retry through generic allowance repair.
+   if(isFollowUpRetryBlock(block.id))return null;
    const now=this.clock();if(block.repairLeaseUntil&&block.repairLeaseUntil>now)return null;
    const token=randomUUID();
    await tx.conversationAllowanceBlock.update({where:{id},data:{repairLeaseToken:token,repairLeaseUntil:new Date(now.getTime()+WORK_LEASE_MS)}});

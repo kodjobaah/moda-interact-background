@@ -110,3 +110,39 @@ test("worker is enabled only by an explicit opt-in and the sweep cannot restart 
   assert.throws(() => new RecoveryDeliveryRetrySweep({ reconcileClaimedPage: empty, runDuePage: empty }, recordingLogger(), 0, 5), RangeError);
   assert.throws(() => new RecoveryDeliveryRetrySweep({ reconcileClaimedPage: empty, runDuePage: empty }, recordingLogger(), 1, 251), RangeError);
 });
+
+test("dedicated follow-up reconciliation has its own bounded restart cursor and cannot discover follow-up sends", async () => {
+  const calls = [], records = [];
+  let count = 0;
+  const worker = new RecoveryDeliveryRetrySweep({
+    async reconcileClaimedPage(input) { calls.push(["initial-reconcile", input]); return empty(); },
+    async runDuePage(input) { calls.push(["initial-due", input]); return empty(); },
+  }, recordingLogger(records), 60_000, 5, {
+    async reconcilePage(input) {
+      calls.push(["follow-up-reconcile", input]);
+      if (++count === 2) throw new Error("database temporarily unavailable");
+      return { outcomes: [{ blockId: "allowance_retry_test", kind: "held" }], next: input.afterId ? null : "allowance_retry_test" };
+    },
+  });
+  for (let i = 0; i < 4; i++) await worker.runOnce();
+  assert.deepEqual(calls.filter(c => c[0] === "follow-up-reconcile"), [
+    ["follow-up-reconcile", { limit: 5 }], ["follow-up-reconcile", { limit: 5, afterId: "allowance_retry_test" }],
+    ["follow-up-reconcile", { limit: 5, afterId: "allowance_retry_test" }], ["follow-up-reconcile", { limit: 5 }],
+  ]);
+  assert.equal(calls.filter(c => c[0] === "initial-due").length, 4);
+  assert.equal(records.filter(r => r.event === "recovery.delivery_retry.sweep_page_failed" && r.stage === "follow-up-reconcile").length, 1);
+  await worker.close();
+});
+
+test("shutdown waits for follow-up reconciliation without starting discovery", async () => {
+  const gate = deferred(), started = deferred();
+  let discoveries = 0;
+  const worker = new RecoveryDeliveryRetrySweep({ reconcileClaimedPage: empty, async runDuePage() { discoveries++; return empty(); } },
+    recordingLogger(), 60_000, 5, { async reconcilePage() { started.resolve(); await gate.promise; return empty(); } });
+  const first = worker.runOnce();
+  await started.promise;
+  const closed = worker.close();
+  gate.resolve();
+  await Promise.all([first, closed]);
+  assert.equal(discoveries, 0);
+});
