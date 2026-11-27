@@ -17,7 +17,8 @@ try {
   execFileSync(existsSync(localCompiler) ? localCompiler : "tsc", ["--strict", "--noUncheckedIndexedAccess", "--exactOptionalPropertyTypes",
     "--target", "ES2022", "--module", "ES2022", "--moduleResolution", "bundler",
     "--skipLibCheck", "--outDir", directory, join(domain, "recovery-outreach-identity.ts"),
-    join(domain, "recovery-retry-funding-lineage.ts"), join(domain, "recovery-retry-claim.ts")], { cwd: directory, stdio: "inherit" });
+    join(domain, "recovery-retry-funding-lineage.ts"), join(domain, "recovery-retry-claim.ts"),
+    join(domain, "recovery-follow-up-retry-allowance.ts")], { cwd: directory, stdio: "inherit" });
 } catch (error) {
   rmSync(directory, { recursive: true, force: true });
   throw error;
@@ -25,7 +26,8 @@ try {
 after(() => rmSync(directory, { recursive: true, force: true }));
 const { retryFundingLineage } = await import(pathToFileURL(join(directory, "recovery-retry-funding-lineage.js")).href);
 const { selectEffectiveOutreachAttempt } = await import(pathToFileURL(join(directory, "recovery-outreach-identity.js")).href);
-const { planInitialRetryClaim } = await import(pathToFileURL(join(directory, "recovery-retry-claim.js")).href);
+const { planInitialRetryClaim, planScheduledFollowUpRetryClaim } = await import(pathToFileURL(join(directory, "recovery-retry-claim.js")).href);
+const { proveFollowUpRetryAllowance } = await import(pathToFileURL(join(directory, "recovery-follow-up-retry-allowance.js")).href);
 const now = new Date("2026-11-26T01:00:00Z");
 function failed(id, sequence, intentId, trigger = "INITIAL") {
   return {
@@ -167,4 +169,135 @@ test("holds orphan successors, duplicate slots, wrong intent IDs and invalid own
   const other = successor("retry_first", 3);
   other.recipient = "different";
   assert.equal(claimPlan([original, other]).kind, "held");
+});
+
+const followTrigger = "NO_RESPONSE_FOLLOW_UP";
+function initialAccepted(id = "initial", sequence = 1, delivered = false) {
+  const original = failed(id, sequence, "unused");
+  original.status = "NO_RESPONSE";
+  original.deliveryRetryIntent = null;
+  original.outboundMessage.status = delivered ? "DELIVERED" : "SENT";
+  original.outboundMessage.failedAt = null;
+  original.outboundMessage.deliveredAt = delivered ? now : null;
+  return original;
+}
+const followFailed = (id = "follow", sequence = 2, intent = "follow_intent") => failed(id, sequence, intent, followTrigger);
+const followPlan = (attempts, intentId = "follow_intent") => planScheduledFollowUpRetryClaim({
+  recoveryId: "recovery", conversationId: "conversation", attempts, intentId,
+});
+function allowance(id, ordinal, reservation, message) {
+  return { id, ordinal, shopId: "shop", conversationId: "conversation", creditReservationId: reservation,
+    fundingKind: ordinal === 0 ? "INITIAL" : "FOLLOW_UP", state: ordinal === 0 ? "CLOSED" : "CANCELLED",
+    predecessorId: ordinal === 0 ? null : "initial-block", repairAt: null, repairLeaseToken: null,
+    repairLeaseUntil: null, outboundMessageIds: [message] };
+}
+function allowanceFixture(repeated = false) {
+  const attempts = [initialAccepted(), followFailed()];
+  const blocks = [allowance("initial-block", 0, "reservation-initial", "message-initial"),
+    allowance("failed-block", 1, "reservation-follow", "message-follow")];
+  if (repeated) {
+    attempts.push(followFailed("retry_follow_intent", 3, "second_follow"));
+    blocks.push(allowance("second-failed-block", 2, "reservation-retry_follow_intent", "message-retry_follow_intent"));
+  }
+  const plan = followPlan(attempts, repeated ? "second_follow" : "follow_intent");
+  assert.equal(plan.kind, "new");
+  return { shopId: "shop", conversationId: "conversation", initialReservationId: "reservation-initial", links: plan.links, blocks };
+}
+
+test("scheduled follow-up retry preserves sequence two and derives a distinct physical claim", () => {
+  const attempts = [initialAccepted(), followFailed()];
+  const before = structuredClone(attempts);
+  const plan = followPlan(attempts);
+  assert.equal(plan.kind, "new");
+  assert.equal(plan.attemptId, "retry_follow_intent");
+  assert.equal(plan.sequence, 3);
+  assert.equal(plan.initialAttemptId, "initial");
+  assert.deepEqual(plan.links.map(link => link.predecessor.id), ["follow"]);
+  assert.deepEqual(attempts, before);
+});
+test("scheduled follow-up retry replays only the exact clean pending claim", () => {
+  const pending = successor("retry_follow_intent", 3, followTrigger);
+  const attempts = [initialAccepted(), followFailed(), pending];
+  const plan = followPlan(attempts);
+  assert.equal(plan.kind, "existing");
+  assert.equal(plan.attemptId, pending.id);
+  assert.equal(plan.sequence, 3);
+  pending.status = "WAITING_FOR_RESPONSE";
+  assert.equal(followPlan(attempts).kind, "held");
+});
+test("a retry of the follow-up uses the latest failed follow-up rather than the initial slot", () => {
+  const attempts = [initialAccepted(), followFailed(), followFailed("retry_follow_intent", 3, "second_follow")];
+  assert.equal(followPlan(attempts).kind, "held");
+  const plan = followPlan(attempts, "second_follow");
+  assert.equal(plan.kind, "new");
+  assert.equal(plan.sequence, 4);
+  assert.deepEqual(plan.links.map(link => link.intent.fundingReservationId), ["reservation-follow", "reservation-retry_follow_intent"]);
+});
+test("an initial retry must be positively delivered before a follow-up retry can be planned", () => {
+  const attempts = [failed("original", 1, "initial_intent"), followFailed(), initialAccepted("retry_initial_intent", 3)];
+  assert.equal(followPlan(attempts).kind, "held");
+  attempts[2] = initialAccepted("retry_initial_intent", 3, true);
+  const plan = followPlan(attempts);
+  assert.equal(plan.kind, "new");
+  assert.equal(plan.sequence, 4);
+  assert.equal(plan.initialAttemptId, "retry_initial_intent");
+});
+test("holds initial delivery conflicts and unproven initial identity", () => {
+  for (const mutate of [a => { a.status = "FAILED"; }, a => { a.customerRespondedAt = now; },
+    a => { a.outboundMessage.providerMessageId = null; }, a => { a.outboundMessage.failedAt = now; },
+    a => { a.outboundMessage.conversationId = "foreign"; }, a => { a.outboundMessage.sentAt = new Date(0); }]) {
+    const initial = initialAccepted(); mutate(initial);
+    assert.equal(followPlan([initial, followFailed()]).kind, "held");
+  }
+});
+test("holds merchant initiated, non-automation and mismatched recipient follow-ups", () => {
+  for (const mutate of [a => { a.trigger = "POST_WINDOW_FOLLOW_UP"; }, a => { a.initiatedBy = "HUMAN"; },
+    a => { a.initiatedBy = "AGENT"; }, a => { a.initiatedBy = null; }, a => { a.recipient = "other"; }]) {
+    const follow = followFailed(); mutate(follow);
+    assert.equal(followPlan([initialAccepted(), follow]).kind, "held");
+  }
+});
+test("holds cancelled, answered, late positive and unconfirmed failed follow-ups", () => {
+  for (const mutate of [a => { a.deliveryRetryIntent.cancelledAt = now; }, a => { a.customerRespondedAt = now; },
+    a => { a.outboundMessage.deliveredAt = now; }, a => { a.outboundMessage.readAt = now; },
+    a => { a.outboundMessage.senderType = "HUMAN"; }, a => { a.outboundMessage.providerMessageId = null; },
+    a => { a.sentAt = null; }, a => { a.outboundMessage.sentAt = new Date(0); }]) {
+    const follow = followFailed(); mutate(follow);
+    assert.equal(followPlan([initialAccepted(), follow]).kind, "held");
+  }
+});
+test("rejects orphan and cross-slot follow-up retry identities", () => {
+  assert.equal(followPlan([initialAccepted(), followFailed(), successor("retry_wrong", 3, followTrigger)]).kind, "held");
+  assert.equal(followPlan([initialAccepted(), followFailed(), successor("retry_follow_intent", 3)]).kind, "held");
+  assert.equal(followPlan([initialAccepted(), followFailed()], "foreign").kind, "held");
+});
+test("proves the exact cancelled follow-up allowance without mutating its predecessor", () => {
+  const fixture = allowanceFixture();
+  const before = structuredClone(fixture);
+  assert.deepEqual(proveFollowUpRetryAllowance(fixture), { kind: "proven", initialBlockId: "initial-block", failedBlockId: "failed-block" });
+  assert.deepEqual(fixture, before);
+});
+test("each compensated physical follow-up keeps its own cancelled allowance and credit", () => {
+  const fixture = allowanceFixture(true);
+  assert.deepEqual(proveFollowUpRetryAllowance(fixture), { kind: "proven", initialBlockId: "initial-block", failedBlockId: "second-failed-block" });
+  fixture.blocks[2].creditReservationId = fixture.blocks[1].creditReservationId;
+  assert.equal(proveFollowUpRetryAllowance(fixture).kind, "held");
+});
+test("holds a different owner, wrong initial credit or invalid allowance identity", () => {
+  for (const mutate of [f => { f.blocks[1].shopId = "foreign"; }, f => { f.blocks[1].conversationId = "foreign"; },
+    f => { f.blocks[1].id = f.blocks[0].id; }, f => { f.blocks[1].ordinal = 0; },
+    f => { f.initialReservationId = "foreign"; }, f => { f.blocks[0].state = "CANCELLED"; }]) {
+    const fixture = allowanceFixture(); mutate(fixture);
+    assert.equal(proveFollowUpRetryAllowance(fixture).kind, "held");
+  }
+});
+test("holds unreconciled allowance consumption, pending work and different funding evidence", () => {
+  for (const mutate of [f => { f.blocks[1].state = "ACTIVE"; }, f => { f.blocks[1].state = "PENDING"; },
+    f => { f.blocks[1].outboundMessageIds.push("later-message"); }, f => { f.blocks[1].outboundMessageIds = ["foreign"]; },
+    f => { f.blocks[1].predecessorId = "foreign"; }, f => { f.blocks[1].fundingKind = "CONTINUATION"; },
+    f => { f.blocks[1].repairLeaseToken = "lease"; }, f => { f.blocks[1].creditReservationId = null; },
+    f => { f.blocks.push(allowance("unrelated", 2, "unrelated-reservation", "unrelated-message")); }]) {
+    const fixture = allowanceFixture(); mutate(fixture);
+    assert.equal(proveFollowUpRetryAllowance(fixture).kind, "held");
+  }
 });
