@@ -120,6 +120,9 @@ void startReadyWorkerProcess({
       },
     });
 
+    const { createRecoveryDeliveryRetryWorker } = await import("../workers/recovery-delivery-retry.worker.js");
+    const recoveryDeliveryRetryWorker = createRecoveryDeliveryRetryWorker();
+
     const closeQueuePerformanceTelemetry = startQueuePerformanceTelemetry({
       connection: connectionRedis,
       queueNames: [
@@ -138,6 +141,7 @@ void startReadyWorkerProcess({
         recoveryOutreachFollowUpWorker,
         shopifyDiscountSyncWorker,
         wooCouponSyncWorker,
+        ...(recoveryDeliveryRetryWorker ? [recoveryDeliveryRetryWorker] : []),
       ],
       // startWorkerProcess closes workers first. Then stop producers before
       // closing their queue, and only then disconnect shared Redis/Postgres.

@@ -57,9 +57,8 @@ export async function listDueInitialRetryIntents(db: Pick<Database, "recoveryOut
   }
 }
 
-/** Deliberately NOT wired to a worker in this patch. An inert attempt is only
- * a durable claim; provider eligibility, consent, offer refresh and the final
- * send fence still have to be implemented before production invocation. */
+/** A durable claim is not provider permission. Execution must still perform
+ * eligibility, consent, offer refresh and the final provider send fence. */
 export class InitialDeliveryRetryClaimService {
   constructor(private readonly database: Database, private readonly clock: () => Date = () => new Date(),
     private readonly serviceLogger: StructuredLogger = logger) {}
@@ -97,8 +96,9 @@ export class InitialDeliveryRetryClaimService {
         }
         const replayable = isReplayableRecoveryTransactionError(error);
         if (replayable && n < 3) {
-          this.serviceLogger.warn("recovery.delivery_retry.claim_conflict", { ...fields, retryBackoffMs: recoveryTransactionBackoffMs(n) });
-          await waitForRecoveryTransactionReplay(n);
+          const retryBackoffMs = recoveryTransactionBackoffMs(n, error);
+          this.serviceLogger.warn("recovery.delivery_retry.claim_conflict", { ...fields, retryBackoffMs });
+          await waitForRecoveryTransactionReplay(retryBackoffMs);
           continue;
         }
         this.serviceLogger.error("recovery.delivery_retry.claim_failed", { ...fields, retryExhausted: replayable });
@@ -124,7 +124,7 @@ export class InitialDeliveryRetryClaimService {
     if (!recoveryPointer?.conversation) return held("missing-owner");
     context.stage = "owner_lock"; context.timing.enter(context.stage);
     const conversationId = recoveryPointer.conversation.id;
-    const owner = await lockRecoveryContext(tx, conversationId);
+    const owner = await lockRecoveryContext(tx, conversationId, { shopId: recoveryPointer.shopId, recoveryId: recoveryPointer.id, contention: "nowait" });
     if (!owner || owner.recoveryId !== recoveryPointer.id || owner.shopId !== recoveryPointer.shopId) return held("owner-changed");
     const now = this.clock();
     context.fields.evaluationAt = now.toISOString();

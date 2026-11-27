@@ -8,8 +8,13 @@ import { initialOutreachDiagnostic } from "./error-diagnostic.js";
 export function isReplayableRecoveryTransactionError(error: unknown): boolean {
   if (isRecoveryReservationRetryableConflict(error)) return true;
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
-  if (error.code === "P2010") return error.meta?.code === "40001" || error.meta?.code === "40P01";
+  if (error.code === "P2010") return error.meta?.code === "40001" || error.meta?.code === "40P01" || isRecoveryOwnerLockConflict(error);
   return error.code === "P2028" && closedTransactionKind(error) !== undefined;
+}
+
+function isRecoveryOwnerLockConflict(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2010" && error.meta?.code === "55P03";
 }
 
 function closedTransactionKind(error: Prisma.PrismaClientKnownRequestError) {
@@ -24,6 +29,7 @@ function closedTransactionKind(error: Prisma.PrismaClientKnownRequestError) {
 /** Prisma often prefixes the real error with a lengthy source excerpt. Retain
  * a separate bounded diagnostic for its actual transaction failure reason. */
 export function transactionFailureDetails(error: unknown): Record<string, unknown> {
+  if (isRecoveryOwnerLockConflict(error)) return { transactionFailureKind: "lock-not-available", sqlState: "55P03" };
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2028") return {};
   const kind = closedTransactionKind(error);
   if (!kind) return {};
@@ -36,11 +42,17 @@ export function transactionFailureDetails(error: unknown): Record<string, unknow
 
 /** Small bounded backoff outside the transaction, including after an uncertain
  * commit. The next transaction MUST reread the exact durable identity. */
-export function recoveryTransactionBackoffMs(attempt: number): number {
-  return Math.min(250, 50 * Math.max(1, attempt));
+export function recoveryTransactionBackoffMs(attempt: number, error?: unknown, random = Math.random()): number {
+  // A busy owner needs time to finish its database-only transaction. Other
+  // conflicts keep the shorter existing backoff. Jitter breaks synchronised
+  // replays by workers that started together. The caller logs the exact value.
+  const base = isRecoveryOwnerLockConflict(error)
+    ? Math.min(1_000, 500 * Math.max(1, attempt))
+    : Math.min(250, 50 * Math.max(1, attempt));
+  return base + Math.floor(base * random);
 }
-export async function waitForRecoveryTransactionReplay(attempt: number): Promise<void> {
-  await delay(recoveryTransactionBackoffMs(attempt));
+export async function waitForRecoveryTransactionReplay(backoffMs: number): Promise<void> {
+  await delay(backoffMs);
 }
 
 /** Monotonic wall timing: stages include database round trips/lock waits;

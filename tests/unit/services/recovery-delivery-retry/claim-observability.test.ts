@@ -133,10 +133,25 @@ describe("recovery delivery retry observability", () => {
     expect(f.tx.recoveryOutreachAttempt.create).toHaveBeenCalledTimes(1);
     expect(f.records.some(record => record.event === "recovery.delivery_retry.claimed")).toBe(false);
     expect(f.records.find(record => record.event === "recovery.delivery_retry.claim_conflict")).toMatchObject({ data: {
-      prismaCode: "P2028", transactionFailureKind: "not-found", transactionAttempt: 1, retryBackoffMs: 50,
+      prismaCode: "P2028", transactionFailureKind: "not-found", transactionAttempt: 1, retryBackoffMs: expect.any(Number),
       stageDurationsMs: expect.objectContaining({ owner_lock: expect.any(Number), transaction_commit: expect.any(Number) }),
     } });
     expect(f.records.at(-1)).toMatchObject({ event: "recovery.delivery_retry.claim_replayed", data: { transactionAttempt: 2 } });
+  });
+
+  it("retries a busy owner in a fresh transaction with the original lock diagnostic", async () => {
+    const f = fixture();
+    const original = new Prisma.PrismaClientKnownRequestError("could not obtain lock on row", {
+      code: "P2010", clientVersion: "6.19.3", meta: { code: "55P03" },
+    });
+    vi.mocked(lockRecoveryContext).mockRejectedValueOnce(original);
+    await expect(f.service.claim("intent-1", policy)).resolves.toMatchObject({ kind: "claimed" });
+    expect(f.transaction).toHaveBeenCalledTimes(2);
+    expect(f.tx.recoveryOutreachAttempt.create).toHaveBeenCalledTimes(1);
+    expect(f.records.find(record => record.event === "recovery.delivery_retry.claim_conflict")).toMatchObject({ data: {
+      stage: "owner_lock", prismaCode: "P2010", sqlState: "55P03", transactionFailureKind: "lock-not-available",
+      retryBackoffMs: expect.any(Number), sourceError: { message: expect.stringContaining("could not obtain lock on row") },
+    } });
   });
 
   it("stops after three closed-transaction attempts and propagates the original exception", async () => {

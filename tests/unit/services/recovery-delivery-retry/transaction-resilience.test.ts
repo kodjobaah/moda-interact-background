@@ -20,7 +20,7 @@ describe("database-only recovery transaction resilience", () => {
   });
 
   it("replays only the recognized raw-query SQLSTATEs and preserves unrelated errors", () => {
-    for (const code of ["40001", "40P01"]) expect(isReplayableRecoveryTransactionError(prismaError("P2010", "raw query failed", { code }))).toBe(true);
+    for (const code of ["40001", "40P01", "55P03"]) expect(isReplayableRecoveryTransactionError(prismaError("P2010", "raw query failed", { code }))).toBe(true);
     for (const error of [prismaError("P2010", "constraint failed", { code: "23514" }),
       prismaError("P2028", "unsupported interactive transaction operation"), prismaError("P2003", "foreign key violation"),
       new Error("Transaction not found"), { code: "P2028", message: "Transaction not found" }]) {
@@ -46,6 +46,13 @@ describe("database-only recovery transaction resilience", () => {
       transaction_acquire: expect.any(Number), identity: expect.any(Number), owner_lock: expect.any(Number),
       source_lookup: expect.any(Number), transaction_commit: expect.any(Number),
     } });
-    expect([1, 2, 3, 100].map(recoveryTransactionBackoffMs)).toEqual([50, 100, 150, 250]);
+    expect([1, 2, 3, 100].map(attempt => recoveryTransactionBackoffMs(attempt, undefined, 0))).toEqual([50, 100, 150, 250]);
+    expect(recoveryTransactionBackoffMs(1, undefined, 0.999)).toBe(99);
+    expect(recoveryTransactionBackoffMs(2, undefined, 0.5)).toBe(150);
+    const busy = prismaError("P2010", "could not obtain lock on row", { code: "55P03" });
+    expect(transactionFailureDetails(busy)).toEqual({ transactionFailureKind: "lock-not-available", sqlState: "55P03" });
+    expect(recoveryTransactionBackoffMs(1, busy, 0)).toBe(500);
+    expect(recoveryTransactionBackoffMs(2, busy, 0.999)).toBe(1999);
+    expect(recoveryTransactionBackoffMs(100, busy, 0.5)).toBe(1500);
   });
 });

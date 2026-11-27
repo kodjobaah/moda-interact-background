@@ -62,7 +62,8 @@ suite("Recovery delivery retry funding (PostgreSQL)", () => {
     try {
       const retry = await prepareFailedOriginal(f);
       expect(retry.intent.policy).toBe("AFTER_COOLDOWN");
-      const results = await Promise.all([retry.billing.admit(retry.request), retry.billing.admit(retry.request)]);
+      const competingBilling = new RecoveryBillingService(f.db);
+      const results = await Promise.all([retry.billing.admit(retry.request), competingBilling.admit(retry.request)]);
       expect(results[0]).toMatchObject({ kind: "admitted", admission: { kind: source === "free" ? "lifetime-free" : source } });
       expect(results[1]).toMatchObject({ kind: "admitted" });
       if (results[0]?.kind !== "admitted" || results[1]?.kind !== "admitted") throw new Error("Retry funding was not admitted");
@@ -74,7 +75,7 @@ suite("Recovery delivery retry funding (PostgreSQL)", () => {
       const replay = await retryCredit.admitInitialRetry(retry.request, async () => { throw new Error("must not reserve again"); });
       expect(replay.result.kind).toBe("admitted");
       expect(retry.records).toContainEqual(expect.objectContaining({ event: "recovery.delivery_retry.funding_replayed", data: expect.objectContaining({
-        retryIntentId: retry.intent.id, outreachAttemptId: retry.retryId, fundingReservationId: fresh.id,
+        retryIntentId: retry.intent.id, outreachAttemptId: retry.retryId, fundingReservationId: fresh.id, queueWaitMs: expect.any(Number),
       }) }));
       expect(await f.db.usageReservation.count({ where: { shopId: f.shopId } })).toBe(2);
       const message = await simulatedReceipt(f, retry, true);

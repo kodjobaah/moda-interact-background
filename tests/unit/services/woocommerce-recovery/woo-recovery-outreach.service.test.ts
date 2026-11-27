@@ -134,7 +134,6 @@ function makeFixture() {
       findExistingAdmission: existing },
     finalize: { confirmed: finalize },
     enqueue: { initial: enqueue },
-    enableTestOutbound: () => true,
   };
   return {
     service: new WooRecoveryOutreachService(deps), deps, logs, admission, send,
@@ -149,7 +148,6 @@ function makeFixture() {
     setRecovery(value: Partial<WooOutreachRecovery>) { recovery = { ...recovery, ...value }; },
     setTerminal(value: typeof terminal) { terminal = value; },
     setAttempt(value: WooInitialAttempt) { attempt = value; },
-    disable() { deps.enableTestOutbound = undefined; },
   };
 }
 
@@ -172,23 +170,21 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
     expect(f.admit).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("keeps enqueue and dispatch default-off before any attempt, queue or credit", async () => {
-    const f = makeFixture(); f.disable();
-    expect(await f.service.enqueueInitial("recovery")).toEqual({ kind: "suppressed", reason: "woo-outbound-disabled" });
-    expect(await f.service.processInitial("recovery")).toEqual({ kind: "suppressed", reason: "woo-outbound-disabled" });
-    expect(f.initialCreates).toBe(0);
-    expect(f.enqueue).not.toHaveBeenCalled();
-    expect(f.admit).not.toHaveBeenCalled();
-  });
-
-  it("cannot opt into outbound outside NODE_ENV=test", async () => {
-    const previous = process.env.NODE_ENV;
+  it.each(["production", "development", "test"])("enqueues and sends eligible Woo initial outreach in %s without a platform opt-in", async environment => {
+    vi.stubEnv("NODE_ENV", environment);
+    vi.stubEnv("MODA_WOO_TEST_OUTBOUND", undefined);
     try {
-      process.env.NODE_ENV = "production";
+      // All provider, queue and persistence ports are injected in-memory mocks.
       const f = makeFixture();
-      expect(await f.service.processInitial("recovery")).toEqual({ kind: "suppressed", reason: "woo-outbound-disabled" });
-      expect(f.send).not.toHaveBeenCalled();
-    } finally { process.env.NODE_ENV = previous; }
+      expect(await f.service.enqueueInitial("recovery")).toEqual({ kind: "queued", attemptId: "attempt-1" });
+      expect(await f.service.processInitial("recovery")).toEqual({ kind: "sent", attemptId: "attempt-1" });
+      expect(await f.service.processInitial("recovery")).toEqual({ kind: "already-initialized", attemptId: "attempt-1" });
+      expect(f.initialCreates).toBe(1);
+      expect(f.enqueue).toHaveBeenCalledOnce();
+      expect(f.admit).toHaveBeenCalledOnce();
+      expect(f.send).toHaveBeenCalledOnce();
+      expect(f.finalize).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("never routes a non-Woo recovery to the sender", async () => {
@@ -552,8 +548,8 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
   });
 
 
-  it("requeues confirmed-but-not-finalized delivery even when new outbound is disabled", async () => {
-    const f = makeFixture(); f.disable();
+  it("requeues confirmed-but-not-finalized delivery without another provider send", async () => {
+    const f = makeFixture();
     f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222", status: "PENDING",
       sentAt: null, outboundMessageId: null, followUpDueAt: null });
     f.messages.set("recovery-outreach:attempt-1", {
@@ -566,7 +562,7 @@ describe("ARCH-048-BACKGROUND-004 WooRecoveryOutreachService", () => {
   });
 
   it("requeues sent attempt when the recovery row was not yet finalised", async () => {
-    const f = makeFixture(); f.disable();
+    const f = makeFixture();
     f.setAttempt({ id: "attempt-1", sequence: 1, recipient: "+447000111222",
       status: "WAITING_FOR_RESPONSE", sentAt: new Date(), outboundMessageId: "message",
       followUpDueAt: null });

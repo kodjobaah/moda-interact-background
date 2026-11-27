@@ -7,10 +7,10 @@ import { isInitialRetryId, isInitialOutreachIdentity, retryOutreachAttemptId } f
 import { WooCheckoutLeaseGuard, CheckoutOrderGuardService } from "../pending-recovery-candidate/checkout-order-guard.service.js";
 import { WooOrderTerminalEvidenceStore } from "../woocommerce-recovery/woo-order-reconciliation.service.js";
 import { createWooGuardedInitialSender } from "../woocommerce-recovery/woo-guarded-initial-sender.service.js";
-import { wooTestOutboundEnabled } from "../woocommerce-recovery/woo-test-outbound-gate.js";
 import { wooRecoveryConsentReader } from "../woocommerce-recovery-consent.service.js";
 import { recoveryStoredConsentService } from "../recovery-conversation/recovery-stored-consent.service.js";
 import { lockRecoveryContext } from "../recovery-conversation/recovery-conversation.sql.js";
+import { isCanonicalRecoveryRecipient } from "../checkout-recovery/recovery-recipient-canonicalization.js";
 import { recoveryRecipientResolverService } from "../checkout-recovery/recovery-recipient-resolver.service.js";
 import { recoveryRecipientSuppressionAdmissionService } from "../checkout-recovery/recovery-recipient-suppression-admission.service.js";
 import { shopExecutionEligibilityService } from "../shop-execution-eligibility.service.js";
@@ -23,6 +23,7 @@ import { InitialDeliveryRetryClaimService, listDueInitialRetryIntents } from "./
 import { checkInitialRetryPermit } from "./initial-permit.js";
 import { initialOutreachDiagnostic } from "./error-diagnostic.js";
 import { releaseTerminalRetryCredit } from "./terminal-credit.js";
+import { reclaimStrandedRetryCredit } from "./stranded-credit.js";
 import { expectedInitialRetryDispatchKey } from "./provider-dispatch-key.js";
 
 const logger = createLogger({ serviceName: "moda-recovery-worker", environment: resolveDeploymentEnvironmentName() });
@@ -45,7 +46,7 @@ export function initialRetryExecutionPorts() {
   const orders = new WooOrderTerminalEvidenceStore(connectionRedis);
   return {
     checkoutLease: new WooCheckoutLeaseGuard(), shopifyOrders: new CheckoutOrderGuardService(), orders,
-    wooEnabled: wooTestOutboundEnabled, wooSender: createWooGuardedInitialSender({ orders, logger }),
+    wooSender: createWooGuardedInitialSender({ orders, logger }),
     wooConsent: wooRecoveryConsentReader, shopifyConsent: recoveryStoredConsentService,
     recipient: recoveryRecipientResolverService, suppression: recoveryRecipientSuppressionAdmissionService,
     execution: shopExecutionEligibilityService, policy: recoveryPolicyService, template: automatedRecoveryTemplateService,
@@ -55,9 +56,7 @@ export function initialRetryExecutionPorts() {
 }
 type Ports = ReturnType<typeof initialRetryExecutionPorts>;
 
-/** Deliberately callable, but NOT registered with a production worker until
- * disposable PostgreSQL/provider-emulator validation and consumer rollout.
- * A retry intent is not a provider permit. Replay always inspects the exact
+/** A retry intent is not a provider permit. Replay always inspects the exact
  * existing attempt first, including after cancellation or a terminal checkout.
  */
 export class InitialDeliveryRetryExecutionService {
@@ -94,9 +93,8 @@ export class InitialDeliveryRetryExecutionService {
             return this.reconcile(scope, recovery, attempt, progress);
           }
         }
-        // Existing confirmed receipts may be reconciled above even when new
-        // Woo sends are disabled. Never use the generic Shopify sender for Woo.
-        if (recovery.shop.platform === "WOOCOMMERCE" && !this.ports.wooEnabled()) return held("woo-outbound-disabled");
+        // Both platforms may claim fresh retries. Provider-specific consent
+        // and final-send fences remain authoritative; reconcile prior receipts first.
         stage = "policy_and_claim";
         const policy = await this.ports.policy.resolve(recovery.shopId);
         if (!attempt) {
@@ -191,11 +189,29 @@ export class InitialDeliveryRetryExecutionService {
     for (const attempt of attempts) {
       try {
         if (!isInitialRetryId(attempt.id)) continue;
-        const recovery = await readRecovery(this.db, attempt.checkoutRecoveryId);
-        if (!recovery?.conversation) continue;
-        const scope = { shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: attempt.id };
-        const progress = await this.ports.outbound.inspectInitialOutreachAdmission(scope);
-        const result = await this.reconcile(scope, recovery, attempt, progress);
+        const initial = await readRecovery(this.db, attempt.checkoutRecoveryId);
+        if (!initial?.conversation) continue;
+        // Use the same checkout lease as execute(). Re-read after acquisition;
+        // the page is a discovery snapshot, not authority to settle or release.
+        const result = await this.ports.checkoutLease.withCheckoutLock(initial.shopId, initial.checkoutToken, async () => {
+          const recovery = await readRecovery(this.db, initial.id);
+          const current = await this.db.recoveryOutreachAttempt.findUnique({ where: { id: attempt.id } });
+          if (!recovery?.conversation || recovery.shopId !== initial.shopId || recovery.checkoutToken !== initial.checkoutToken ||
+              recovery.conversation.id !== initial.conversation!.id || !current || !isInitialOutreachIdentity(current) ||
+              current.checkoutRecoveryId !== recovery.id) return held("reconciliation-owner-changed");
+          const scope = { shopId: recovery.shopId, recoveryId: recovery.id, outreachAttemptId: current.id };
+          const progress = await this.ports.outbound.inspectInitialOutreachAdmission(scope);
+          if (progress.kind === "confirmed" || (progress.kind === "failed" && current.outboundMessageId))
+            return this.reconcile(scope, recovery, current, progress);
+          if (progress.kind === "failed" && progress.disposition !== "pre-permit-refused")
+            return held("reconciliation-unlinked-provider-failure");
+          if (progress.kind === "held" && progress.reason === "provider-outcome-unknown") return held(progress.reason);
+          if (!["PENDING", "CAPACITY_BLOCKED", "CANCELLED"].includes(current.status)) return held("reconciliation-no-pending-work");
+          const cleanup = await reclaimStrandedRetryCredit(this.db, { ...scope, conversationId: recovery.conversation.id }, this.log);
+          return held(cleanup.kind === "cancelled" ? "obsolete-retry-cancelled" : cleanup.reason);
+        });
+        this.outcome({ shopId: initial.shopId, checkoutRecoveryId: initial.id, conversationId: initial.conversation.id,
+          outreachAttemptId: attempt.id, retryIntentId: attempt.id.slice("retry_".length) }, result);
         outcomes.push({ attemptId: attempt.id, kind: result.kind });
       } catch (error) {
         this.log.error("recovery.delivery_retry.reconciliation_failed", { outreachAttemptId: attempt.id,
@@ -218,8 +234,12 @@ export class InitialDeliveryRetryExecutionService {
     if (check.kind === "held") return check;
     const execution = await this.ports.execution.evaluate(scope.shopId, recovery.shop.status, "recovery");
     if (!execution.allowed) return { kind: "held", reason: execution.reason } as const;
-    const recipient = await this.ports.recipient.resolveForCustomerInShop(recovery.customerId, recovery.shopId);
-    if (!recipient || recipient !== attempt.recipient.replace(/^\+/, "")) return { kind: "held", reason: "recipient-changed" } as const;
+    const expectedRecipient = attempt.recipient.replace(/^\+/, "");
+    // Woo has its own consent/recipient authority; the Shopify selector
+    // requires SHOPIFY_NATIVE evidence and must not be used for Woo.
+    const recipient = recovery.shop.platform === "WOOCOMMERCE" ? expectedRecipient
+      : await this.ports.recipient.resolveForCustomerInShop(recovery.customerId, recovery.shopId);
+    if (!isCanonicalRecoveryRecipient(recipient) || recipient !== expectedRecipient) return { kind: "held", reason: "recipient-changed" } as const;
     if ((await this.ports.suppression.evaluate(recovery.shopId, recipient, this.clock())).kind !== "allowed")
       return { kind: "held", reason: "recipient-suppressed" } as const;
     if (recovery.shop.platform === "WOOCOMMERCE") {

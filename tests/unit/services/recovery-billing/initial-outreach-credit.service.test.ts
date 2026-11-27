@@ -344,7 +344,7 @@ describe("InitialOutreachCreditService", () => {
     expect(transaction).toHaveBeenCalledTimes(2);
     expect(records[0]).toMatchObject({ event: "recovery.initial_outreach_credit.retry", data: {
       reasonCode: "P2028", transactionFailureKind: "expired", prismaTimeoutMs: 5000, prismaElapsedMs: 5268,
-      transactionErrorMessage: expect.stringContaining("expired transaction"), transactionElapsedMs: expect.any(Number), retryBackoffMs: 50,
+      transactionErrorMessage: expect.stringContaining("expired transaction"), transactionElapsedMs: expect.any(Number), retryBackoffMs: expect.any(Number),
     } });
     expect(records.at(-1)).toMatchObject({ event: "recovery.initial_outreach_credit.transaction_completed", data: { attempt: 2, outcome: "absent" } });
   });

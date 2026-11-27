@@ -65,6 +65,43 @@ describe("ARCH-046 Woo current recipient consent reader", () => {
       .toEqual(["NOT_AUTHORISED", "STALE_RECIPIENT_SNAPSHOT"]);
   });
 
+  it("resolves the verified Woo phone scoped to its customer and shop, independently of Shopify", async () => {
+    const { instance, db } = reader();
+    await expect(instance.resolveStoredRecipient("customer-a", "woo-a")).resolves.toBe(DIGITS);
+    expect(db.customerPhone.findMany).toHaveBeenCalledWith({
+      where: { customerId: "customer-a", customer: { shopId: "woo-a", shop: { platform: "WOOCOMMERCE" } },
+        endedAt: null, whatsappCanonicalPhone: { not: null }, whatsappPhoneVerifiedAt: { not: null },
+        whatsappConsentSource: "WOO_MODA_CHECKBOX" },
+      select: { whatsappCanonicalPhone: true }, take: 2,
+    });
+  });
+
+  it("does not pick a different recipient from an ambiguous set or an invalid stored number", async () => {
+    await expect(reader([]).instance.resolveStoredRecipient("customer-a", "woo-a")).resolves.toBeNull();
+    await expect(reader([permitted(), permitted({ id: "phone-b", whatsappCanonicalPhone: "447400123457" })])
+      .instance.resolveStoredRecipient("customer-a", "woo-a")).resolves.toBeNull();
+    await expect(reader([permitted({ whatsappCanonicalPhone: E164 })])
+      .instance.resolveStoredRecipient("customer-a", "woo-a")).resolves.toBeNull();
+  });
+
+  it("does not convert a failed identity read into a missing recipient", async () => {
+    const { instance, db } = reader();
+    const error = new Error("database read failed");
+    db.customerPhone.findMany.mockRejectedValueOnce(error);
+    await expect(instance.resolveStoredRecipient("customer-a", "woo-a")).rejects.toBe(error);
+  });
+
+  it("evaluates stored international digits independently of the merchant country and retains STOP", async () => {
+    const { instance, db } = reader();
+    db.shop.findUnique.mockResolvedValueOnce({ id: "woo-a", platform: "WOOCOMMERCE", status: "ACTIVE", defaultCountryCode: "US" });
+    expect(await instance.evaluateStoredRecipient({ shopId: "woo-a", customerId: "customer-a", recipient: DIGITS }))
+      .toMatchObject({ status: "ALLOWED", canonicalRecipient: DIGITS });
+    const stopped = reader([permitted({ whatsappNoContact: true, whatsappNoContactReason: "CUSTOMER_STOP" })]).instance;
+    await expect(stopped.resolveStoredRecipient("customer-a", "woo-a")).resolves.toBe(DIGITS);
+    expect(failure(await stopped.evaluateStoredRecipient({ shopId: "woo-a", customerId: "customer-a", recipient: DIGITS })))
+      .toEqual(["NOT_AUTHORISED", "LOCAL_NO_CONTACT"]);
+  });
+
   it("denies missing, duplicated and wrong-customer phone matches", async () => {
     expect(failure(await reader([]).instance.evaluateRecipient(request)))
       .toEqual(["NOT_AUTHORISED", "ACTIVE_RECIPIENT_NOT_FOUND"]);

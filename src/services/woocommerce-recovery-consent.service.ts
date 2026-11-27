@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { normalizeRecipientPhone } from "@modainteract/moda-interact-shared/identity";
 import prisma from "../lib/db.js";
+import { isCanonicalRecoveryRecipient } from "./checkout-recovery/recovery-recipient-canonicalization.js";
 
 /**
  * Only authenticated Woo installation handlers or internal, approved Background
@@ -41,7 +42,7 @@ export type WooRecoveryConsentReadInput = Readonly<{
 
 export interface WooRecoveryConsentReaderPort {
   evaluateRecipient(input: WooRecoveryConsentReadInput): Promise<WooRecoveryConsentEligibility>;
-  /** Stored-recipient method mirrors the Background Shopify fence input shape. */
+  /** Stored recipient is canonical international digits or an explicit E.164 number. */
   evaluateStoredRecipient(input: {
     shopId: string; customerId: string; recipient: string; expected?: WooRecoveryConsentSnapshot;
   }): Promise<WooRecoveryConsentEligibility>;
@@ -62,13 +63,33 @@ const MAX_LEGACY_SCAN = 250;
 export class WooRecoveryConsentReader implements WooRecoveryConsentReaderPort {
   constructor(private readonly database: ConsentReadDatabase = prisma) {}
 
+  /** Resolve identity only. The caller must still evaluate current Woo consent
+   * and use the final-send fence. Do not use Shopify-native consent to select
+   * Woo recipients. A recovery does not persist a selected phone ID, so an
+   * ambiguous set of verified numbers must not silently redirect outreach. */
+  async resolveStoredRecipient(customerId: string, shopId: string): Promise<string | null> {
+    const rows = await this.database.customerPhone.findMany({
+      where: {
+        customerId, customer: { shopId, shop: { platform: "WOOCOMMERCE" } },
+        endedAt: null, whatsappCanonicalPhone: { not: null },
+        whatsappPhoneVerifiedAt: { not: null }, whatsappConsentSource: "WOO_MODA_CHECKBOX",
+      },
+      select: { whatsappCanonicalPhone: true },
+      take: 2,
+    });
+    const recipient = rows[0]?.whatsappCanonicalPhone;
+    return rows.length === 1 && isCanonicalRecoveryRecipient(recipient) ? recipient : null;
+  }
+
   async evaluateStoredRecipient(input: {
     shopId: string; customerId: string; recipient: string; expected?: WooRecoveryConsentSnapshot;
   }): Promise<WooRecoveryConsentEligibility> {
     return this.evaluateRecipient({
       context: { kind: "JOB", shopId: input.shopId },
       expectedCustomerId: input.customerId,
-      recipient: input.recipient,
+      // Stored digits are already international. Never reinterpret them as
+      // a national number in the merchant's country.
+      recipient: isCanonicalRecoveryRecipient(input.recipient) ? `+${input.recipient}` : input.recipient,
       ...(input.expected ? { expected: input.expected } : {}),
     });
   }

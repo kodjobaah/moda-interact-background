@@ -7,6 +7,7 @@ export async function createInitialOutreachCreditFixture(input: {
   databaseUrl?: string;
   withCredit?: boolean;
   sentAgeMs?: number;
+  recipient?: string;
   source?: "free" | "paid" | "purchased" | "promotional";
 } = {}) {
   const db = new PrismaClient({ datasourceUrl: input.databaseUrl ?? process.env.TEST_DATABASE_URL! });
@@ -79,7 +80,7 @@ export async function createInitialOutreachCreditFixture(input: {
   await db.recoveryOutreachAttempt.create({ data: {
     id: attemptId,
     checkoutRecoveryId: recoveryId,
-    recipient: "15551234567",
+    recipient: input.recipient ?? "15551234567",
     sequence: 1,
     trigger: "INITIAL",
     configuredOfferMode: "NONE",

@@ -387,7 +387,8 @@ Execution and finalization use structured, redacted diagnostics.
 `runDuePage` and `reconcileClaimedPage` expose bounded, cursor-based discovery
 and receipt reconciliation. Neither is registered with a production worker in
 this patch. Do not manually invoke the executor against production. The existing
-Woo outbound test-only gate is unchanged; `131049` policy holds are unchanged.
+Woo outbound test-only gate is unchanged in this earlier patch (removed by
+Patch 4b.3); `131049` policy holds are unchanged.
 Follow-up retries and incompatible allowance blocks remain held. Before worker
 activation, validate actual fresh provider dispatch and restart recovery in the
 local emulator, production checkout authority and consent races, recovery of
@@ -405,3 +406,95 @@ The reservation path validates the owner and current historical chain once per l
 Claim and reservation outcomes and failed/replayed transactions include monotonic `transactionElapsedMs` and `stageDurationsMs`. The `owner_lock`, `shop_lock` and `message_lock` stages include round trips and lock waiting, not just PostgreSQL execution. `transaction_acquire` and `transaction_commit` expose acquisition and commit-acknowledgement time. For recognized P2028 failures the bounded redacted transaction error and parsed timeout/elapsed fields are recorded separately from the source excerpt. Slow or recovered settlement and preflight transactions emit `recovery.initial_outreach_credit.transaction_completed`. The disposable integration fixtures simulate both rollback and lost commit acknowledgement against actual PostgreSQL; neither invokes a provider.
 
 Automatic retry execution remains unregistered. This correction does not prove production performance or fresh provider dispatch readiness.
+
+### Lock contention and query optimisation (code-only Patch 4b.2.2)
+
+Initial retry claim and retry credit preflight already possess a durable owner
+pointer within a Serializable transaction. They acquire the same Shop ->
+Conversation locks using `NOWAIT`, verify the locked owner, and fail fast on
+PostgreSQL SQLSTATE `55P03` rather than waiting until Prisma expires. Original
+(non-retry) callers retain the existing blocking owner path. The retry path
+eliminates the initial redundant context read and combines the conversation
+lock with the context read. The credit preflight retains the exact attempt
+projection from the same Serializable snapshot and validates current retry
+lineage under the owner locks, rather than reading that projection twice.
+The post-reservation and final provider fences remain intact.
+
+A process-local FIFO gate serializes retry funding admission for the same
+Shop before any interactive transaction starts. Each operation independently
+revalidates durable state; there is no cached admission, cross-process lock
+or provider permission. The gate is released even after an exception, and
+unrelated Shops proceed independently. `queueWaitMs` is recorded separately
+from transaction timings. A busy owner uses bounded jittered backoff (500–999
+ms, then 1,000–1,999 ms); other replayable failures use 50–99 ms, then 100–199
+ms. The chosen delay is logged once and used for that replay. If contention
+persists, the original failure is propagated after the existing bounded
+attempt budget. No timeout or attempt count is increased. These changes
+reduce contention within a worker but cannot guarantee that an independently
+held lock becomes available within the retry budget. The disposable tests
+exercise actual row-lock conflicts and concurrent funding across services.
+Worker activation and measured performance verification remain outstanding.
+
+### Worker registration and controlled activation (code-only Patch 4b.3)
+
+The recovery entrypoint owns an opt-in, serial delivery retry sweep. Only the
+exact deployment setting `MODA_RECOVERY_DELIVERY_RETRY_ENABLED=1` enables it;
+missing, zero and malformed values leave it disabled. Leave the flag disabled
+on production until the new disposable integration tests, the complete
+Background regression/build and the remaining API/dashboard consumer rollout
+are validated. An environment change requires restarting the recovery worker.
+Neither the messaging worker nor the combined local entrypoint runs this sweep.
+The obsolete WooCommerce-only test outbound gate is removed from initial
+enqueue, dispatch and retry execution. Production initial sends use the
+existing guarded sender without a separate platform opt-in. The common retry
+worker flag governs automated retry execution for both Shopify and WooCommerce,
+not their initial outreach. Woo retry eligibility uses the existing Woo
+consent reader rather than the Shopify-native phone selector. The Woo final
+SQL permit, STOP, order, template, billing and provider-idempotency checks
+remain in place. Test transports remain injected or disposable loopback
+emulators; no production provider is required for these tests.
+Follow-up policy and broader conversation parity are outside this patch;
+this change does not enable unsupported follow-up retries.
+
+Each sweep starts immediately, processes one bounded page of up to five claimed
+attempts for reconciliation and one page of up to five due intents for execution,
+and schedules the next sweep 60 seconds after completion. Cursors are in-process
+fairness state, not durable delivery state. Errors are logged, a failed page
+retains its cursor, and other pages still run. The process never overlaps its
+own sweeps, and shutdown drains the running sweep before Redis/Postgres close.
+Replicas can independently discover the same durable intent; the existing
+checkout lease, deterministic attempt identity, exact funding reservation and
+committed provider permit remain the authoritative concurrency protections.
+No separate queue or new database table is needed. The bounded reconciliation
+scan deliberately revisits historical attempts because finalization includes
+idempotent external follow-up scheduling and has no separate completion marker.
+
+Reconciliation uses the checkout lease and re-reads persisted ownership. An
+obsolete unsent claim may release its exact reserved credit inside a locked
+Serializable database transaction: a cancelled intent, changed checkout
+activity/generation, newer generation, terminal/engaged recovery or recorded
+customer response. A provisional outbound message must belong to the attempt
+via its exact usage key, contain no dispatch permit or provider outcome, have
+no other message owner or allowance/parts, and be closed and uncharged in the
+same transaction as credit release. Unknown provider outcomes, ambiguous
+lineage, already committed funding, temporary offer/consent/policy holds and
+other unproven cases remain held. No provider request is made by cleanup.
+Rollback/lost-ack retries are limited to the database-only cleanup operation.
+No initial receipt or previous compensation is rewritten.
+
+The worker logs start/stop, sweep/page failures, per-attempt outcomes and
+stranded-credit release with bounded, redacted diagnostics. Unchanged debug
+holds and repeat reconciliation info are coalesced for 15 minutes in a bounded
+2,000-entry process-local cache. New decisions and warnings/errors remain
+visible; the cache never grants permission or changes business state. A
+restart clears the cache and scan cursors, not durable state.
+
+Local verification: `node --test scripts/test-recovery-retry-sweep.mjs` exercises
+scheduling and log coalescing. The disposable PostgreSQL/Redis suites
+`recovery-retry-stranded-credit.integration.test.ts` and
+`recovery-retry-emulator.integration.test.ts` cover the cleanup and fresh
+provider paths. The emulator cases use real funding, persisted moderation,
+consent, provider permits and loopback WhatsApp HTTP, with a deterministic
+approved no-offer template fixture (no live commerce/LLM fetch). They are not
+proof of production commerce-agent revalidation or full cross-service E2E.
+No schema changes, timeout increases or new provider replay policy.

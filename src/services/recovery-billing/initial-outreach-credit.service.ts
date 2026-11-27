@@ -24,6 +24,7 @@ import { lockRecoveryContext, terminalRecovery } from "../recovery-conversation/
 import type { CapacityPolicyOutcome } from "./capacity-policy.js";
 import { requireInitialRetryFundingReady } from "../recovery-delivery-retry/funding.js";
 import { initialOutreachDiagnostic } from "../recovery-delivery-retry/error-diagnostic.js";
+import { serializeRetryFunding } from "../recovery-delivery-retry/funding-admission-gate.js";
 import { RecoveryTransactionTiming, SLOW_RECOVERY_TRANSACTION_MS, isReplayableRecoveryTransactionError,
   recoveryTransactionBackoffMs, transactionFailureDetails, waitForRecoveryTransactionReplay } from "../recovery-delivery-retry/transaction-resilience.js";
 import { assertNoInitialMessageEvidence, readInitialAttempt, readInitialAttemptIdentity, readInitialMessage, validateInitialMessageIdentity, type InitialAttemptEvidence } from "./initial-outreach-credit-evidence.js";
@@ -51,6 +52,11 @@ export class InitialOutreachCreditService {
    * owners: it may not change recovery/message state or perform external I/O.
    */
   async admitInitialRetry(input: { shopId: string; recoveryId: string; outreachAttemptId: string }, reserve: (tx: Tx) => Promise<CapacityPolicyOutcome>): Promise<CapacityPolicyOutcome> {
+    return serializeRetryFunding(input.shopId, queueWaitMs => this.admitInitialRetrySerialized(input, reserve, queueWaitMs));
+  }
+
+  private async admitInitialRetrySerialized(input: { shopId: string; recoveryId: string; outreachAttemptId: string },
+    reserve: (tx: Tx) => Promise<CapacityPolicyOutcome>, queueWaitMs: number): Promise<CapacityPolicyOutcome> {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       let stage = "identity";
       const timing = new RecoveryTransactionTiming();
@@ -84,7 +90,7 @@ export class InitialOutreachCreditService {
           return { result: { kind: "admitted", admission: checked.admission } };
         }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         const fields = { shopId: input.shopId, checkoutRecoveryId: input.recoveryId,
-          outreachAttemptId: input.outreachAttemptId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, transactionAttempt: attempt, ...timing.snapshot() };
+          outreachAttemptId: input.outreachAttemptId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, transactionAttempt: attempt, queueWaitMs, ...timing.snapshot() };
         if (outcome.result.kind === "admitted") {
           const evidence = { ...fields, fundingReservationId: reservationId, fundingSource: outcome.result.admission.kind };
           if (reused) this.serviceLogger.debug("recovery.delivery_retry.funding_replayed", evidence);
@@ -96,16 +102,17 @@ export class InitialOutreachCreditService {
       } catch (error) {
         if (error instanceof RecoveryCompensationLineageError || error instanceof ExistingHoldSignal) {
           this.serviceLogger.debug("recovery.retry_credit.held", { ...input, checkoutRecoveryId: input.recoveryId,
-            retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, ...timing.snapshot(), reason: initialOutreachDiagnostic(error).message,
+            retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, queueWaitMs, ...timing.snapshot(), reason: initialOutreachDiagnostic(error).message,
             sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
           return { result: { kind: "blocked", reason: "reservation-in-flight" } };
         }
         if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, maxAttempts: this.maxAttempts, ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
-          await waitForRecoveryTransactionReplay(attempt);
+          const retryBackoffMs = recoveryTransactionBackoffMs(attempt, error);
+          this.serviceLogger.warn("recovery.retry_credit.retry", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, queueWaitMs, maxAttempts: this.maxAttempts, ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs, sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(retryBackoffMs);
           continue;
         }
-        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
+        this.serviceLogger.error("recovery.retry_credit.failed", { ...input, checkoutRecoveryId: input.recoveryId, retryIntentId: input.outreachAttemptId.slice("retry_".length), stage, attempt, queueWaitMs, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), sourceError: initialOutreachDiagnostic(error), ...databaseErrorContext(error) });
         throw error;
       }
     }
@@ -183,8 +190,9 @@ export class InitialOutreachCreditService {
           return { kind: "held", reason: "lineage-conflict" };
         }
         if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
-          await waitForRecoveryTransactionReplay(attempt);
+          const retryBackoffMs = recoveryTransactionBackoffMs(attempt, error);
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs, error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(retryBackoffMs);
           continue;
         }
         this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "settleConfirmedInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
@@ -219,8 +227,9 @@ export class InitialOutreachCreditService {
           return { kind: "held", reason: "lineage-conflict" };
         }
         if (isReplayableRecoveryTransactionError(error) && attempt < this.maxAttempts) {
-          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs: recoveryTransactionBackoffMs(attempt), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
-          await waitForRecoveryTransactionReplay(attempt);
+          const retryBackoffMs = recoveryTransactionBackoffMs(attempt, error);
+          this.serviceLogger.warn("recovery.initial_outreach_credit.retry", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, reasonCode: conflictCode(error), ...timing.snapshot(), ...transactionFailureDetails(error), retryBackoffMs, error, ...errorCauseContext(error), ...databaseErrorContext(error) });
+          await waitForRecoveryTransactionReplay(retryBackoffMs);
           continue;
         }
         this.serviceLogger.error("recovery.initial_outreach_credit.failed", { operation: "revalidateExistingInitialOutreach", stage, ...input, ...(sourceKind ? { sourceKind } : {}), attempt, maxAttempts: this.maxAttempts, retryExhausted: isReplayableRecoveryTransactionError(error), ...timing.snapshot(), ...transactionFailureDetails(error), error, ...errorCauseContext(error), ...databaseErrorContext(error) });
@@ -294,18 +303,21 @@ async function revalidate(tx: Tx, input: ExistingInitialOutreachCreditInput, now
 
 async function validatePrePermit(tx: Tx, input: ExistingInitialOutreachCreditInput, now: Date, setStage: Stage): Promise<PrePermit> {
   setStage("identity");
-  let attempt = await readInitialAttemptIdentity(tx, input);
+  const attempt = await readInitialAttemptIdentity(tx, input);
   let historicalMessageIds: string[] = [];
   if (attempt.sequence >= 3) {
     const conversationId = attempt.checkoutRecovery.conversation?.id;
     requireLineage(conversationId, "initial retry conversation missing");
     setStage("owner_lock");
-    const owner = await lockRecoveryContext(tx, conversationId);
+    const owner = await lockRecoveryContext(tx, conversationId, { shopId: input.shopId, recoveryId: input.recoveryId, contention: "nowait" });
     requireLineage(owner?.shopId === input.shopId && owner.recoveryId === input.recoveryId &&
       owner.mode === "AI" && !terminalRecovery(owner.recoveryStatus) && !owner.lastInboundAt && owner.inboundVersion === 0,
     "initial retry owner no longer eligible");
     setStage("retry_lineage");
-    attempt = await readInitialAttemptIdentity(tx, input);
+    // The exact attempt evidence was read in this same Serializable snapshot
+    // before acquiring the owner locks. No mutation occurs between the reads;
+    // the current-attempt/lineage query below still verifies the retry under
+    // those locks. A second identical projection is not a freshness check.
     requireLineage(attempt.sequence >= 3 && attempt.checkoutRecovery.conversation?.id === conversationId, "retry identity changed");
     const links = await requireInitialRetryFundingReady(tx, { ...input, conversationId, attemptId: attempt.id, now });
     historicalMessageIds = links.map(link => link.intent.failedMessageId);

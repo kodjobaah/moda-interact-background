@@ -1,6 +1,5 @@
 import { recoverySenderPoolService } from "../recovery-sender-pool/sender-pool.service.js";
 import prisma from "../../lib/db.js";
-import { recoveryRecipientResolverService } from "../checkout-recovery/recovery-recipient-resolver.service.js";
 import { recoveryOutreachAttemptService } from "../recovery-outreach-attempt.service.js";
 import { recoveryPolicyService } from "../recovery-policy.service.js";
 import { recoveryBillingService } from "../recovery-billing.service.js";
@@ -29,7 +28,6 @@ export function createWooRecoveryOutreachService(input: {
   guardedSender: WooGuardedInitialSender;
   enqueue: WooOutreachDependencies["enqueue"];
   logger: StructuredLogger;
-  enableTestOutbound?: () => boolean;
 }): WooRecoveryOutreachService {
   return new WooRecoveryOutreachService({
     logger: input.logger,
@@ -37,7 +35,6 @@ export function createWooRecoveryOutreachService(input: {
     orders: input.orders,
     sender: input.guardedSender,
     enqueue: input.enqueue,
-    ...(input.enableTestOutbound ? { enableTestOutbound: input.enableTestOutbound } : {}),
     recoveries: {
       async get(recoveryId) {
         return prisma.checkoutRecovery.findUnique({
@@ -50,7 +47,7 @@ export function createWooRecoveryOutreachService(input: {
         });
       },
       currentRecipient: (customerId, shopId) =>
-        recoveryRecipientResolverService.resolveForCustomerInShop(customerId, shopId),
+        wooRecoveryConsentReader.resolveStoredRecipient(customerId, shopId),
     },
     attempts: {
       async findInitial(recoveryId) {

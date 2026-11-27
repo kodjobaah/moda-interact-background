@@ -1,3 +1,4 @@
+import { failure, policy, type Fixture } from "./fixtures/recovery-retry-claim.fixture.js";
 import { withOneRecoveryTransactionFault } from "./fixtures/recovery-transaction-fault.fixture.js";
 import { initialRetryExecutionPorts, InitialDeliveryRetryExecutionService } from "../../src/services/recovery-delivery-retry/execution.js";
 import { expectedInitialRetryDispatchKey } from "../../src/services/recovery-delivery-retry/provider-dispatch-key.js";
@@ -13,42 +14,9 @@ import { retryOutreachAttemptId } from "../../src/domain/recovery-outreach-ident
 import { InitialDeliveryRetryClaimService, listDueInitialRetryIntents } from "../../src/services/recovery-delivery-retry/claim.js";
 import { checkInitialRetryPermit } from "../../src/services/recovery-delivery-retry/initial-permit.js";
 import { lockRecoveryContext, readRecoveryWindowEvidence } from "../../src/services/recovery-conversation/recovery-conversation.sql.js";
-import { RecoveryDeliveryCompensationService } from "../../src/services/recovery-delivery-compensation/reconcile.service.js";
-import type { RecoveryPolicySnapshot } from "../../src/services/recovery-policy.service.js";
 import { createInitialOutreachCreditFixture } from "./fixtures/arch056-initial-outreach-credit.fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL && process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
-const policy: RecoveryPolicySnapshot = { recoveryDelayMinutes: 15, recoveryOfferMode: "NONE", fixedShopifyDiscountId: null,
-  followUpEnabled: false, followUpDelayMinutes: null, source: "MERCHANT", offerSnapshot: null };
-type Fixture = Awaited<ReturnType<typeof createInitialOutreachCreditFixture>>;
-
-async function failure(f: Fixture, code = "131016") {
-  const conversation = await f.db.conversation.findUniqueOrThrow({ where: { checkoutRecoveryId: f.recoveryId } });
-  // Simulate an existing verified sender assignment and the exact immutable
-  // provider stamps of its accepted message. No credentials or provider calls.
-  const senderPhone = BigInt(`0x${randomUUID().replace(/-/g, "")}`).toString();
-  const senderAccount = "918273645546372819";
-  const recipient = "15551234567";
-  const sender = await f.db.whatsAppPoolSender.create({ data: { providerPhoneNumberId: senderPhone,
-    providerAccountId: senderAccount, verifiedAt: f.sentAt, allocationEnabled: false } });
-  const thread = await f.db.recoverySenderThread.create({ data: { canonicalRecipient: recipient,
-    providerPhoneNumberId: sender.providerPhoneNumberId, openedAt: f.sentAt } });
-  const route = await f.db.recoverySenderRoute.create({ data: { shopId: f.shopId, threadId: thread.id,
-    canonicalRecipient: recipient, providerPhoneNumberId: sender.providerPhoneNumberId, openedAt: f.sentAt } });
-  await f.db.recoverySenderAssignment.create({ data: { conversationId: conversation.id, routeId: route.id, assignedAt: f.sentAt } });
-  expect(await f.service.settleConfirmedInitialOutreach({ shopId: f.shopId, recoveryId: f.recoveryId,
-    outreachAttemptId: f.attemptId, outboundMessageId: f.messageId })).toMatchObject({ kind: "settled" });
-  await f.db.conversationMessage.update({ where: { id: f.messageId }, data: {
-    dispatchProviderAccountId: senderAccount, dispatchProviderPhoneNumberId: senderPhone,
-    status: "FAILED", providerFailureCode: code, failedAt: new Date(f.sentAt.getTime() + 1_000),
-  } });
-  expect(await new RecoveryDeliveryCompensationService(f.db).reconcile(f.providerMessageId)).toBe("restored-spendable");
-  const intent = await f.db.recoveryOutreachRetryIntent.findUniqueOrThrow({ where: { failedAttemptId: f.attemptId } });
-  const original = await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } });
-  const reservation = await f.db.usageReservation.findUniqueOrThrow({ where: { id: intent.fundingReservationId } });
-  return { conversation, intent, original, reservation, claim: new InitialDeliveryRetryClaimService(f.db) };
-}
-
 async function noFinancialOrProviderChanges(f: Fixture, setup: Awaited<ReturnType<typeof failure>>) {
   expect(await f.db.recoveryOutreachAttempt.findUniqueOrThrow({ where: { id: f.attemptId } })).toEqual(setup.original);
   expect(await f.db.usageReservation.findUniqueOrThrow({ where: { id: setup.reservation.id } })).toEqual(setup.reservation);
@@ -76,6 +44,27 @@ suite("Initial delivery retry durable claims", () => {
         .toMatchObject({ checkoutRecoveryId: f.recoveryId, sequence: 3, trigger: "INITIAL", status: "PENDING", outboundMessageId: null });
       // Crash/restart: the same intent can be rediscovered, and the claim replays.
       expect(await new InitialDeliveryRetryClaimService(f.db).claim(s.intent.id, policy)).toMatchObject({ kind: "existing", sequence: 3 });
+      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(2);
+      await noFinancialOrProviderChanges(f, s);
+    } finally { await f.close(); }
+  }, 60_000);
+
+  it.each(["shop", "conversation"] as const)("fails fast on a locked %s and can claim after release", async locked => {
+    const f = await createInitialOutreachCreditFixture({ sentAgeMs: 60 * 60_000 });
+    try {
+      const s = await failure(f);
+      const owner = { shopId: f.shopId, recoveryId: f.recoveryId, contention: "nowait" as const };
+      await f.db.$transaction(async blocker => {
+        if (locked === "shop") await blocker.$queryRaw`SELECT id FROM commerce."Shop" WHERE id=${f.shopId} FOR UPDATE`;
+        else await blocker.$queryRaw`SELECT id FROM whatsapp."Conversation" WHERE id=${s.conversation.id} FOR UPDATE`;
+        // The holder cannot release until the competing transaction returns.
+        // NOWAIT must return the original PostgreSQL lock conflict, not P2028.
+        await expect(f.db.$transaction(tx => lockRecoveryContext(tx, s.conversation.id, owner)))
+          .rejects.toMatchObject({ code: "P2010", meta: { code: "55P03" } });
+      });
+      expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(1);
+      expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({ kind: "claimed" });
+      expect(await s.claim.claim(s.intent.id, policy)).toMatchObject({ kind: "existing" });
       expect(await f.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: f.recoveryId } })).toBe(2);
       await noFinancialOrProviderChanges(f, s);
     } finally { await f.close(); }
@@ -162,7 +151,6 @@ suite("Initial delivery retry execution replay", () => {
       ports.outbound = new OutboundWhatsAppAdmissionService(f.db);
       ports.policy = new RecoveryPolicyService(f.db);
       ports.finalizer = new RecoveryOutreachFinalizationService(ports.billing, new RecoveryInitialOutreachSupportNoticeService(f.db), undefined, f.db);
-      ports.wooEnabled = () => false; // Even disabled Woo must settle an earlier acceptance.
       const reserve = vi.spyOn(ports.outbound, "reserve").mockRejectedValue(new Error("unexpected new admission"));
       const send = vi.spyOn(ports.outbound, "resumeInitialTemplate").mockRejectedValue(new Error("unexpected provider send"));
       const wooSend = vi.spyOn(ports.wooSender, "sendInitial").mockRejectedValue(new Error("unexpected Woo provider send"));

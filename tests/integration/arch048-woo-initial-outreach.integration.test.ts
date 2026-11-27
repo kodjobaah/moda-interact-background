@@ -2,41 +2,30 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { outboundWhatsAppAdmissionService } from "../../src/services/outbound-whatsapp-admission.service.js";
+import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
 import { recoveryBillingService } from "../../src/services/recovery-billing.service.js";
 import { conversationService } from "../../src/services/conversation.service.js";
 import { whatsAppService } from "../../src/services/whatsapp.service.js";
-import { platformConsumerConfiguration } from "../../src/services/platform-configuration/consumers.js";
-import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../src/services/platform-configuration/contracts.js";
-import { createWooRecoveryOutreachService } from "../../src/services/woocommerce-recovery/woo-recovery-outreach.adapters.js";
-import { createLogger } from "@modainteract/moda-interact-shared/logging";
+import { recoverySenderPoolService } from "../../src/services/recovery-sender-pool/sender-pool.service.js";
 import { createRecoveryIdempotencyKey } from "@modainteract/moda-interact-shared/billing";
 import type { WhatsAppInboundEvent } from "../../src/integration/whatsapp/types.js";
 import { RecoveryRoutingService } from "../../src/services/recovery-routing.service.js";
 import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
 import {
-  createWooOutreachFixture,
-  type WooOutreachIntegrationFixture,
+  createWooOutreachFixture, mockWooOutreachSenderConfiguration, recordWooFixtureReceipt,
+  WOO_TEST_PRODUCT_ID, type WooOutreachIntegrationFixture,
 } from "./fixtures/arch048-woo-outreach.fixture.js";
+import { mockWooOutreachCatalogue } from "./fixtures/woo-outreach-catalogue.fixture.js";
 
 const integration = process.env.TEST_DATABASE_URL && process.env.TEST_REDIS_URL &&
   process.env.MODA_DISPOSABLE_INTEGRATION === "1" ? describe : describe.skip;
 
 integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres + Redis)", () => {
   let f: WooOutreachIntegrationFixture | undefined;
+  let catalogueReads: ReturnType<typeof mockWooOutreachCatalogue>;
 
   beforeEach(async () => {
-    const readConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
-    vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
-      async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
-        if (key === "messaging.sender") {
-          return {
-            key, version: 1,
-            value: { accessToken: "integration-token", phoneNumberId: "123456789", businessAccountId: "987654321" },
-          } as ConfigurationSnapshot<K>;
-        }
-        return readConfiguration(key);
-      },
-    );
+    catalogueReads = mockWooOutreachCatalogue();
     vi.spyOn(outboundWhatsAppAdmissionService, "getProviderAccountId")
       .mockResolvedValue(WOO_TEST_SENDER_WABA);
     vi.spyOn(whatsAppService, "getProviderAccountId")
@@ -44,12 +33,13 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     // The frozen registration, approval, category and language are persisted
     // in the disposable DB; the provider transport is still controlled.
     f = await createWooOutreachFixture();
-  });
+    mockWooOutreachSenderConfiguration(f.senderConfiguration);
+  }, 90_000);
 
   afterEach(async () => {
     try { if (f) await f.cleanup(); }
-    finally { f = undefined; vi.restoreAllMocks(); }
-  });
+    finally { f = undefined; vi.restoreAllMocks(); vi.unstubAllEnvs(); }
+  }, 90_000);
 
   it("creates only one durable sequence-1 attempt and one BullMQ job across concurrent DB-locked requests", async () => {
     const a = f!;
@@ -73,8 +63,18 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
 
   it("does not send or reserve/commit billing when the approved initial template lacks the basket binding", async () => {
     await f!.cleanup();
+    f = undefined;
     f = await createWooOutreachFixture({ includeCheckoutItemsBinding: false });
-    const a = f!;
+    const a = f;
+    // Reinstall within the same test to exercise the previous recursive mock
+    // failure deterministically, without relying on a timed-out setup hook.
+    mockWooOutreachSenderConfiguration(a.senderConfiguration);
+    await expect(platformConsumerConfiguration.read("messaging.sender")).resolves.toMatchObject({
+      rowId: a.senderConfiguration.id, version: a.senderConfiguration.version,
+    });
+    // A non-sender read must still use the real configuration service.
+    await expect(platformConsumerConfiguration.read("commerce.recoveryExecution"))
+      .resolves.toMatchObject({ key: "commerce.recoveryExecution" });
     await a.service.enqueueInitial(a.recoveryId);
 
     await expect(a.service.processInitial(a.recoveryId)).resolves.toMatchObject({
@@ -95,6 +95,10 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     ]);
     expect(dispatched.map((r) => r.kind).sort()).toEqual(["already-initialized", "sent"]);
     expect(a.providerRequests).toBe(1);
+    expect(catalogueReads.mock.calls.map(([name, args]) => ({ name, args }))).toEqual([
+      { name: "commerce_get_product", args: { productId: WOO_TEST_PRODUCT_ID, variantId: null } },
+      { name: "commerce_get_product", args: { productId: WOO_TEST_PRODUCT_ID, variantId: null } },
+    ]);
     expect((await a.db.checkoutRecovery.findUniqueOrThrow({ where: { id: a.recoveryId } })).status)
       .toBe("MESSAGE_SENT");
     const attempts = await a.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: a.recoveryId } });
@@ -185,19 +189,18 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       expect(attempts[1]!.outboundMessageId).toBe(messages[1]!.id);
       expect(messages[0]!.providerMessageId).not.toBe(messages[1]!.providerMessageId);
 
-      const routing = new RecoveryRoutingService(first.db, { isShopExecutionActive: async () => true }, {
-        resolveSender: async () => ({
-          providerAccountId: WOO_TEST_SENDER_WABA, providerPhoneNumberId: "123456789",
-        }),
-      });
-      const quotedEvent = (providerMessageId: string, contextMessageId: string): WhatsAppInboundEvent => ({
-        schemaVersion: 1, provider: "whatsapp", providerAccountId: WOO_TEST_SENDER_WABA,
-        providerPhoneNumberId: "123456789", providerMessageId, customerPhone: "+447400123456",
-        contextMessageId, occurredAt: new Date().toISOString(), content: { type: "text", text: "Help" },
-      });
-      const routes = await Promise.all(messages.map((message, index) => routing.resolveInboundMessage(
-        quotedEvent(`inbound-${index}-${randomUUID()}`, message.providerMessageId!),
-      )));
+      const routing = new RecoveryRoutingService(first.db, { isShopExecutionActive: async () => true });
+      const routes = await Promise.all(messages.map((message, index) => {
+        expect(message.dispatchProviderAccountId).toBe(WOO_TEST_SENDER_WABA);
+        expect(message.dispatchProviderPhoneNumberId).toBeTruthy();
+        const event: WhatsAppInboundEvent = {
+          schemaVersion: 1, provider: "whatsapp", providerAccountId: message.dispatchProviderAccountId!,
+          providerPhoneNumberId: message.dispatchProviderPhoneNumberId!, providerMessageId: `inbound-${index}-${randomUUID()}`,
+          customerPhone: "+447400123456", contextMessageId: message.providerMessageId!,
+          occurredAt: new Date().toISOString(), content: { type: "text", text: "Help" },
+        };
+        return routing.resolveInboundMessage(event);
+      }));
       expect(routes[0]).toMatchObject({
         kind: "resolved", shopId: first.shopId, checkoutRecoveryId: first.recoveryId,
         conversationId: messages[0]!.conversationId,
@@ -258,7 +261,7 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       shopId: a.shopId, customerId: a.customerId, checkoutToken: a.checkoutToken,
       generation: 2, status: "DETECTED", lastExternalActivityAt: new Date(),
       currency: "GBP", checkoutUrl: `${a.shopUrl}/checkout/${a.checkoutToken}`,
-      lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
+      lineItems: [{ productId: WOO_TEST_PRODUCT_ID, variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     expect(await a.service.enqueueInitial(next.id)).toMatchObject({ kind: "queued" });
     const newAttempt = await a.db.recoveryOutreachAttempt.findUniqueOrThrow({
@@ -343,14 +346,15 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
       where: { id: conversation.id }, select: { controlRevision: true },
     });
     const sentAt = new Date();
-    const message = await a.db.conversationMessage.create({ data: {
-      conversationId: conversation.id, direction: "OUTBOUND", senderType: "AUTOMATION",
-      status: "SENT", content: "Integration-only confirmed template", sentAt,
-      providerDispatchKey: `recovery-outreach:${attempt.id}`,
-      providerDispatchAdmittedAt: sentAt,
-      providerDispatchControlRevision: control.controlRevision,
+    const allocated = await recoverySenderPoolService.allocate({ conversationId: conversation.id,
+      canonicalRecipient: "447400123456", initialAttemptId: attempt.id });
+    expect(allocated.kind).toBe("assigned");
+    const message = await recordWooFixtureReceipt(a.db, {
+      shopId: a.shopId, conversationId: conversation.id, recipient: "447400123456",
+      content: "Integration-only confirmed template", sentAt,
+      idempotencyKey: `recovery-outreach:${attempt.id}`, controlRevision: control.controlRevision,
       providerMessageId: `wamid-resumed-${randomUUID()}`,
-    } });
+    });
     // Simulate worker termination after the durable provider result but before
     // RecoveryOutreachAttempt finalisation: attempt identity remains unset.
     await a.resumePreviousRecovery();
@@ -568,23 +572,18 @@ integration("ARCH-048-BACKGROUND-004 Woo initial outreach (disposable Postgres +
     expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(0);
   }, 90_000);
 
-  it("keeps outbound default-off in production configuration and does not publish or reserve", async () => {
+  it("dispatches and settles eligible Woo initial outreach without a Woo-specific outbound flag", async () => {
     const a = f!;
-    const guarded = createWooRecoveryOutreachService({
-      coordinator: { withCheckoutLock: async (_ref, run) => run() },
-      orders: { read: async () => ({ kind: "none-observed" }) },
-      guardedSender: {
-        sendInitial: async () => { throw new Error("NO_PROVIDER_CALL_ALLOWED"); },
-        findExistingAdmission: async () => null,
-      },
-      enqueue: { initial: async () => { throw new Error("NO_QUEUE_ALLOWED"); } },
-      logger: createLogger({ serviceName: "moda-recovery-worker", environment: "test" }),
-    });
-    expect(await guarded.enqueueInitial(a.recoveryId))
-      .toEqual({ kind: "suppressed", reason: "woo-outbound-disabled" });
-    expect(await guarded.processInitial(a.recoveryId))
-      .toEqual({ kind: "suppressed", reason: "woo-outbound-disabled" });
-    expect(await a.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: a.recoveryId } })).toBe(0);
-    expect(await a.db.usageReservation.count({ where: { shopId: a.shopId } })).toBe(0);
+    vi.stubEnv("MODA_WOO_TEST_OUTBOUND", undefined);
+    try {
+      // The fixture injects a disposable queue, database and controlled sender.
+      expect(await a.service.enqueueInitial(a.recoveryId)).toMatchObject({ kind: "queued" });
+      expect(await a.service.processInitial(a.recoveryId)).toMatchObject({ kind: "sent" });
+      expect(await a.service.processInitial(a.recoveryId)).toMatchObject({ kind: "already-initialized" });
+      expect(a.providerRequests).toBe(1);
+      expect(await a.db.recoveryOutreachAttempt.count({ where: { checkoutRecoveryId: a.recoveryId } })).toBe(1);
+      expect(await a.db.usageReservation.count({ where: { shopId: a.shopId, status: "COMMITTED" } })).toBe(1);
+      expect(await a.db.usageEvent.count({ where: { shopId: a.shopId, metric: "RECOVERY_CONVERSATION" } })).toBe(1);
+    } finally { vi.unstubAllEnvs(); }
   }, 90_000);
 });

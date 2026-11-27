@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { vi } from "vitest";
+import { platformConsumerConfiguration } from "../../../src/services/platform-configuration/consumers.js";
+import type { BackgroundReadableKey, ConfigurationSnapshot } from "../../../src/services/platform-configuration/contracts.js";
 import { Queue } from "bullmq";
 import { PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
@@ -8,7 +11,7 @@ import { createWooRecoveryOutreachService } from "../../../src/services/woocomme
 import type {
   WooGuardedInitialSender,
 } from "../../../src/services/woocommerce-recovery/woo-recovery-outreach.service.js";
-import { seedApprovedInitialWooTemplateRegistration } from "./woo-approved-initial-template.fixture.js";
+import { WOO_TEST_SENDER_WABA, seedApprovedInitialWooTemplateRegistration } from "./woo-approved-initial-template.fixture.js";
 import type {
   WooCheckoutCoordinator,
   WooObservedOrderStateReader,
@@ -17,6 +20,61 @@ import type {
 import { WooCheckoutCoordinatorService } from "../../../src/services/woocommerce-recovery/woo-order-reconciliation.service.js";
 import { WooCheckoutLeaseGuard } from "../../../src/services/pending-recovery-candidate/checkout-order-guard.service.js";
 
+export const WOO_TEST_POOL_PHONE = "123456789";
+export const WOO_TEST_PRODUCT_ID = "101";
+const catalogueLocales = [
+  "cs", "da", "de", "en", "es", "fi", "fr", "it", "ja", "ko", "nb", "nl", "pl",
+  "pt-BR", "pt-PT", "sv", "th", "tr", "zh-Hans", "zh-Hant",
+] as const;
+
+// Capture the real reader before installing any fixture spies. Reinstalling a
+// sender mock must not capture its previous implementation as the fallback.
+const readUnmockedConfiguration = platformConsumerConfiguration.read.bind(platformConsumerConfiguration);
+
+/** Keep only credential retrieval mocked. The production allocator checks the
+ * persisted configuration revision and writes real sender ownership. */
+export function mockWooOutreachSenderConfiguration(configuration: { id: string; version: number }) {
+  vi.spyOn(platformConsumerConfiguration, "read").mockImplementation(
+    async <K extends BackgroundReadableKey>(key: K): Promise<ConfigurationSnapshot<K>> => {
+      if (key === "messaging.sender") return {
+        key, rowId: configuration.id, version: configuration.version,
+        value: { accessToken: "integration-token", phoneNumberId: "123456788", businessAccountId: WOO_TEST_SENDER_WABA },
+      } as ConfigurationSnapshot<K>;
+      return readUnmockedConfiguration(key);
+    },
+  );
+}
+
+/** Persist the accepted message and its exact automated allowance debit. This
+ * models a completed provider send, without mocking production settlement. */
+export async function recordWooFixtureReceipt(db: PrismaClient, input: {
+  shopId: string; conversationId: string; idempotencyKey: string; recipient: string;
+  controlRevision: number; sentAt: Date; providerMessageId: string; content: string;
+}) {
+  return db.$transaction(async tx => {
+    const assignment = await tx.recoverySenderAssignment.findUniqueOrThrow({
+      where: { conversationId: input.conversationId }, include: { route: { include: { thread: { include: { sender: true } } } } },
+    });
+    const route = assignment.route;
+    if (assignment.releasedAt || route.closedAt || route.thread.closedAt || route.shopId !== input.shopId ||
+        route.canonicalRecipient !== input.recipient || route.thread.sender.providerAccountId !== WOO_TEST_SENDER_WABA)
+      throw new Error("WOO_FIXTURE_SENDER_OWNERSHIP_MISMATCH");
+    const message = await tx.conversationMessage.create({ data: {
+      conversationId: input.conversationId, direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT",
+      content: input.content, sentAt: input.sentAt, providerDispatchKey: input.idempotencyKey,
+      providerDispatchAdmittedAt: input.sentAt, providerDispatchControlRevision: input.controlRevision,
+      providerMessageId: input.providerMessageId,
+      dispatchProviderAccountId: route.thread.sender.providerAccountId,
+      dispatchProviderPhoneNumberId: route.providerPhoneNumberId,
+    } });
+    await tx.usageEvent.create({ data: {
+      shopId: input.shopId, metric: "OUTBOUND_AUTOMATED_MESSAGE", quantity: 1,
+      idempotencyKey: input.idempotencyKey, sourceType: "OUTBOUND_AUTOMATED_MESSAGE", sourceId: message.id,
+    } });
+    return message;
+  });
+}
+
 /**
  * BG004's disposable Postgres/BullMQ harness. BG002's production checkout
  * coordinator and ARCH-046's production final-send guard are NOT available in
@@ -24,6 +82,7 @@ import { WooCheckoutLeaseGuard } from "../../../src/services/pending-recovery-ca
  * persisted test sender here; BG005/system testing must verify the real wiring.
  */
 export async function createWooOutreachFixture(options: { includeCheckoutItemsBinding?: boolean } = {}) {
+  if (process.env.MODA_DISPOSABLE_INTEGRATION !== "1") throw new Error("Woo outreach fixture requires disposable integration infrastructure");
   const db = new PrismaClient({ datasourceUrl: process.env.TEST_DATABASE_URL! });
   const redis = new Redis(process.env.TEST_REDIS_URL!, { maxRetriesPerRequest: null });
   const runId = randomUUID();
@@ -46,6 +105,17 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
   let beforePermit: (() => Promise<void>) | undefined;
 
   try {
+    const senderConfiguration = await db.platformConfiguration.upsert({
+      where: { environment_key: { environment: "test", key: "messaging.sender" } },
+      create: { environment: "test", key: "messaging.sender", value: { fixture: true } }, update: {},
+    });
+    await db.backgroundRuntimeConfig.upsert({ where: { id: "default" },
+      create: { id: "default", checkoutRecoveryLifetimeDays: 21 }, update: {} });
+    const poolSender = await db.whatsAppPoolSender.upsert({ where: { providerPhoneNumberId: WOO_TEST_POOL_PHONE },
+      create: { providerPhoneNumberId: WOO_TEST_POOL_PHONE, providerAccountId: WOO_TEST_SENDER_WABA,
+        verifiedAt: new Date(Date.now() - 60_000), allocationEnabled: true }, update: {} });
+    if (poolSender.providerAccountId !== WOO_TEST_SENDER_WABA || !poolSender.allocationEnabled)
+      throw new Error("WOO_FIXTURE_POOL_CONFIGURATION_MISMATCH");
     const feature = await db.feature.upsert({
       where: { key: "checkout_recovery" },
       create: { key: "checkout_recovery", displayName: "Checkout recovery", activationMode: "ALWAYS_ENABLED" },
@@ -55,9 +125,26 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
     const plan = await db.billingPlan.create({ data: {
       shopifyPlanHandle: `arch048-woo-${runId}`, name: "ARCH048 Woo free", kind: "FREE",
     } });
+    // Live offer-budget lookup resolves the active subscription by the
+    // pricing-catalogue handle, even in NONE mode. Keep the real resolver and
+    // database constraints active instead of bypassing billing/model policy.
+    await db.merchantPricingPlan.create({ data: {
+      shopifyPlanHandle: plan.shopifyPlanHandle, displayName: "Woo integration free",
+      planKind: "FREE", cataloguePosition: await db.merchantPricingPlan.count(),
+      includedRecoveryCredits: 1, allowancePeriod: "LIFETIME",
+      billingPeriod: "EVERY_30_DAYS", recurringAmountMinor: 0, currency: "GBP",
+      translations: { create: catalogueLocales.map(locale => ({
+        locale, merchantDescription: "Disposable Woo outreach integration plan",
+      })) },
+    } });
+    // example.com is reserved for examples and passes the real Woo HTTPS link
+    // issuer's public-host syntax check; the fixture never contacts the store.
     const shop = await db.shop.create({ data: {
-      id: shopId, domain: `https://${runId}.example.test`, platform: "WOOCOMMERCE",
+      id: shopId, domain: `https://${runId}.example.com`, platform: "WOOCOMMERCE",
       status: "ACTIVE", defaultCountryCode: "GB", defaultLanguageTag: "en-GB",
+    } });
+    await db.shopSettings.create({ data: {
+      shopId, recoveryOfferMode: "NONE", followUpEnabled: false,
     } });
     const install = await db.wooCommerceInstallation.create({ data: {
       shopId, canonicalSiteUrl: shop.domain, credentialDigest: Uint8Array.from(randomBytes(32)),
@@ -147,7 +234,7 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
     const recovery = await db.checkoutRecovery.create({ data: {
       shopId, customerId: customer.id, checkoutToken, lastExternalActivityAt: sentAt,
       currency: "GBP", checkoutUrl: `${shop.domain}/checkout/${checkoutToken}`,
-      lineItems: [{ productId: "woo-product-1", variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
+      lineItems: [{ productId: WOO_TEST_PRODUCT_ID, variantId: null, title: "Test item", quantity: 1, price: "10.00" }],
     } });
     const reader = new WooRecoveryConsentReader(db);
 
@@ -214,15 +301,13 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
           bodyParameters: input.template.sendFields?.bodyParameters ?? [],
         });
         const admittedAt = new Date();
-        await db.conversationMessage.create({ data: {
-          conversationId: input.conversationId,
-          direction: "OUTBOUND", senderType: "AUTOMATION", status: "SENT",
+        await recordWooFixtureReceipt(db, {
+          shopId: input.recovery.shopId, conversationId: input.conversationId,
+          recipient: input.recipient, idempotencyKey: input.idempotencyKey,
           content: "Integration-only Marketing template", sentAt: admittedAt,
-          providerDispatchKey: input.idempotencyKey,
-          providerDispatchAdmittedAt: admittedAt,
-          providerDispatchControlRevision: control.controlRevision,
+          controlRevision: control.controlRevision,
           providerMessageId: `wamid-arch048-${runId}-${providerRequests + 1}`,
-        } });
+        });
         ++providerRequests;
         return { kind: "admitted" };
       },
@@ -230,7 +315,6 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
     const service = createWooRecoveryOutreachService({
       coordinator, orders, guardedSender: sender,
       logger: createLogger({ serviceName: "moda-recovery-worker", environment: "test" }),
-      enableTestOutbound: () => true,
       enqueue: { async initial(recoveryId, attemptId) {
         await queue.add("initial-outreach", { recoveryId, attemptId }, {
           jobId: `arch048-${attemptId}`, removeOnComplete: false,
@@ -239,7 +323,7 @@ export async function createWooOutreachFixture(options: { includeCheckoutItemsBi
     });
     return {
       db, redis, queue, shopId, shopUrl: shop.domain, checkoutToken, recoveryId: recovery.id, customerId: customer.id,
-      guardedSender: sender,
+      guardedSender: sender, senderConfiguration,
       phoneId: phone.id, service, coordinator,
       providerTemplateRequests,
       useRedisCheckoutCoordinator() { activeCoordinator = redisCoordinator; },

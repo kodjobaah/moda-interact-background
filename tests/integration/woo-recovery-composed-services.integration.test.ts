@@ -17,8 +17,10 @@ import { createWooRecoveryOutreachService } from "../../src/services/woocommerce
 import { WooInitialDispatchQueue } from "../../src/services/woocommerce-recovery/woo-initial-dispatch.queue.js";
 import { WooRecoveryOrchestratorService } from "../../src/services/woocommerce-recovery/woo-recovery-orchestrator.service.js";
 import { createPendingRecoveryCandidateWorker } from "../../src/workers/pending-recovery-candidate.worker.js";
-import { createWooOutreachFixture, type WooOutreachIntegrationFixture } from "./fixtures/arch048-woo-outreach.fixture.js";
+import { createWooOutreachFixture, mockWooOutreachSenderConfiguration, type WooOutreachIntegrationFixture } from "./fixtures/arch048-woo-outreach.fixture.js";
 import { WOO_TEST_SENDER_WABA } from "./fixtures/woo-approved-initial-template.fixture.js";
+import { mockWooOutreachCatalogue, WOO_COMPOSED_FIRST_PRODUCT_ID,
+  WOO_COMPOSED_SECOND_PRODUCT_ID } from "./fixtures/woo-outreach-catalogue.fixture.js";
 
 vi.mock("../../src/runtime/background-runtime-config.js", () => ({
   backgroundRuntimeConfigService: {
@@ -42,7 +44,7 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
   let fixture: WooOutreachIntegrationFixture | undefined;
   afterEach(async () => {
     try { if (fixture) await fixture.cleanup(); }
-    finally { fixture = undefined; vi.restoreAllMocks(); }
+    finally { fixture = undefined; vi.restoreAllMocks(); vi.unstubAllEnvs(); }
   });
 
   it("composes BG001 checkout → BG003 consent/admission → BG004 attempt and credit → BG002 terminal order", async () => {
@@ -52,7 +54,9 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       .mockResolvedValue(WOO_TEST_SENDER_WABA);
     vi.spyOn(whatsAppService, "getProviderAccountId")
       .mockResolvedValue(WOO_TEST_SENDER_WABA);
+    const catalogueReads = mockWooOutreachCatalogue();
     fixture = await createWooOutreachFixture();
+    mockWooOutreachSenderConfiguration(fixture.senderConfiguration);
     const f = fixture;
     await f.db.shop.update({ where: { id: f.shopId }, data: { onboardingCompleted: true } });
     await f.db.shopSettings.upsert({
@@ -69,7 +73,6 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
     const logger = createLogger({ serviceName: "moda-recovery-worker", environment: "test", sink: () => undefined });
     const outreach = createWooRecoveryOutreachService({
       coordinator, orders, guardedSender: f.guardedSender, enqueue: initialQueue, logger,
-      enableTestOutbound: () => true,
     });
     const orchestrator = new WooRecoveryOrchestratorService({
       checkout: createWooCheckoutActivityService({ coordinator, observedOrders: orders, candidates }),
@@ -94,7 +97,10 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       schemaVersion: "woo.activity.v1" as const, shopId: f.shopId,
       eventId: `evt-${randomUUID()}`, eventType: "CHECKOUT_UPDATED" as const,
       checkoutKey: checkoutToken, occurredAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
-      checkout: { currency: "GBP", total: "20.00", items: [{ quantity: 1, title: "Test product" }],
+      checkout: { currency: "GBP", total: "20.00",
+        items: [{ productId: WOO_COMPOSED_FIRST_PRODUCT_ID, quantity: 1, title: "Test product", unitPrice: "20.00" }],
+        restoration: { schemaVersion: "woo.cart-restore.v1" as const, kind: "supported" as const,
+          appliedCouponCodes: [], lines: [{ productId: Number(WOO_COMPOSED_FIRST_PRODUCT_ID), quantity: 1 }] },
         contact: { phone: "+447400123456" } },
     };
     let worker: ReturnType<typeof createPendingRecoveryCandidateWorker> | undefined;
@@ -135,7 +141,10 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       const resumedEvent = {
         ...event, eventId: `evt-${randomUUID()}`,
         occurredAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
-        checkout: { ...event.checkout, total: "35.00", items: [{ quantity: 2, title: "Generation two product" }] },
+        checkout: { ...event.checkout, total: "35.00",
+          items: [{ productId: WOO_COMPOSED_SECOND_PRODUCT_ID, quantity: 2, title: "Generation two product", unitPrice: "17.50" }],
+          restoration: { ...event.checkout.restoration,
+            lines: [{ productId: Number(WOO_COMPOSED_SECOND_PRODUCT_ID), quantity: 2 }] } },
       };
       expect((await orchestrator.onCheckout(resumedEvent)).kind).toBe("resumed");
       await eventually(async () => (await f.db.checkoutRecovery.findFirst({
@@ -146,9 +155,9 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
       });
       expect(rows).toHaveLength(2);
       expect(rows[0]).toMatchObject({ id: first.id, generation: 1, status: "CANCELLED",
-        lineItems: [{ title: "Test product", quantity: 1 }] });
+        lineItems: [{ productId: WOO_COMPOSED_FIRST_PRODUCT_ID, title: "Test product", quantity: 1, price: "20.00" }] });
       expect(rows[1]).toMatchObject({ generation: 2, status: "MESSAGE_SENT",
-        lineItems: [{ title: "Generation two product", quantity: 2 }] });
+        lineItems: [{ productId: WOO_COMPOSED_SECOND_PRODUCT_ID, title: "Generation two product", quantity: 2, price: "17.50" }] });
       expect(rows[1]!.totalPrice?.toString()).toBe("35");
       const secondAttempts = await f.db.recoveryOutreachAttempt.findMany({ where: { checkoutRecoveryId: rows[1]!.id } });
       expect(secondAttempts).toHaveLength(1);
@@ -157,6 +166,19 @@ integrated("ARCH-048-BG005 real Woo services through BullMQ and Postgres", () =>
         where: { checkoutRecoveryId: first.id, systemCode: "RECOVERY_INITIAL_OUTREACH_SENT" },
       })).toBe(1);
       expect(f.providerRequests).toBe(2);
+      expect(catalogueReads.mock.calls.map(([name, args]) => ({ name, args }))).toEqual([
+        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null } },
+        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_FIRST_PRODUCT_ID, variantId: null } },
+        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_SECOND_PRODUCT_ID, variantId: null } },
+        { name: "commerce_get_product", args: { productId: WOO_COMPOSED_SECOND_PRODUCT_ID, variantId: null } },
+      ]);
+      for (const row of rows) {
+        const link = new URL(row.checkoutUrl!);
+        expect(link.origin).toBe(new URL(f.shopUrl).origin);
+        expect(link.searchParams.get("moda_interact_resume")).toBe("1");
+        expect(link.searchParams.get("r")).toBe(row.id);
+        expect(link.searchParams.get("t")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      }
       expect(await f.db.usageEvent.count({ where: {
         shopId: f.shopId, metric: "RECOVERY_CONVERSATION",
       } })).toBe(2);

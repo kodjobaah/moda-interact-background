@@ -39,6 +39,14 @@ export const terminalRecovery = (status: string): boolean =>
 export async function readRecoveryContext(
   db: SqlTransaction, conversationId: string,
 ): Promise<RecoveryContext | null> {
+  return readRecoveryContextRow(db, conversationId);
+}
+
+type RetryOwnerPointer = { shopId: string; recoveryId: string; contention: "nowait" };
+
+async function readRecoveryContextRow(
+  db: SqlTransaction, conversationId: string, expectedOwner?: RetryOwnerPointer,
+): Promise<RecoveryContext | null> {
   return first<RecoveryContext>(db, `
     SELECT c."id", r."shopId", r."id" AS "recoveryId", r."checkoutToken",
       r."status"::text AS "recoveryStatus", c."controlMode"::text AS "mode",
@@ -46,7 +54,9 @@ export async function readRecoveryContext(
     FROM "whatsapp"."Conversation" c
     JOIN "commerce"."CheckoutRecovery" r ON r."id"=c."checkoutRecoveryId"
     WHERE c."id"=$1 AND c."type"='RECOVERY'
-      AND (c."shopId" IS NULL OR c."shopId"=r."shopId")`, conversationId);
+      AND (c."shopId" IS NULL OR c."shopId"=r."shopId")
+    ${expectedOwner ? 'AND r."shopId"=$2 AND r."id"=$3 FOR UPDATE OF c NOWAIT' : ""}`,
+    conversationId, ...(expectedOwner ? [expectedOwner.shopId, expectedOwner.recoveryId] : []));
 }
 
 /** Lock order mandated by DATABASE-001: Shop -> Conversation -> command/attempt/message.
@@ -55,7 +65,20 @@ export async function readRecoveryContext(
  */
 export async function lockRecoveryContext(
   tx: SqlTransaction, conversationId: string,
+  expectedOwner?: RetryOwnerPointer,
 ): Promise<RecoveryContext | null> {
+  // Retry callers already read a durable owner pointer in this Serializable
+  // transaction. Avoid two additional owner reads; acquire the same locks in
+  // the same order, and validate the identity from the locked conversation.
+  // NOWAIT throws SQLSTATE 55P03, aborting this transaction, rather than
+  // spending its execution budget waiting behind a different worker.
+  if (expectedOwner) {
+    const shop = await first<{ id: string }>(tx,
+      `SELECT "id" FROM "commerce"."Shop" WHERE "id"=$1 FOR UPDATE NOWAIT`, expectedOwner.shopId);
+    if (!shop) return null;
+    const current = await readRecoveryContextRow(tx, conversationId, expectedOwner);
+    return current?.shopId === expectedOwner.shopId && current.recoveryId === expectedOwner.recoveryId ? current : null;
+  }
   const initial = await readRecoveryContext(tx, conversationId);
   if (!initial) return null;
   const shop = await first<{ id: string }>(tx,

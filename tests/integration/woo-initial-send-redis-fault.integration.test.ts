@@ -4,7 +4,7 @@ import { outboundWhatsAppAdmissionService } from
   "../../src/services/outbound-whatsapp-admission.service.js";
 import { automatedRecoveryTemplateService } from
   "../../src/services/recovery-template-integration/automated-recovery-template.service.js";
-import { createWooOutreachFixture, type WooOutreachIntegrationFixture } from
+import { createWooOutreachFixture, mockWooOutreachSenderConfiguration, type WooOutreachIntegrationFixture } from
   "./fixtures/arch048-woo-outreach.fixture.js";
 
 const integration = process.env.TEST_DATABASE_URL && process.env.TEST_REDIS_URL &&
@@ -28,12 +28,13 @@ integration("ARCH-046 Woo initial outreach: late Redis fault compensation", () =
       }, send: { templateName: "woo_checkout_recovery", languageCode: "en_GB" },
     } as never);
     fixture = await createWooOutreachFixture();
-  });
+    mockWooOutreachSenderConfiguration(fixture.senderConfiguration);
+  }, 90_000);
 
   afterEach(async () => {
     try { if (fixture) await fixture.cleanup(); }
     finally { fixture = undefined; vi.restoreAllMocks(); }
-  });
+  }, 90_000);
 
   it("propagates a late Redis read failure without provider send or committed recovery charge", async () => {
     const f = fixture!;

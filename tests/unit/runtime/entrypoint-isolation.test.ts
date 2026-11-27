@@ -25,6 +25,7 @@ const entrypoints = [
     ownedWorkers: [
       "pending-recovery-candidate.worker.js",
       "shopify-discount-sync.worker.js",
+      "recovery-delivery-retry.worker.js",
     ],
     excludedWorkers: ["checkout.worker.js", "orders.worker.js", "woo-checkout-capture.worker.js", "woo-order-capture.worker.js", "whatsapp.worker.js"],
   },

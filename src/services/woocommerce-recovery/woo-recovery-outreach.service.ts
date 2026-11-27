@@ -145,8 +145,6 @@ export interface WooOutreachDependencies {
   };
   enqueue: { initial(recoveryId: string, attemptId: string): Promise<void> };
   logger: StructuredLogger;
-  /** Explicit test-only opt-in. Never permits production/development outbound. */
-  enableTestOutbound?: () => boolean;
 }
 
 type GuardOutcome =
@@ -295,7 +293,7 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
               fresh.status !== "DETECTED")
               return this.enqueueOutcome(state, "already-initialized");
             // Meta has already sent: enqueue ONLY to finish durable credit/attempt
-            // finalization. processInitial finds SENT before consulting rollout.
+            // finalization. processInitial reconciles SENT before fresh eligibility.
             state.stage = "enqueue-confirmed-finalization";
             await this.deps.enqueue.initial(recoveryId, previous.id);
             return this.enqueueOutcome(state, "queued");
@@ -311,7 +309,6 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
             ["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(previous.status))
             throw new Error("WOO_INITIAL_ATTEMPT_WITHOUT_CONFIRMED_MESSAGE");
         }
-        if (!this.enabled()) return this.enqueueOutcome(state, "suppressed", "woo-outbound-disabled");
         const guard = await this.guard(fresh);
         if (guard.kind !== "allowed") return this.enqueueOutcome(state, guard.kind, guard.reason);
         if (previous && previous.recipient !== guard.recipient)
@@ -383,7 +380,6 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
             ["WAITING_FOR_RESPONSE", "ENGAGED", "NO_RESPONSE"].includes(attempt.status))
             throw new Error("WOO_INITIAL_ATTEMPT_WITHOUT_CONFIRMED_MESSAGE");
         }
-        if (!this.enabled()) return this.dispatchOutcome(state, "suppressed", "woo-outbound-disabled");
         const guard = await this.guard(fresh);
         if (guard.kind !== "allowed") return this.dispatchOutcome(state, guard.kind, guard.reason);
         if (attempt && attempt.recipient !== guard.recipient)
@@ -511,10 +507,6 @@ export class WooRecoveryOutreachService implements WooRecoveryOutreachDispatcher
       this.failed(state, error);
       throw error;
     }
-  }
-
-  private enabled(): boolean {
-    return process.env.NODE_ENV === "test" && this.deps.enableTestOutbound?.() === true;
   }
 
   private isWoo(recovery: WooOutreachRecovery | null): recovery is WooOutreachRecovery {
